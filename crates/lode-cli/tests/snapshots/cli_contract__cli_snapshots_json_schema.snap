@@ -1,0 +1,29 @@
+---
+source: crates/lode-cli/tests/cli_contract.rs
+expression: doc
+---
+{
+  "snapshots": [
+    {
+      "hostname": "[hostname]",
+      "id": "[id]",
+      "incomplete": false,
+      "parent": null,
+      "paths": "[paths]",
+      "short_id": "[short_id]",
+      "stats": {
+        "bytes_added": "[bytes_added]",
+        "bytes_read": 4,
+        "bytes_total": 4,
+        "dirs": "[dirs]",
+        "files_changed": 0,
+        "files_new": 1,
+        "files_unchanged": 0
+      },
+      "tags": [],
+      "time": "[time]"
+    }
+  ],
+  "type": "snapshots",
+  "v": 1
+}

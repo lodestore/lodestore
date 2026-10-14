@@ -1,0 +1,788 @@
+{
+  "snapshots": [
+    {
+      "hostname": "676f6c64656e2d686f7374",
+      "id": "5c851783d8d37ff40e7d1f55a620d268204f451e5aaa8841004fb6a8817b6898",
+      "nodes": [
+        {
+          "gid": 0,
+          "hardlink_group": 0,
+          "link_target": "",
+          "mode": 493,
+          "mtime": null,
+          "path": "2f6c6f646573746f72652d676f6c64656e",
+          "size": 0,
+          "sparse_extents": [],
+          "type": "NODE_TYPE_DIR",
+          "uid": 0,
+          "xattrs": []
+        },
+        {
+          "gid": 0,
+          "hardlink_group": 0,
+          "link_target": "",
+          "mode": 493,
+          "mtime": [
+            1600001000,
+            100007919
+          ],
+          "path": "2f6c6f646573746f72652d676f6c64656e2f737263",
+          "size": 0,
+          "sparse_extents": [],
+          "type": "NODE_TYPE_DIR",
+          "uid": 0,
+          "xattrs": []
+        },
+        {
+          "gid": 0,
+          "hardlink_group": 0,
+          "link_target": "",
+          "mode": 493,
+          "mtime": [
+            1600002000,
+            100015838
+          ],
+          "path": "2f6c6f646573746f72652d676f6c64656e2f7372632f61",
+          "size": 0,
+          "sparse_extents": [],
+          "type": "NODE_TYPE_DIR",
+          "uid": 0,
+          "xattrs": []
+        },
+        {
+          "gid": 0,
+          "hardlink_group": 0,
+          "link_target": "",
+          "mode": 493,
+          "mtime": [
+            1600003000,
+            100023757
+          ],
+          "path": "2f6c6f646573746f72652d676f6c64656e2f7372632f612f62",
+          "size": 0,
+          "sparse_extents": [],
+          "type": "NODE_TYPE_DIR",
+          "uid": 0,
+          "xattrs": []
+        },
+        {
+          "gid": 0,
+          "hardlink_group": 0,
+          "link_target": "",
+          "mode": 493,
+          "mtime": [
+            1600004000,
+            100031676
+          ],
+          "path": "2f6c6f646573746f72652d676f6c64656e2f7372632f612f622f63",
+          "size": 0,
+          "sparse_extents": [],
+          "type": "NODE_TYPE_DIR",
+          "uid": 0,
+          "xattrs": []
+        },
+        {
+          "blake3": "fbff1a3df743949c28a22d419531de7cd4c26b78ecc024b662ecb31accf40d07",
+          "gid": 0,
+          "hardlink_group": 0,
+          "link_target": "",
+          "mode": 420,
+          "mtime": [
+            1600005000,
+            100039595
+          ],
+          "path": "2f6c6f646573746f72652d676f6c64656e2f7372632f612f622f632f776f7264732e747874",
+          "size": 229376,
+          "sparse_extents": [],
+          "type": "NODE_TYPE_FILE",
+          "uid": 0,
+          "xattrs": []
+        },
+        {
+          "blake3": "488de202f73bd976de4e7048f4e1f39a776d86d582b7348ff53bf432b987fca8",
+          "gid": 0,
+          "hardlink_group": 0,
+          "link_target": "",
+          "mode": 420,
+          "mtime": [
+            1600006000,
+            100047514
+          ],
+          "path": "2f6c6f646573746f72652d676f6c64656e2f7372632f612f622f7a65726f732e62696e",
+          "size": 1048576,
+          "sparse_extents": [],
+          "type": "NODE_TYPE_FILE",
+          "uid": 0,
+          "xattrs": []
+        },
+        {
+          "blake3": "25c1d87bdbdb9256b4bdc9ade127069b91458bdef51f0d012775a744585bb858",
+          "gid": 0,
+          "hardlink_group": 0,
+          "link_target": "",
+          "mode": 416,
+          "mtime": [
+            1600007000,
+            100055433
+          ],
+          "path": "2f6c6f646573746f72652d676f6c64656e2f7372632f612f6e6f6973652e62696e",
+          "size": 102400,
+          "sparse_extents": [],
+          "type": "NODE_TYPE_FILE",
+          "uid": 0,
+          "xattrs": []
+        },
+        {
+          "blake3": "60a6f4e8e87cd914e6892730c3e24a5f83afd94af4bd00728cf23bae5dda22f0",
+          "gid": 0,
+          "hardlink_group": 0,
+          "link_target": "",
+          "mode": 384,
+          "mtime": [
+            1600008000,
+            100063352
+          ],
+          "path": "2f6c6f646573746f72652d676f6c64656e2f7372632f612f72616e646f6d2e62696e",
+          "size": 3145728,
+          "sparse_extents": [],
+          "type": "NODE_TYPE_FILE",
+          "uid": 0,
+          "xattrs": []
+        },
+        {
+          "gid": 0,
+          "hardlink_group": 0,
+          "link_target": "",
+          "mode": 493,
+          "mtime": [
+            1600009000,
+            100071271
+          ],
+          "path": "2f6c6f646573746f72652d676f6c64656e2f7372632f656d707479",
+          "size": 0,
+          "sparse_extents": [],
+          "type": "NODE_TYPE_DIR",
+          "uid": 0,
+          "xattrs": []
+        },
+        {
+          "blake3": "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
+          "gid": 0,
+          "hardlink_group": 0,
+          "link_target": "",
+          "mode": 420,
+          "mtime": [
+            1600010000,
+            100079190
+          ],
+          "path": "2f6c6f646573746f72652d676f6c64656e2f7372632f656d7074792e747874",
+          "size": 0,
+          "sparse_extents": [],
+          "type": "NODE_TYPE_FILE",
+          "uid": 0,
+          "xattrs": []
+        },
+        {
+          "gid": 0,
+          "hardlink_group": 0,
+          "link_target": "",
+          "mode": 416,
+          "mtime": [
+            1600011000,
+            100087109
+          ],
+          "path": "2f6c6f646573746f72652d676f6c64656e2f7372632f6669666f",
+          "size": 0,
+          "sparse_extents": [],
+          "type": "NODE_TYPE_FIFO",
+          "uid": 0,
+          "xattrs": []
+        },
+        {
+          "blake3": "ebe0b1e40d046b084e95fe5813f56a208419bf1d7e2445aa2e899236257bca05",
+          "gid": 0,
+          "hardlink_group": 0,
+          "link_target": "",
+          "mode": 420,
+          "mtime": [
+            1600012000,
+            100095028
+          ],
+          "path": "2f6c6f646573746f72652d676f6c64656e2f7372632f68656c6c6f2e747874",
+          "size": 17,
+          "sparse_extents": [],
+          "type": "NODE_TYPE_FILE",
+          "uid": 0,
+          "xattrs": [
+            [
+              "757365722e676f6c64656e",
+              "676f6c64656e2d7631"
+            ]
+          ]
+        },
+        {
+          "gid": 0,
+          "hardlink_group": 0,
+          "link_target": "68656c6c6f2e747874",
+          "mode": 511,
+          "mtime": [
+            1600013000,
+            100102947
+          ],
+          "path": "2f6c6f646573746f72652d676f6c64656e2f7372632f6c696e6b2d746f2d68656c6c6f",
+          "size": 0,
+          "sparse_extents": [],
+          "type": "NODE_TYPE_SYMLINK",
+          "uid": 0,
+          "xattrs": []
+        },
+        {
+          "gid": 0,
+          "hardlink_group": 0,
+          "link_target": "",
+          "mode": 493,
+          "mtime": [
+            1600014000,
+            100110866
+          ],
+          "path": "2f6c6f646573746f72652d676f6c64656e2f7372632f6c696e6b73",
+          "size": 0,
+          "sparse_extents": [],
+          "type": "NODE_TYPE_DIR",
+          "uid": 0,
+          "xattrs": []
+        },
+        {
+          "blake3": "d7259c8f924ab05fab10f95d558aa1247ffb866f0f63f632fc1f67da05a2b487",
+          "gid": 0,
+          "hardlink_group": 1,
+          "link_target": "",
+          "mode": 420,
+          "mtime": [
+            1600016000,
+            100126704
+          ],
+          "path": "2f6c6f646573746f72652d676f6c64656e2f7372632f6c696e6b732f6669727374",
+          "size": 21,
+          "sparse_extents": [],
+          "type": "NODE_TYPE_FILE",
+          "uid": 0,
+          "xattrs": []
+        },
+        {
+          "blake3": "d7259c8f924ab05fab10f95d558aa1247ffb866f0f63f632fc1f67da05a2b487",
+          "gid": 0,
+          "hardlink_group": 1,
+          "link_target": "",
+          "mode": 420,
+          "mtime": [
+            1600016000,
+            100126704
+          ],
+          "path": "2f6c6f646573746f72652d676f6c64656e2f7372632f6c696e6b732f7365636f6e64",
+          "size": 21,
+          "sparse_extents": [],
+          "type": "NODE_TYPE_FILE",
+          "uid": 0,
+          "xattrs": []
+        },
+        {
+          "blake3": "e3f6666d121df61deefe2a55c77a7cae00e2ded454d8cfe4c10d1db7c622daa0",
+          "gid": 1234,
+          "hardlink_group": 0,
+          "link_target": "",
+          "mode": 416,
+          "mtime": [
+            1600017000,
+            100134623
+          ],
+          "path": "2f6c6f646573746f72652d676f6c64656e2f7372632f6f776e6564",
+          "size": 14,
+          "sparse_extents": [],
+          "type": "NODE_TYPE_FILE",
+          "uid": 1234,
+          "xattrs": []
+        },
+        {
+          "blake3": "7106fbb71315a6c2a395cdb019585e36fb4b3c70c37a45488c8e21fc852c625f",
+          "gid": 0,
+          "hardlink_group": 0,
+          "link_target": "",
+          "mode": 420,
+          "mtime": [
+            1600018000,
+            100142542
+          ],
+          "path": "2f6c6f646573746f72652d676f6c64656e2f7372632f7370617273652e62696e",
+          "size": 69206016,
+          "sparse_extents": [
+            [
+              0,
+              1048576
+            ],
+            [
+              68157440,
+              1048576
+            ]
+          ],
+          "type": "NODE_TYPE_FILE",
+          "uid": 0,
+          "xattrs": []
+        },
+        {
+          "blake3": "bc1f407a11c9377c8b9b13f956b279c8462775105eb958fc9ae3c40de87cc96e",
+          "gid": 0,
+          "hardlink_group": 0,
+          "link_target": "",
+          "mode": 2541,
+          "mtime": [
+            1600019000,
+            100150461
+          ],
+          "path": "2f6c6f646573746f72652d676f6c64656e2f7372632f73756964",
+          "size": 10,
+          "sparse_extents": [],
+          "type": "NODE_TYPE_FILE",
+          "uid": 0,
+          "xattrs": []
+        },
+        {
+          "gid": 0,
+          "hardlink_group": 0,
+          "link_target": "",
+          "mode": 493,
+          "mtime": [
+            1600020000,
+            100158380
+          ],
+          "path": "2f6c6f646573746f72652d676f6c64656e2f7372632f7765697264",
+          "size": 0,
+          "sparse_extents": [],
+          "type": "NODE_TYPE_DIR",
+          "uid": 0,
+          "xattrs": []
+        },
+        {
+          "blake3": "affbe8496299098f9fe74f7f1b4499613006825ea9d3bd156ea0c4650b7f1c3a",
+          "gid": 0,
+          "hardlink_group": 0,
+          "link_target": "",
+          "mode": 420,
+          "mtime": [
+            1600021000,
+            100166299
+          ],
+          "path": "2f6c6f646573746f72652d676f6c64656e2f7372632f77656972642f6e6f742d757466382dff",
+          "size": 9,
+          "sparse_extents": [],
+          "type": "NODE_TYPE_FILE",
+          "uid": 0,
+          "xattrs": []
+        }
+      ],
+      "parent": "",
+      "paths": [
+        "2f6c6f646573746f72652d676f6c64656e2f737263"
+      ],
+      "tags": [
+        "golden"
+      ],
+      "time": [
+        1700000100,
+        0
+      ]
+    },
+    {
+      "hostname": "676f6c64656e2d686f7374",
+      "id": "0e8a1c7b5d28d7d333397454cd29315339b54281def7b2ba4118428c0a4e585b",
+      "nodes": [
+        {
+          "gid": 0,
+          "hardlink_group": 0,
+          "link_target": "",
+          "mode": 493,
+          "mtime": null,
+          "path": "2f6c6f646573746f72652d676f6c64656e",
+          "size": 0,
+          "sparse_extents": [],
+          "type": "NODE_TYPE_DIR",
+          "uid": 0,
+          "xattrs": []
+        },
+        {
+          "gid": 0,
+          "hardlink_group": 0,
+          "link_target": "",
+          "mode": 493,
+          "mtime": [
+            1600001000,
+            100007919
+          ],
+          "path": "2f6c6f646573746f72652d676f6c64656e2f737263",
+          "size": 0,
+          "sparse_extents": [],
+          "type": "NODE_TYPE_DIR",
+          "uid": 0,
+          "xattrs": []
+        },
+        {
+          "gid": 0,
+          "hardlink_group": 0,
+          "link_target": "",
+          "mode": 493,
+          "mtime": [
+            1600002000,
+            100015838
+          ],
+          "path": "2f6c6f646573746f72652d676f6c64656e2f7372632f61",
+          "size": 0,
+          "sparse_extents": [],
+          "type": "NODE_TYPE_DIR",
+          "uid": 0,
+          "xattrs": []
+        },
+        {
+          "gid": 0,
+          "hardlink_group": 0,
+          "link_target": "",
+          "mode": 493,
+          "mtime": [
+            1600003000,
+            100023757
+          ],
+          "path": "2f6c6f646573746f72652d676f6c64656e2f7372632f612f62",
+          "size": 0,
+          "sparse_extents": [],
+          "type": "NODE_TYPE_DIR",
+          "uid": 0,
+          "xattrs": []
+        },
+        {
+          "gid": 0,
+          "hardlink_group": 0,
+          "link_target": "",
+          "mode": 493,
+          "mtime": [
+            1600004000,
+            100031676
+          ],
+          "path": "2f6c6f646573746f72652d676f6c64656e2f7372632f612f622f63",
+          "size": 0,
+          "sparse_extents": [],
+          "type": "NODE_TYPE_DIR",
+          "uid": 0,
+          "xattrs": []
+        },
+        {
+          "blake3": "fbff1a3df743949c28a22d419531de7cd4c26b78ecc024b662ecb31accf40d07",
+          "gid": 0,
+          "hardlink_group": 0,
+          "link_target": "",
+          "mode": 420,
+          "mtime": [
+            1600005000,
+            100039595
+          ],
+          "path": "2f6c6f646573746f72652d676f6c64656e2f7372632f612f622f632f776f7264732e747874",
+          "size": 229376,
+          "sparse_extents": [],
+          "type": "NODE_TYPE_FILE",
+          "uid": 0,
+          "xattrs": []
+        },
+        {
+          "blake3": "488de202f73bd976de4e7048f4e1f39a776d86d582b7348ff53bf432b987fca8",
+          "gid": 0,
+          "hardlink_group": 0,
+          "link_target": "",
+          "mode": 420,
+          "mtime": [
+            1600006000,
+            100047514
+          ],
+          "path": "2f6c6f646573746f72652d676f6c64656e2f7372632f612f622f7a65726f732e62696e",
+          "size": 1048576,
+          "sparse_extents": [],
+          "type": "NODE_TYPE_FILE",
+          "uid": 0,
+          "xattrs": []
+        },
+        {
+          "blake3": "25c1d87bdbdb9256b4bdc9ade127069b91458bdef51f0d012775a744585bb858",
+          "gid": 0,
+          "hardlink_group": 0,
+          "link_target": "",
+          "mode": 416,
+          "mtime": [
+            1600007000,
+            100055433
+          ],
+          "path": "2f6c6f646573746f72652d676f6c64656e2f7372632f612f6e6f6973652e62696e",
+          "size": 102400,
+          "sparse_extents": [],
+          "type": "NODE_TYPE_FILE",
+          "uid": 0,
+          "xattrs": []
+        },
+        {
+          "blake3": "60a6f4e8e87cd914e6892730c3e24a5f83afd94af4bd00728cf23bae5dda22f0",
+          "gid": 0,
+          "hardlink_group": 0,
+          "link_target": "",
+          "mode": 384,
+          "mtime": [
+            1600008000,
+            100063352
+          ],
+          "path": "2f6c6f646573746f72652d676f6c64656e2f7372632f612f72616e646f6d2e62696e",
+          "size": 3145728,
+          "sparse_extents": [],
+          "type": "NODE_TYPE_FILE",
+          "uid": 0,
+          "xattrs": []
+        },
+        {
+          "gid": 0,
+          "hardlink_group": 0,
+          "link_target": "",
+          "mode": 493,
+          "mtime": [
+            1600009000,
+            100071271
+          ],
+          "path": "2f6c6f646573746f72652d676f6c64656e2f7372632f656d707479",
+          "size": 0,
+          "sparse_extents": [],
+          "type": "NODE_TYPE_DIR",
+          "uid": 0,
+          "xattrs": []
+        },
+        {
+          "blake3": "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
+          "gid": 0,
+          "hardlink_group": 0,
+          "link_target": "",
+          "mode": 420,
+          "mtime": [
+            1600010000,
+            100079190
+          ],
+          "path": "2f6c6f646573746f72652d676f6c64656e2f7372632f656d7074792e747874",
+          "size": 0,
+          "sparse_extents": [],
+          "type": "NODE_TYPE_FILE",
+          "uid": 0,
+          "xattrs": []
+        },
+        {
+          "gid": 0,
+          "hardlink_group": 0,
+          "link_target": "",
+          "mode": 416,
+          "mtime": [
+            1600011000,
+            100087109
+          ],
+          "path": "2f6c6f646573746f72652d676f6c64656e2f7372632f6669666f",
+          "size": 0,
+          "sparse_extents": [],
+          "type": "NODE_TYPE_FIFO",
+          "uid": 0,
+          "xattrs": []
+        },
+        {
+          "blake3": "8260b3dc44fac55fad92fc52778e46a8bc246ad0a331937ee766046f455acb6f",
+          "gid": 0,
+          "hardlink_group": 0,
+          "link_target": "",
+          "mode": 420,
+          "mtime": [
+            1650000000,
+            4
+          ],
+          "path": "2f6c6f646573746f72652d676f6c64656e2f7372632f68656c6c6f2e747874",
+          "size": 39,
+          "sparse_extents": [],
+          "type": "NODE_TYPE_FILE",
+          "uid": 0,
+          "xattrs": [
+            [
+              "757365722e676f6c64656e",
+              "676f6c64656e2d7631"
+            ]
+          ]
+        },
+        {
+          "gid": 0,
+          "hardlink_group": 0,
+          "link_target": "68656c6c6f2e747874",
+          "mode": 511,
+          "mtime": [
+            1600013000,
+            100102947
+          ],
+          "path": "2f6c6f646573746f72652d676f6c64656e2f7372632f6c696e6b2d746f2d68656c6c6f",
+          "size": 0,
+          "sparse_extents": [],
+          "type": "NODE_TYPE_SYMLINK",
+          "uid": 0,
+          "xattrs": []
+        },
+        {
+          "gid": 0,
+          "hardlink_group": 0,
+          "link_target": "",
+          "mode": 493,
+          "mtime": [
+            1600014000,
+            100110866
+          ],
+          "path": "2f6c6f646573746f72652d676f6c64656e2f7372632f6c696e6b73",
+          "size": 0,
+          "sparse_extents": [],
+          "type": "NODE_TYPE_DIR",
+          "uid": 0,
+          "xattrs": []
+        },
+        {
+          "blake3": "d7259c8f924ab05fab10f95d558aa1247ffb866f0f63f632fc1f67da05a2b487",
+          "gid": 0,
+          "hardlink_group": 1,
+          "link_target": "",
+          "mode": 420,
+          "mtime": [
+            1600016000,
+            100126704
+          ],
+          "path": "2f6c6f646573746f72652d676f6c64656e2f7372632f6c696e6b732f6669727374",
+          "size": 21,
+          "sparse_extents": [],
+          "type": "NODE_TYPE_FILE",
+          "uid": 0,
+          "xattrs": []
+        },
+        {
+          "blake3": "d7259c8f924ab05fab10f95d558aa1247ffb866f0f63f632fc1f67da05a2b487",
+          "gid": 0,
+          "hardlink_group": 1,
+          "link_target": "",
+          "mode": 420,
+          "mtime": [
+            1600016000,
+            100126704
+          ],
+          "path": "2f6c6f646573746f72652d676f6c64656e2f7372632f6c696e6b732f7365636f6e64",
+          "size": 21,
+          "sparse_extents": [],
+          "type": "NODE_TYPE_FILE",
+          "uid": 0,
+          "xattrs": []
+        },
+        {
+          "blake3": "e3f6666d121df61deefe2a55c77a7cae00e2ded454d8cfe4c10d1db7c622daa0",
+          "gid": 1234,
+          "hardlink_group": 0,
+          "link_target": "",
+          "mode": 416,
+          "mtime": [
+            1600017000,
+            100134623
+          ],
+          "path": "2f6c6f646573746f72652d676f6c64656e2f7372632f6f776e6564",
+          "size": 14,
+          "sparse_extents": [],
+          "type": "NODE_TYPE_FILE",
+          "uid": 1234,
+          "xattrs": []
+        },
+        {
+          "blake3": "7106fbb71315a6c2a395cdb019585e36fb4b3c70c37a45488c8e21fc852c625f",
+          "gid": 0,
+          "hardlink_group": 0,
+          "link_target": "",
+          "mode": 420,
+          "mtime": [
+            1600018000,
+            100142542
+          ],
+          "path": "2f6c6f646573746f72652d676f6c64656e2f7372632f7370617273652e62696e",
+          "size": 69206016,
+          "sparse_extents": [
+            [
+              0,
+              1048576
+            ],
+            [
+              68157440,
+              1048576
+            ]
+          ],
+          "type": "NODE_TYPE_FILE",
+          "uid": 0,
+          "xattrs": []
+        },
+        {
+          "blake3": "bc1f407a11c9377c8b9b13f956b279c8462775105eb958fc9ae3c40de87cc96e",
+          "gid": 0,
+          "hardlink_group": 0,
+          "link_target": "",
+          "mode": 2541,
+          "mtime": [
+            1600019000,
+            100150461
+          ],
+          "path": "2f6c6f646573746f72652d676f6c64656e2f7372632f73756964",
+          "size": 10,
+          "sparse_extents": [],
+          "type": "NODE_TYPE_FILE",
+          "uid": 0,
+          "xattrs": []
+        },
+        {
+          "gid": 0,
+          "hardlink_group": 0,
+          "link_target": "",
+          "mode": 493,
+          "mtime": [
+            1600020000,
+            100158380
+          ],
+          "path": "2f6c6f646573746f72652d676f6c64656e2f7372632f7765697264",
+          "size": 0,
+          "sparse_extents": [],
+          "type": "NODE_TYPE_DIR",
+          "uid": 0,
+          "xattrs": []
+        },
+        {
+          "blake3": "affbe8496299098f9fe74f7f1b4499613006825ea9d3bd156ea0c4650b7f1c3a",
+          "gid": 0,
+          "hardlink_group": 0,
+          "link_target": "",
+          "mode": 420,
+          "mtime": [
+            1600021000,
+            100166299
+          ],
+          "path": "2f6c6f646573746f72652d676f6c64656e2f7372632f77656972642f6e6f742d757466382dff",
+          "size": 9,
+          "sparse_extents": [],
+          "type": "NODE_TYPE_FILE",
+          "uid": 0,
+          "xattrs": []
+        }
+      ],
+      "parent": "5c851783d8d37ff40e7d1f55a620d268204f451e5aaa8841004fb6a8817b6898",
+      "paths": [
+        "2f6c6f646573746f72652d676f6c64656e2f737263"
+      ],
+      "tags": [
+        "golden"
+      ],
+      "time": [
+        1700003700,
+        0
+      ]
+    }
+  ]
+}

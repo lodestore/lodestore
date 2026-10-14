@@ -1,0 +1,18 @@
+[package]
+name = "lodestore-testkit"
+description = "Test harness: pinned MinIO and a fault-injecting S3 proxy"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+version.workspace = true
+publish = false
+
+[dependencies]
+tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "net", "sync", "process", "time"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
+sha2 = "0.11.1"
+data-encoding = "2.11.1"
+tempfile = "3.27.0"
+axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
+getrandom = "0.4.3"
+serde_json = "1.0.154"

@@ -1,0 +1,382 @@
+//! A restore must refuse snapshots a writer-keys holder could forge, and
+//! survive a hostile target, without changing anything it was not meant to.
+
+use std::collections::BTreeMap;
+use std::fs;
+use std::os::unix::fs::symlink;
+use std::path::{Path, PathBuf};
+
+use lodestore_format::crypto::{BLOB_TYPE_DATA, BLOB_TYPE_TREE, BlobId, Entropy};
+use lodestore_format::error::Error;
+use lodestore_format::keys::KdfCost;
+use lodestore_format::pack::{CODEC_RAW, CODEC_ZSTD};
+use lodestore_format::pb;
+use lodestore_format::reader::{Overwrite, Reader, RestoreOptions, RestoreReport};
+use lodestore_format::repo::{InitOptions, PendingInit, Repository};
+use lodestore_format::store::LocalFsStore;
+use lodestore_format::tree::encode_tree;
+use lodestore_format::writer::Writer;
+
+const LOW_KDF: KdfCost = KdfCost {
+    memory_kib: 64,
+    iterations: 1,
+    parallelism: 1,
+};
+
+struct Fx {
+    _tmp: tempfile::TempDir,
+    repo_dir: PathBuf,
+    root: PathBuf,
+    target: PathBuf,
+    writer: Writer<LocalFsStore>,
+}
+
+impl Fx {
+    async fn new() -> Fx {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let repo_dir = root.join("repo");
+        fs::create_dir(&repo_dir).unwrap();
+        let store = LocalFsStore::new(repo_dir.clone());
+        let mut entropy = Entropy::os();
+        let options = InitOptions {
+            kdf: LOW_KDF,
+            ..Default::default()
+        };
+        PendingInit::generate(&mut entropy, options)
+            .unwrap()
+            .commit(&store, b"pw", &mut entropy)
+            .await
+            .unwrap();
+        let repo = Repository::open(&store, b"pw").await.unwrap();
+        let keys = repo.read_keys().write_keys(repo.config_hash());
+        let writer = Writer::new(store, keys, repo.config()).await.unwrap();
+
+        let target = root.join("out");
+        fs::create_dir_all(target.join("a")).unwrap();
+        fs::write(target.join("keep.txt"), b"keep").unwrap();
+        Fx {
+            _tmp: tmp,
+            repo_dir,
+            root,
+            target,
+            writer,
+        }
+    }
+
+    fn data(&mut self, bytes: &[u8]) -> BlobId {
+        let len = u32::try_from(bytes.len()).unwrap();
+        self.writer
+            .put_blob_raw(BLOB_TYPE_DATA, CODEC_RAW, bytes, len)
+            .unwrap()
+    }
+
+    fn tree(&mut self, nodes: Vec<pb::Node>) -> BlobId {
+        self.writer.put_tree_raw(&encode_tree(nodes)).unwrap()
+    }
+
+    async fn snapshot(&mut self, top: Vec<pb::Node>) -> BlobId {
+        let root = self.tree(top);
+        self.writer
+            .commit_snapshot_raw(root, vec![b"/".to_vec()])
+            .await
+            .unwrap()
+    }
+
+    /// A snapshot whose first directory is fine and whose second holds
+    /// `bad`, so a restore that validated as it went would already have
+    /// written the first one.
+    async fn hostile(&mut self, bad: Vec<pb::Node>) -> BlobId {
+        let ok = self.data(b"fine");
+        let first = self.tree(vec![file("ok.txt", &[ok], 4)]);
+        let second = self.tree(bad);
+        self.snapshot(vec![dir("a", first), dir("z", second)]).await
+    }
+
+    async fn restore(
+        &self,
+        snapshot: &BlobId,
+        options: &RestoreOptions,
+    ) -> Result<RestoreReport, Error> {
+        let store = LocalFsStore::new(self.repo_dir.clone());
+        let repo = Repository::open(&store, b"pw").await.unwrap();
+        let mut reader = Reader::open(store, repo.read_keys().duplicate(), repo.config()).unwrap();
+        reader
+            .restore(snapshot, &self.target, options, &|_| {})
+            .await
+    }
+
+    fn listing(&self) -> BTreeMap<PathBuf, (bool, u64)> {
+        listing(&self.target)
+    }
+
+    /// The restore is refused as corrupt and the target is exactly as before.
+    async fn assert_refused(&self, snapshot: &BlobId) {
+        let before = self.listing();
+        let err = self
+            .restore(snapshot, &RestoreOptions::default())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Corrupt { .. }), "{err:?}");
+        assert_eq!(self.listing(), before);
+    }
+}
+
+fn listing(dir: &Path) -> BTreeMap<PathBuf, (bool, u64)> {
+    fn walk(base: &Path, dir: &Path, out: &mut BTreeMap<PathBuf, (bool, u64)>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries {
+            let path = entry.unwrap().path();
+            let meta = fs::symlink_metadata(&path).unwrap();
+            out.insert(
+                path.strip_prefix(base).unwrap().to_path_buf(),
+                (meta.is_dir(), if meta.is_dir() { 0 } else { meta.len() }),
+            );
+            if meta.is_dir() {
+                walk(base, &path, out);
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    walk(dir, dir, &mut out);
+    out
+}
+
+fn file(name: &str, content: &[BlobId], size: u64) -> pb::Node {
+    pb::Node {
+        name: name.as_bytes().to_vec(),
+        r#type: pb::NodeType::File as i32,
+        mode: 0o644,
+        size,
+        content: content.iter().map(|c| c.to_vec()).collect(),
+        ..Default::default()
+    }
+}
+
+fn dir(name: &str, tree: BlobId) -> pb::Node {
+    pb::Node {
+        name: name.as_bytes().to_vec(),
+        r#type: pb::NodeType::Dir as i32,
+        mode: 0o755,
+        subtrees: vec![tree.to_vec()],
+        ..Default::default()
+    }
+}
+
+fn leftovers(dir: &Path) -> Vec<PathBuf> {
+    listing(dir)
+        .into_keys()
+        .filter(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(".lode-restore-")
+        })
+        .collect()
+}
+
+async fn refuses_name(name: &[u8]) {
+    let mut fx = Fx::new().await;
+    let mut bad = file("x", &[], 0);
+    bad.name = name.to_vec();
+    let snap = fx.hostile(vec![bad]).await;
+    fx.assert_refused(&snap).await;
+}
+
+#[tokio::test]
+async fn restore_hostile_dotdot_name() {
+    refuses_name(b"..").await;
+}
+
+#[tokio::test]
+async fn restore_hostile_dot_name() {
+    refuses_name(b".").await;
+}
+
+#[tokio::test]
+async fn restore_hostile_slash_name() {
+    refuses_name(b"x/y").await;
+    refuses_name(b"../escape").await;
+}
+
+#[tokio::test]
+async fn restore_hostile_nul_name() {
+    refuses_name(b"x\0y").await;
+}
+
+#[tokio::test]
+async fn restore_hostile_empty_name() {
+    refuses_name(b"").await;
+}
+
+#[tokio::test]
+async fn restore_hostile_duplicate_names() {
+    let mut fx = Fx::new().await;
+    let snap = fx
+        .hostile(vec![file("same", &[], 0), file("same", &[], 0)])
+        .await;
+    fx.assert_refused(&snap).await;
+}
+
+#[tokio::test]
+async fn restore_hostile_unsorted() {
+    let mut fx = Fx::new().await;
+    let snap = fx.hostile(vec![file("b", &[], 0), file("a", &[], 0)]).await;
+    fx.assert_refused(&snap).await;
+}
+
+#[tokio::test]
+async fn restore_hostile_deep_tree() {
+    let mut fx = Fx::new().await;
+    let mut inner = fx.tree(vec![file("f", &[], 0)]);
+    for _ in 0..5000 {
+        inner = fx.tree(vec![dir("d", inner)]);
+    }
+    let snap = fx.snapshot(vec![dir("d", inner)]).await;
+    let before = fx.listing();
+    let err = fx
+        .restore(&snap, &RestoreOptions::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, Error::Corrupt { reason, .. } if reason.contains("nested")),
+        "{err:?}"
+    );
+    assert_eq!(fx.listing(), before);
+}
+
+#[tokio::test]
+async fn restore_hostile_hardlink_group_mismatch() {
+    let mut fx = Fx::new().await;
+    let (one, two) = (fx.data(b"12345"), fx.data(b"123456"));
+    let mut x = file("x", &[one], 5);
+    let mut y = file("y", &[two], 6);
+    x.hardlink_group = 7;
+    y.hardlink_group = 7;
+    let snap = fx.hostile(vec![x, y]).await;
+    fx.assert_refused(&snap).await;
+}
+
+#[tokio::test]
+async fn restore_hostile_size_mismatch() {
+    let mut fx = Fx::new().await;
+    let id = fx.data(b"12345");
+    let snap = fx.hostile(vec![file("liar", &[id], 10)]).await;
+    fx.assert_refused(&snap).await;
+
+    let mut fx = Fx::new().await;
+    let id = fx.data(b"12345");
+    let snap = fx.hostile(vec![file("liar", &[id], 2)]).await;
+    fx.assert_refused(&snap).await;
+}
+
+#[tokio::test]
+async fn restore_hostile_existing_symlink_not_followed() {
+    for (overwrite, replaced) in [
+        (Overwrite::IfChanged, true),
+        (Overwrite::Always, true),
+        (Overwrite::Never, false),
+    ] {
+        let mut fx = Fx::new().await;
+        let outside = fx.root.join("outside");
+        fs::create_dir(&outside).unwrap();
+        symlink(&outside, fx.target.join("a/x")).unwrap();
+
+        let data = fx.data(b"payload");
+        let evil = fx.tree(vec![file("f.txt", &[data], 7)]);
+        let x = fx.tree(vec![dir("evil", evil)]);
+        let a = fx.tree(vec![dir("x", x)]);
+        let snap = fx.snapshot(vec![dir("a", a)]).await;
+
+        let report = fx
+            .restore(
+                &snap,
+                &RestoreOptions {
+                    overwrite,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            listing(&outside).is_empty(),
+            "{overwrite:?}: nothing leaked out"
+        );
+        let meta = fs::symlink_metadata(fx.target.join("a/x")).unwrap();
+        if replaced {
+            assert!(
+                meta.is_dir() && !meta.file_type().is_symlink(),
+                "{overwrite:?}"
+            );
+            assert_eq!(
+                fs::read(fx.target.join("a/x/evil/f.txt")).unwrap(),
+                b"payload"
+            );
+            assert!(report.errors.is_empty(), "{:?}", report.errors);
+        } else {
+            assert!(meta.file_type().is_symlink());
+            assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
+            assert_eq!(report.errors[0].path, b"a/x");
+        }
+    }
+}
+
+#[tokio::test]
+async fn restore_hostile_bomb_ulen_lie() {
+    let mut fx = Fx::new().await;
+    let bomb = zstd::bulk::compress(&vec![0u8; 4 << 20], 3).unwrap();
+    assert!(bomb.len() < 1024);
+    let id = fx
+        .writer
+        .put_blob_raw(BLOB_TYPE_DATA, CODEC_ZSTD, &bomb, 1024)
+        .unwrap();
+    let good = fx.data(b"still restored");
+    let d = fx.tree(vec![
+        file("bomb.bin", &[id], 1024),
+        file("good.txt", &[good], 14),
+    ]);
+    let snap = fx.snapshot(vec![dir("d", d)]).await;
+
+    let report = fx.restore(&snap, &RestoreOptions::default()).await.unwrap();
+    assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
+    assert_eq!(report.errors[0].path, b"d/bomb.bin");
+    assert!(!fx.target.join("d/bomb.bin").exists());
+    assert!(
+        leftovers(&fx.target).is_empty(),
+        "{:?}",
+        leftovers(&fx.target)
+    );
+    assert_eq!(
+        fs::read(fx.target.join("d/good.txt")).unwrap(),
+        b"still restored"
+    );
+    assert_eq!(report.files, 1);
+}
+
+#[tokio::test]
+async fn restore_hostile_ulen_over_cap() {
+    let mut fx = Fx::new().await;
+    let bomb = zstd::bulk::compress(&vec![0u8; 1 << 20], 3).unwrap();
+    let id = fx
+        .writer
+        .put_blob_raw(BLOB_TYPE_DATA, CODEC_ZSTD, &bomb, 64 << 20)
+        .unwrap();
+    let snap = fx.hostile(vec![file("huge", &[id], 64 << 20)]).await;
+    fx.assert_refused(&snap).await;
+}
+
+#[tokio::test]
+async fn restore_hostile_oversized_tree_blob() {
+    let mut fx = Fx::new().await;
+    let small = encode_tree(vec![file("f", &[], 0)]);
+    let id = fx
+        .writer
+        .put_blob_raw(BLOB_TYPE_TREE, CODEC_RAW, &small, 17 << 20)
+        .unwrap();
+    let mut big = dir("big", id);
+    big.subtrees = vec![id.to_vec()];
+    let snap = fx.hostile(vec![big]).await;
+    fx.assert_refused(&snap).await;
+}

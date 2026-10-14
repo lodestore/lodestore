@@ -1,0 +1,198 @@
+// Lodestore repository format v1.
+//
+// Rules that keep the encoding stable and language-neutral:
+// - field numbers are never reused or renumbered; retired numbers are reserved
+// - no map fields and no floating point types; time is (seconds, nanos),
+//   sizes are unsigned integers
+// - paths and names are bytes, never strings
+// - repeated fields are written in a fixed order chosen by the writer
+// - object names are the BLAKE3 of the exact bytes written
+syntax = "proto3";
+
+package lodestore.format.v1;
+
+message Timestamp {
+  int64 seconds = 1;
+  uint32 nanos = 2;
+}
+
+message HpkeSuite {
+  uint32 kem_id = 1;
+  uint32 kdf_id = 2;
+  uint32 aead_id = 3;
+  bytes public_key = 4;
+}
+
+message ChunkerParams {
+  // 1 = fastcdc v2020
+  uint32 algorithm = 1;
+  uint32 min_size = 2;
+  uint32 avg_size = 3;
+  uint32 max_size = 4;
+  uint32 normalization = 5;
+}
+
+message Config {
+  uint32 format_version = 1;
+  uint32 min_reader_version = 2;
+  uint32 min_writer_version = 3;
+  repeated string incompat_features = 4;
+  bytes repo_id = 5;
+  HpkeSuite hpke = 6;
+  // 1 = XChaCha20-Poly1305
+  uint32 blob_aead_id = 7;
+  ChunkerParams chunker = 8;
+  uint32 key_epoch = 9;
+  Timestamp created = 10;
+  string program_version = 11;
+}
+
+message KdfParams {
+  // 1 = argon2id v0x13, 2 = blake3 derive_key (recovery key)
+  uint32 algorithm = 1;
+  uint32 memory_kib = 2;
+  uint32 iterations = 3;
+  uint32 parallelism = 4;
+  bytes salt = 5;
+}
+
+enum SlotKind {
+  SLOT_KIND_UNSPECIFIED = 0;
+  SLOT_KIND_PASSWORD = 1;
+  SLOT_KIND_RECOVERY = 2;
+  SLOT_KIND_SERVER = 3;
+}
+
+message KeySlot {
+  uint32 version = 1;
+  SlotKind kind = 2;
+  KdfParams kdf = 3;
+  bytes nonce = 4;
+  bytes ciphertext = 5;
+  Timestamp created = 6;
+}
+
+message PackRecord {
+  bytes pack_id = 1;
+  bytes hpke_enc = 2;
+  bytes sealed_pack_key = 3;
+  uint64 pack_size = 4;
+  // N records of 45 bytes, sorted by blob id
+  bytes entries = 5;
+}
+
+message IndexShard {
+  repeated PackRecord packs = 1;
+  // reserved for compaction
+  repeated bytes supersedes = 2;
+}
+
+message Extent {
+  uint64 offset = 1;
+  uint64 length = 2;
+}
+
+message Xattr {
+  bytes name = 1;
+  bytes value = 2;
+}
+
+enum NodeType {
+  NODE_TYPE_UNSPECIFIED = 0;
+  NODE_TYPE_FILE = 1;
+  NODE_TYPE_DIR = 2;
+  NODE_TYPE_SYMLINK = 3;
+  NODE_TYPE_FIFO = 4;
+  NODE_TYPE_CHARDEV = 5;
+  NODE_TYPE_BLOCKDEV = 6;
+}
+
+message Node {
+  bytes name = 1;
+  NodeType type = 2;
+  uint32 mode = 3;
+  uint32 uid = 4;
+  uint32 gid = 5;
+  bytes user = 6;
+  bytes group = 7;
+  Timestamp mtime = 8;
+  Timestamp atime = 9;
+  Timestamp ctime = 10;
+  uint64 size = 11;
+  repeated bytes content = 12;
+  repeated Extent sparse_extents = 13;
+  bytes link_target = 14;
+  uint64 rdev = 15;
+  repeated Xattr xattrs = 16;
+  uint64 inode = 17;
+  uint64 dev = 18;
+  uint64 nlink = 19;
+  uint64 hardlink_group = 20;
+  repeated bytes subtrees = 21;
+}
+
+message Tree {
+  repeated Node nodes = 1;
+}
+
+enum IssueKind {
+  ISSUE_KIND_UNSPECIFIED = 0;
+  ISSUE_KIND_UNREADABLE = 1;
+  ISSUE_KIND_VANISHED = 2;
+  ISSUE_KIND_CHANGED_DURING_READ = 3;
+  ISSUE_KIND_UNSUPPORTED_TYPE = 4;
+  ISSUE_KIND_TOO_LARGE = 5;
+}
+
+message SnapshotIssue {
+  bytes path = 1;
+  IssueKind kind = 2;
+  string message = 3;
+}
+
+message SnapshotStats {
+  uint64 files_new = 1;
+  uint64 files_changed = 2;
+  uint64 files_unchanged = 3;
+  uint64 dirs = 4;
+  uint64 bytes_total = 5;
+  uint64 bytes_read = 6;
+  uint64 bytes_added = 7;
+}
+
+message Snapshot {
+  Timestamp time = 1;
+  bytes hostname = 2;
+  repeated bytes paths = 3;
+  repeated string tags = 4;
+  bytes root_tree = 5;
+  bytes parent = 6;
+  SnapshotStats stats = 7;
+  bool incomplete = 8;
+  repeated SnapshotIssue errors = 9;
+  repeated SnapshotIssue warnings = 10;
+  uint64 errors_total = 11;
+  uint64 warnings_total = 12;
+  repeated bytes index_refs = 13;
+  bytes agent_id = 14;
+  bytes signature = 15;
+  uint32 key_epoch = 16;
+  string program_version = 17;
+}
+
+message SnapshotEnvelope {
+  uint32 version = 1;
+  bytes hpke_enc = 2;
+  bytes sealed_key = 3;
+  bytes nonce = 4;
+  bytes ciphertext = 5;
+}
+
+message WriterKeys {
+  uint32 version = 1;
+  bytes repo_id = 2;
+  bytes config_hash = 3;
+  bytes k_id = 4;
+  bytes k_idx = 5;
+  HpkeSuite hpke = 6;
+}

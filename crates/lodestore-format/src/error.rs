@@ -1,0 +1,48 @@
+use crate::store::BlobError;
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("storage error: {0}")]
+    Store(#[from] BlobError),
+    #[error("cryptographic operation failed")]
+    Crypto,
+    #[error("wrong password or recovery key")]
+    WrongSecret,
+    #[error("corrupt {object}: {reason}")]
+    Corrupt { object: String, reason: String },
+    #[error(
+        "unsupported {what}: the repository requires version {required}, this build supports up to {supported}"
+    )]
+    UnsupportedVersion {
+        what: &'static str,
+        required: u32,
+        supported: u32,
+    },
+    #[error("repository is already initialized")]
+    AlreadyInitialized,
+    #[error("repository is not initialized")]
+    NotInitialized,
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
+    #[error("interrupted")]
+    Interrupted,
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+impl Error {
+    pub fn corrupt(object: impl Into<String>, reason: impl Into<String>) -> Self {
+        Error::Corrupt {
+            object: object.into(),
+            reason: reason.into(),
+        }
+    }
+}
+
+impl From<rustix::io::Errno> for Error {
+    fn from(e: rustix::io::Errno) -> Self {
+        Error::Io(e.into())
+    }
+}

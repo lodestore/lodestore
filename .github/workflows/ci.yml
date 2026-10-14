@@ -1,0 +1,71 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace -- -D warnings
+      - uses: actions/cache@v4
+        with:
+          path: target/test-bin
+          key: test-bin-minio-RELEASE.2025-09-07T16-13-09Z-mc-RELEASE.2025-08-13T08-35-41Z
+      - run: cargo nextest run --workspace
+      - name: Forbid openssl-sys and ring on every target
+        run: |
+          for pkg in openssl-sys ring; do
+            graph=$(cargo tree --workspace --target all -i "$pkg" 2>/dev/null || true)
+            if [ -n "$graph" ]; then
+              echo "$pkg is in the dependency tree:" >&2
+              echo "$graph" >&2
+              exit 1
+            fi
+          done
+
+  fixtures-append-only:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Compare the v1 fixtures with the base
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            scripts/check-fixtures-append-only.sh "origin/$BASE_REF"
+          elif [ "$BEFORE" = 0000000000000000000000000000000000000000 ]; then
+            echo "no previous commit to compare with"
+          else
+            scripts/check-fixtures-append-only.sh "$BEFORE"
+          fi
+
+  linux-root:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+      - run: sudo apt-get install -y acl
+      - run: scripts/test-linux.sh --root fidelity_root_
+      - run: scripts/test-linux.sh --root backup_root_
