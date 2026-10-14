@@ -1,0 +1,122 @@
+syntax = "proto3";
+
+package lodestore.agent.v1;
+
+service Enrollment {
+  rpc GetTrustAnchor(GetTrustAnchorRequest) returns (TrustAnchor);
+  rpc Enroll(EnrollRequest) returns (EnrollResponse);
+}
+
+service Agent {
+  rpc Session(stream AgentMessage) returns (stream ServerMessage);
+  rpc Renew(RenewRequest) returns (RenewResponse);
+}
+
+message Versions {
+  uint32 min = 1;
+  uint32 max = 2;
+}
+
+message GetTrustAnchorRequest {}
+
+message TrustAnchor {
+  string ca_pem = 1;
+}
+
+message EnrollRequest {
+  string join_secret = 1;
+  bytes csr_der = 2;
+  string hostname = 3;
+  string os = 4;
+  string arch = 5;
+  string agent_version = 6;
+  Versions versions = 7;
+}
+
+message EnrollResponse {
+  string agent_id = 1;
+  string leaf_pem = 2;
+  string ca_pem = 3;
+  int64 issued_at = 4;
+  int64 expires_at = 5;
+  string writer_keys_text = 6;
+  RepoLocation location = 7;
+  S3Credentials agent_s3 = 8;
+  uint32 selected_version = 9;
+  int64 server_time = 10;
+}
+
+message RepoLocation {
+  string backend = 1;
+  map<string, string> options = 2;
+  string repository_id = 3;
+}
+
+message S3Credentials {
+  string access_key_id = 1;
+  string secret_access_key = 2;
+}
+
+message AgentMessage {
+  oneof body {
+    Hello hello = 1;
+    Heartbeat heartbeat = 2;
+  }
+}
+
+message Hello {
+  Versions versions = 1;
+  string agent_version = 2;
+}
+
+message Heartbeat {
+  int64 uptime_s = 1;
+  string kernel = 2;
+  string distro = 3;
+  repeated Mount mounts = 4;
+}
+
+message Mount {
+  string path = 1;
+  string fs_type = 2;
+  uint64 total_bytes = 3;
+  uint64 free_bytes = 4;
+}
+
+message ServerMessage {
+  oneof body {
+    HelloAck hello_ack = 1;
+    UpdateS3Credentials update_s3_credentials = 2;
+    Disconnect disconnect = 3;
+  }
+}
+
+message HelloAck {
+  uint32 selected_version = 1;
+  int64 server_time = 2;
+}
+
+message UpdateS3Credentials {
+  S3Credentials credentials = 1;
+}
+
+enum DisconnectReason {
+  DISCONNECT_REASON_UNSPECIFIED = 0;
+  DISCONNECT_REASON_REVOKED = 1;
+  DISCONNECT_REASON_REPLACED = 2;
+  DISCONNECT_REASON_SHUTDOWN = 3;
+}
+
+message Disconnect {
+  DisconnectReason reason = 1;
+}
+
+message RenewRequest {
+  bytes csr_der = 1;
+}
+
+message RenewResponse {
+  string leaf_pem = 1;
+  int64 issued_at = 2;
+  int64 expires_at = 3;
+}

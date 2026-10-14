@@ -1,0 +1,22 @@
+import { type QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { createRootRouteWithContext, Outlet } from "@tanstack/react-router";
+import { Toaster } from "@/components/ui/sonner";
+import { TooltipProvider } from "@/components/ui/tooltip";
+
+export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
+	{
+		component: RootLayout,
+	},
+);
+
+function RootLayout() {
+	const { queryClient } = Route.useRouteContext();
+	return (
+		<QueryClientProvider client={queryClient}>
+			<TooltipProvider>
+				<Outlet />
+				<Toaster position="bottom-right" duration={4000} />
+			</TooltipProvider>
+		</QueryClientProvider>
+	);
+}

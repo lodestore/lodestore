@@ -21,13 +21,17 @@ rand_core = "0.10.1"
 zeroize = { version = "1.9.1", features = ["derive"] }
 subtle = "2.6.1"
 thiserror = "2.0.21"
-tokio = { version = "1.53.2", features = ["rt"] }
+tokio = { version = "1.53.2", features = ["rt", "rt-multi-thread"] }
 data-encoding = "2.11.1"
 ignore = "0.4.33"
 opendal = { version = "0.59.4", default-features = false, features = ["services-s3", "layers-retry", "layers-timeout", "executors-tokio", "http-transport-reqwest"] }
 
 [features]
 test-hooks = []
+backend-azblob = ["opendal/services-azblob"]
+backend-gcs = ["opendal/services-gcs"]
+backend-sftp = ["opendal/services-sftp"]
+backend-webdav = ["opendal/services-webdav"]
 
 [build-dependencies]
 prost-build = "0.14.4"

@@ -332,10 +332,25 @@ fn argon2_kek(password: &[u8], kdf: &pb::KdfParams) -> Result<Key32> {
     let params = Params::new(kdf.memory_kib, kdf.iterations, kdf.parallelism, Some(32))
         .map_err(|e| Error::corrupt("key slot", format!("invalid KDF parameters: {e}")))?;
     let mut kek = Zeroizing::new([0u8; 32]);
-    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
-        .hash_password_into(password, &kdf.salt, kek.as_mut_slice())
-        .map_err(|e| Error::corrupt("key slot", format!("KDF failed: {e}")))?;
+    off_async_workers(|| {
+        Argon2::new(Algorithm::Argon2id, Version::V0x13, params).hash_password_into(
+            password,
+            &kdf.salt,
+            kek.as_mut_slice(),
+        )
+    })
+    .map_err(|e| Error::corrupt("key slot", format!("KDF failed: {e}")))?;
     Ok(kek)
+}
+
+/// Runs CPU-heavy work so it does not stall a multi-threaded tokio runtime's
+/// other tasks; elsewhere it simply runs inline.
+fn off_async_workers<T>(f: impl FnOnce() -> T) -> T {
+    use tokio::runtime::{Handle, RuntimeFlavor};
+    match Handle::try_current() {
+        Ok(h) if h.runtime_flavor() == RuntimeFlavor::MultiThread => tokio::task::block_in_place(f),
+        _ => f(),
+    }
 }
 
 fn seal_slot(
@@ -595,6 +610,16 @@ mod tests {
         let keys = ReadKeys::derive(MasterKey::from_bytes([9; 32]), [3; 16]);
         assert_eq!(keys.cdc_seed(), cdc_seed(keys.k_id()));
         assert_eq!(keys.write_keys([0; 32]).cdc_seed, keys.cdc_seed());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn slot_opens_inside_a_multi_thread_runtime() {
+        let mut ent = seeded(2);
+        let master = MasterKey::generate(&mut ent);
+        let repo = [4u8; 16];
+        let slot = seal_password_slot(&master, &repo, b"pw", LOW, None, &mut ent).unwrap();
+        let opened = open_password_slot(&slot, &repo, b"pw").unwrap().unwrap();
+        assert_eq!(opened.as_bytes(), master.as_bytes());
     }
 
     #[test]

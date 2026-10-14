@@ -1,0 +1,33 @@
+[licenses]
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+]
+exceptions = [
+    { crate = "lodestore-server", allow = ["AGPL-3.0-only"] },
+]
+
+[bans]
+multiple-versions = "allow"
+deny = [
+    { crate = "openssl" },
+    { crate = "openssl-sys" },
+    { crate = "native-tls" },
+    { crate = "ring" },
+]
+
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2023-0071", reason = "rsa is pulled in by the azblob client for request signing and never runs a private key supplied by a user" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

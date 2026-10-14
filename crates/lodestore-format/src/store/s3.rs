@@ -10,7 +10,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 use super::{BlobDelete, BlobError, BlobStore, ListEntry};
 use crate::error::{Error, Result};
 
-const DEFAULT_REGION: &str = "us-east-1";
+pub(crate) const DEFAULT_REGION: &str = "us-east-1";
 const RETRY_ATTEMPTS: usize = 6;
 
 /// A parsed `s3:http(s)://host[:port]/bucket[/prefix]` location.
@@ -59,11 +59,11 @@ impl S3Url {
             prefix: prefix.to_owned(),
         })
     }
+}
 
-    fn host(&self) -> &str {
-        let authority = self.endpoint.split_once("://").map_or("", |(_, h)| h);
-        authority.split(':').next().unwrap_or(authority)
-    }
+fn endpoint_host(endpoint: &str) -> &str {
+    let authority = endpoint.split_once("://").map_or("", |(_, h)| h);
+    authority.split(':').next().unwrap_or(authority)
 }
 
 /// Explicit credentials for callers that must not touch the process
@@ -99,9 +99,12 @@ fn region_from_env() -> String {
         .unwrap_or_else(|| DEFAULT_REGION.to_owned())
 }
 
-fn map_err(e: opendal::Error) -> BlobError {
+pub(super) fn map_err(e: opendal::Error) -> BlobError {
     match e.kind() {
         ErrorKind::NotFound => BlobError::NotFound,
+        ErrorKind::PermissionDenied => BlobError::Denied {
+            message: e.to_string(),
+        },
         _ => BlobError::Backend {
             message: e.to_string(),
             temporary: e.is_temporary(),
@@ -109,7 +112,7 @@ fn map_err(e: opendal::Error) -> BlobError {
     }
 }
 
-fn check_key(key: &str) -> std::result::Result<(), BlobError> {
+pub(super) fn check_key(key: &str) -> std::result::Result<(), BlobError> {
     let bad = key.is_empty()
         || key.contains('\0')
         || key
@@ -121,17 +124,95 @@ fn check_key(key: &str) -> std::result::Result<(), BlobError> {
     Ok(())
 }
 
+/// Everything needed to address a bucket, independent of the URL syntax.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct S3Options {
+    pub endpoint: Option<String>,
+    pub bucket: String,
+    pub prefix: String,
+    pub region: String,
+    pub virtual_host_style: bool,
+}
+
+/// The timeout sits inside the retry, so a timed-out attempt is retried.
+/// Bodies are handed over as whole `Bytes`, which keeps a PUT replayable.
+pub(super) fn layered(op: Operator) -> Operator {
+    op.layer(
+        TimeoutLayer::new()
+            .with_timeout(Duration::from_secs(60))
+            .with_io_timeout(Duration::from_secs(120)),
+    )
+    .layer(
+        RetryLayer::new()
+            .with_jitter()
+            .with_min_delay(Duration::from_millis(200))
+            .with_max_delay(Duration::from_secs(10))
+            .with_max_times(RETRY_ATTEMPTS),
+    )
+}
+
+/// Lists by directory-like prefix; the rest of `prefix` is a plain string
+/// filter, which matches what the local store does.
+pub(super) async fn list_op(
+    op: &Operator,
+    prefix: &str,
+) -> std::result::Result<Vec<ListEntry>, BlobError> {
+    let dir = prefix.rsplit_once('/').map_or("", |(d, _)| d);
+    let dir = if dir.is_empty() {
+        "/".to_owned()
+    } else {
+        format!("{dir}/")
+    };
+    let entries = op.list_with(&dir).recursive(true).await.map_err(map_err)?;
+    let mut out = Vec::new();
+    for e in entries {
+        let meta = e.metadata();
+        if !meta.is_file() {
+            continue;
+        }
+        let key = e.path().trim_start_matches('/');
+        if key.starts_with(prefix) {
+            out.push(ListEntry {
+                key: key.to_owned(),
+                size: meta.content_length(),
+            });
+        }
+    }
+    out.sort_by(|a, b| a.key.cmp(&b.key));
+    Ok(out)
+}
+
 impl S3Store {
     pub fn open(url: &str, creds: Option<StaticCredentials>) -> Result<Self> {
         let url = S3Url::parse(url)?;
+        Self::with_options(
+            &S3Options {
+                endpoint: Some(url.endpoint),
+                bucket: url.bucket,
+                prefix: url.prefix,
+                region: region_from_env(),
+                virtual_host_style: false,
+            },
+            creds,
+        )
+    }
+
+    pub fn with_options(opts: &S3Options, creds: Option<StaticCredentials>) -> Result<Self> {
         // Idempotent; installs the reqwest transport that is not auto-registered.
         opendal::install_default();
+        let endpoint = opts
+            .endpoint
+            .clone()
+            .unwrap_or_else(|| format!("https://s3.{}.amazonaws.com", opts.region));
         let mut builder = services::S3::default()
-            .endpoint(&url.endpoint)
-            .bucket(&url.bucket)
-            .root(&format!("/{}", url.prefix))
-            .region(&region_from_env());
-        if !url.host().ends_with("amazonaws.com")
+            .endpoint(&endpoint)
+            .bucket(&opts.bucket)
+            .root(&format!("/{}", opts.prefix.trim_matches('/')))
+            .region(&opts.region);
+        if opts.virtual_host_style {
+            builder = builder.enable_virtual_host_style();
+        }
+        if !endpoint_host(&endpoint).ends_with("amazonaws.com")
             && std::env::var_os("AWS_EC2_METADATA_DISABLED").is_none()
         {
             builder = builder.disable_ec2_metadata();
@@ -141,23 +222,22 @@ impl S3Store {
                 .access_key_id(&c.access_key_id)
                 .secret_access_key(&c.secret_access_key);
         }
-        // The timeout sits inside the retry, so a timed-out attempt is retried.
-        // Bodies are handed over as whole `Bytes`, which keeps a PUT replayable.
         let op = Operator::new(builder)
-            .map_err(|e| Error::InvalidInput(format!("cannot configure the s3 backend: {e}")))?
-            .layer(
-                TimeoutLayer::new()
-                    .with_timeout(Duration::from_secs(60))
-                    .with_io_timeout(Duration::from_secs(120)),
-            )
-            .layer(
-                RetryLayer::new()
-                    .with_jitter()
-                    .with_min_delay(Duration::from_millis(200))
-                    .with_max_delay(Duration::from_secs(10))
-                    .with_max_times(RETRY_ATTEMPTS),
-            );
-        Ok(S3Store { op })
+            .map_err(|e| Error::InvalidInput(format!("cannot configure the s3 backend: {e}")))?;
+        Ok(S3Store { op: layered(op) })
+    }
+}
+
+impl S3Store {
+    /// Replaces the object without `If-None-Match`. Only the capability probe
+    /// uses this, to find out whether a key could overwrite existing data.
+    pub(super) async fn overwrite_for_probe(
+        &self,
+        key: &str,
+        data: Bytes,
+    ) -> std::result::Result<(), BlobError> {
+        check_key(key)?;
+        self.op.write(key, data).await.map(|_| ()).map_err(map_err)
     }
 }
 
@@ -191,36 +271,7 @@ impl BlobStore for S3Store {
     }
 
     async fn list(&self, prefix: &str) -> std::result::Result<Vec<ListEntry>, BlobError> {
-        // S3 lists by directory-like prefix; the rest of `prefix` is a plain
-        // string filter, which matches what the local store does.
-        let dir = prefix.rsplit_once('/').map_or("", |(d, _)| d);
-        let dir = if dir.is_empty() {
-            "/".to_owned()
-        } else {
-            format!("{dir}/")
-        };
-        let entries = self
-            .op
-            .list_with(&dir)
-            .recursive(true)
-            .await
-            .map_err(map_err)?;
-        let mut out = Vec::new();
-        for e in entries {
-            let meta = e.metadata();
-            if !meta.is_file() {
-                continue;
-            }
-            let key = e.path().trim_start_matches('/');
-            if key.starts_with(prefix) {
-                out.push(ListEntry {
-                    key: key.to_owned(),
-                    size: meta.content_length(),
-                });
-            }
-        }
-        out.sort_by(|a, b| a.key.cmp(&b.key));
-        Ok(out)
+        list_op(&self.op, prefix).await
     }
 }
 
@@ -241,12 +292,12 @@ mod tests {
         assert_eq!(u.endpoint, "http://127.0.0.1:9000");
         assert_eq!(u.bucket, "bkt");
         assert_eq!(u.prefix, "a/b");
-        assert_eq!(u.host(), "127.0.0.1");
+        assert_eq!(endpoint_host(&u.endpoint), "127.0.0.1");
 
         let u = S3Url::parse("s3:https://s3.eu-west-1.amazonaws.com/bkt").unwrap();
         assert_eq!(u.endpoint, "https://s3.eu-west-1.amazonaws.com");
         assert_eq!(u.prefix, "");
-        assert!(u.host().ends_with("amazonaws.com"));
+        assert!(endpoint_host(&u.endpoint).ends_with("amazonaws.com"));
 
         for bad in [
             "s3:http://host",

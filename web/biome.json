@@ -1,0 +1,20 @@
+{
+	"$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+	"vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
+	"files": {
+		"includes": [
+			"**",
+			"!openapi.json",
+			"!src/routeTree.gen.ts",
+			"!src/api/gen",
+			"!src/components/ui"
+		]
+	},
+	"formatter": { "indentStyle": "tab" },
+	"javascript": { "formatter": { "quoteStyle": "double" } },
+	"css": { "parser": { "tailwindDirectives": true } },
+	"assist": {
+		"actions": { "source": { "organizeImports": "on" } }
+	},
+	"linter": { "enabled": true, "rules": { "preset": "none" } }
+}

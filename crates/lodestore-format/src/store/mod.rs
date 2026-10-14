@@ -1,4 +1,8 @@
 mod local;
+pub mod location;
+pub mod opendal;
+pub mod policy;
+pub mod probe;
 pub mod s3;
 
 use std::future::Future;
@@ -9,7 +13,9 @@ use bytes::Bytes;
 use crate::error::{Error, Result};
 
 pub use local::LocalFsStore;
-pub use s3::{S3Store, S3Url, StaticCredentials};
+pub use location::RepoLocation;
+pub use opendal::OpendalStore;
+pub use s3::{S3Options, S3Store, S3Url, StaticCredentials};
 
 #[derive(Debug, thiserror::Error)]
 pub enum BlobError {
@@ -17,6 +23,8 @@ pub enum BlobError {
     AlreadyExists,
     #[error("object not found")]
     NotFound,
+    #[error("access denied: {message}")]
+    Denied { message: String },
     #[error("backend error: {message}")]
     Backend { message: String, temporary: bool },
 }
@@ -130,6 +138,28 @@ impl<T: BlobDelete> BlobDelete for &T {
 pub enum Store {
     Local(LocalFsStore),
     S3(S3Store),
+    Opendal(OpendalStore),
+}
+
+impl Store {
+    pub fn conditional_write_supported(&self) -> bool {
+        match self {
+            Store::Local(_) | Store::S3(_) => true,
+            Store::Opendal(s) => s.conditional_write_supported(),
+        }
+    }
+
+    async fn overwrite_for_probe(
+        &self,
+        key: &str,
+        data: Bytes,
+    ) -> std::result::Result<(), BlobError> {
+        match self {
+            Store::Local(_) => Err(BlobError::backend("not supported on a local folder")),
+            Store::S3(s) => s.overwrite_for_probe(key, data).await,
+            Store::Opendal(s) => s.overwrite_for_probe(key, data).await,
+        }
+    }
 }
 
 impl BlobStore for Store {
@@ -137,6 +167,7 @@ impl BlobStore for Store {
         match self {
             Store::Local(s) => s.put_if_absent(key, data).await,
             Store::S3(s) => s.put_if_absent(key, data).await,
+            Store::Opendal(s) => s.put_if_absent(key, data).await,
         }
     }
 
@@ -144,6 +175,7 @@ impl BlobStore for Store {
         match self {
             Store::Local(s) => s.get(key).await,
             Store::S3(s) => s.get(key).await,
+            Store::Opendal(s) => s.get(key).await,
         }
     }
 
@@ -155,6 +187,7 @@ impl BlobStore for Store {
         match self {
             Store::Local(s) => s.get_range(key, range).await,
             Store::S3(s) => s.get_range(key, range).await,
+            Store::Opendal(s) => s.get_range(key, range).await,
         }
     }
 
@@ -162,6 +195,7 @@ impl BlobStore for Store {
         match self {
             Store::Local(s) => s.list(prefix).await,
             Store::S3(s) => s.list(prefix).await,
+            Store::Opendal(s) => s.list(prefix).await,
         }
     }
 
@@ -169,6 +203,7 @@ impl BlobStore for Store {
         match self {
             Store::Local(s) => s.ensure_prefixes(prefixes).await,
             Store::S3(s) => s.ensure_prefixes(prefixes).await,
+            Store::Opendal(s) => s.ensure_prefixes(prefixes).await,
         }
     }
 }
@@ -178,6 +213,7 @@ impl BlobDelete for Store {
         match self {
             Store::Local(s) => s.delete(key).await,
             Store::S3(s) => s.delete(key).await,
+            Store::Opendal(s) => s.delete(key).await,
         }
     }
 }

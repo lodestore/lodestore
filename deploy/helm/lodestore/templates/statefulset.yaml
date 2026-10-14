@@ -1,0 +1,101 @@
+{{- $grpcAddress := required "grpc.publicAddress is required: agents connect to this address" .Values.grpc.publicAddress }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "lodestore.fullname" . }}
+  labels:
+    {{- include "lodestore.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  serviceName: {{ include "lodestore.fullname" . }}
+  selector:
+    matchLabels:
+      {{- include "lodestore.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "lodestore.labels" . | nindent 8 }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+      containers:
+        - name: lodestore
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: grpc
+              containerPort: 8443
+          env:
+            - name: LODESTORE_GRPC_PUBLIC_ADDRESS
+              value: {{ $grpcAddress | quote }}
+            {{- with .Values.publicUrl }}
+            - name: LODESTORE_PUBLIC_URL
+              value: {{ . | quote }}
+            {{- end }}
+            - name: LODESTORE_UNLOCK_KEY_FILE
+              value: /etc/lodestore/secret/unlock-key
+            {{- if .Values.adminPassword }}
+            - name: LODESTORE_ADMIN_PASSWORD_FILE
+              value: /etc/lodestore/secret/admin-password
+            {{- end }}
+            {{- if include "lodestore.hasDatabase" . }}
+            - name: LODESTORE_DATABASE_URL_FILE
+              value: /etc/lodestore/database/database-url
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/lodestore
+            - name: secret
+              mountPath: /etc/lodestore/secret
+              readOnly: true
+            {{- if include "lodestore.hasDatabase" . }}
+            - name: database
+              mountPath: /etc/lodestore/database
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: secret
+          secret:
+            secretName: {{ include "lodestore.secretName" . }}
+            defaultMode: 0440
+        {{- if include "lodestore.hasDatabase" . }}
+        - name: database
+          secret:
+            secretName: {{ include "lodestore.databaseSecretName" . }}
+            defaultMode: 0440
+            items:
+              - key: database-url
+                path: database-url
+        {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.persistence.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}

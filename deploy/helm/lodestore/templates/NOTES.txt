@@ -1,0 +1,18 @@
+Lodestore {{ .Chart.AppVersion }} is installed as {{ include "lodestore.fullname" . }}.
+{{ if .Values.adminPassword }}
+First sign-in: the administrator was created from the Secret; sign in as "admin".
+{{- else }}
+First sign-in: the server prints a one-time setup link on first start:
+
+  kubectl --namespace {{ .Release.Namespace }} logs statefulset/{{ include "lodestore.fullname" . }} | grep setup
+{{- end }}
+
+Agents connect to {{ .Values.grpc.publicAddress }} over mTLS. The gRPC Service
+({{ include "lodestore.fullname" . }}-grpc) must be exposed at layer 4 or with TLS passthrough;
+an HTTP ingress that terminates TLS breaks agent client certificates.
+
+The unlock key lives in the Secret {{ include "lodestore.secretName" . }}. Save it outside the cluster:
+
+  kubectl --namespace {{ .Release.Namespace }} get secret {{ include "lodestore.secretName" . }} -o jsonpath='{.data.unlock-key}' | base64 -d
+
+Without it the repository master secrets stored in the database cannot be opened.

@@ -1,0 +1,1678 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Lodestore",
+    "description": "Lodestore server API",
+    "license": {
+      "name": "AGPL-3.0-only",
+      "identifier": "AGPL-3.0-only"
+    },
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/v1/agent-policy": {
+      "get": {
+        "operationId": "agent_policy",
+        "parameters": [
+          {
+            "name": "bucket",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "prefix",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The IAM policy for a write-only agent key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentPolicy"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "No bucket given",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/login": {
+      "post": {
+        "operationId": "login",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Signed in; the session cookie is set"
+          },
+          "401": {
+            "description": "Wrong username or password",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "No administrator exists yet",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many attempts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/logout": {
+      "post": {
+        "operationId": "logout",
+        "responses": {
+          "204": {
+            "description": "The session is ended and the cookie cleared"
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/session": {
+      "get": {
+        "operationId": "session",
+        "responses": {
+          "200": {
+            "description": "The signed-in user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionInfo"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/hosts": {
+      "get": {
+        "operationId": "list_hosts",
+        "responses": {
+          "200": {
+            "description": "All hosts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Host"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/hosts/{id}": {
+      "get": {
+        "operationId": "get_host",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Host id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Host details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown host",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/hosts/{id}/labels": {
+      "put": {
+        "operationId": "set_labels",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Host id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetLabels"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Host with the new labels",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown host",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The host is revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid labels",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/hosts/{id}/revoke": {
+      "post": {
+        "operationId": "revoke_host",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Host id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The host is revoked and disconnected"
+          },
+          "404": {
+            "description": "Unknown host",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/join-tokens": {
+      "post": {
+        "operationId": "create_join_token",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateJoinToken"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "A one-time join token and the install command",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JoinTokenResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown repository",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid labels",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/join-tokens/{id}": {
+      "get": {
+        "operationId": "get_token",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Join token id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Token status and the host that used it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JoinTokenStatus"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/repositories": {
+      "get": {
+        "operationId": "list_repositories",
+        "responses": {
+          "200": {
+            "description": "All repositories",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RepositorySummary"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/repositories/check": {
+      "post": {
+        "operationId": "check_storage",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RepositoryDraft"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Capability checks of the storage",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The location or keys are malformed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/repositories/connect": {
+      "post": {
+        "operationId": "connect_repository",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The existing repository was connected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepositorySummary"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The storage failed a check or holds no repository",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConflictBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The secret does not open the repository",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/repositories/wizard": {
+      "post": {
+        "operationId": "start_wizard",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RepositoryDraft"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "A new recovery key; nothing is written to the storage yet",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WizardStarted"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The storage failed a check or already holds a repository",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConflictBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The draft is malformed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/repositories/wizard/{id}/commit": {
+      "post": {
+        "operationId": "commit_wizard",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Wizard id from the start response",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CommitRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The repository was created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepositorySummary"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The setup session expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Weak password or wrong last group",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/repositories/{id}": {
+      "get": {
+        "operationId": "get_repository",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Repository id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Repository details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepositoryDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown repository",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/repositories/{id}/agent-key": {
+      "put": {
+        "operationId": "replace_key",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Repository id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Credentials"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The key was replaced and sent to the online agents",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KeyReplaced"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown repository",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The repository has no separate agent key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The new key could not be verified",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/repositories/{id}/agent-key/verify": {
+      "post": {
+        "operationId": "verify_key",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Repository id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Credentials"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "What the new key can do; nothing is changed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KeyVerification"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown repository",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The repository has no separate agent key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/repositories/{id}/check": {
+      "post": {
+        "operationId": "recheck",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Repository id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Fresh capability checks with the stored keys",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckResult"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown repository",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/server/info": {
+      "get": {
+        "operationId": "info",
+        "responses": {
+          "200": {
+            "description": "Server version and connection details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServerInfo"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/server/status": {
+      "get": {
+        "operationId": "status",
+        "responses": {
+          "200": {
+            "description": "Whether the first administrator still has to be created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServerStatus"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/setup": {
+      "post": {
+        "operationId": "create_admin",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetupRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "The administrator is created and signed in"
+          },
+          "404": {
+            "description": "The setup link is invalid or already used",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "An administrator already exists",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid username or password",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many attempts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/setup/verify": {
+      "post": {
+        "operationId": "verify",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VerifyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "The setup link is valid"
+          },
+          "404": {
+            "description": "The setup link is invalid or already used",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many attempts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AgentPolicy": {
+        "type": "object",
+        "required": [
+          "iam_json",
+          "minio_commands"
+        ],
+        "properties": {
+          "iam_json": {
+            "type": "string"
+          },
+          "minio_commands": {
+            "type": "string"
+          }
+        }
+      },
+      "CheckDto": {
+        "type": "object",
+        "required": [
+          "id",
+          "status"
+        ],
+        "properties": {
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        }
+      },
+      "CheckResult": {
+        "type": "object",
+        "required": [
+          "existing_repository",
+          "blocking",
+          "agent_key_state",
+          "checks"
+        ],
+        "properties": {
+          "agent_key_state": {
+            "type": "string"
+          },
+          "blocking": {
+            "type": "boolean"
+          },
+          "checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CheckDto"
+            }
+          },
+          "existing_repository": {
+            "type": "boolean"
+          }
+        }
+      },
+      "CommitRequest": {
+        "type": "object",
+        "required": [
+          "password",
+          "recovery_key_last_group"
+        ],
+        "properties": {
+          "password": {
+            "type": "string"
+          },
+          "recovery_key_last_group": {
+            "type": "string"
+          }
+        }
+      },
+      "ConflictBody": {
+        "type": "object",
+        "required": [
+          "code",
+          "message",
+          "check"
+        ],
+        "properties": {
+          "check": {
+            "$ref": "#/components/schemas/CheckResult"
+          },
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "ConnectRequest": {
+        "type": "object",
+        "required": [
+          "draft"
+        ],
+        "properties": {
+          "draft": {
+            "$ref": "#/components/schemas/RepositoryDraft"
+          },
+          "password": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "recovery_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "CreateJoinToken": {
+        "type": "object",
+        "required": [
+          "repository_id"
+        ],
+        "properties": {
+          "labels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Label"
+            }
+          },
+          "repository_id": {
+            "type": "string"
+          }
+        }
+      },
+      "Credentials": {
+        "type": "object",
+        "required": [
+          "access_key_id",
+          "secret_access_key"
+        ],
+        "properties": {
+          "access_key_id": {
+            "type": "string"
+          },
+          "secret_access_key": {
+            "type": "string"
+          }
+        }
+      },
+      "ErrorBody": {
+        "type": "object",
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "Host": {
+        "type": "object",
+        "required": [
+          "id",
+          "hostname",
+          "status",
+          "version",
+          "os",
+          "arch",
+          "labels",
+          "repository_id",
+          "cert_not_after",
+          "enrolled_at"
+        ],
+        "properties": {
+          "arch": {
+            "type": "string"
+          },
+          "cert_not_after": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "distro": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "enrolled_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "hostname": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Label"
+            }
+          },
+          "last_seen_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "os": {
+            "type": "string"
+          },
+          "repository_id": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/HostStatus"
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "HostDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Host"
+          },
+          {
+            "type": "object",
+            "required": [
+              "mounts",
+              "cert_issued_at",
+              "next_renewal_at",
+              "repository_name"
+            ],
+            "properties": {
+              "cert_issued_at": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "kernel": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "mounts": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/HostMount"
+                }
+              },
+              "next_renewal_at": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "repository_name": {
+                "type": "string"
+              },
+              "uptime_s": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64"
+              }
+            }
+          }
+        ]
+      },
+      "HostMount": {
+        "type": "object",
+        "required": [
+          "path",
+          "fs_type",
+          "total_bytes",
+          "free_bytes"
+        ],
+        "properties": {
+          "free_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "fs_type": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "total_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "HostStatus": {
+        "type": "string",
+        "enum": [
+          "online",
+          "offline",
+          "revoked"
+        ]
+      },
+      "JoinTokenResponse": {
+        "type": "object",
+        "required": [
+          "id",
+          "token",
+          "command",
+          "expires_at",
+          "server_time"
+        ],
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "id": {
+            "type": "string"
+          },
+          "server_time": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "token": {
+            "type": "string"
+          }
+        }
+      },
+      "JoinTokenStatus": {
+        "type": "object",
+        "required": [
+          "status",
+          "expires_at",
+          "server_time"
+        ],
+        "properties": {
+          "expires_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "host": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/TokenHost"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "server_time": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "status": {
+            "$ref": "#/components/schemas/TokenStatus"
+          }
+        }
+      },
+      "KeyReplaced": {
+        "type": "object",
+        "required": [
+          "agent_key_state",
+          "online_notified",
+          "offline"
+        ],
+        "properties": {
+          "agent_key_state": {
+            "type": "string"
+          },
+          "offline": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "online_notified": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "KeyVerification": {
+        "type": "object",
+        "required": [
+          "agent_key_state",
+          "check"
+        ],
+        "properties": {
+          "agent_key_state": {
+            "type": "string"
+          },
+          "check": {
+            "$ref": "#/components/schemas/CheckDto"
+          }
+        }
+      },
+      "Label": {
+        "type": "object",
+        "required": [
+          "key",
+          "value"
+        ],
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        }
+      },
+      "LocationDto": {
+        "type": "object",
+        "required": [
+          "backend"
+        ],
+        "properties": {
+          "backend": {
+            "type": "string"
+          },
+          "options": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "LoginRequest": {
+        "type": "object",
+        "required": [
+          "username",
+          "password"
+        ],
+        "properties": {
+          "password": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          }
+        }
+      },
+      "RepositoryDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/RepositorySummary"
+          },
+          {
+            "type": "object",
+            "required": [
+              "location",
+              "checks"
+            ],
+            "properties": {
+              "checks": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/CheckDto"
+                }
+              },
+              "location": {
+                "$ref": "#/components/schemas/LocationDto"
+              }
+            }
+          }
+        ]
+      },
+      "RepositoryDraft": {
+        "type": "object",
+        "required": [
+          "location"
+        ],
+        "properties": {
+          "agent_credentials": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Credentials"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "location": {
+            "$ref": "#/components/schemas/LocationDto"
+          },
+          "name": {
+            "type": "string"
+          },
+          "server_credentials": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Credentials"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "RepositorySummary": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "backend",
+          "experimental",
+          "location_display",
+          "hosts_count",
+          "agent_key_state"
+        ],
+        "properties": {
+          "agent_key_state": {
+            "type": "string"
+          },
+          "backend": {
+            "type": "string"
+          },
+          "checked_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "experimental": {
+            "type": "boolean"
+          },
+          "hosts_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "id": {
+            "type": "string"
+          },
+          "location_display": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "unlocked": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        }
+      },
+      "ServerInfo": {
+        "type": "object",
+        "required": [
+          "version",
+          "unlock_key_source",
+          "public_url",
+          "grpc_public_address",
+          "agent_arches"
+        ],
+        "properties": {
+          "agent_arches": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "grpc_public_address": {
+            "type": "string"
+          },
+          "public_url": {
+            "type": "string"
+          },
+          "unlock_key_source": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "ServerStatus": {
+        "type": "object",
+        "required": [
+          "setup_required"
+        ],
+        "properties": {
+          "setup_required": {
+            "type": "boolean"
+          }
+        }
+      },
+      "SessionInfo": {
+        "type": "object",
+        "required": [
+          "username",
+          "csrf_token"
+        ],
+        "properties": {
+          "csrf_token": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          }
+        }
+      },
+      "SetLabels": {
+        "type": "object",
+        "required": [
+          "labels"
+        ],
+        "properties": {
+          "labels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Label"
+            }
+          }
+        }
+      },
+      "SetupRequest": {
+        "type": "object",
+        "required": [
+          "token",
+          "username",
+          "password"
+        ],
+        "properties": {
+          "password": {
+            "type": "string"
+          },
+          "token": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          }
+        }
+      },
+      "TokenHost": {
+        "type": "object",
+        "required": [
+          "id",
+          "hostname",
+          "version",
+          "status"
+        ],
+        "properties": {
+          "hostname": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/HostStatus"
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "TokenStatus": {
+        "type": "string",
+        "enum": [
+          "pending",
+          "used",
+          "expired"
+        ]
+      },
+      "VerifyRequest": {
+        "type": "object",
+        "required": [
+          "token"
+        ],
+        "properties": {
+          "token": {
+            "type": "string"
+          }
+        }
+      },
+      "WizardStarted": {
+        "type": "object",
+        "required": [
+          "wizard_id",
+          "recovery_key",
+          "expires_at"
+        ],
+        "properties": {
+          "expires_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "recovery_key": {
+            "type": "string"
+          },
+          "wizard_id": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

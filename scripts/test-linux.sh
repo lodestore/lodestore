@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Runs the Linux tests in the OrbStack machine `lodestore-test` from a macOS host.
 #
-#   [PKG=lode-cli] scripts/test-linux.sh [--root] [nextest-args...]
+#   [PKG=lode-cli] [BINS=lodestore-agent] scripts/test-linux.sh [--root] [nextest-args...]
 #
 # Without --root the tests run as the machine's regular user. With --root they run
 # as root and include the #[ignore]d tests that need CAP_CHOWN, CAP_MKNOD and friends.
-# Both modes share one build directory inside the machine. The machine is started
-# for the run and stopped when it ends. On a Linux host without OrbStack (a CI
-# runner) the tests run on the host itself, with sudo for --root.
+# BINS names a package whose binary is built before the tests run (the install
+# tests need the agent). Both modes share one build directory inside the machine.
+# The machine is started for the run and stopped when it ends. On a Linux host
+# without OrbStack (a CI runner) the tests run on the host itself, with sudo for
+# --root.
 #
 # One-time setup:
 #   orb create ubuntu lodestore-test
@@ -26,9 +28,11 @@ fi
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
 pkg=${PKG:-lodestore-format}
+bins=${BINS:-}
 
 if [ "$(uname -s)" = Linux ] && ! command -v orb >/dev/null 2>&1; then
   cd "$repo"
+  [ -z "$bins" ] || cargo build --locked -p "$bins"
   if [ "$root" = 0 ]; then
     exec cargo nextest run --locked -p "$pkg" "$@"
   fi
@@ -42,11 +46,12 @@ fi
 
 trap 'orb stop lodestore-test >/dev/null 2>&1' EXIT
 orb run -m lodestore-test -w "$repo" bash -euo pipefail -c '
-  root=$1 pkg=$2 gen=$3
-  shift 3
+  root=$1 pkg=$2 gen=$3 bins=$4
+  shift 4
   [ -z "$gen" ] || export LODE_GENERATE_FIXTURES=$gen
   . "$HOME/.cargo/env"
   export CARGO_TARGET_DIR=$HOME/lodestore-target CARGO_BUILD_JOBS=4
+  [ -z "$bins" ] || cargo build --locked -p "$bins"
   if [ "$root" = 0 ]; then
     exec cargo nextest run --locked -p "$pkg" "$@"
   fi
@@ -54,4 +59,4 @@ orb run -m lodestore-test -w "$repo" bash -euo pipefail -c '
   sudo --preserve-env=PATH,CARGO_HOME,RUSTUP_HOME,CARGO_TARGET_DIR,CARGO_BUILD_JOBS,LODE_GENERATE_FIXTURES \
     env HOME=/root CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" \
     cargo nextest run --locked -p "$pkg" --run-ignored all "$@"
-' bash "$root" "$pkg" "${LODE_GENERATE_FIXTURES:-}" "$@"
+' bash "$root" "$pkg" "${LODE_GENERATE_FIXTURES:-}" "$bins" "$@"

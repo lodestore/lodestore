@@ -1,0 +1,9 @@
+*
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!crates/
+!scripts/
+!web/
+web/node_modules/
+web/dist/

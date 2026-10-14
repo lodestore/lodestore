@@ -15,6 +15,10 @@ use axum::response::Response;
 
 const SLOW_DOWN: &str =
     "<Error><Code>SlowDown</Code><Message>Please reduce your request rate.</Message></Error>";
+const ACCESS_DENIED: &str =
+    "<Error><Code>AccessDenied</Code><Message>Access Denied.</Message></Error>";
+const NOT_IMPLEMENTED: &str =
+    "<Error><Code>NotImplemented</Code><Message>Not implemented.</Message></Error>";
 const INTERNAL_ERROR: &str =
     "<Error><Code>InternalError</Code><Message>We encountered an internal error.</Message></Error>";
 
@@ -25,6 +29,12 @@ pub enum FaultAction {
     /// Let the upstream process the request, then answer 500 instead of its
     /// response: the write happened but the client cannot know.
     ForwardThenFail,
+    /// Answer 403 AccessDenied to a request without `If-None-Match`, as a
+    /// provider that enforces the `s3:if-none-match` policy condition does.
+    DenyUnconditional,
+    /// Answer 501 NotImplemented without contacting the upstream: a failure
+    /// that is permanent but says nothing about permissions.
+    NotImplemented,
 }
 
 #[derive(Debug, Clone)]
@@ -194,7 +204,13 @@ async fn handle(State(st): State<Arc<Inner>>, req: Request) -> Response {
         let mut rules = st.rules.lock().unwrap();
         rules
             .iter_mut()
-            .find(|(r, left)| *left > 0 && r.method == verb && key.starts_with(&r.key_prefix))
+            .find(|(r, left)| {
+                *left > 0
+                    && r.method == verb
+                    && key.starts_with(&r.key_prefix)
+                    && (r.action != FaultAction::DenyUnconditional
+                        || !parts.headers.contains_key(header::IF_NONE_MATCH))
+            })
             .map(|(r, left)| {
                 *left -= 1;
                 r.action
@@ -202,6 +218,13 @@ async fn handle(State(st): State<Arc<Inner>>, req: Request) -> Response {
     };
     if action == Some(FaultAction::SlowDown) {
         return xml(StatusCode::SERVICE_UNAVAILABLE, SLOW_DOWN);
+    }
+
+    if action == Some(FaultAction::NotImplemented) {
+        return xml(StatusCode::NOT_IMPLEMENTED, NOT_IMPLEMENTED);
+    }
+    if action == Some(FaultAction::DenyUnconditional) {
+        return xml(StatusCode::FORBIDDEN, ACCESS_DENIED);
     }
 
     let url = format!(

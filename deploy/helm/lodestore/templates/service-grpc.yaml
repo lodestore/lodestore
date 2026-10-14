@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "lodestore.fullname" . }}-grpc
+  labels:
+    {{- include "lodestore.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.grpc.service.type }}
+  selector:
+    {{- include "lodestore.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: grpc
+      port: 8443
+      targetPort: grpc
+      {{- if and .Values.grpc.service.nodePort (eq .Values.grpc.service.type "NodePort") }}
+      nodePort: {{ .Values.grpc.service.nodePort }}
+      {{- end }}

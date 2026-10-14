@@ -1,0 +1,16 @@
+[package]
+name = "lodestore-proto"
+description = "Lodestore agent control protocol"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+prost = "0.14.4"
+tonic = { version = "0.14.6", default-features = false, features = ["codegen"] }
+tonic-prost = "0.14.6"
+
+[build-dependencies]
+tonic-prost-build = "0.14.6"
+protox = "0.10.0"

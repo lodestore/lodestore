@@ -184,13 +184,7 @@ async fn s3_write_only_cannot_delete() {
     let pack = fx.root.list("packs/").await.unwrap().remove(0).key;
 
     let err = fx.writer_store.delete(&pack).await.unwrap_err();
-    let BlobError::Backend { message, .. } = &err else {
-        panic!("expected a backend error, got {err:?}");
-    };
-    assert!(
-        message.contains("AccessDenied") || message.contains("PermissionDenied"),
-        "{message}"
-    );
+    assert!(matches!(err, BlobError::Denied { .. }), "{err:?}");
     assert!(fx.root.get(&pack).await.is_ok());
 }
 
@@ -201,14 +195,14 @@ async fn s3_write_only_cannot_read_packs() {
 
     assert!(matches!(
         fx.writer_store.get(&pack).await,
-        Err(BlobError::Backend { .. })
+        Err(BlobError::Denied { .. })
     ));
     assert!(matches!(
         fx.writer_store.get_range(&pack, 0..16).await,
-        Err(BlobError::Backend { .. })
+        Err(BlobError::Denied { .. })
     ));
     assert!(matches!(
         fx.writer_store.list("packs/").await,
-        Err(BlobError::Backend { .. })
+        Err(BlobError::Denied { .. })
     ));
 }

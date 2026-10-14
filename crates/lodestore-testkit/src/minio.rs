@@ -134,6 +134,23 @@ fn random_hex(bytes: usize) -> String {
     data_encoding::HEXLOWER.encode(&buf)
 }
 
+/// The IAM policy of a write-only agent key on an unprefixed bucket.
+pub fn write_only_policy(bucket: &str) -> serde_json::Value {
+    let arn = |path: &str| format!("arn:aws:s3:::{bucket}/{path}");
+    serde_json::json!({
+        "Version": "2012-10-17",
+        "Statement": [
+            {"Effect": "Allow", "Action": ["s3:PutObject"],
+             "Resource": [arn("packs/*"), arn("index/*"), arn("snapshots/*")]},
+            {"Effect": "Allow", "Action": ["s3:GetObject"],
+             "Resource": [arn("config"), arn("index/*")]},
+            {"Effect": "Allow", "Action": ["s3:ListBucket"],
+             "Resource": [format!("arn:aws:s3:::{bucket}")],
+             "Condition": {"StringLike": {"s3:prefix": ["index/*", "index/"]}}},
+        ],
+    })
+}
+
 pub struct MinioServer {
     child: Child,
     mc: PathBuf,
@@ -251,23 +268,21 @@ impl MinioServer {
     /// A user that can add objects under `packs/`, `index/` and `snapshots/`,
     /// read `config` and `index/`, and list `index/`, but never delete.
     pub async fn create_write_only_user(&self, bucket: &str) -> (String, String) {
+        self.create_user_with_policy(bucket, &write_only_policy(bucket).to_string())
+            .await
+    }
+
+    /// A user bound to the given IAM policy document; the bucket is only used
+    /// to name the policy.
+    pub async fn create_user_with_policy(
+        &self,
+        bucket: &str,
+        policy_json: &str,
+    ) -> (String, String) {
         let (access_key, secret_key) = (random_hex(8), random_hex(16));
-        let arn = |path: &str| format!("arn:aws:s3:::{bucket}/{path}");
-        let policy = serde_json::json!({
-            "Version": "2012-10-17",
-            "Statement": [
-                {"Effect": "Allow", "Action": ["s3:PutObject"],
-                 "Resource": [arn("packs/*"), arn("index/*"), arn("snapshots/*")]},
-                {"Effect": "Allow", "Action": ["s3:GetObject"],
-                 "Resource": [arn("config"), arn("index/*")]},
-                {"Effect": "Allow", "Action": ["s3:ListBucket"],
-                 "Resource": [format!("arn:aws:s3:::{bucket}")],
-                 "Condition": {"StringLike": {"s3:prefix": ["index/*", "index/"]}}},
-            ],
-        });
-        let name = format!("write-only-{access_key}");
+        let name = format!("policy-{bucket}-{access_key}");
         let file = self.mc_config.path().join(format!("{name}.json"));
-        std::fs::write(&file, policy.to_string()).expect("write the policy");
+        std::fs::write(&file, policy_json).expect("write the policy");
         let file = file.to_str().expect("utf-8 path");
         self.mc(&["admin", "user", "add", "lode", &access_key, &secret_key])
             .await
