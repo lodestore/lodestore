@@ -32,6 +32,15 @@ jobs:
         run: |
           version=$(sed -n 's/^ARG ZIGLANG_VERSION=//p' deploy/docker/Dockerfile)
           pip install "ziglang==$version"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "24"
+      - name: Build the web UI
+        working-directory: web
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+          pnpm build
       - run: scripts/build-musl.sh dist --server x86_64-unknown-linux-musl aarch64-unknown-linux-musl
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -108,23 +117,26 @@ jobs:
 
   web:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: "24"
       - run: corepack enable
-      - run: pnpm --prefix web install --frozen-lockfile
-      - run: pnpm --prefix web build
-      - run: pnpm --prefix web test
-      - run: pnpm --prefix web lint
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm test
+      - run: pnpm lint
 
   helm:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - run: helm lint deploy/helm/lodestore --set grpc.publicAddress=lodestore.example:8443
-      - run: helm template lodestore deploy/helm/lodestore --set grpc.publicAddress=lodestore.example:8443
+      - run: helm lint deploy/helm/lodestore --set grpc.publicAddress=lodestore.example:8443 --set unlockKey=ci-render-only
+      - run: helm template lodestore deploy/helm/lodestore --set grpc.publicAddress=lodestore.example:8443 --set unlockKey=ci-render-only
 
   advisories:
     runs-on: ubuntu-latest

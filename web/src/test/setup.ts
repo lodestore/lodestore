@@ -10,3 +10,8 @@ afterEach(() => {
 });
 afterAll(() => server.close());
 window.scrollTo = () => {};
+globalThis.ResizeObserver ??= class {
+	observe() {}
+	unobserve() {}
+	disconnect() {}
+};

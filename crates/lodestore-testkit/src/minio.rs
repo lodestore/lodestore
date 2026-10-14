@@ -197,15 +197,24 @@ impl MinioServer {
             server.root_user.clone(),
             server.root_password.clone(),
         );
-        server
-            .mc(&["alias", "set", "lode", &endpoint, &user, &password])
-            .await
-            .expect("mc alias set");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            match server
+                .mc(&["alias", "set", "lode", &endpoint, &user, &password])
+                .await
+            {
+                Ok(_) => break,
+                Err(e) if e.contains("not initialized") && Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+                Err(e) => panic!("mc alias set: {e:?}"),
+            }
+        }
         server
     }
 
     async fn wait_ready(&mut self) {
-        let url = format!("{}/minio/health/live", self.endpoint);
+        let url = format!("{}/minio/health/ready", self.endpoint);
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             if let Ok(Some(status)) = self.child.try_wait() {

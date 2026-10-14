@@ -405,11 +405,28 @@ async fn agent_has_no_listening_socket() {
         assert!(online, "[{}] the host never became online", backend.name());
 
         let known = [ts.config.listen.port(), ts.config.grpc.listen.port()];
+        let own_sockets: Vec<String> = std::fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .filter_map(|fd| std::fs::read_link(fd.ok()?.path()).ok())
+            .filter_map(|target| {
+                let target = target.to_str()?;
+                Some(
+                    target
+                        .strip_prefix("socket:[")?
+                        .strip_suffix(']')?
+                        .to_string(),
+                )
+            })
+            .collect();
         let mut stray = Vec::new();
         for table in ["/proc/self/net/tcp", "/proc/self/net/tcp6"] {
             for line in std::fs::read_to_string(table).unwrap().lines().skip(1) {
                 let columns: Vec<&str> = line.split_whitespace().collect();
-                if columns.get(3) != Some(&"0A") {
+                if columns.get(3) != Some(&"0A")
+                    || !columns
+                        .get(9)
+                        .is_some_and(|inode| own_sockets.iter().any(|own| own == inode))
+                {
                     continue;
                 }
                 let port = u16::from_str_radix(columns[1].rsplit(':').next().unwrap(), 16).unwrap();
