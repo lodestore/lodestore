@@ -48,14 +48,16 @@ docker run -d --name "$name" \
 
 wait_for /healthz curl -fsS "$base/healthz"
 
-curl -fsS "$base/" | grep -qi '<html' || fail "GET / did not return HTML"
+curl -fsS "$base/" -o "$workdir/index.html"
+grep -qi '<html' "$workdir/index.html" || fail "GET / did not return HTML"
 
 for arch in x86_64 aarch64; do
   sum=$(curl -fsS "$base/install/agent/$arch.sha256")
   echo "$sum" | grep -Eq '^[0-9a-f]{64}$' || fail "bad checksum for $arch: $sum"
 done
 
-curl -fsS "$base/install.sh" | grep -q "$base" || fail "install.sh does not mention $base"
+curl -fsS "$base/install.sh" -o "$workdir/install.sh"
+grep -q "$base" "$workdir/install.sh" || fail "install.sh does not mention $base"
 
 user=$(docker inspect --format '{{.Config.User}}' "$name")
 [ "$user" = "65532:65532" ] || fail "container user is $user"
@@ -65,7 +67,8 @@ healthy() {
 }
 wait_for "healthcheck status healthy" healthy
 
-if docker logs "$name" 2>&1 | grep -qi 'permission denied'; then
+docker logs "$name" >"$workdir/container.log" 2>&1
+if grep -qi 'permission denied' "$workdir/container.log"; then
   fail "container logs contain permission denied"
 fi
 
