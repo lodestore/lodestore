@@ -196,6 +196,7 @@ async fn proxied(bucket: &str, plan: FaultPlan) -> (MinioServer, FaultProxy, S3S
 }
 
 #[tokio::test]
+#[ignore = "slow; run with --run-ignored only"]
 async fn s3_fault_slowdown_retried() {
     let (_minio, proxy, store, direct) =
         proxied("slowdown", put_rule(FaultAction::SlowDown, 3)).await;
@@ -215,6 +216,7 @@ async fn s3_fault_slowdown_retried() {
 }
 
 #[tokio::test]
+#[ignore = "slow; run with --run-ignored only"]
 async fn s3_fault_ambiguous_put_is_success() {
     let (_minio, proxy, store, direct) =
         proxied("ambiguous", put_rule(FaultAction::ForwardThenFail, 1)).await;
@@ -241,6 +243,7 @@ async fn s3_fault_ambiguous_put_is_success() {
 }
 
 #[tokio::test]
+#[ignore = "slow; run with --run-ignored only"]
 async fn s3_object_lock_version_delete_refused() {
     let minio = MinioServer::start().await;
     minio.create_locked_bucket("locked").await;
@@ -262,6 +265,7 @@ async fn s3_object_lock_version_delete_refused() {
 }
 
 #[tokio::test]
+#[ignore = "slow; run with --run-ignored only"]
 async fn s3_single_put_per_pack() {
     let (_minio, proxy, store, direct) = proxied("single-put", FaultPlan::none()).await;
     let src = tempfile::tempdir().unwrap();

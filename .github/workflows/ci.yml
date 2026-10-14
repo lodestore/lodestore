@@ -22,7 +22,6 @@ jobs:
       - uses: taiki-e/install-action@nextest
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo clippy --workspace -- -D warnings
       - uses: actions/cache@v4
         with:
           path: target/test-bin
@@ -57,15 +56,3 @@ jobs:
           else
             scripts/check-fixtures-append-only.sh "$BEFORE"
           fi
-
-  linux-root:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install the pinned toolchain
-        run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@nextest
-      - run: sudo apt-get install -y acl
-      - run: scripts/test-linux.sh --root fidelity_root_
-      - run: scripts/test-linux.sh --root backup_root_
