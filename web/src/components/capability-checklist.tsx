@@ -1,4 +1,5 @@
 import {
+	ChevronDown,
 	CircleCheck,
 	CircleX,
 	Clock,
@@ -7,6 +8,13 @@ import {
 } from "lucide-react";
 import type { ReactNode } from "react";
 import type { CheckDto } from "@/api/gen/model";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+	Collapsible,
+	CollapsibleContent,
+	CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import {
 	Item,
 	ItemActions,
@@ -155,15 +163,62 @@ const visuals = {
 	stale: { icon: Clock, tone: "text-neutral" },
 } as const;
 
-export function CapabilityChecklist({ rows }: { rows: CheckRow[] }) {
+const why: Record<CheckId, string> = {
+	write: copy.checklist.why.write,
+	list: copy.checklist.why.list,
+	conditional_write: copy.checklist.why.conditionalWrite,
+	agent_delete: copy.access.whyWriteOnly.body,
+	object_lock: copy.checklist.why.objectLock,
+};
+
+const OVERALL = {
+	fail: visuals.fail,
+	warn: visuals.warn,
+	pass: visuals.pass,
+} as const;
+
+export function CapabilityChecklist({
+	rows,
+	stale,
+}: {
+	rows: CheckRow[];
+	stale?: boolean;
+}) {
+	const full: CheckRow[] = CHECK_IDS.map(
+		(id) => rows.find((r) => r.id === id) ?? { id, status: "neutral" },
+	);
+	const isStale = stale ?? full.some((r) => r.status === "stale");
+	const count = (status: CheckStatus) =>
+		full.filter((r) => r.status === status).length;
+	const counts = {
+		pass: count("pass"),
+		warn: count("warn"),
+		fail: count("fail"),
+	};
+	const summary = copy.checklist.summary(counts);
+	const overall = OVERALL[counts.fail ? "fail" : counts.warn ? "warn" : "pass"];
+
 	return (
-		<div aria-live="polite">
-			<ItemGroup className="gap-2">
-				{CHECK_IDS.map((id) => {
-					const row: CheckRow = rows.find((r) => r.id === id) ?? {
-						id,
-						status: "neutral",
-					};
+		<div aria-live="polite" className="flex flex-col gap-4">
+			{(summary !== "" || isStale) && (
+				<div className="flex flex-wrap items-center gap-2">
+					{summary !== "" && (
+						<>
+							<overall.icon
+								aria-hidden
+								className={cn("size-5", overall.tone)}
+							/>
+							<p className="font-semibold">{summary}</p>
+						</>
+					)}
+					{isStale && (
+						<Badge variant="outline">{copy.checklist.outdated}</Badge>
+					)}
+				</div>
+			)}
+			<ItemGroup className={cn("gap-2", isStale && "opacity-60")}>
+				{full.map((row, i) => {
+					const { id } = row;
 					const visual = row.status === "running" ? null : visuals[row.status];
 					return (
 						<Item
@@ -172,20 +227,51 @@ export function CapabilityChecklist({ rows }: { rows: CheckRow[] }) {
 							variant="outline"
 							size="sm"
 							data-status={row.status}
-							className={cn(row.status === "stale" && "opacity-60")}
+							className="min-h-16 animate-in fade-in slide-in-from-bottom-2 fill-mode-backwards duration-400"
+							style={{ animationDelay: `${i * 80}ms` }}
 						>
-							<ItemMedia variant="icon">
+							<ItemMedia
+								variant="icon"
+								className="size-6 border-0 bg-transparent"
+							>
 								{visual ? (
-									<visual.icon aria-hidden className={visual.tone} />
+									<visual.icon
+										aria-hidden
+										className={cn("size-6", visual.tone)}
+									/>
 								) : (
-									<Spinner />
+									<Spinner className="size-6" />
 								)}
 							</ItemMedia>
 							<ItemContent>
-								<ItemTitle>{copy.check.rows[id]}</ItemTitle>
-								<ItemDescription>
+								<div className="flex flex-wrap items-center gap-2">
+									<ItemTitle>{copy.check.rows[id]}</ItemTitle>
+									{id === "object_lock" && visual && (
+										<Badge variant="outline">
+											{copy.checklist.recommended}
+										</Badge>
+									)}
+								</div>
+								<ItemDescription className="line-clamp-none">
 									{visual ? row.detail : copy.check.rowRunning}
 								</ItemDescription>
+								{(row.status === "warn" || row.status === "fail") && (
+									<Collapsible defaultOpen={row.status === "fail"}>
+										<CollapsibleTrigger asChild>
+											<Button
+												variant="ghost"
+												size="sm"
+												className="-ml-2 h-auto px-2 py-1"
+											>
+												<ChevronDown aria-hidden />
+												{copy.checklist.whyItMatters}
+											</Button>
+										</CollapsibleTrigger>
+										<CollapsibleContent className="mt-1 text-sm text-muted-foreground">
+											{why[id]}
+										</CollapsibleContent>
+									</Collapsible>
+								)}
 							</ItemContent>
 							{visual && row.status !== "running" && (
 								<ItemActions className={cn("text-xs", visual.tone)}>

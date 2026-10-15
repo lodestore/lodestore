@@ -2,7 +2,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { describe, expect, it } from "vitest";
-import type { Host, HostDetail } from "@/api/gen/model";
+import type { Host } from "@/api/gen/model";
 import { renderApp, useSignedIn } from "@/test/app";
 import { server } from "@/test/server";
 
@@ -56,14 +56,56 @@ describe("Hosts page", () => {
 
 		expect(await screen.findByText("web-1")).toBeInTheDocument();
 		expect(screen.getByText("db-1")).toBeInTheDocument();
-		const online = screen.getByText("Online").closest("[data-status]");
-		expect(online).toHaveAttribute("data-status", "online");
-		expect(online?.querySelector("svg")).not.toBeNull();
-		const offline = screen.getByText("Offline").closest("[data-status]");
-		expect(offline).toHaveAttribute("data-status", "offline");
-		expect(offline?.querySelector("svg")).not.toBeNull();
+		const table = screen.getByRole("table");
+		for (const [word, status] of [
+			["Online", "online"],
+			["Offline", "offline"],
+		]) {
+			const badge = within(table)
+				.getAllByText(word)[0]
+				.closest("[data-status]");
+			expect(badge).toHaveAttribute("data-status", status);
+			expect(badge?.querySelector("svg")).not.toBeNull();
+		}
 		expect(screen.getAllByText("linux / arm64")).toHaveLength(2);
 		expect(screen.getAllByText("0.1.0").length).toBeGreaterThan(0);
+	});
+
+	it("shows total, online and offline tiles from the loaded list", async () => {
+		mockHosts([
+			makeHost("a"),
+			makeHost("b"),
+			makeHost("c", { status: "offline" }),
+			makeHost("d", { status: "revoked" }),
+		]);
+		await openHosts();
+		await screen.findByText("a");
+		const tile = (label: string) =>
+			screen.getByText(label, { selector: "div" }).nextElementSibling
+				?.textContent;
+		expect(tile("Total hosts")).toBe("3");
+		expect(tile("Online")).toBe("2");
+		expect(tile("Offline")).toBe("1");
+	});
+
+	it("shows zero online when every active host is offline", async () => {
+		mockHosts([makeHost("a", { status: "offline" })]);
+		await openHosts();
+		await screen.findByText("a");
+		expect(
+			screen.getByText("Online", { selector: "div" }).nextElementSibling,
+		).toHaveTextContent("0");
+	});
+
+	it("opens the Add host dialog from ?add=1 and clears the parameter", async () => {
+		mockHosts([makeHost("web-1")]);
+		useSignedIn();
+		const { router } = renderApp("/hosts?add=1");
+		expect(
+			await screen.findByRole("dialog", { name: "Add host" }),
+		).toBeInTheDocument();
+		await waitFor(() => expect(router.state.location.search).toEqual({}));
+		expect(router.state.location.pathname).toBe("/hosts");
 	});
 
 	it("shows a host added through the dialog without a reload", async () => {
@@ -126,7 +168,7 @@ function bodyRows() {
 }
 
 function firstRowName() {
-	return within(bodyRows()[0]).getAllByRole("button")[0].textContent;
+	return within(bodyRows()[0]).getAllByRole("link")[0].textContent;
 }
 
 function many(n: number, over: (i: number) => Partial<Host> = () => ({})) {
@@ -136,6 +178,51 @@ function many(n: number, over: (i: number) => Partial<Host> = () => ({})) {
 }
 
 describe("Hosts table", () => {
+	it("opens the host page from the name link", async () => {
+		const host = makeHost("web-1");
+		mockHosts([host]);
+		useSignedIn();
+		const { router } = renderApp("/hosts");
+		await userEvent.click(
+			await screen.findByRole("link", { name: "Open web-1" }),
+		);
+		await waitFor(() =>
+			expect(router.state.location.pathname).toBe(`/hosts/${host.id}`),
+		);
+	});
+
+	it("opens the host page when the row is clicked", async () => {
+		const host = makeHost("web-1");
+		mockHosts([host]);
+		useSignedIn();
+		const { router } = renderApp("/hosts");
+		await userEvent.click(await screen.findByText("linux / arm64"));
+		await waitFor(() =>
+			expect(router.state.location.pathname).toBe(`/hosts/${host.id}`),
+		);
+	});
+
+	it("opens the host page from the View details menu item", async () => {
+		const host = makeHost("web-1");
+		mockHosts([host]);
+		useSignedIn();
+		const { router } = renderApp("/hosts");
+		await screen.findByText("web-1");
+		await openMenu("web-1", "View details");
+		await waitFor(() =>
+			expect(router.state.location.pathname).toBe(`/hosts/${host.id}`),
+		);
+	});
+
+	it("shows the last 8 characters of the host id", async () => {
+		mockHosts([
+			makeHost("alpha", { id: "01a13d57-aaaa-7000-8000-0123456789ab" }),
+		]);
+		await openHosts();
+		const id = await screen.findByText("456789ab");
+		expect(id).toHaveAttribute("title", "01a13d57-aaaa-7000-8000-0123456789ab");
+	});
+
 	it("paginates 50 rows per page", async () => {
 		mockHosts(many(212));
 		await openHosts();
@@ -186,6 +273,26 @@ describe("Hosts table", () => {
 		expect(firstRowName()).toBe("c-host");
 	});
 
+	it("sorts by last seen in its own column, newest first", async () => {
+		mockHosts([
+			makeHost("a-old", { last_seen_at: Date.now() - 3_600_000 }),
+			makeHost("b-new", { last_seen_at: Date.now() - 1_000 }),
+		]);
+		await openHosts();
+		await screen.findByText("a-old");
+
+		const user = userEvent.setup();
+		for (const header of screen.getAllByRole("columnheader")) {
+			expect(within(header).queryAllByRole("button").length).toBeLessThan(2);
+		}
+		const lastSeen = screen.getByRole("columnheader", { name: /Last seen/ });
+		const status = screen.getByRole("columnheader", { name: /Status/ });
+		await user.click(within(lastSeen).getByRole("button"));
+		expect(lastSeen).toHaveAttribute("aria-sort", "descending");
+		expect(status).not.toHaveAttribute("aria-sort");
+		expect(firstRowName()).toBe("b-new");
+	});
+
 	it("puts online hosts first by default", async () => {
 		mockHosts([
 			makeHost("a-offline", { status: "offline" }),
@@ -196,7 +303,7 @@ describe("Hosts table", () => {
 		expect(firstRowName()).toBe("z-online");
 	});
 
-	it("shows three label chips and a counter with the rest", async () => {
+	it("shows two label chips and a counter with the rest", async () => {
 		mockHosts([
 			makeHost("web-1", {
 				labels: ["a", "b", "c", "d", "e"].map((key) => ({ key, value: "1" })),
@@ -206,12 +313,30 @@ describe("Hosts table", () => {
 		await screen.findByText("web-1");
 		const row = bodyRows()[0];
 		expect(within(row).getByText("a=1")).toBeInTheDocument();
-		expect(within(row).getByText("c=1")).toBeInTheDocument();
-		expect(within(row).queryByText("d=1")).toBeNull();
-		await userEvent.hover(within(row).getByText("+2"));
+		expect(within(row).getByText("b=1")).toBeInTheDocument();
+		expect(
+			within(row).queryByText("c=1", { selector: "span.truncate" }),
+		).toBeNull();
+		expect(
+			within(row).getByRole("link", { name: "Open web-1" }),
+		).toHaveAccessibleDescription("c=1, d=1, e=1");
+		await userEvent.hover(within(row).getByText("+3"));
 		const tip = await screen.findByRole("tooltip");
-		expect(tip).toHaveTextContent("d=1");
+		expect(tip).toHaveTextContent("c=1");
 		expect(tip).toHaveTextContent("e=1");
+	});
+
+	it("puts a label chip into the search box and filters by it", async () => {
+		mockHosts([
+			makeHost("web-1", { labels: [{ key: "env", value: "prod" }] }),
+			makeHost("db-1", { labels: [{ key: "env", value: "dev" }] }),
+		]);
+		await openHosts();
+		await screen.findByText("web-1");
+		await userEvent.click(screen.getByRole("button", { name: "env=prod" }));
+		expect(screen.getByRole("searchbox")).toHaveValue("env=prod");
+		expect(bodyRows()).toHaveLength(1);
+		expect(firstRowName()).toBe("web-1");
 	});
 
 	it("flags an agent version that differs from the server", async () => {
@@ -260,6 +385,15 @@ describe("Hosts table", () => {
 			screen.getByText(/Add a host to start protecting it/),
 		).toBeInTheDocument();
 		expect(screen.getAllByRole("button", { name: "Add host" })).toHaveLength(2);
+	});
+
+	it("shows an illustration in the empty state", async () => {
+		mockHosts([]);
+		await openHosts();
+		const empty = (await screen.findByText("No hosts yet")).closest(
+			"[data-slot=empty]",
+		);
+		expect(empty?.querySelector("img")).not.toBeNull();
 	});
 
 	it("shows an empty revoked filter", async () => {
@@ -312,8 +446,8 @@ describe("Hosts table", () => {
 	it("renders a non-ASCII host name in full in the tooltip", async () => {
 		mockHosts([makeHost("сервер-бэкапов.пример")]);
 		await openHosts();
-		const name = await screen.findByRole("button", {
-			name: "сервер-бэкапов.пример",
+		const name = await screen.findByRole("link", {
+			name: "Open сервер-бэкапов.пример",
 		});
 		await userEvent.hover(name);
 		expect(await screen.findByRole("tooltip")).toHaveTextContent(
@@ -333,25 +467,6 @@ describe("Hosts table", () => {
 	});
 });
 
-function makeDetail(host: Host, over: Partial<HostDetail> = {}): HostDetail {
-	return {
-		...host,
-		cert_issued_at: Date.now() - 30 * DAY,
-		next_renewal_at: Date.now() + 30 * DAY,
-		repository_name: "main",
-		kernel: "6.8.0-45-generic",
-		uptime_s: 3 * 86_400 + 4 * 3_600,
-		mounts: [],
-		...over,
-	};
-}
-
-function mockDetail(detail: HostDetail) {
-	server.use(
-		http.get(`/api/v1/hosts/${detail.id}`, () => HttpResponse.json(detail)),
-	);
-}
-
 async function openMenu(name: string, item: string) {
 	const user = userEvent.setup();
 	await user.click(
@@ -364,81 +479,12 @@ async function openMenu(name: string, item: string) {
 async function waitForRowGone(name: string) {
 	await waitFor(() =>
 		expect(
-			within(screen.getByRole("table")).queryByRole("button", { name }),
+			within(screen.getByRole("table")).queryByRole("link", {
+				name: `Open ${name}`,
+			}),
 		).toBeNull(),
 	);
 }
-
-describe("Host details", () => {
-	it("limits filesystems to 20 rows and expands on request", async () => {
-		const host = makeHost("web-1");
-		mockHosts([host]);
-		mockDetail(
-			makeDetail(host, {
-				mounts: Array.from({ length: 60 }, (_, i) => ({
-					path: `/mnt/fs${String(i).padStart(2, "0")}`,
-					fs_type: "ext4",
-					total_bytes: 100 * 1024 ** 3,
-					free_bytes: (100 - i) * 1024 ** 3,
-				})),
-			}),
-		);
-		await openHosts();
-		await userEvent.click(await screen.findByRole("button", { name: "web-1" }));
-
-		const sheet = await screen.findByRole("dialog", { name: "web-1" });
-		expect(await within(sheet).findByText("Storage")).toBeInTheDocument();
-		expect(within(sheet).getAllByRole("row")).toHaveLength(21);
-		expect(within(sheet).getAllByRole("row")[1]).toHaveTextContent("/mnt/fs59");
-		expect(within(sheet).getAllByRole("row")[1]).toHaveTextContent("59%");
-
-		await userEvent.click(
-			within(sheet).getByRole("button", { name: "Show all 60 filesystems" }),
-		);
-		expect(within(sheet).getAllByRole("row")).toHaveLength(61);
-		expect(
-			within(sheet).queryByRole("button", { name: /Show all/ }),
-		).toBeNull();
-		expect(within(sheet).getByText("Overview")).toBeInTheDocument();
-		expect(within(sheet).getByText("main")).toBeInTheDocument();
-	});
-
-	it("shows a dash for missing facts and hides empty sections", async () => {
-		const host = makeHost("fresh-1");
-		mockHosts([host]);
-		mockDetail(makeDetail(host, { kernel: null, uptime_s: null }));
-		await openHosts();
-		await userEvent.click(
-			await screen.findByRole("button", { name: "fresh-1" }),
-		);
-
-		const sheet = await screen.findByRole("dialog", { name: "fresh-1" });
-		expect(await within(sheet).findByText("Kernel")).toBeInTheDocument();
-		expect(within(sheet).getAllByText("—").length).toBeGreaterThanOrEqual(3);
-		expect(within(sheet).queryByText("Storage")).toBeNull();
-	});
-
-	it("reports a details failure and retries", async () => {
-		const host = makeHost("web-1");
-		mockHosts([host]);
-		server.use(
-			http.get(`/api/v1/hosts/${host.id}`, () =>
-				HttpResponse.json({ code: "x", message: "boom" }, { status: 500 }),
-			),
-		);
-		await openHosts();
-		await userEvent.click(await screen.findByRole("button", { name: "web-1" }));
-		expect(
-			await screen.findByText(/Couldn't load host details\./),
-		).toBeInTheDocument();
-
-		mockDetail(makeDetail(host));
-		await userEvent.click(
-			screen.getByRole("button", { name: "Retry loading" }),
-		);
-		expect(await screen.findByText("Kernel")).toBeInTheDocument();
-	});
-});
 
 describe("Edit labels", () => {
 	it("starts with one focused blank row and saves an empty set", async () => {

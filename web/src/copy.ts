@@ -8,10 +8,178 @@ export const copy = {
 		settings: "Settings",
 	},
 	soon: "Soon",
-	stubTitle: (section: string) => `${section} is not available yet`,
-	stubBody:
-		"This section arrives in a later release. Nothing else is needed from you now.",
+	brand: "Lodestore",
 	signOut: "Sign out",
+	theme: { label: "Theme", light: "Light", dark: "Dark", system: "System" },
+
+	shell: {
+		navLabel: "Main navigation",
+		groups: { workspace: "Workspace", backup: "Backup", system: "System" },
+		skipLink: "Skip to content",
+		toggleSidebar: "Toggle sidebar",
+		searchTrigger: "Search…",
+		commandPalette: "Command palette",
+	},
+	palette: {
+		label: "Command palette",
+		placeholder: "Search hosts, repositories and pages",
+		groups: {
+			pages: "Pages",
+			hosts: "Hosts",
+			repositories: "Repositories",
+			actions: "Actions",
+		},
+		addHost: "Add host",
+		addRepository: "Add repository",
+		lightTheme: "Switch to light theme",
+		darkTheme: "Switch to dark theme",
+		systemTheme: "Use system theme",
+		empty: (query: string) =>
+			`No results for "${query}". Try a host name or a label such as env=prod.`,
+		hints: {
+			move: "↑↓ to move",
+			open: "↵ to open",
+			close: "Esc to close",
+		},
+		hostsFailed: "Couldn't load hosts",
+		repositoriesFailed: "Couldn't load repositories",
+	},
+	preview: {
+		badge: "Arrives in a later release",
+		footnote: "Nothing is needed from you now.",
+		overview: {
+			title: "See every backup at a glance",
+			lead: "A live view of protected hosts, the last successful backup of each and how much storage you use.",
+			bullets: [
+				"Which hosts are protected and which need attention",
+				"Last successful backup per host",
+				"Storage growth over time",
+			],
+		},
+		policies: {
+			title: "Decide what gets backed up, and when",
+			lead: "Policies pick hosts by label and describe what to protect, how often and how long to keep it.",
+			bullets: [
+				"Select hosts by label, such as env=prod",
+				"Schedules and retention in one place",
+				"Databases, Proxmox and Kubernetes sources",
+			],
+		},
+		jobs: {
+			title: "Follow every backup as it runs",
+			lead: "Watch running and finished jobs, with logs and the reason for any failure.",
+			bullets: [
+				"Live progress for each host",
+				"Clear errors with a next step",
+				"History you can filter by host or policy",
+			],
+		},
+		restore: {
+			title: "Restore any file from any snapshot",
+			lead: "Browse a snapshot, pick what you need and restore it to the original host or a new one.",
+			bullets: [
+				"Browse files in any snapshot",
+				"Restore to the same host or a different one",
+				"Works with only the bucket and your password or recovery key",
+			],
+		},
+		hostSnapshots: {
+			title: "Snapshots will appear here",
+			lead: "Once a policy backs up this host, every snapshot is listed here and can be restored.",
+		},
+		hostJobs: {
+			title: "Jobs will appear here",
+			lead: "Backup jobs that ran on this host are listed here with their status.",
+		},
+	},
+	hostPage: {
+		tabs: { overview: "Overview", snapshots: "Snapshots", jobs: "Jobs" },
+		editLabels: "Edit labels",
+		revoke: "Revoke host",
+		notFound: {
+			heading: "Host not found",
+			body: "It may have been removed, or the link is wrong.",
+			back: "Back to Hosts",
+		},
+		revokedBanner:
+			"This host is revoked. It cannot connect or receive jobs. Reinstall the agent with --force and a new token to use this machine again.",
+		loadFailed:
+			"Couldn't load this host. Check that the server is reachable, then retry.",
+		cards: {
+			status: "Status",
+			system: "System",
+			labels: "Labels",
+			certificate: "Certificate",
+			storage: "Storage",
+		},
+	},
+	auth: {
+		tagline: "Backups outlive the server.",
+		loginLead: "Enter your administrator credentials.",
+		setupLead: "Choose the credentials for the first administrator.",
+		showPassword: "Show password",
+		hidePassword: "Hide password",
+		username: "Username",
+		password: "Password",
+	},
+	access: {
+		serverKey: {
+			title: "Server key",
+			body: "Full access. Stays on the server to manage and clean up the repository.",
+		},
+		agentKey: {
+			title: "Agent key",
+			body: "Write-only. Sent to every host so it can upload backups.",
+		},
+		writeOnlyBadge: "Write-only",
+		whyWriteOnly: {
+			title: "Why write-only?",
+			body: "If a host is ever compromised, the attacker can add data but cannot delete or read your backups. Deleting data is done by the server only.",
+		},
+		verify: {
+			title: "Verify access",
+			body: "Lodestore tries each permission once with a small test object, then removes it with the server key.",
+		},
+	},
+	checklist: {
+		summary: (counts: { pass: number; warn: number; fail: number }) =>
+			[
+				counts.pass > 0 && `${counts.pass} passed`,
+				counts.warn > 0 && `${counts.warn} with warnings`,
+				counts.fail > 0 && `${counts.fail} failed`,
+			]
+				.filter(Boolean)
+				.join(", "),
+		why: {
+			write:
+				"Lodestore stores every backup through this write access. Check the server key's policy and the bucket name, then check again.",
+			list: "Lodestore lists objects to find existing backups and to clean up. Allow listing for the server key, then check again.",
+			conditionalWrite:
+				"A conditional write stops two writers from replacing the same object. Without it, a race could overwrite backup data.",
+			objectLock:
+				"With Object Lock, stored backups cannot be changed or deleted until their retention ends, even with the server key.",
+		},
+		whyItMatters: "Why this matters",
+		recommended: "Recommended",
+		outdated: "Outdated",
+	},
+	recoverySteps: {
+		save: "1. Save the key",
+		password: "2. Choose a password",
+		confirm: "3. Confirm you saved it",
+		hint: "Store it in a password manager or print it. Do not keep it only on this server.",
+		copied: "Copied",
+		downloaded: "Downloaded",
+		lastGroup: "Last group",
+		completed: "completed",
+	},
+	firstHost: {
+		whatNext: "What happens next",
+		timeline: ["Run the command", "The agent enrolls", "The host appears here"],
+		successHeading: (name: string) => `${name} is connected`,
+		successDetail: (version: string) => `Online, version ${version}.`,
+		nextStep: "Next: create a backup policy — coming soon",
+	},
 
 	login: {
 		title: "Sign in to Lodestore",
@@ -54,12 +222,29 @@ export const copy = {
 		keepHost: "Keep host",
 		discardChanges: "Discard changes",
 		keepCurrentKey: "Keep current key",
+		stepDescriptions: [
+			"Choose where backups live",
+			"Give Lodestore two keys",
+			"Save the way back in",
+			"Connect a machine",
+		],
+		progress: (n: number, total: number) => `Step ${n} of ${total}`,
+		progressLabel: "Progress",
+		railFootnote: "Your progress is kept until you reload the page.",
+		exit: "Exit setup",
+		discard: {
+			title: "Leave without creating a repository?",
+			body: "Nothing has been written to the bucket yet.",
+			keep: "Keep editing",
+			leave: "Leave without creating",
+		},
+		previousStep: "Previous step",
+		newTitle: "Add a repository",
+		completed: "completed",
 	},
 	backend: {
 		s3: "S3-compatible storage. AWS S3, MinIO, Ceph, R2 and others.",
 		local: "Local folder. A path both the server and the agent can see.",
-		localNote:
-			"Suitable for development or a single host. The server cannot guarantee that agents are unable to delete here.",
 		experimental: "Experimental",
 		moreBackends:
 			"More backends (experimental): Azure Blob, Google Cloud Storage, SFTP, WebDAV. These are not covered by our storage tests.",
@@ -68,14 +253,14 @@ export const copy = {
 	},
 	policy: {
 		title: "Policy for the agent key",
-		body: "Attach this to the write-only user, replacing the bucket name. Copy it as is.",
+		body: "Attach this to the agent key's user. The bucket name follows what you typed. Copy it as is.",
 		tabIam: "AWS IAM",
 		tabMinio: "MinIO",
 	},
 	check: {
 		button: "Check storage",
-		running: "Checking storage...",
-		rowRunning: "Checking...",
+		running: "Checking storage…",
+		rowRunning: "Checking…",
 		rows: {
 			write: "Write objects",
 			list: "List objects",
@@ -140,8 +325,6 @@ export const copy = {
 			"We check that you saved it. The repository is created only after this matches.",
 		mismatch:
 			"That does not match the last group of the key. Check the saved copy.",
-		cta: "Create repository",
-		goingBack: "Going back generates a new key.",
 		passwordLabel: "Repository password",
 		passwordHelper:
 			"Opens the repository together with the recovery key. At least 12 characters.",
@@ -182,13 +365,15 @@ export const copy = {
 		columns: {
 			host: "Host",
 			status: "Status",
-			lastSeenSort: "Last seen",
+			lastSeen: "Last seen",
 			version: "Version",
 			platform: "Platform",
 			labels: "Labels",
 			certificate: "Certificate",
 			actions: "Actions",
 		},
+		tiles: { total: "Total hosts", online: "Online", offline: "Offline" },
+		openRow: (name: string) => `Open ${name}`,
 		viewDetails: "View details",
 		previous: "Previous",
 		next: "Next",
@@ -222,16 +407,14 @@ export const copy = {
 	},
 	addHost: {
 		title: "Add host",
-		helper: (grpcPublicAddress: string) =>
-			`Run the command as root on a Linux host (x86_64 or arm64) with systemd. The host needs outbound access to ${grpcPublicAddress}.`,
 		labelsHelper:
 			"Labels select which policies apply to this host. Example: env=prod. You can edit them later.",
 		generate: "Generate token",
 		generateNew: "Generate new token",
 		shownOnce:
-			"This command contains a one-time secret. It works once and expires in 1 hour. If you close this dialog you need a new token.",
+			"This command contains a one-time secret. It works once and expires in 1 hour. If you lose it, generate a new token.",
 		commandCopied: "Command copied",
-		waiting: "Waiting for the host to connect...",
+		waiting: "Waiting for the host to connect…",
 		connected: (name: string, version: string) =>
 			`${name} is online. Version ${version}.`,
 		tokenExpired: "The token expired. Generate a new one.",
@@ -240,16 +423,16 @@ export const copy = {
 		copyCommand: "Copy install command",
 		commandObject: "install command",
 		expiresIn: (remaining: string) => `Expires in ${remaining}`,
-		installOptionsTitle: "Install options",
-		installOptions:
-			"--from-github downloads the agent from GitHub instead of this server. --force re-registers a host that is already registered. --uninstall removes the agent; add --purge to delete its config and state.",
 		finish: "Finish host setup",
 		noRepoHeading: "Create a repository first",
 		noRepoBody:
 			"Hosts back up into a repository. Add one to generate a join token.",
 		noRepoButton: "Add repository",
-		noAgentBinaries:
-			"This server has no agent binaries. Add --from-github to the command, or put the binaries into the server's agent directory.",
+		noAgentBinaries: {
+			before: "This server has no agent binaries. Add ",
+			after:
+				" to the install command, or put the binaries into the server's agent directory.",
+		},
 	},
 	labels: {
 		validation:
@@ -290,6 +473,7 @@ export const copy = {
 			lastChecked: "Last checked",
 		},
 		actionsColumn: "Actions",
+		actionsFor: (name: string) => `Actions for ${name}`,
 		viewRepository: "View repository",
 		checkAgain: "Check storage again",
 		storageChecks: "Storage checks",
@@ -300,6 +484,11 @@ export const copy = {
 			"Agents write straight to the local folder; there is no separate agent key.",
 		hostsTitle: "Hosts",
 		breadcrumbSettings: "Settings",
+		notFound: {
+			heading: "Repository not found",
+			body: "It may have been removed, or the link is wrong.",
+			back: "Back to Repositories",
+		},
 		loadFailed:
 			"Couldn't load this repository. Check that the server is reachable, then retry.",
 		checkFailed: "storage check",
@@ -309,7 +498,6 @@ export const copy = {
 	errors: {
 		list: (what: "hosts" | "repositories") =>
 			`Couldn't load ${what}. Check that the server is reachable, then retry.`,
-		hostDetails: "Couldn't load host details.",
 		retry: "Retry loading",
 		submit: (action: string, serverMessage?: string) =>
 			`Couldn't ${action}. ${serverMessage ? `${serverMessage}. ` : ""}Try again.`,
@@ -320,9 +508,10 @@ export const copy = {
 		copyButton: "Copy",
 		copyFailed:
 			"Could not copy automatically. The text is selected: press Ctrl+C (Cmd+C on a Mac) to copy it.",
+		showSecret: (what: string) => `Show ${what}`,
+		hideSecret: (what: string) => `Hide ${what}`,
 		copyFailedUnselected:
 			"Could not copy automatically. Select the text and press Ctrl+C (Cmd+C on a Mac) to copy it.",
-		checking: "Checking...",
 		dash: "—",
 	},
 } as const;

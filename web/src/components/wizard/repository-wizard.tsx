@@ -4,10 +4,20 @@ import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { checkStorage } from "@/api/gen/endpoints";
 import type { RepositorySummary } from "@/api/gen/model";
-import { Stepper } from "@/components/stepper";
+import { WizardLayout } from "@/components/layout/wizard-layout";
+import {
+	AlertDialog,
+	AlertDialogAction,
+	AlertDialogCancel,
+	AlertDialogContent,
+	AlertDialogDescription,
+	AlertDialogFooter,
+	AlertDialogHeader,
+	AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Button } from "@/components/ui/button";
 import { copy } from "@/copy";
 import { repositoriesQuery } from "@/lib/session";
-import { cn } from "@/lib/utils";
 import { AccessStep } from "./access-step";
 import { ConnectExistingStep } from "./connect-existing-step";
 import {
@@ -99,6 +109,7 @@ export function RepositoryWizard({
 	const [draft, setDraft] = useState(loadDraft);
 	const [check, setCheck] = useState<CheckState>({ phase: "idle" });
 	const [created, setCreated] = useState<RepositorySummary>();
+	const [confirmExit, setConfirmExit] = useState(false);
 
 	const steps = mode === "welcome" ? STEPS : STEPS.slice(0, 3);
 	const current: Step = step ?? "storage";
@@ -179,71 +190,116 @@ export function RepositoryWizard({
 		}
 	}
 
-	const wide = current === "access" && draft.backend === "s3";
+	function leave() {
+		clearSavedDraft();
+		void navigate({ to: "/settings/repositories" });
+	}
+
+	function exit() {
+		if (JSON.stringify(draft) === JSON.stringify(newDraft())) leave();
+		else setConfirmExit(true);
+	}
+
+	const wide =
+		(current === "access" && draft.backend === "s3") || current === "host";
+	const stepInfo = steps.map((id) => {
+		const i = STEPS.indexOf(id);
+		return {
+			title: copy.wizard.steps[i],
+			description: copy.wizard.stepDescriptions[i],
+		};
+	});
 
 	return (
-		<div
-			className={cn(
-				"mx-auto flex w-full max-w-[720px] flex-col gap-8",
-				wide && "lg:max-w-[1172px]",
-			)}
+		<WizardLayout
+			mode={mode}
+			steps={stepInfo}
+			current={Math.max(0, steps.indexOf(current))}
+			wide={wide}
 		>
-			{mode === "welcome" ? (
-				<header className="flex flex-col gap-2">
-					<h1 className="text-2xl font-semibold">{copy.wizard.title}</h1>
-					<p className="text-sm text-muted-foreground">
-						{copy.wizard.subtitle}
-					</p>
-				</header>
-			) : (
-				<h1 className="text-xl font-semibold">{text.settingsTitle}</h1>
-			)}
-			<div className="w-full max-w-[720px]">
-				<Stepper steps={steps} current={Math.max(0, steps.indexOf(current))} />
-			</div>
-			{current === "storage" && (
-				<StorageStep
-					draft={draft}
-					onChange={change}
-					onBackend={chooseBackend}
-					onContinue={() => go("access")}
-				/>
-			)}
-			{current === "access" && (
-				<AccessStep
-					draft={draft}
-					onChange={change}
-					check={check}
-					onCheck={runCheck}
-					onBack={() => go("storage")}
-					onContinue={() => go("key")}
-				/>
-			)}
-			{current === "key" &&
-				checked &&
-				(check.result.existing_repository ? (
-					<ConnectExistingStep
-						draft={draft}
-						onBack={() => go("access")}
-						onConnected={(repository) =>
-							void finish(repository, copy.existingRepo.connected)
-						}
-					/>
+			<div className="flex flex-1 flex-col gap-8">
+				{mode === "welcome" ? (
+					<header className="flex flex-col gap-2">
+						<h1
+							data-page-title
+							className="text-2xl font-semibold outline-none lg:text-display"
+						>
+							{copy.wizard.title}
+						</h1>
+						<p className="text-sm text-muted-foreground">
+							{copy.wizard.subtitle}
+						</p>
+					</header>
 				) : (
-					<RecoveryKeyStep
+					<header className="flex items-start justify-between gap-4">
+						<h1 data-page-title className="text-2xl font-semibold outline-none">
+							{copy.wizard.newTitle}
+						</h1>
+						<Button type="button" variant="outline" onClick={exit}>
+							{copy.wizard.exit}
+						</Button>
+					</header>
+				)}
+				{current === "storage" && (
+					<StorageStep
 						draft={draft}
-						onBack={() => go("access")}
-						onCreated={(repository) =>
-							void finish(
-								repository,
-								copy.recoveryKey.createdNamed(repository.name),
-							)
-						}
+						onChange={change}
+						onBackend={chooseBackend}
+						onContinue={() => go("access")}
 					/>
-				))}
-			{current === "host" && created && (
-				<FirstHostStep repositoryId={created.id} />
-			)}
-		</div>
+				)}
+				{current === "access" && (
+					<AccessStep
+						draft={draft}
+						onChange={change}
+						check={check}
+						onCheck={runCheck}
+						onBack={() => go("storage")}
+						onContinue={() => go("key")}
+					/>
+				)}
+				{current === "key" &&
+					checked &&
+					(check.result.existing_repository ? (
+						<ConnectExistingStep
+							draft={draft}
+							onBack={() => go("access")}
+							onConnected={(repository) =>
+								void finish(repository, copy.existingRepo.connected)
+							}
+						/>
+					) : (
+						<RecoveryKeyStep
+							draft={draft}
+							onBack={() => go("access")}
+							onCreated={(repository) =>
+								void finish(
+									repository,
+									copy.recoveryKey.createdNamed(repository.name),
+								)
+							}
+						/>
+					))}
+				{current === "host" && created && (
+					<FirstHostStep repositoryId={created.id} />
+				)}
+			</div>
+			<AlertDialog open={confirmExit} onOpenChange={setConfirmExit}>
+				<AlertDialogContent>
+					<AlertDialogHeader>
+						<AlertDialogTitle>{copy.wizard.discard.title}</AlertDialogTitle>
+						<AlertDialogDescription>
+							{copy.wizard.discard.body}
+						</AlertDialogDescription>
+					</AlertDialogHeader>
+					<AlertDialogFooter>
+						<AlertDialogCancel>{copy.wizard.discard.keep}</AlertDialogCancel>
+						<AlertDialogAction onClick={leave}>
+							{copy.wizard.discard.leave}
+						</AlertDialogAction>
+					</AlertDialogFooter>
+				</AlertDialogContent>
+			</AlertDialog>
+		</WizardLayout>
 	);
 }

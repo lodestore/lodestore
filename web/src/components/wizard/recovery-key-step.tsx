@@ -1,11 +1,11 @@
-import { CircleAlert, Download } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { Check, CircleAlert, CircleCheck, Copy, Download } from "lucide-react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { ApiError } from "@/api/fetcher";
 import { commitWizard, startWizard } from "@/api/gen/endpoints";
 import type { RepositorySummary } from "@/api/gen/model";
-import { CodeBlock } from "@/components/code-block";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import {
 	Field,
 	FieldDescription,
@@ -16,6 +16,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { copy } from "@/copy";
+import { copyText } from "@/lib/clipboard";
 import { type Draft, lastGroup, toApiDraft } from "./draft";
 import { SecretInput, StepCard, StepHeading } from "./parts";
 import { text } from "./text";
@@ -38,7 +39,39 @@ function download(name: string, key: string) {
 	document.body.append(link);
 	link.click();
 	link.remove();
-	URL.revokeObjectURL(url);
+	setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}
+
+function Section({
+	title,
+	done,
+	children,
+}: {
+	title: string;
+	done?: boolean;
+	children: ReactNode;
+}) {
+	return (
+		<Card className="gap-6 px-8 [--card-spacing:--spacing(8)]">
+			<h3
+				className="flex items-center gap-2 text-base font-semibold"
+				data-done={done || undefined}
+			>
+				{done ? `${title} ` : title}
+				{done && (
+					<>
+						<CircleCheck
+							aria-hidden
+							data-slot="done"
+							className="size-5 text-success"
+						/>
+						<span className="sr-only">{copy.recoverySteps.completed}</span>
+					</>
+				)}
+			</h3>
+			{children}
+		</Card>
+	);
 }
 
 function tidy(message: string) {
@@ -63,9 +96,15 @@ export function RecoveryKeyStep({
 	const [submitError, setSubmitError] = useState<string>();
 	const [mismatch, setMismatch] = useState(false);
 
+	const [copied, setCopied] = useState(false);
+	const [downloaded, setDownloaded] = useState(false);
+
 	const request = useRef<StartRequest>(undefined);
+	const keyPanel = useRef<HTMLDivElement>(null);
+	const created = useRef(false);
 
 	useEffect(() => {
+		if (created.current) return;
 		const apiDraft = toApiDraft(draft);
 		const payload = JSON.stringify(apiDraft);
 		if (request.current?.payload !== payload) {
@@ -111,6 +150,14 @@ export function RecoveryKeyStep({
 		mismatch ||
 		(typed.trim().length >= group.length && typed !== "" && !typedOk);
 	const ready = started !== undefined && passwordOk && confirmOk && typedOk;
+	const parts = started?.key.split("-") ?? [];
+	const prefix = parts.slice(0, 2).join("-");
+	const groups = parts.slice(2);
+	const createHint =
+		!confirmOk || confirm === ""
+			? text.createHint.confirm
+			: text.createHint.lastGroup;
+	const showHint = started !== undefined && passwordOk && !ready && !pending;
 
 	async function create() {
 		if (!started || !ready || pending) return;
@@ -122,6 +169,7 @@ export function RecoveryKeyStep({
 				password,
 				recovery_key_last_group: typed.trim(),
 			});
+			created.current = true;
 			setStarted(undefined);
 			setPassword("");
 			setConfirm("");
@@ -147,10 +195,31 @@ export function RecoveryKeyStep({
 			onBack={onBack}
 			backDisabled={pending}
 			actions={
-				<Button type="button" disabled={!ready || pending} onClick={create}>
-					{pending && <Spinner />}
-					{copy.wizard.createRepository}
-				</Button>
+				<>
+					{showHint && (
+						<p
+							id="create-repository-hint"
+							className="text-sm text-muted-foreground"
+						>
+							{createHint}
+						</p>
+					)}
+					<Button
+						type="button"
+						disabled={!ready || pending}
+						aria-describedby={
+							showHint
+								? "create-repository-hint"
+								: started !== undefined && !passwordOk
+									? "repository-password-help"
+									: undefined
+						}
+						onClick={create}
+					>
+						{pending && <Spinner />}
+						{copy.wizard.createRepository}
+					</Button>
+				</>
 			}
 		>
 			<StepHeading>{text.stepHeading.key}</StepHeading>
@@ -171,65 +240,138 @@ export function RecoveryKeyStep({
 
 			{started && (
 				<>
-					<div className="flex flex-col gap-2">
-						<CodeBlock
-							text={started.key}
-							object={text.keyObject}
-							copyLabel={copy.recoveryKey.copy}
-							large
-						/>
-						<div className="flex flex-wrap items-center gap-3">
+					<Section title={copy.recoverySteps.save}>
+						<div
+							ref={keyPanel}
+							role="region"
+							aria-label={text.keyObject}
+							tabIndex={0}
+							className="rounded-lg bg-muted p-6"
+						>
+							<span className="sr-only">{started.key}</span>
+							<p
+								aria-hidden
+								className="mb-2 font-mono text-sm text-muted-foreground"
+							>
+								{prefix}
+							</p>
+							<div
+								aria-hidden
+								className="grid grid-cols-4 gap-x-6 gap-y-2 font-mono text-base font-normal tabular-nums tracking-[0.04em]"
+							>
+								{groups.map((part, index) => (
+									<span
+										key={index}
+										className={
+											index === groups.length - 1
+												? "flex flex-col gap-1"
+												: undefined
+										}
+									>
+										<span
+											className={
+												index === groups.length - 1
+													? "border-b-2 border-primary-strong"
+													: undefined
+											}
+										>
+											{part}
+										</span>
+										{index === groups.length - 1 && (
+											<span className="font-sans text-sm tracking-normal text-muted-foreground">
+												{copy.recoverySteps.lastGroup}
+											</span>
+										)}
+									</span>
+								))}
+							</div>
+						</div>
+						<div className="flex flex-wrap items-center gap-4">
 							<Button
 								type="button"
-								variant="secondary"
-								size="sm"
-								onClick={() => download(draft.name, started.key)}
+								variant="outline"
+								onClick={async () => {
+									if (await copyText(started.key, keyPanel.current)) {
+										setCopied(true);
+									}
+								}}
+							>
+								<Copy aria-hidden />
+								{copy.recoveryKey.copy}
+							</Button>
+							{copied && (
+								<span className="flex items-center gap-1 text-sm text-success">
+									<Check aria-hidden className="size-4" />
+									{copy.recoverySteps.copied}
+								</span>
+							)}
+							<Button
+								type="button"
+								variant="outline"
+								onClick={() => {
+									download(draft.name, started.key);
+									setDownloaded(true);
+								}}
 							>
 								<Download aria-hidden />
 								{copy.recoveryKey.download}
 							</Button>
-							<p className="text-sm text-muted-foreground">
-								{copy.recoveryKey.goingBack}
-							</p>
-						</div>
-					</div>
-
-					<FieldGroup>
-						<Field>
-							<FieldLabel htmlFor="repository-password">
-								{copy.recoveryKey.passwordLabel}
-							</FieldLabel>
-							<SecretInput
-								id="repository-password"
-								what="repository password"
-								autoComplete="new-password"
-								describedBy="repository-password-help"
-								value={password}
-								onChange={setPassword}
-							/>
-							<FieldDescription id="repository-password-help">
-								{copy.recoveryKey.passwordHelper}
-							</FieldDescription>
-						</Field>
-						<Field data-invalid={(confirm !== "" && !confirmOk) || undefined}>
-							<FieldLabel htmlFor="repository-password-confirm">
-								{text.confirmPassword}
-							</FieldLabel>
-							<SecretInput
-								id="repository-password-confirm"
-								what="password confirmation"
-								autoComplete="new-password"
-								invalid={confirm !== "" && !confirmOk}
-								describedBy="repository-password-confirm-error"
-								value={confirm}
-								onChange={setConfirm}
-							/>
-							{confirm !== "" && !confirmOk && (
-								<FieldError id="repository-password-confirm-error">
-									{text.passwordMismatch}
-								</FieldError>
+							{downloaded && (
+								<span className="flex items-center gap-1 text-sm text-success">
+									<Check aria-hidden className="size-4" />
+									{copy.recoverySteps.downloaded}
+								</span>
 							)}
-						</Field>
+						</div>
+						<p className="text-sm text-muted-foreground">
+							{copy.recoverySteps.hint}
+						</p>
+					</Section>
+
+					<Section
+						title={copy.recoverySteps.password}
+						done={passwordOk && confirmOk && confirm !== ""}
+					>
+						<FieldGroup>
+							<Field>
+								<FieldLabel htmlFor="repository-password">
+									{copy.recoveryKey.passwordLabel}
+								</FieldLabel>
+								<SecretInput
+									id="repository-password"
+									what="repository password"
+									autoComplete="new-password"
+									describedBy="repository-password-help"
+									value={password}
+									onChange={setPassword}
+								/>
+								<FieldDescription id="repository-password-help">
+									{copy.recoveryKey.passwordHelper}
+								</FieldDescription>
+							</Field>
+							<Field data-invalid={(confirm !== "" && !confirmOk) || undefined}>
+								<FieldLabel htmlFor="repository-password-confirm">
+									{text.confirmPassword}
+								</FieldLabel>
+								<SecretInput
+									id="repository-password-confirm"
+									what="password confirmation"
+									autoComplete="new-password"
+									invalid={confirm !== "" && !confirmOk}
+									describedBy="repository-password-confirm-error"
+									value={confirm}
+									onChange={setConfirm}
+								/>
+								{confirm !== "" && !confirmOk && (
+									<FieldError id="repository-password-confirm-error">
+										{text.passwordMismatch}
+									</FieldError>
+								)}
+							</Field>
+						</FieldGroup>
+					</Section>
+
+					<Section title={copy.recoverySteps.confirm} done={typedOk}>
 						<Field data-invalid={showTypedError || undefined}>
 							<FieldLabel htmlFor="recovery-key-last-group">
 								{copy.recoveryKey.confirmLabel}
@@ -259,7 +401,7 @@ export function RecoveryKeyStep({
 								</FieldDescription>
 							)}
 						</Field>
-					</FieldGroup>
+					</Section>
 				</>
 			)}
 

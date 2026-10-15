@@ -1,7 +1,7 @@
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { apiError, renderApp, useSignedIn, useSignedOut } from "@/test/app";
 import { server } from "@/test/server";
 
@@ -12,7 +12,36 @@ async function fillAndSubmit(password = "wrong-password") {
 	await user.click(screen.getByRole("button", { name: "Sign in" }));
 }
 
+afterEach(() => {
+	sessionStorage.clear();
+	vi.unstubAllGlobals();
+});
+
 describe("login", () => {
+	it("renders the auth layout without the sidebar", async () => {
+		useSignedOut();
+		renderApp("/login");
+		expect(
+			await screen.findByRole("heading", {
+				level: 1,
+				name: "Sign in to Lodestore",
+			}),
+		).toBeInTheDocument();
+		expect(screen.getByText("Backups outlive the server.")).toBeInTheDocument();
+		expect(
+			screen.queryByRole("navigation", { name: "Main navigation" }),
+		).not.toBeInTheDocument();
+	});
+
+	it("warns about plain http before the password is typed", async () => {
+		vi.stubGlobal("location", new URL("http://10.0.0.5:8080/login"));
+		useSignedOut();
+		renderApp("/login");
+		expect(
+			await screen.findByText("This connection is not encrypted"),
+		).toBeInTheDocument();
+	});
+
 	it("shows the error, clears the password and focuses it on a wrong password", async () => {
 		useSignedOut();
 		server.use(
@@ -86,6 +115,27 @@ describe("login", () => {
 		await waitFor(() =>
 			expect(router.state.location.pathname).toBe("/policies"),
 		);
+	});
+
+	it("shows an error when the session cannot be read after signing in", async () => {
+		useSignedOut();
+		server.use(
+			http.post(
+				"/api/v1/auth/login",
+				() => new HttpResponse(null, { status: 204 }),
+			),
+			http.get("/api/v1/auth/session", () =>
+				apiError(503, "unavailable", "try later"),
+			),
+		);
+		const { router } = renderApp("/login");
+		await fillAndSubmit("correct-password");
+
+		expect(
+			await screen.findByText(/Couldn't sign in\. try later/),
+		).toBeInTheDocument();
+		expect(router.state.location.pathname).toBe("/login");
+		expect(screen.getByRole("button", { name: "Sign in" })).toBeEnabled();
 	});
 
 	it("ignores a next target that leaves the app", async () => {

@@ -102,7 +102,7 @@ pub async fn enroll(args: EnrollArgs) -> Result<Enrolled, AgentError> {
             join_secret: token.secret.to_string(),
             csr_der,
             hostname: args.hostname.unwrap_or_else(default_hostname),
-            os: "linux".to_string(),
+            os: std::env::consts::OS.to_string(),
             arch: std::env::consts::ARCH.to_string(),
             agent_version: env!("CARGO_PKG_VERSION").to_string(),
             versions: Some(Versions {

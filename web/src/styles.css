@@ -2,15 +2,34 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 
-@custom-variant dark (@media (prefers-color-scheme: dark));
+@custom-variant dark (&:is(.dark *));
+
+@font-face {
+	font-family: "Onest Variable";
+	src: url("./assets/fonts/onest-latin-wght-normal.woff2")
+		format("woff2-variations");
+	font-weight: 400 600;
+	font-style: normal;
+	font-display: swap;
+}
+
+@font-face {
+	font-family: "JetBrains Mono Variable";
+	src: url("./assets/fonts/jetbrains-mono-latin-wght-normal.woff2")
+		format("woff2-variations");
+	font-weight: 400 600;
+	font-style: normal;
+	font-display: swap;
+}
 
 @theme inline {
 	--font-heading: var(--font-sans);
 	--font-sans:
-		ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
-		"Helvetica Neue", Arial, sans-serif;
+		"Onest Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+		Roboto, "Helvetica Neue", Arial, sans-serif;
 	--font-mono:
-		ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+		"JetBrains Mono Variable", ui-monospace, SFMono-Regular, Menlo, Consolas,
+		"Liberation Mono", monospace;
 	--color-sidebar-ring: var(--sidebar-ring);
 	--color-sidebar-border: var(--sidebar-border);
 	--color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -35,7 +54,10 @@
 	--color-secondary-foreground: var(--secondary-foreground);
 	--color-secondary: var(--secondary);
 	--color-primary-foreground: var(--primary-foreground);
+	--color-primary-subtle: var(--primary-subtle);
 	--color-primary: var(--primary);
+	--color-primary-strong: var(--primary-strong);
+	--color-brand: var(--brand);
 	--color-popover-foreground: var(--popover-foreground);
 	--color-popover: var(--popover);
 	--color-card-foreground: var(--card-foreground);
@@ -52,100 +74,110 @@
 }
 
 @theme {
-	--text-xs: 0.75rem;
+	--text-xs: 0.875rem;
 	--text-xs--line-height: 1.5;
 	--text-sm: 0.875rem;
 	--text-sm--line-height: 1.5;
-	--text-base: 0.875rem;
+	--text-base: 1rem;
 	--text-base--line-height: 1.5;
-	--text-lg: 1.25rem;
+	--text-lg: 1.5rem;
 	--text-lg--line-height: 1.2;
-	--text-xl: 1.25rem;
+	--text-xl: 1.5rem;
 	--text-xl--line-height: 1.2;
-	--text-2xl: 1.75rem;
+	--text-2xl: 1.5rem;
 	--text-2xl--line-height: 1.2;
-	--text-3xl: 1.75rem;
+	--text-3xl: 1.5rem;
 	--text-3xl--line-height: 1.2;
+	--text-display: 2.5rem;
+	--text-display--line-height: 1.1;
 	--color-success: var(--success);
 	--color-warning: var(--warning);
 	--color-neutral: var(--neutral);
 }
 
 :root {
-	--background: #ffffff;
-	--foreground: #18181b;
-	--card: #f4f4f5;
-	--card-foreground: #18181b;
+	--background: #f5f7fb;
+	--foreground: #0b1220;
+	--card: #ffffff;
+	--card-foreground: #0b1220;
 	--popover: #ffffff;
-	--popover-foreground: #18181b;
-	--primary: #2563eb;
-	--primary-foreground: #ffffff;
-	--secondary: #f4f4f5;
-	--secondary-foreground: #18181b;
-	--muted: #f4f4f5;
-	--muted-foreground: #52525b;
-	--accent: #e4e4e7;
-	--accent-foreground: #18181b;
-	--destructive: #dc2626;
-	--border: #e4e4e7;
-	--input: #e4e4e7;
-	--ring: #2563eb;
+	--popover-foreground: #0b1220;
+	--primary: #38e1ff;
+	--primary-foreground: #070a12;
+	--primary-subtle: #d6f6fd;
+	--primary-strong: #007591;
+	--secondary: #ecf0f6;
+	--secondary-foreground: #0b1220;
+	--muted: #ecf0f6;
+	--muted-foreground: #4f5b70;
+	--accent: #ecf0f6;
+	--accent-foreground: #0b1220;
+	--destructive: #c62828;
+	--border: #d9e0ea;
+	--input: #76839a;
+	--ring: #007591;
 	--success: #15803d;
 	--warning: #b45309;
-	--neutral: #52525b;
-	--chart-1: #2563eb;
+	--neutral: #4f5b70;
+	--brand: #5e8a00;
+	--mark-plate: #070a12;
+	--mark-edge: #38e1ff;
+	--mark-star: #38e1ff;
+	--mark-core: #c6f24e;
+	--chart-1: #007591;
 	--chart-2: #15803d;
 	--chart-3: #b45309;
-	--chart-4: #52525b;
-	--chart-5: #dc2626;
-	--radius: 0.625rem;
-	--sidebar: #f4f4f5;
-	--sidebar-foreground: #18181b;
-	--sidebar-primary: #2563eb;
-	--sidebar-primary-foreground: #ffffff;
-	--sidebar-accent: #e4e4e7;
-	--sidebar-accent-foreground: #18181b;
-	--sidebar-border: #e4e4e7;
-	--sidebar-ring: #2563eb;
+	--chart-4: #4f5b70;
+	--chart-5: #c62828;
+	--radius: 0.75rem;
+	--sidebar: #edf1f7;
+	--sidebar-foreground: #0b1220;
+	--sidebar-primary: #38e1ff;
+	--sidebar-primary-foreground: #070a12;
+	--sidebar-accent: #dde5f0;
+	--sidebar-accent-foreground: #0b1220;
+	--sidebar-border: #d9e0ea;
+	--sidebar-ring: #007591;
 }
 
-@media (prefers-color-scheme: dark) {
-	:root {
-		--background: #0a0a0b;
-		--foreground: #fafafa;
-		--card: #18181b;
-		--card-foreground: #fafafa;
-		--popover: #0a0a0b;
-		--popover-foreground: #fafafa;
-		--primary: #60a5fa;
-		--primary-foreground: #0a0a0b;
-		--secondary: #18181b;
-		--secondary-foreground: #fafafa;
-		--muted: #18181b;
-		--muted-foreground: #a1a1aa;
-		--accent: #27272a;
-		--accent-foreground: #fafafa;
-		--destructive: #f87171;
-		--border: #27272a;
-		--input: #27272a;
-		--ring: #60a5fa;
-		--success: #4ade80;
-		--warning: #fbbf24;
-		--neutral: #a1a1aa;
-		--chart-1: #60a5fa;
-		--chart-2: #4ade80;
-		--chart-3: #fbbf24;
-		--chart-4: #a1a1aa;
-		--chart-5: #f87171;
-		--sidebar: #18181b;
-		--sidebar-foreground: #fafafa;
-		--sidebar-primary: #60a5fa;
-		--sidebar-primary-foreground: #0a0a0b;
-		--sidebar-accent: #27272a;
-		--sidebar-accent-foreground: #fafafa;
-		--sidebar-border: #27272a;
-		--sidebar-ring: #60a5fa;
-	}
+.dark {
+	--background: #0f1522;
+	--foreground: #eaf0fa;
+	--card: #172033;
+	--card-foreground: #eaf0fa;
+	--popover: #172033;
+	--popover-foreground: #eaf0fa;
+	--primary: #38e1ff;
+	--primary-foreground: #070a12;
+	--primary-subtle: #0c3a52;
+	--primary-strong: #6fe8ff;
+	--secondary: #1f2a3e;
+	--secondary-foreground: #eaf0fa;
+	--muted: #1f2a3e;
+	--muted-foreground: #a3aec4;
+	--accent: #1f2a3e;
+	--accent-foreground: #eaf0fa;
+	--destructive: #f87171;
+	--border: #27324a;
+	--input: #66738f;
+	--ring: #38e1ff;
+	--success: #4ade80;
+	--warning: #fbbf24;
+	--neutral: #97a3ba;
+	--brand: #c6f24e;
+	--chart-1: #38e1ff;
+	--chart-2: #4ade80;
+	--chart-3: #fbbf24;
+	--chart-4: #97a3ba;
+	--chart-5: #f87171;
+	--sidebar: #0b101a;
+	--sidebar-foreground: #eaf0fa;
+	--sidebar-primary: #38e1ff;
+	--sidebar-primary-foreground: #070a12;
+	--sidebar-accent: #1a2740;
+	--sidebar-accent-foreground: #eaf0fa;
+	--sidebar-border: #27324a;
+	--sidebar-ring: #38e1ff;
 }
 
 @layer base {
@@ -156,7 +188,14 @@
 	body {
 		@apply bg-background text-foreground;
 	}
-	h1[tabindex="-1"]:focus {
+	p,
+	h1,
+	h2,
+	h3 {
+		text-wrap: pretty;
+	}
+	h1[tabindex="-1"]:focus,
+	[data-page-title][tabindex="-1"]:focus {
 		outline: none;
 	}
 	html {

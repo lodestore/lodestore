@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { ChevronDown, CircleCheck, Server, TriangleAlert } from "lucide-react";
+import { CircleCheck, Server, TriangleAlert } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import {
 	getListHostsQueryKey,
@@ -11,12 +11,8 @@ import type { JoinTokenResponse, TokenHost } from "@/api/gen/model";
 import { CodeBlock } from "@/components/code-block";
 import { LabelsEditor } from "@/components/labels-editor";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-	Collapsible,
-	CollapsibleContent,
-	CollapsibleTrigger,
-} from "@/components/ui/collapsible";
 import {
 	Empty,
 	EmptyContent,
@@ -40,6 +36,8 @@ import { infoQuery, repositoriesQuery } from "@/lib/session";
 
 const POLL_MS = 3000;
 
+export type AddHostStage = "idle" | "issued" | "enrolling" | "online";
+
 type Issued = { response: JoinTokenResponse; offset: number };
 
 function formatRemaining(ms: number) {
@@ -51,9 +49,11 @@ function formatRemaining(ms: number) {
 export function AddHostPanel({
 	repositoryId,
 	onConnected,
+	onStage,
 }: {
 	repositoryId?: string;
 	onConnected?: (host: TokenHost) => void;
+	onStage?: (stage: AddHostStage) => void;
 }) {
 	const queryClient = useQueryClient();
 	const repositories = useQuery(repositoriesQuery);
@@ -100,6 +100,20 @@ export function AddHostPanel({
 		issued !== undefined &&
 		(token.data?.status === "expired" || remaining <= 0);
 
+	const stage: AddHostStage = !issued
+		? "idle"
+		: connected
+			? "online"
+			: token.data?.status === "used"
+				? "enrolling"
+				: "issued";
+	const reported = useRef<AddHostStage>("idle");
+	useEffect(() => {
+		if (stage === reported.current) return;
+		reported.current = stage;
+		onStage?.(stage);
+	}, [stage, onStage]);
+
 	useEffect(() => {
 		if (!connected || !host || notified.current) return;
 		notified.current = true;
@@ -108,7 +122,7 @@ export function AddHostPanel({
 	}, [connected, host, onConnected, queryClient]);
 
 	function generate() {
-		if (!selectedId || !validation.valid) return;
+		if (!selectedId || !validation.valid || create.isPending) return;
 		notified.current = false;
 		create.mutate(
 			{
@@ -181,14 +195,14 @@ export function AddHostPanel({
 			{noBinaries && (
 				<Alert role="alert" className="text-warning">
 					<TriangleAlert aria-hidden />
-					<AlertDescription>{copy.addHost.noAgentBinaries}</AlertDescription>
+					<AlertDescription>
+						<p>
+							{copy.addHost.noAgentBinaries.before}
+							<code className="font-mono whitespace-nowrap">--from-github</code>
+							{copy.addHost.noAgentBinaries.after}
+						</p>
+					</AlertDescription>
 				</Alert>
-			)}
-
-			{info.data && (
-				<p className="text-sm text-muted-foreground">
-					{copy.addHost.helper(info.data.grpc_public_address)}
-				</p>
 			)}
 
 			<Field>
@@ -217,12 +231,18 @@ export function AddHostPanel({
 
 			{readOnly ? (
 				labels.some((row) => row.key !== "") && (
-					<p className="font-mono text-sm">
-						{labels
-							.filter((row) => row.key !== "")
-							.map((row) => `${row.key}=${row.value}`)
-							.join(", ")}
-					</p>
+					<Field>
+						<FieldLabel>{copy.addHost.labelsTitle}</FieldLabel>
+						<div className="flex flex-wrap gap-2">
+							{labels
+								.filter((row) => row.key !== "")
+								.map((row) => (
+									<Badge key={row.key} variant="outline" className="font-mono">
+										{row.key}={row.value}
+									</Badge>
+								))}
+						</div>
+					</Field>
 				)
 			) : (
 				<Field>
@@ -277,11 +297,17 @@ export function AddHostPanel({
 							{copy.addHost.connected(host.hostname, host.version)}
 						</p>
 					) : expired ? (
-						<div className="flex flex-wrap items-center gap-3">
+						<div className="flex flex-wrap items-center gap-2">
 							<p role="alert" className="text-sm">
 								{copy.addHost.tokenExpired}
 							</p>
-							<Button variant="secondary" size="sm" onClick={generate}>
+							<Button
+								variant="secondary"
+								size="sm"
+								disabled={create.isPending}
+								onClick={generate}
+							>
+								{create.isPending && <Spinner />}
 								{copy.addHost.generateNew}
 							</Button>
 						</div>
@@ -296,18 +322,6 @@ export function AddHostPanel({
 					)}
 				</>
 			)}
-
-			<Collapsible>
-				<CollapsibleTrigger asChild>
-					<Button variant="ghost" size="sm" className="-ml-2">
-						<ChevronDown aria-hidden />
-						{copy.addHost.installOptionsTitle}
-					</Button>
-				</CollapsibleTrigger>
-				<CollapsibleContent className="text-sm text-muted-foreground">
-					{copy.addHost.installOptions}
-				</CollapsibleContent>
-			</Collapsible>
 		</div>
 	);
 }

@@ -1,3 +1,4 @@
+import { Link, useNavigate } from "@tanstack/react-router";
 import {
 	ArrowDown,
 	ArrowUp,
@@ -9,6 +10,10 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import type { Host } from "@/api/gen/model";
+import {
+	Illustration,
+	type IllustrationName,
+} from "@/components/brand/illustration";
 import { formatRelative } from "@/components/relative-time";
 import { StatusBadge } from "@/components/status-badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -52,6 +57,10 @@ import { cn } from "@/lib/utils";
 const PAGE_SIZE = 50;
 const DAY_MS = 86_400_000;
 const CERT_WARNING_DAYS = 14;
+const SHOW_STATUS = "hidden @min-[680px]:table-cell";
+const SHOW_PLATFORM = "hidden @min-[840px]:table-cell";
+const SHOW_LAST_SEEN = "hidden @min-[1040px]:table-cell";
+const SHOW_WIDE = "hidden @min-[1280px]:table-cell";
 const STATUS_RANK = { online: 0, offline: 1, revoked: 2 } as const;
 
 type SortKey = "host" | "status" | "lastSeen";
@@ -112,10 +121,9 @@ function LastSeen({ at }: { at: number }) {
 			<TooltipTrigger asChild>
 				<time
 					dateTime={date.toISOString()}
-					tabIndex={0}
 					className="text-xs text-muted-foreground"
 				>
-					{copy.hosts.lastSeen(formatRelative(date, new Date()))}
+					{formatRelative(date, new Date())}
 				</time>
 			</TooltipTrigger>
 			<TooltipContent>
@@ -128,43 +136,62 @@ function LastSeen({ at }: { at: number }) {
 	);
 }
 
-function LabelChips({ labels }: { labels: Host["labels"] }) {
+const labelText = (l: Host["labels"][number]) => `${l.key}=${l.value}`;
+
+const restId = (host: Host) => `labels-rest-${host.id}`;
+
+function LabelChips({
+	host,
+	onPick,
+}: {
+	host: Host;
+	onPick: (text: string) => void;
+}) {
+	const { labels } = host;
 	if (labels.length === 0) return <span>{copy.common.dash}</span>;
-	const text = (l: Host["labels"][number]) => `${l.key}=${l.value}`;
-	const rest = labels.slice(3);
+	const rest = labels.slice(2);
 	return (
-		<div className="flex max-w-[420px] flex-wrap gap-1">
-			{labels.slice(0, 3).map((label) => (
+		<div className="flex flex-wrap items-center gap-1">
+			{labels.slice(0, 2).map((label) => (
 				<Tooltip key={label.key}>
 					<TooltipTrigger asChild>
-						<Badge variant="outline" className="max-w-40 min-w-0 font-mono">
-							<span className="truncate">{text(label)}</span>
+						<Badge
+							asChild
+							variant="outline"
+							className="h-6 max-w-24 min-w-0 cursor-pointer font-mono hover:bg-muted xl:max-w-32"
+						>
+							<button type="button" onClick={() => onPick(labelText(label))}>
+								<span className="truncate">{labelText(label)}</span>
+							</button>
 						</Badge>
 					</TooltipTrigger>
-					<TooltipContent>{text(label)}</TooltipContent>
+					<TooltipContent>{labelText(label)}</TooltipContent>
 				</Tooltip>
 			))}
 			{rest.length > 0 && (
-				<Tooltip>
-					<TooltipTrigger asChild>
-						<Badge variant="secondary" aria-label={rest.map(text).join(", ")}>
-							+{rest.length}
-						</Badge>
-					</TooltipTrigger>
-					<TooltipContent>
-						<ul className="font-mono">
-							{rest.map((label) => (
-								<li key={label.key}>{text(label)}</li>
-							))}
-						</ul>
-					</TooltipContent>
-				</Tooltip>
+				<>
+					<Tooltip>
+						<TooltipTrigger asChild>
+							<Badge variant="secondary">+{rest.length}</Badge>
+						</TooltipTrigger>
+						<TooltipContent>
+							<ul className="font-mono">
+								{rest.map((label) => (
+									<li key={label.key}>{labelText(label)}</li>
+								))}
+							</ul>
+						</TooltipContent>
+					</Tooltip>
+					<span id={restId(host)} className="sr-only">
+						{rest.map(labelText).join(", ")}
+					</span>
+				</>
 			)}
 		</div>
 	);
 }
 
-function VersionCell({
+export function VersionCell({
 	version,
 	serverVersion,
 }: {
@@ -195,7 +222,7 @@ function VersionCell({
 	);
 }
 
-function CertificateText({ host }: { host: Host }) {
+export function CertificateText({ host }: { host: Host }) {
 	if (host.status === "revoked") return <span>{copy.common.dash}</span>;
 	const remaining = host.cert_not_after - Date.now();
 	if (remaining <= 0) {
@@ -218,18 +245,23 @@ function SortButton({
 	active,
 	dir,
 	onClick,
+	className,
 }: {
 	label: string;
 	active: boolean;
 	dir: Sort["dir"];
 	onClick: () => void;
+	className?: string;
 }) {
 	const Icon = !active ? ChevronsUpDown : dir === "asc" ? ArrowUp : ArrowDown;
 	return (
 		<button
 			type="button"
 			onClick={onClick}
-			className="inline-flex items-center gap-1 rounded-sm hover:text-foreground"
+			className={cn(
+				"inline-flex min-h-6 items-center gap-1 rounded-sm hover:text-foreground",
+				className,
+			)}
 		>
 			{label}
 			<Icon aria-hidden className="size-3.5" />
@@ -239,29 +271,31 @@ function SortButton({
 
 function SkeletonRows() {
 	return Array.from({ length: 5 }, (_, i) => (
-		<TableRow key={i} aria-hidden>
-			<TableCell>
+		<TableRow key={i} aria-hidden className="h-16">
+			<TableCell className="px-4">
 				<Skeleton className="h-4 w-40" />
-				<Skeleton className="mt-1 h-3 w-16" />
+				<Skeleton className="mt-2 h-3 w-16" />
 			</TableCell>
-			<TableCell>
+			<TableCell className={cn("px-4", SHOW_STATUS)}>
 				<Skeleton className="h-5 w-20" />
-				<Skeleton className="mt-1 h-3 w-28" />
 			</TableCell>
-			<TableCell>
-				<Skeleton className="h-4 w-12" />
+			<TableCell className={cn("px-4", SHOW_LAST_SEEN)}>
+				<Skeleton className="h-4 w-20" />
 			</TableCell>
-			<TableCell>
+			<TableCell className={cn("px-4", SHOW_PLATFORM)}>
 				<Skeleton className="h-4 w-24" />
 			</TableCell>
-			<TableCell>
+			<TableCell className="px-4">
 				<Skeleton className="h-5 w-32" />
 			</TableCell>
-			<TableCell>
+			<TableCell className={cn("px-4", SHOW_WIDE)}>
+				<Skeleton className="h-4 w-12" />
+			</TableCell>
+			<TableCell className={cn("px-4", SHOW_WIDE)}>
 				<Skeleton className="h-4 w-28" />
 			</TableCell>
-			<TableCell>
-				<Skeleton className="size-8" />
+			<TableCell className="px-4">
+				<Skeleton className="size-10" />
 			</TableCell>
 		</TableRow>
 	));
@@ -274,7 +308,6 @@ export function HostsTable({
 	onRetry,
 	serverVersion,
 	onAdd,
-	onView,
 	onEditLabels,
 	onRevoke,
 }: {
@@ -284,10 +317,12 @@ export function HostsTable({
 	onRetry: () => void;
 	serverVersion?: string;
 	onAdd: () => void;
-	onView: (host: Host, via: "row" | "menu") => void;
 	onEditLabels: (host: Host) => void;
 	onRevoke: (host: Host) => void;
 }) {
+	const navigate = useNavigate();
+	const openHost = (host: Host) =>
+		navigate({ to: "/hosts/$id", params: { id: host.id } });
 	const [query, setQuery] = useState("");
 	const [filter, setFilter] = useState<Filter>("active");
 	const [sort, setSort] = useState<Sort>({ key: "status", dir: "asc" });
@@ -313,8 +348,8 @@ export function HostsTable({
 				: { key, dir: key === "lastSeen" ? "desc" : "asc" },
 		);
 	};
-	const ariaSort = (...keys: SortKey[]) =>
-		keys.includes(sort.key)
+	const ariaSort = (key: SortKey) =>
+		sort.key === key
 			? sort.dir === "asc"
 				? "ascending"
 				: "descending"
@@ -334,6 +369,7 @@ export function HostsTable({
 				<EmptyState
 					heading={copy.hosts.emptyHeading}
 					body={copy.hosts.emptyBody}
+					illustration="hosts-empty"
 					action={<Button onClick={onAdd}>{copy.hosts.addHost}</Button>}
 				/>
 			);
@@ -349,17 +385,17 @@ export function HostsTable({
 	return (
 		<div className="flex flex-col gap-4">
 			<div className="flex items-center justify-between gap-4">
-				<div className="relative w-80 max-w-full">
+				<div className="relative w-90 max-w-full">
 					<Search
 						aria-hidden
-						className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground"
+						className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground"
 					/>
 					<Input
 						type="search"
 						aria-label={copy.hosts.searchPlaceholder}
 						placeholder={copy.hosts.searchPlaceholder}
 						value={query}
-						className="pl-8"
+						className="pl-10"
 						onChange={(e) => {
 							setQuery(e.target.value);
 							setPage(0);
@@ -369,6 +405,8 @@ export function HostsTable({
 				<ToggleGroup
 					type="single"
 					variant="outline"
+					size="lg"
+					spacing={0}
 					value={filter}
 					onValueChange={(value) => {
 						if (value === "active" || value === "revoked") {
@@ -377,10 +415,16 @@ export function HostsTable({
 						}
 					}}
 				>
-					<ToggleGroupItem value="active">
+					<ToggleGroupItem
+						value="active"
+						className="px-4 data-[state=on]:bg-primary-subtle data-[state=on]:text-primary-strong"
+					>
 						{copy.hosts.filterActive}
 					</ToggleGroupItem>
-					<ToggleGroupItem value="revoked">
+					<ToggleGroupItem
+						value="revoked"
+						className="px-4 data-[state=on]:bg-primary-subtle data-[state=on]:text-primary-strong"
+					>
 						{copy.hosts.filterRevoked}
 					</ToggleGroupItem>
 				</ToggleGroup>
@@ -398,11 +442,11 @@ export function HostsTable({
 			)}
 
 			{body === null ? (
-				<div className="rounded-md border">
-					<Table className="min-w-[1000px]">
-						<TableHeader>
+				<div className="@container overflow-hidden rounded-lg border bg-card">
+					<Table>
+						<TableHeader className="bg-muted">
 							<TableRow>
-								<TableHead aria-sort={ariaSort("host")}>
+								<TableHead className="px-4" aria-sort={ariaSort("host")}>
 									<SortButton
 										label={copy.hosts.columns.host}
 										active={sort.key === "host"}
@@ -410,27 +454,41 @@ export function HostsTable({
 										onClick={() => sortBy("host")}
 									/>
 								</TableHead>
-								<TableHead aria-sort={ariaSort("status", "lastSeen")}>
-									<div className="flex items-center gap-3">
-										<SortButton
-											label={copy.hosts.columns.status}
-											active={sort.key === "status"}
-											dir={sort.dir}
-											onClick={() => sortBy("status")}
-										/>
-										<SortButton
-											label={copy.hosts.columns.lastSeenSort}
-											active={sort.key === "lastSeen"}
-											dir={sort.dir}
-											onClick={() => sortBy("lastSeen")}
-										/>
-									</div>
+								<TableHead
+									className={cn("px-4", SHOW_STATUS)}
+									aria-sort={ariaSort("status")}
+								>
+									<SortButton
+										label={copy.hosts.columns.status}
+										active={sort.key === "status"}
+										dir={sort.dir}
+										onClick={() => sortBy("status")}
+									/>
 								</TableHead>
-								<TableHead>{copy.hosts.columns.version}</TableHead>
-								<TableHead>{copy.hosts.columns.platform}</TableHead>
-								<TableHead>{copy.hosts.columns.labels}</TableHead>
-								<TableHead>{copy.hosts.columns.certificate}</TableHead>
-								<TableHead className="w-12">
+								<TableHead
+									className={cn("px-4", SHOW_LAST_SEEN)}
+									aria-sort={ariaSort("lastSeen")}
+								>
+									<SortButton
+										label={copy.hosts.columns.lastSeen}
+										active={sort.key === "lastSeen"}
+										dir={sort.dir}
+										onClick={() => sortBy("lastSeen")}
+									/>
+								</TableHead>
+								<TableHead className={cn("px-4", SHOW_PLATFORM)}>
+									{copy.hosts.columns.platform}
+								</TableHead>
+								<TableHead className="px-4">
+									{copy.hosts.columns.labels}
+								</TableHead>
+								<TableHead className={cn("px-4", SHOW_WIDE)}>
+									{copy.hosts.columns.version}
+								</TableHead>
+								<TableHead className={cn("px-4", SHOW_WIDE)}>
+									{copy.hosts.columns.certificate}
+								</TableHead>
+								<TableHead className="w-16 px-4">
 									<span className="sr-only">{copy.hosts.columns.actions}</span>
 								</TableHead>
 							</TableRow>
@@ -442,54 +500,84 @@ export function HostsTable({
 								visible.map((host) => (
 									<TableRow
 										key={host.id}
-										className="cursor-pointer"
-										onClick={() => onView(host, "row")}
+										className="h-16 cursor-pointer"
+										onClick={(e) => {
+											const target = e.target as HTMLElement;
+											if (!target.closest("a,button,[role=menuitem]")) {
+												void openHost(host);
+											}
+										}}
 									>
-										<TableCell>
-											<Truncated text={host.hostname} className="max-w-[240px]">
-												<button
-													type="button"
+										<TableCell className="px-4">
+											<Truncated
+												text={host.hostname}
+												className="max-w-48 lg:max-w-32 xl:max-w-52"
+											>
+												<Link
+													to="/hosts/$id"
+													params={{ id: host.id }}
 													data-host-name={host.id}
-													className="block max-w-[240px] truncate rounded-sm text-left text-sm font-semibold"
+													aria-label={copy.hosts.openRow(host.hostname)}
+													aria-describedby={
+														host.labels.length > 2 ? restId(host) : undefined
+													}
+													className="block max-w-48 truncate rounded-sm text-left text-base font-semibold lg:max-w-32 xl:max-w-52"
 												>
 													{host.hostname}
-												</button>
+												</Link>
 											</Truncated>
-											<div className="font-mono text-xs text-muted-foreground">
-												{host.id.slice(0, 8)}
+											<div
+												title={host.id}
+												className="hidden font-mono text-sm text-muted-foreground lg:block"
+											>
+												{host.id.slice(-8)}
+											</div>
+											<div className="@min-[680px]:hidden">
+												<StatusBadge status={host.status} />
 											</div>
 										</TableCell>
-										<TableCell>
+										<TableCell className={cn("px-4", SHOW_STATUS)}>
 											<StatusBadge status={host.status} />
-											{host.last_seen_at != null && (
-												<div>
-													<LastSeen at={host.last_seen_at} />
+										</TableCell>
+										<TableCell className={cn("px-4", SHOW_LAST_SEEN)}>
+											{host.last_seen_at != null ? (
+												<LastSeen at={host.last_seen_at} />
+											) : (
+												copy.common.dash
+											)}
+										</TableCell>
+										<TableCell className={cn("px-4", SHOW_PLATFORM)}>
+											<div>
+												{host.os} / {host.arch}
+											</div>
+											{host.distro && (
+												<div className="text-sm text-muted-foreground">
+													{host.distro}
 												</div>
 											)}
 										</TableCell>
-										<TableCell>
+										<TableCell className="px-4">
+											<LabelChips
+												host={host}
+												onPick={(text) => {
+													setQuery(text);
+													setPage(0);
+												}}
+											/>
+										</TableCell>
+										<TableCell className={cn("px-4", SHOW_WIDE)}>
 											<VersionCell
 												version={host.version}
 												serverVersion={serverVersion}
 											/>
 										</TableCell>
-										<TableCell>
-											<div>
-												{host.os} / {host.arch}
-											</div>
-											{host.distro && (
-												<div className="text-xs text-muted-foreground">
-													{host.distro}
-												</div>
-											)}
-										</TableCell>
-										<TableCell>
-											<LabelChips labels={host.labels} />
-										</TableCell>
-										<TableCell>
+										<TableCell className={cn("px-4", SHOW_WIDE)}>
 											<CertificateText host={host} />
 										</TableCell>
-										<TableCell onClick={(e) => e.stopPropagation()}>
+										<TableCell
+											className="px-4"
+											onClick={(e) => e.stopPropagation()}
+										>
 											<DropdownMenu modal={false}>
 												<DropdownMenuTrigger asChild>
 													<Button
@@ -503,7 +591,7 @@ export function HostsTable({
 												</DropdownMenuTrigger>
 												<DropdownMenuContent align="end">
 													<DropdownMenuItem
-														onSelect={() => onView(host, "menu")}
+														onSelect={() => void openHost(host)}
 													>
 														{copy.hosts.viewDetails}
 													</DropdownMenuItem>
@@ -573,17 +661,28 @@ function EmptyState({
 	heading,
 	body,
 	action,
+	illustration,
 }: {
 	heading: string;
 	body: string;
 	action?: React.ReactNode;
+	illustration?: IllustrationName;
 }) {
 	return (
-		<Empty>
+		<Empty className={illustration ? "py-24" : undefined}>
 			<EmptyHeader>
-				<EmptyMedia variant="icon">
-					<Server />
-				</EmptyMedia>
+				{illustration ? (
+					<Illustration
+						name={illustration}
+						width={320}
+						height={216}
+						className="h-auto w-80 max-w-full"
+					/>
+				) : (
+					<EmptyMedia variant="icon">
+						<Server />
+					</EmptyMedia>
+				)}
 				<EmptyTitle>{heading}</EmptyTitle>
 				<EmptyDescription>{body}</EmptyDescription>
 			</EmptyHeader>

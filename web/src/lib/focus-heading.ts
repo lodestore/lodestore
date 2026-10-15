@@ -2,12 +2,16 @@ import { useRouter } from "@tanstack/react-router";
 import { useEffect } from "react";
 
 const GIVE_UP_MS = 3000;
+const findHeading = () =>
+	document.querySelector<HTMLElement>("[data-page-title]") ??
+	document.querySelector<HTMLElement>("h1");
 
 function focusIsClaimed() {
 	const active = document.activeElement;
 	return (
 		active instanceof HTMLElement &&
 		active !== document.body &&
+		active.closest('[data-state="closed"]') === null &&
 		(active.closest("main") !== null || active.matches("input,textarea"))
 	);
 }
@@ -24,10 +28,10 @@ export function useFocusHeading() {
 		let stopWaiting = () => {};
 		function run() {
 			stopWaiting();
-			const existing = document.querySelector<HTMLElement>("h1");
+			const existing = findHeading();
 			if (existing) return focusHeading(existing);
 			const observer = new MutationObserver(() => {
-				const heading = document.querySelector<HTMLElement>("h1");
+				const heading = findHeading();
 				if (!heading) return;
 				stopWaiting();
 				focusHeading(heading);
@@ -39,9 +43,8 @@ export function useFocusHeading() {
 				clearTimeout(timer);
 			};
 		}
-		run();
 		const unsubscribe = router.subscribe("onRendered", (event) => {
-			if (event.pathChanged) run();
+			if (event.pathChanged && event.fromLocation) run();
 		});
 		return () => {
 			unsubscribe();

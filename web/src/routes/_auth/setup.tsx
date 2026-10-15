@@ -6,7 +6,6 @@ import { ApiError } from "@/api/fetcher";
 import { useCreateAdmin, verify } from "@/api/gen/endpoints";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
 import {
 	Field,
 	FieldDescription,
@@ -17,12 +16,11 @@ import {
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { copy } from "@/copy";
-import { useFocusHeading } from "@/lib/focus-heading";
 import { redirectIfSignedIn, sessionQuery, statusQuery } from "@/lib/session";
 
 const MIN_PASSWORD = 12;
 
-export const Route = createFileRoute("/setup")({
+export const Route = createFileRoute("/_auth/setup")({
 	validateSearch: (search: Record<string, unknown>) => ({
 		token: typeof search.token === "string" ? search.token : undefined,
 	}),
@@ -31,7 +29,6 @@ export const Route = createFileRoute("/setup")({
 });
 
 function SetupPage() {
-	useFocusHeading();
 	const { token } = Route.useSearch();
 	const navigate = useNavigate();
 	const queryClient = useQueryClient();
@@ -77,7 +74,16 @@ function SetupPage() {
 			{
 				onSuccess: async () => {
 					queryClient.removeQueries({ queryKey: statusQuery.queryKey });
-					await queryClient.fetchQuery({ ...sessionQuery, staleTime: 0 });
+					try {
+						await queryClient.fetchQuery({ ...sessionQuery, staleTime: 0 });
+					} catch {
+						await navigate({
+							to: "/login",
+							search: { next: undefined, expired: undefined },
+							replace: true,
+						});
+						return;
+					}
 					await navigate({ to: "/welcome", replace: true });
 				},
 				onError: (e) => {
@@ -106,110 +112,105 @@ function SetupPage() {
 	}
 
 	return (
-		<main className="flex min-h-svh justify-center px-4 pt-16">
-			<div className="w-full max-w-[400px]">
-				<h1 className="mb-6 text-center text-2xl font-semibold">
+		<>
+			<div className="flex flex-col gap-2">
+				<h1 data-page-title className="text-2xl font-semibold">
 					{copy.setup.title}
 				</h1>
-				<Card>
-					<CardContent>
-						{invalidLink ? (
-							<Alert variant="destructive">
-								<CircleAlert aria-hidden />
-								<AlertDescription>{copy.setup.invalidLink}</AlertDescription>
-							</Alert>
-						) : check.isError ? (
-							<Alert variant="destructive">
-								<CircleAlert aria-hidden />
-								<AlertDescription>
-									{check.error instanceof ApiError && check.error.status === 429
-										? copy.login.rateLimited(check.error.retryAfter ?? 60)
-										: copy.errors.submit(
-												"check the setup link",
-												check.error.message,
-											)}
-								</AlertDescription>
-							</Alert>
-						) : check.isPending ? (
-							<div className="flex justify-center py-6">
-								<Spinner className="size-6" />
-							</div>
-						) : (
-							<form onSubmit={onSubmit} noValidate>
-								<FieldGroup>
-									<Field>
-										<FieldLabel htmlFor="username">Username</FieldLabel>
-										<Input
-											id="username"
-											name="username"
-											autoComplete="username"
-											disabled={create.isPending}
-											value={username}
-											onChange={(e) => setUsername(e.target.value)}
-										/>
-									</Field>
-									<Field>
-										<FieldLabel htmlFor="password">Password</FieldLabel>
-										<Input
-											id="password"
-											name="password"
-											type="password"
-											autoComplete="new-password"
-											autoFocus
-											aria-describedby="password-hint"
-											aria-invalid={passwordInvalid}
-											disabled={create.isPending}
-											value={password}
-											onChange={(e) => setPassword(e.target.value)}
-										/>
-										<FieldDescription
-											id="password-hint"
-											className={passwordInvalid ? "text-destructive" : ""}
-										>
-											{copy.setup.passwordRule}
-										</FieldDescription>
-									</Field>
-									<Field>
-										<FieldLabel htmlFor="confirm">
-											{copy.setup.confirmPassword}
-										</FieldLabel>
-										<Input
-											id="confirm"
-											name="confirm"
-											type="password"
-											autoComplete="new-password"
-											aria-describedby={mismatch ? "confirm-error" : undefined}
-											aria-invalid={mismatch}
-											disabled={create.isPending}
-											value={confirm}
-											onChange={(e) => setConfirm(e.target.value)}
-										/>
-										{mismatch && (
-											<FieldError id="confirm-error">
-												{copy.setup.passwordMismatch}
-											</FieldError>
-										)}
-									</Field>
-									{error && (
-										<Alert variant="destructive">
-											<CircleAlert aria-hidden />
-											<AlertDescription>{error}</AlertDescription>
-										</Alert>
-									)}
-									<Button
-										type="submit"
-										className="w-full"
-										disabled={create.isPending}
-									>
-										{create.isPending && <Spinner />}
-										{copy.setup.button}
-									</Button>
-								</FieldGroup>
-							</form>
-						)}
-					</CardContent>
-				</Card>
+				<p className="text-base text-muted-foreground">{copy.auth.setupLead}</p>
 			</div>
-		</main>
+			{invalidLink ? (
+				<Alert variant="destructive">
+					<CircleAlert aria-hidden />
+					<AlertDescription>{copy.setup.invalidLink}</AlertDescription>
+				</Alert>
+			) : check.isError ? (
+				<Alert variant="destructive">
+					<CircleAlert aria-hidden />
+					<AlertDescription>
+						{check.error instanceof ApiError && check.error.status === 429
+							? copy.login.rateLimited(check.error.retryAfter ?? 60)
+							: copy.errors.submit("check the setup link", check.error.message)}
+					</AlertDescription>
+				</Alert>
+			) : check.isPending ? (
+				<div className="flex justify-center py-6">
+					<Spinner className="size-6" />
+				</div>
+			) : (
+				<form onSubmit={onSubmit} noValidate>
+					<FieldGroup className="gap-6">
+						<Field>
+							<FieldLabel htmlFor="username">{copy.auth.username}</FieldLabel>
+							<Input
+								id="username"
+								name="username"
+								autoComplete="username"
+								disabled={create.isPending}
+								value={username}
+								onChange={(e) => setUsername(e.target.value)}
+							/>
+						</Field>
+						<Field>
+							<FieldLabel htmlFor="password">{copy.auth.password}</FieldLabel>
+							<Input
+								id="password"
+								name="password"
+								type="password"
+								autoComplete="new-password"
+								autoFocus
+								aria-describedby="password-hint"
+								aria-invalid={passwordInvalid}
+								disabled={create.isPending}
+								value={password}
+								onChange={(e) => setPassword(e.target.value)}
+							/>
+							<FieldDescription
+								id="password-hint"
+								className={passwordInvalid ? "text-destructive" : ""}
+							>
+								{copy.setup.passwordRule}
+							</FieldDescription>
+						</Field>
+						<Field>
+							<FieldLabel htmlFor="confirm">
+								{copy.setup.confirmPassword}
+							</FieldLabel>
+							<Input
+								id="confirm"
+								name="confirm"
+								type="password"
+								autoComplete="new-password"
+								aria-describedby={mismatch ? "confirm-error" : undefined}
+								aria-invalid={mismatch}
+								disabled={create.isPending}
+								value={confirm}
+								onChange={(e) => setConfirm(e.target.value)}
+							/>
+							{mismatch && (
+								<FieldError id="confirm-error">
+									{copy.setup.passwordMismatch}
+								</FieldError>
+							)}
+						</Field>
+						{error && (
+							<Alert variant="destructive">
+								<CircleAlert aria-hidden />
+								<AlertDescription>{error}</AlertDescription>
+							</Alert>
+						)}
+						<Button
+							type="submit"
+							size="lg"
+							className="w-full"
+							disabled={create.isPending}
+						>
+							{create.isPending && <Spinner />}
+							{copy.setup.button}
+						</Button>
+					</FieldGroup>
+				</form>
+			)}
+		</>
 	);
 }

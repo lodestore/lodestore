@@ -47,19 +47,50 @@ function Banner({
 	);
 }
 
-export function AppBanners() {
-	const info = useQuery(infoQuery);
-	const [dismissed, setDismissed] = useState(
-		() =>
-			new Set(
-				[UNLOCK_KEY, UNENCRYPTED].filter((k) => sessionStorage.getItem(k)),
-			),
-	);
+function readDismissed(key: string) {
+	try {
+		return sessionStorage.getItem(key) !== null;
+	} catch {
+		return false;
+	}
+}
 
+function useDismiss(keys: string[]) {
+	const [dismissed, setDismissed] = useState(
+		() => new Set(keys.filter(readDismissed)),
+	);
 	const dismiss = (key: string) => {
-		sessionStorage.setItem(key, "1");
+		try {
+			sessionStorage.setItem(key, "1");
+		} catch {
+			// Blocked storage: the banner is still hidden for this page view.
+		}
 		setDismissed((current) => new Set(current).add(key));
 	};
+	return { dismissed, dismiss };
+}
+
+export function UnencryptedBanner() {
+	const { dismissed, dismiss } = useDismiss([UNENCRYPTED]);
+	if (
+		!isInsecureOrigin(location.protocol, location.hostname) ||
+		dismissed.has(UNENCRYPTED)
+	)
+		return null;
+	return (
+		<Banner
+			title={copy.unencryptedBanner.title}
+			dismissLabel={copy.unencryptedBanner.dismiss}
+			onDismiss={() => dismiss(UNENCRYPTED)}
+		>
+			{copy.unencryptedBanner.body}
+		</Banner>
+	);
+}
+
+export function AppBanners() {
+	const info = useQuery(infoQuery);
+	const { dismissed, dismiss } = useDismiss([UNLOCK_KEY, UNENCRYPTED]);
 
 	const showUnlock =
 		info.data?.unlock_key_source === "data_dir" && !dismissed.has(UNLOCK_KEY);
@@ -69,7 +100,7 @@ export function AppBanners() {
 
 	if (!showUnlock && !showUnencrypted) return null;
 	return (
-		<div className="mb-4 flex flex-col gap-3">
+		<div className="mb-4 flex flex-col gap-4">
 			{showUnlock && (
 				<Banner
 					dismissLabel={copy.unlockKeyDismiss}

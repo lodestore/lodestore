@@ -42,6 +42,13 @@ describe("setup", () => {
 			await screen.findByText(/This setup link is invalid or was already used/),
 		).toBeInTheDocument();
 		expect(screen.queryByLabelText("Password")).not.toBeInTheDocument();
+		expect(
+			screen.getByRole("heading", {
+				level: 1,
+				name: "Create the administrator",
+			}),
+		).toBeInTheDocument();
+		expect(document.querySelector("img")).not.toBeNull();
 	});
 
 	it("rejects a password shorter than 12 characters without a request", async () => {
@@ -162,6 +169,21 @@ describe("setup", () => {
 		server.use(
 			http.post("/api/v1/setup", () =>
 				apiError(409, "conflict", "administrator already exists"),
+			),
+		);
+		const { router } = renderApp(`/setup?token=${TOKEN}`);
+		await fill(PASSWORD, PASSWORD);
+
+		await waitFor(() => expect(router.state.location.pathname).toBe("/login"));
+	});
+
+	it("sends the visitor to /login when the session cannot be read after creating the administrator", async () => {
+		useSignedOut(true);
+		mockVerify();
+		server.use(
+			http.post("/api/v1/setup", () => new HttpResponse(null, { status: 204 })),
+			http.get("/api/v1/auth/session", () =>
+				apiError(503, "unavailable", "try later"),
 			),
 		);
 		const { router } = renderApp(`/setup?token=${TOKEN}`);

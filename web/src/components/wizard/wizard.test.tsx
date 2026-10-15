@@ -177,11 +177,8 @@ describe("repository wizard with a local folder", () => {
 		expect(
 			await screen.findByText("lode-rk1-aaaa-bbbb-wxyz"),
 		).toBeInTheDocument();
-		expect(
-			screen.getByText("Going back generates a new key."),
-		).toBeInTheDocument();
 
-		await user.click(screen.getByRole("button", { name: "Back" }));
+		await user.click(screen.getByRole("button", { name: "Previous step" }));
 		await user.click(
 			await screen.findByRole("button", { name: "Continue to recovery key" }),
 		);
@@ -247,6 +244,92 @@ describe("repository wizard with a local folder", () => {
 		expect(
 			screen.queryByRole("heading", { name: "Set up your first repository" }),
 		).not.toBeInTheDocument();
+	});
+
+	it("titles the settings wizard Add a repository", async () => {
+		mockServer();
+		useSignedIn();
+		renderApp("/settings/repositories/new");
+		expect(
+			await screen.findByRole("heading", {
+				level: 1,
+				name: "Add a repository",
+			}),
+		).toBeInTheDocument();
+		expect(
+			screen.queryByText("Your progress is kept until you reload the page."),
+		).not.toBeInTheDocument();
+	});
+
+	it("shows the progress footnote and no Exit setup on /welcome", async () => {
+		mockServer();
+		renderApp("/welcome");
+		await screen.findByRole("heading", {
+			name: "Set up your first repository",
+		});
+		expect(
+			screen.getByText("Your progress is kept until you reload the page."),
+		).toBeInTheDocument();
+		expect(
+			screen.queryByRole("button", { name: "Exit setup" }),
+		).not.toBeInTheDocument();
+		expect(screen.getByText("Step 1 of 4")).toBeInTheDocument();
+		expect(
+			screen.getByRole("progressbar", { name: "Progress" }),
+		).toHaveAttribute("aria-valuenow", "1");
+	});
+
+	it("puts Exit setup in the title row of /settings/repositories/new", async () => {
+		mockServer();
+		useSignedIn();
+		renderApp("/settings/repositories/new");
+		const heading = await screen.findByRole("heading", {
+			name: "Add a repository",
+		});
+		const header = heading.closest("header");
+		expect(header).not.toBeNull();
+		expect(
+			within(header as HTMLElement).getByRole("button", {
+				name: "Exit setup",
+			}),
+		).toBeInTheDocument();
+	});
+
+	it("leaves at once through Exit setup when nothing changed", async () => {
+		mockServer();
+		useSignedIn();
+		const user = userEvent.setup();
+		const { router } = renderApp("/settings/repositories/new");
+		await user.click(await screen.findByRole("button", { name: "Exit setup" }));
+		await waitFor(() =>
+			expect(router.state.location.pathname).toBe("/settings/repositories"),
+		);
+	});
+
+	it("asks before Exit setup discards changed fields", async () => {
+		mockServer();
+		useSignedIn();
+		const user = userEvent.setup();
+		const { router } = renderApp("/settings/repositories/new");
+		await user.type(await screen.findByLabelText("Repository name"), "-two");
+		await user.click(screen.getByRole("button", { name: "Exit setup" }));
+		const dialog = await screen.findByRole("alertdialog", {
+			name: "Leave without creating a repository?",
+		});
+		await user.click(
+			within(dialog).getByRole("button", { name: "Keep editing" }),
+		);
+		expect(router.state.location.pathname).toBe("/settings/repositories/new");
+		expect(screen.getByLabelText("Repository name")).toHaveValue("default-two");
+
+		await user.click(screen.getByRole("button", { name: "Exit setup" }));
+		await user.click(
+			await screen.findByRole("button", { name: "Leave without creating" }),
+		);
+		await waitFor(() =>
+			expect(router.state.location.pathname).toBe("/settings/repositories"),
+		);
+		expect(sessionStorage.getItem("lodestore.wizard.draft")).toBeNull();
 	});
 });
 

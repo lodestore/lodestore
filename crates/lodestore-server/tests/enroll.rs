@@ -153,7 +153,7 @@ async fn tracer(backend: &Backend) {
     let host = &hosts[0];
     assert_eq!(host["id"], enrolled.agent_id);
     assert_eq!(host["version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(host["os"], "linux");
+    assert_eq!(host["os"], std::env::consts::OS);
     assert_eq!(host["repository_id"], repo);
     assert_eq!(host["labels"], json!([{ "key": "env", "value": "test" }]));
 

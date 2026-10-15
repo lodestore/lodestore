@@ -51,17 +51,19 @@ export function CodeBlock({
 				aria-label={object}
 				tabIndex={0}
 				className={cn(
-					"m-0 rounded-md p-4 pr-28 font-mono break-all whitespace-pre-wrap",
-					large ? "text-lg tabular-nums tracking-[0.02em]" : "text-sm",
+					"m-0 rounded-md p-4 pr-32 font-mono wrap-anywhere whitespace-pre-wrap",
+					large
+						? "text-lg tabular-nums tracking-[0.02em]"
+						: "text-[0.8125rem] leading-relaxed",
 				)}
 			>
 				{text}
 			</pre>
 			<Button
 				type="button"
-				variant="secondary"
+				variant="outline"
 				size="sm"
-				className="absolute top-2 right-2"
+				className="absolute top-2 right-2 bg-background"
 				aria-label={copyLabel}
 				disabled={disabled}
 				onClick={onCopy}

@@ -1,21 +1,15 @@
+import { useQuery } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
 import { Copy } from "lucide-react";
 import { type ReactNode, useRef, useState } from "react";
 import { toast } from "sonner";
-import { useGetHost } from "@/api/gen/endpoints";
-import type { Host, HostDetail, HostMount } from "@/api/gen/model";
+import type { HostDetail, HostMount } from "@/api/gen/model";
+import { CertificateText, VersionCell } from "@/components/hosts/hosts-table";
 import { RelativeTime } from "@/components/relative-time";
 import { StatusBadge } from "@/components/status-badge";
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { ScrollArea } from "@/components/ui/scroll-area";
-import {
-	Sheet,
-	SheetContent,
-	SheetDescription,
-	SheetFooter,
-	SheetHeader,
-	SheetTitle,
-} from "@/components/ui/sheet";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
 	Table,
@@ -27,6 +21,7 @@ import {
 } from "@/components/ui/table";
 import { copy } from "@/copy";
 import { copyText } from "@/lib/clipboard";
+import { infoQuery } from "@/lib/session";
 
 const FILESYSTEMS_SHOWN = 20;
 const UNITS = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
@@ -68,24 +63,45 @@ const usedPercent = (m: HostMount) =>
 
 type Fact = [label: string, value: ReactNode | null | undefined];
 
-function Section({ title, facts }: { title: string; facts: Fact[] }) {
-	const present = (value: Fact[1]) =>
-		value !== null && value !== undefined && value !== "";
+const present = (value: Fact[1]) =>
+	value !== null && value !== undefined && value !== "";
+
+function InfoCard({
+	title,
+	className,
+	children,
+}: {
+	title: string;
+	className?: string;
+	children: ReactNode;
+}) {
+	return (
+		<Card className={className}>
+			<CardHeader>
+				<CardTitle>
+					<h2>{title}</h2>
+				</CardTitle>
+			</CardHeader>
+			<CardContent className="flex flex-col gap-2">{children}</CardContent>
+		</Card>
+	);
+}
+
+function FactsCard({ title, facts }: { title: string; facts: Fact[] }) {
 	if (!facts.some(([, value]) => present(value))) return null;
 	return (
-		<section className="flex flex-col gap-2">
-			<h3 className="text-sm font-semibold">{title}</h3>
-			<dl className="grid grid-cols-[8rem_1fr] gap-x-4 gap-y-1.5 text-sm">
+		<InfoCard title={title}>
+			<dl className="grid auto-rows-[minmax(1.5rem,auto)] grid-cols-[8rem_1fr] items-center gap-x-4 gap-y-2 text-sm">
 				{facts.map(([label, value]) => (
 					<div key={label} className="contents">
 						<dt className="text-muted-foreground">{label}</dt>
-						<dd className="min-w-0 break-all">
+						<dd className="min-w-0 break-words">
 							{present(value) ? value : copy.common.dash}
 						</dd>
 					</div>
 				))}
 			</dl>
-		</section>
+		</InfoCard>
 	);
 }
 
@@ -98,8 +114,7 @@ function Filesystems({ mounts }: { mounts: HostMount[] }) {
 	const shown = all ? sorted : sorted.slice(0, FILESYSTEMS_SHOWN);
 	const d = copy.hosts.details;
 	return (
-		<section className="flex flex-col gap-2">
-			<h3 className="text-sm font-semibold">{d.storage}</h3>
+		<InfoCard title={d.storage} className="lg:col-span-2">
 			<Table>
 				<TableHeader>
 					<TableRow>
@@ -110,8 +125,8 @@ function Filesystems({ mounts }: { mounts: HostMount[] }) {
 					</TableRow>
 				</TableHeader>
 				<TableBody>
-					{shown.map((m) => (
-						<TableRow key={m.path}>
+					{shown.map((m, index) => (
+						<TableRow key={`${m.path}:${m.fs_type}:${index}`}>
 							<TableCell className="font-mono break-all whitespace-normal">
 								{m.path}
 							</TableCell>
@@ -136,7 +151,7 @@ function Filesystems({ mounts }: { mounts: HostMount[] }) {
 					{copy.hosts.showAllFilesystems(sorted.length)}
 				</Button>
 			)}
-		</section>
+		</InfoCard>
 	);
 }
 
@@ -146,14 +161,14 @@ function AgentId({ id }: { id: string }) {
 		if (await copyText(id, idRef.current)) toast.success(copy.common.copied);
 	}
 	return (
-		<span className="flex items-start gap-1">
+		<span className="inline-flex items-center gap-2">
 			<span ref={idRef} className="font-mono">
 				{id}
 			</span>
 			<Button
 				variant="ghost"
-				size="icon-sm"
-				className="shrink-0"
+				size="icon-xs"
+				className="relative -my-1 shrink-0 after:absolute after:-inset-[9px]"
 				aria-label={copy.hosts.details.copyAgentId}
 				onClick={onCopy}
 			>
@@ -163,12 +178,32 @@ function AgentId({ id }: { id: string }) {
 	);
 }
 
-function Details({ host }: { host: HostDetail }) {
-	const d = copy.hosts.details;
+function LabelsCard({ host }: { host: HostDetail }) {
+	if (host.labels.length === 0) return null;
 	return (
-		<div className="flex flex-col gap-6">
-			<Section
-				title={d.overview}
+		<InfoCard title={copy.hostPage.cards.labels}>
+			<div className="flex flex-wrap gap-2">
+				{host.labels.map((label) => (
+					<Badge
+						key={label.key}
+						variant="outline"
+						className="h-auto max-w-full font-mono break-all whitespace-normal"
+					>
+						{label.key}={label.value}
+					</Badge>
+				))}
+			</div>
+		</InfoCard>
+	);
+}
+
+export function HostOverview({ host }: { host: HostDetail }) {
+	const d = copy.hosts.details;
+	const info = useQuery(infoQuery);
+	return (
+		<div className="grid gap-6 xl:grid-cols-2">
+			<FactsCard
+				title={copy.hostPage.cards.status}
 				facts={[
 					[d.status, <StatusBadge key="s" status={host.status} />],
 					[
@@ -179,11 +214,21 @@ function Details({ host }: { host: HostDetail }) {
 					],
 					[d.enrolled, formatDate(host.enrolled_at)],
 					[d.agentId, <AgentId key="id" id={host.id} />],
-					[d.repository, host.repository_name],
+					[
+						d.repository,
+						<Link
+							key="r"
+							to="/settings/repositories/$id"
+							params={{ id: host.repository_id }}
+							className="font-semibold underline underline-offset-4"
+						>
+							{host.repository_name}
+						</Link>,
+					],
 				]}
 			/>
-			<Section
-				title={d.system}
+			<FactsCard
+				title={copy.hostPage.cards.system}
 				facts={[
 					[d.os, host.os],
 					[d.arch, host.arch],
@@ -191,106 +236,55 @@ function Details({ host }: { host: HostDetail }) {
 					[d.kernel, host.kernel],
 					[
 						d.uptime,
-						host.uptime_s == null ? null : formatUptime(host.uptime_s),
+						host.uptime_s == null || host.uptime_s <= 0
+							? null
+							: formatUptime(host.uptime_s),
+					],
+					[
+						copy.hosts.columns.version,
+						<VersionCell
+							key="v"
+							version={host.version}
+							serverVersion={info.data?.version}
+						/>,
 					],
 				]}
 			/>
-			<Filesystems mounts={host.mounts} />
-			<Section
-				title={d.certificate}
+			<LabelsCard host={host} />
+			<FactsCard
+				title={copy.hostPage.cards.certificate}
 				facts={[
 					[d.notBefore, formatDate(host.cert_issued_at)],
-					[d.notAfter, formatDate(host.cert_not_after)],
+					[
+						d.notAfter,
+						<span key="a" className="inline-flex flex-wrap gap-x-2">
+							{formatDate(host.cert_not_after)}
+							<CertificateText host={host} />
+						</span>,
+					],
 					[d.nextRenewal, formatDate(host.next_renewal_at)],
 				]}
 			/>
+			<Filesystems mounts={host.mounts} />
 		</div>
 	);
 }
 
-function DetailsSkeleton() {
+export function HostOverviewSkeleton() {
 	return (
-		<div className="flex flex-col gap-6" aria-hidden>
-			{[5, 5, 4, 3].map((rows, i) => (
-				<div key={i} className="flex flex-col gap-2">
-					<Skeleton className="h-4 w-24" />
-					{Array.from({ length: rows }, (_, j) => (
-						<Skeleton key={j} className="h-4 w-full" />
-					))}
-				</div>
+		<div className="grid gap-6 xl:grid-cols-2" aria-hidden>
+			{[5, 6, 3, 3].map((rows, i) => (
+				<Card key={i}>
+					<CardHeader>
+						<Skeleton className="h-4 w-24" />
+					</CardHeader>
+					<CardContent className="flex flex-col gap-2">
+						{Array.from({ length: rows }, (_, j) => (
+							<Skeleton key={j} className="h-4 w-full" />
+						))}
+					</CardContent>
+				</Card>
 			))}
 		</div>
-	);
-}
-
-export function HostDetailsSheet({
-	host,
-	onClose,
-	onEditLabels,
-	onRevoke,
-	onCloseAutoFocus,
-}: {
-	host?: Host;
-	onClose: () => void;
-	onEditLabels: (host: Host) => void;
-	onRevoke: (host: Host) => void;
-	onCloseAutoFocus?: (event: Event) => void;
-}) {
-	const details = useGetHost(host?.id ?? "", {
-		query: { enabled: host !== undefined },
-	});
-	const loaded = details.data;
-
-	return (
-		<Sheet
-			open={host !== undefined}
-			onOpenChange={(open) => {
-				if (!open) onClose();
-			}}
-		>
-			<SheetContent
-				className="data-[side=right]:w-full data-[side=right]:sm:max-w-[480px]"
-				onCloseAutoFocus={onCloseAutoFocus}
-			>
-				<SheetHeader>
-					<SheetTitle className="break-all">{host?.hostname}</SheetTitle>
-					<SheetDescription className="sr-only">
-						{copy.hosts.details.description}
-					</SheetDescription>
-				</SheetHeader>
-				<ScrollArea className="min-h-0 flex-1">
-					<div className="px-4 pb-4">
-						{details.isError ? (
-							<Alert variant="destructive" role="alert">
-								<AlertDescription>
-									{copy.errors.hostDetails}{" "}
-									<Button
-										variant="link"
-										className="h-auto p-0"
-										onClick={() => details.refetch()}
-									>
-										{copy.errors.retry}
-									</Button>
-								</AlertDescription>
-							</Alert>
-						) : loaded ? (
-							<Details host={loaded} />
-						) : (
-							<DetailsSkeleton />
-						)}
-					</div>
-				</ScrollArea>
-				{loaded && loaded.status !== "revoked" && (
-					<SheetFooter className="flex-row justify-end">
-						<Button variant="outline" onClick={() => onEditLabels(loaded)}>
-							{copy.hosts.editLabels}
-						</Button>
-						<Button variant="destructive" onClick={() => onRevoke(loaded)}>
-							{copy.hosts.revokeHost}
-						</Button>
-					</SheetFooter>
-				)}
-			</SheetContent>
-		</Sheet>
 	);
 }

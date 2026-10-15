@@ -45,12 +45,42 @@ export function isSignedOut(error: unknown) {
 	);
 }
 
+export async function requireSession(
+	queryClient: QueryClient,
+	location: { href: string },
+) {
+	const toLogin = () =>
+		redirect({
+			to: "/login",
+			search: { next: location.href, expired: undefined },
+		});
+	if (queryClient.getQueryData(sessionQuery.queryKey) === undefined) {
+		const status = await queryClient
+			.fetchQuery({ ...statusQuery, staleTime: 0 })
+			.catch(() => null);
+		if (status?.setup_required) throw toLogin();
+	}
+	try {
+		await queryClient.ensureQueryData(sessionQuery);
+	} catch (error) {
+		if (isSignedOut(error)) throw toLogin();
+		throw error;
+	}
+}
+
 export async function redirectIfSignedIn(queryClient: QueryClient) {
 	try {
 		const status = await queryClient.fetchQuery(statusQuery);
 		if (status.setup_required) return;
 	} catch (error) {
 		console.debug("Could not read the server status", error);
+	}
+	const cached = queryClient.getQueryState(sessionQuery.queryKey);
+	if (
+		isSignedOut(cached?.error) &&
+		Date.now() - (cached?.errorUpdatedAt ?? 0) < 5_000
+	) {
+		return;
 	}
 	try {
 		await queryClient.fetchQuery(sessionQuery);
@@ -61,10 +91,7 @@ export async function redirectIfSignedIn(queryClient: QueryClient) {
 }
 
 export function safeNext(next: unknown) {
-	return typeof next === "string" &&
-		next.startsWith("/") &&
-		!next.startsWith("//") &&
-		!next.startsWith("/\\")
+	return typeof next === "string" && /^\/(?![/\\])\P{Cc}*$/u.test(next)
 		? next
 		: undefined;
 }

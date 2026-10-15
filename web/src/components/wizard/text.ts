@@ -7,7 +7,6 @@ export const text = {
 		key: copy.recoveryKey.heading,
 		host: copy.addHost.title,
 	},
-	settingsTitle: copy.repos.add,
 	name: "Repository name",
 	nameHelper: "1 to 48 characters: lowercase letters, digits and hyphens.",
 	backendLegend: "Storage backend",
@@ -60,4 +59,8 @@ export const text = {
 	keyLoading: "Generating the recovery key...",
 	createAction: "create the repository",
 	keyAction: "generate the recovery key",
+	createHint: {
+		confirm: "Repeat the password to continue.",
+		lastGroup: "Type the last group of the key to continue.",
+	},
 } as const;

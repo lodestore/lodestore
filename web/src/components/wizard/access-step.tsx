@@ -6,6 +6,7 @@ import { CapabilityChecklist } from "@/components/capability-checklist";
 import { PolicyPanel } from "@/components/policy-panel";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
 import {
 	Field,
 	FieldDescription,
@@ -27,6 +28,7 @@ import {
 	type KeyPair,
 	runningRows,
 } from "./draft";
+import { KeyCard } from "./key-card";
 import { SecretInput, StepCard, StepHeading } from "./parts";
 import { text } from "./text";
 
@@ -75,7 +77,7 @@ function TextField({
 				onChange={(event) => onChange(event.target.value)}
 			/>
 			{help && (
-				<FieldDescription id={`${id}-help`} className="break-all">
+				<FieldDescription id={`${id}-help`} className="wrap-anywhere">
 					{help}
 				</FieldDescription>
 			)}
@@ -98,11 +100,14 @@ function KeySection({
 }) {
 	return (
 		<FieldSet>
-			<FieldLegend variant="label">{legend}</FieldLegend>
+			<FieldLegend variant="label" className="sr-only">
+				{legend}
+			</FieldLegend>
 			<FieldGroup>
 				<Field>
 					<FieldLabel htmlFor={`${prefix}-key-id`}>
-						{`${legend}: ${text.accessKeyId}`}
+						<span className="sr-only">{`${legend}: `}</span>
+						{text.accessKeyId}
 					</FieldLabel>
 					<Input
 						id={`${prefix}-key-id`}
@@ -118,7 +123,8 @@ function KeySection({
 				</Field>
 				<Field>
 					<FieldLabel htmlFor={`${prefix}-key-secret`}>
-						{`${legend}: ${text.secretAccessKey}`}
+						<span className="sr-only">{`${legend}: `}</span>
+						{text.secretAccessKey}
 					</FieldLabel>
 					<SecretInput
 						id={`${prefix}-key-secret`}
@@ -143,66 +149,89 @@ function S3Fields({
 	disabled: boolean;
 }) {
 	return (
-		<FieldGroup>
-			<TextField
-				id="s3-endpoint"
-				label={text.endpoint}
-				help={text.endpointHelper}
-				value={draft.endpoint}
-				onChange={(endpoint) => onChange({ endpoint })}
-				disabled={disabled}
-			/>
-			<TextField
-				id="s3-region"
-				label={text.region}
-				help={text.regionHelper}
-				value={draft.region}
-				onChange={(region) => onChange({ region })}
-				disabled={disabled}
-			/>
-			<TextField
-				id="s3-bucket"
-				label={text.bucket}
-				value={draft.bucket}
-				onChange={(bucket) => onChange({ bucket })}
-				disabled={disabled}
-			/>
-			<TextField
-				id="s3-prefix"
-				label={text.prefix}
-				help={text.prefixHelper}
-				value={draft.prefix}
-				onChange={(prefix) => onChange({ prefix })}
-				disabled={disabled}
-			/>
-			<Field orientation="horizontal">
-				<Switch
-					id="s3-path-style"
-					disabled={disabled}
-					checked={draft.pathStyle ?? draft.endpoint.trim() !== ""}
-					onCheckedChange={(pathStyle) => onChange({ pathStyle })}
-				/>
-				<FieldLabel htmlFor="s3-path-style">{text.pathStyle}</FieldLabel>
-			</Field>
+		<div className="flex flex-col gap-6">
+			<p>{copy.backend.twoKeys}</p>
 			<Alert>
 				<Info aria-hidden />
-				<AlertDescription>{copy.backend.twoKeys}</AlertDescription>
+				<AlertTitle>{copy.access.whyWriteOnly.title}</AlertTitle>
+				<AlertDescription>{copy.access.whyWriteOnly.body}</AlertDescription>
 			</Alert>
-			<KeySection
-				prefix="server"
-				legend={text.serverKey}
-				value={draft.serverKey}
-				onChange={(serverKey) => onChange({ serverKey })}
-				disabled={disabled}
-			/>
-			<KeySection
-				prefix="agent"
-				legend={text.agentKey}
-				value={draft.agentKey}
-				onChange={(agentKey) => onChange({ agentKey })}
-				disabled={disabled}
-			/>
-		</FieldGroup>
+			<section className="flex flex-col gap-4 rounded-lg border p-6">
+				<h3 className="font-semibold">{text.bucket}</h3>
+				<FieldGroup>
+					<TextField
+						id="s3-endpoint"
+						label={text.endpoint}
+						help={text.endpointHelper}
+						value={draft.endpoint}
+						onChange={(endpoint) => onChange({ endpoint })}
+						disabled={disabled}
+					/>
+					<TextField
+						id="s3-region"
+						label={text.region}
+						help={text.regionHelper}
+						value={draft.region}
+						onChange={(region) => onChange({ region })}
+						disabled={disabled}
+					/>
+					<TextField
+						id="s3-bucket"
+						label={text.bucket}
+						value={draft.bucket}
+						onChange={(bucket) => onChange({ bucket })}
+						disabled={disabled}
+					/>
+					<TextField
+						id="s3-prefix"
+						label={text.prefix}
+						help={text.prefixHelper}
+						value={draft.prefix}
+						onChange={(prefix) => onChange({ prefix })}
+						disabled={disabled}
+					/>
+					<Field orientation="horizontal">
+						<Switch
+							id="s3-path-style"
+							disabled={disabled}
+							checked={draft.pathStyle ?? draft.endpoint.trim() !== ""}
+							onCheckedChange={(pathStyle) => onChange({ pathStyle })}
+						/>
+						<FieldLabel htmlFor="s3-path-style">{text.pathStyle}</FieldLabel>
+					</Field>
+				</FieldGroup>
+			</section>
+			<div className="grid gap-6 xl:grid-cols-2">
+				<KeyCard
+					number={1}
+					title={copy.access.serverKey.title}
+					role={copy.access.serverKey.body}
+				>
+					<KeySection
+						prefix="server"
+						legend={text.serverKey}
+						value={draft.serverKey}
+						onChange={(serverKey) => onChange({ serverKey })}
+						disabled={disabled}
+					/>
+				</KeyCard>
+				<KeyCard
+					number={2}
+					title={copy.access.agentKey.title}
+					role={copy.access.agentKey.body}
+					badge={copy.access.writeOnlyBadge}
+				>
+					<KeySection
+						prefix="agent"
+						legend={text.agentKey}
+						value={draft.agentKey}
+						onChange={(agentKey) => onChange({ agentKey })}
+						disabled={disabled}
+					/>
+				</KeyCard>
+			</div>
+			<PolicyColumn draft={draft} />
+		</div>
 	);
 }
 
@@ -357,27 +386,21 @@ export function AccessStep({
 	const blocked = fresh && check.result.blocking;
 	const existing = check.phase === "done" && check.result.existing_repository;
 
-	const card = (
+	return (
 		<StepCard
 			onBack={onBack}
 			backDisabled={running}
 			actions={
-				<>
-					{blocked && (
-						<p id="continue-blocked" className="text-sm text-muted-foreground">
-							{copy.check.blockedContinue}
-						</p>
-					)}
-					<Button
-						type="button"
-						variant={fresh ? "outline" : "default"}
-						disabled={running || !accessReady(draft)}
-						onClick={onCheck}
-					>
-						{running && <Spinner />}
-						{running ? copy.check.running : copy.check.button}
-					</Button>
-					{fresh && (
+				fresh && (
+					<>
+						{blocked && (
+							<p
+								id="continue-blocked"
+								className="text-sm text-muted-foreground"
+							>
+								{copy.check.blockedContinue}
+							</p>
+						)}
 						<Button
 							type="button"
 							disabled={blocked}
@@ -386,8 +409,8 @@ export function AccessStep({
 						>
 							{copy.wizard.continueToKey}
 						</Button>
-					)}
-				</>
+					</>
+				)
 			}
 		>
 			<StepHeading>{text.stepHeading.access}</StepHeading>
@@ -404,10 +427,6 @@ export function AccessStep({
 						onChange={(path) => onChange({ path })}
 						disabled={running}
 					/>
-					<Alert>
-						<Info aria-hidden />
-						<AlertDescription>{copy.backend.localNote}</AlertDescription>
-					</Alert>
 				</FieldGroup>
 			)}
 			{isExperimental(draft.backend) && (
@@ -417,37 +436,53 @@ export function AccessStep({
 					disabled={running}
 				/>
 			)}
-			{check.phase === "error" && (
-				<Alert variant="destructive" role="alert">
-					<CircleAlert aria-hidden />
-					<AlertDescription>{check.message}</AlertDescription>
-				</Alert>
-			)}
-			{existing && (
-				<Alert>
-					<Info aria-hidden />
-					<AlertTitle>{copy.existingRepo.heading}</AlertTitle>
-					<AlertDescription>{copy.existingRepo.body}</AlertDescription>
-				</Alert>
-			)}
-			<div className="break-all">
-				{check.phase === "running" && (
-					<CapabilityChecklist rows={runningRows()} />
+			<section className="flex flex-col gap-4">
+				<div className="flex flex-col gap-1">
+					<h3 className="font-semibold">{copy.access.verify.title}</h3>
+					<p className="text-sm text-muted-foreground">
+						{copy.access.verify.body}
+					</p>
+				</div>
+				<div>
+					<Button
+						type="button"
+						size="lg"
+						variant={fresh ? "outline" : "default"}
+						disabled={running || !accessReady(draft)}
+						onClick={onCheck}
+					>
+						{running && <Spinner />}
+						{running ? copy.check.running : copy.check.button}
+					</Button>
+				</div>
+				{check.phase === "error" && (
+					<Alert variant="destructive" role="alert">
+						<CircleAlert aria-hidden />
+						<AlertDescription>{check.message}</AlertDescription>
+					</Alert>
 				)}
-				{check.phase === "done" && (
-					<CapabilityChecklist
-						rows={checkRows(check.result, draft.backend, check.stale)}
-					/>
+				{existing && (
+					<Alert>
+						<Info aria-hidden />
+						<AlertTitle>{copy.existingRepo.heading}</AlertTitle>
+						<AlertDescription>{copy.existingRepo.body}</AlertDescription>
+					</Alert>
 				)}
-			</div>
+				{(check.phase === "running" || check.phase === "done") && (
+					<Card size="sm">
+						<CardContent className="wrap-anywhere">
+							{check.phase === "running" ? (
+								<CapabilityChecklist rows={runningRows()} />
+							) : (
+								<CapabilityChecklist
+									rows={checkRows(check.result, draft.backend, check.stale)}
+									stale={check.stale}
+								/>
+							)}
+						</CardContent>
+					</Card>
+				)}
+			</section>
 		</StepCard>
-	);
-
-	if (draft.backend !== "s3") return card;
-	return (
-		<div className="grid items-start gap-8 lg:grid-cols-[minmax(0,720px)_minmax(0,420px)]">
-			{card}
-			<PolicyColumn draft={draft} />
-		</div>
 	);
 }

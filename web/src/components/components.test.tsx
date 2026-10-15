@@ -46,7 +46,7 @@ describe("CapabilityChecklist", () => {
 		expect(within(items[4]).getByText("n/a")).toBeInTheDocument();
 	});
 
-	it("shows Checking... for running rows", () => {
+	it("shows Checking… for running rows", () => {
 		render(
 			<CapabilityChecklist
 				rows={[
@@ -58,7 +58,7 @@ describe("CapabilityChecklist", () => {
 				]}
 			/>,
 		);
-		expect(screen.getAllByText("Checking...")).toHaveLength(5);
+		expect(screen.getAllByText("Checking…")).toHaveLength(5);
 	});
 });
 
@@ -72,16 +72,32 @@ describe("StatusBadge", () => {
 });
 
 describe("Stepper", () => {
+	const steps = [
+		{ title: "Storage", description: "Choose where backups live" },
+		{ title: "Access", description: "Give Lodestore two keys" },
+		{ title: "Recovery key", description: "Save the way back in" },
+	];
+
 	it("marks only the current step with aria-current", () => {
-		render(
-			<Stepper steps={["Storage", "Access", "Recovery key"]} current={1} />,
-		);
+		render(<Stepper steps={steps} current={1} />);
 		const current = screen
 			.getAllByRole("listitem")
 			.filter((li) => li.hasAttribute("aria-current"));
 		expect(current).toHaveLength(1);
 		expect(current[0]).toHaveTextContent("Access");
 		expect(current[0]).toHaveAttribute("aria-current", "step");
+	});
+
+	it("shows step descriptions and names completed steps", () => {
+		render(<Stepper steps={steps} current={1} />);
+		expect(screen.getByText("Save the way back in")).toBeInTheDocument();
+		const [done, now, next] = screen.getAllByRole("listitem");
+		expect(done).toHaveAttribute("data-state", "completed");
+		expect(done).toHaveTextContent("completed");
+		expect(now).toHaveAttribute("data-state", "current");
+		expect(next).toHaveAttribute("data-state", "upcoming");
+		expect(next).not.toHaveTextContent("completed");
+		expect(screen.getByRole("list", { name: "Progress" })).toBeInTheDocument();
 	});
 });
 

@@ -5,6 +5,7 @@ import { connectRepository } from "@/api/gen/endpoints";
 import type { RepositorySummary } from "@/api/gen/model";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import { Field, FieldLabel } from "@/components/ui/field";
 import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -85,51 +86,53 @@ export function ConnectExistingStep({
 				<AlertTitle>{copy.existingRepo.heading}</AlertTitle>
 				<AlertDescription>{copy.existingRepo.body}</AlertDescription>
 			</Alert>
-			<Tabs
-				value={method}
-				onValueChange={(next) => {
-					setMethod(next as Method);
-					setError(undefined);
-				}}
-			>
-				<TabsList>
-					<TabsTrigger value="password">
-						{copy.existingRepo.tabPassword}
-					</TabsTrigger>
-					<TabsTrigger value="recovery_key">
-						{copy.existingRepo.tabRecoveryKey}
-					</TabsTrigger>
-				</TabsList>
-				<TabsContent value="password">
-					<Field>
-						<FieldLabel htmlFor="connect-password">
-							{text.connectPasswordLabel}
-						</FieldLabel>
-						<SecretInput
-							id="connect-password"
-							what="repository password"
-							autoComplete="current-password"
-							disabled={pending}
-							value={password}
-							onChange={setPassword}
-						/>
-					</Field>
-				</TabsContent>
-				<TabsContent value="recovery_key">
-					<Field>
-						<FieldLabel htmlFor="connect-recovery-key">
-							{text.connectKeyLabel}
-						</FieldLabel>
-						<SecretInput
-							id="connect-recovery-key"
-							what="recovery key"
-							disabled={pending}
-							value={recoveryKey}
-							onChange={setRecoveryKey}
-						/>
-					</Field>
-				</TabsContent>
-			</Tabs>
+			<Card className="gap-6 px-8 [--card-spacing:--spacing(8)]">
+				<Tabs
+					value={method}
+					onValueChange={(next) => {
+						setMethod(next as Method);
+						setError(undefined);
+					}}
+				>
+					<TabsList>
+						<TabsTrigger value="password">
+							{copy.existingRepo.tabPassword}
+						</TabsTrigger>
+						<TabsTrigger value="recovery_key">
+							{copy.existingRepo.tabRecoveryKey}
+						</TabsTrigger>
+					</TabsList>
+					<TabsContent value="password">
+						<Field>
+							<FieldLabel htmlFor="connect-password">
+								{text.connectPasswordLabel}
+							</FieldLabel>
+							<SecretInput
+								id="connect-password"
+								what="repository password"
+								autoComplete="current-password"
+								disabled={pending}
+								value={password}
+								onChange={setPassword}
+							/>
+						</Field>
+					</TabsContent>
+					<TabsContent value="recovery_key">
+						<Field>
+							<FieldLabel htmlFor="connect-recovery-key">
+								{text.connectKeyLabel}
+							</FieldLabel>
+							<SecretInput
+								id="connect-recovery-key"
+								what="recovery key"
+								disabled={pending}
+								value={recoveryKey}
+								onChange={setRecoveryKey}
+							/>
+						</Field>
+					</TabsContent>
+				</Tabs>
+			</Card>
 			{error && (
 				<Alert variant="destructive" role="alert">
 					<CircleAlert aria-hidden />

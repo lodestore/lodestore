@@ -30,7 +30,11 @@ type RequestConfig = {
 };
 
 const MUTATING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
-const AUTH_PATHS = ["/api/v1/auth/login", "/api/v1/auth/session"];
+const AUTH_PATHS = [
+	"/api/v1/auth/login",
+	"/api/v1/auth/logout",
+	"/api/v1/auth/session",
+];
 
 let csrfToken: string | undefined;
 let unauthorizedHandler: (() => void) | undefined;

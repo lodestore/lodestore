@@ -1,7 +1,6 @@
 import { Eye, EyeOff } from "lucide-react";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardFooter } from "@/components/ui/card";
 import {
 	InputGroup,
 	InputGroupAddon,
@@ -22,26 +21,26 @@ export function StepCard({
 	actions: ReactNode;
 }) {
 	return (
-		<Card className="w-full">
-			<CardContent className="flex flex-col gap-6">{children}</CardContent>
-			<CardFooter className="justify-between gap-3">
+		<div className="flex w-full flex-col gap-8">
+			<div className="flex flex-col gap-6">{children}</div>
+			<footer className="sticky bottom-0 flex min-h-16 shrink-0 items-center justify-between gap-2 border-t py-2 bg-background">
 				{onBack ? (
 					<Button
 						type="button"
-						variant="ghost"
+						variant="outline"
 						disabled={backDisabled}
 						onClick={onBack}
 					>
-						{copy.wizard.back}
+						{copy.wizard.previousStep}
 					</Button>
 				) : (
 					<span />
 				)}
-				<div className="flex flex-wrap items-center justify-end gap-3">
+				<div className="flex flex-wrap items-center justify-end gap-2">
 					{actions}
 				</div>
-			</CardFooter>
-		</Card>
+			</footer>
+		</div>
 	);
 }
 
@@ -92,7 +91,9 @@ export function SecretInput({
 			<InputGroupAddon align="inline-end">
 				<InputGroupButton
 					size="icon-xs"
-					aria-label={`${shown ? "Hide" : "Show"} ${what}`}
+					aria-label={
+						shown ? copy.common.hideSecret(what) : copy.common.showSecret(what)
+					}
 					onClick={() => setShown((v) => !v)}
 				>
 					{shown ? <EyeOff aria-hidden /> : <Eye aria-hidden />}

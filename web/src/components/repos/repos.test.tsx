@@ -1,4 +1,4 @@
-import { act, screen, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { describe, expect, it } from "vitest";
@@ -40,7 +40,9 @@ const detail = {
 
 async function openAfterGuard(path: string, swap: () => void, first = "/jobs") {
 	const { router } = renderApp(first);
-	await screen.findByRole("heading", { name: /Jobs is not available yet/ });
+	await screen.findByRole("heading", {
+		name: "Follow every backup as it runs",
+	});
 	swap();
 	await act(() => router.navigate({ to: path }));
 }
@@ -51,6 +53,17 @@ describe("repositories list", () => {
 		renderApp("/settings/repositories");
 
 		expect(await screen.findByText("main")).toBeInTheDocument();
+		expect(
+			screen.getAllByRole("columnheader").map((header) => header.textContent),
+		).toEqual([
+			"Name",
+			"Backend",
+			"Location",
+			"Hosts",
+			"Agent key",
+			"Last checked",
+			"Actions",
+		]);
 		expect(screen.getByText("archive")).toBeInTheDocument();
 		expect(screen.getByText("Experimental")).toBeInTheDocument();
 		expect(screen.getByText("Can delete")).toBeInTheDocument();
@@ -71,6 +84,39 @@ describe("repositories list", () => {
 		expect(
 			screen.getAllByRole("link", { name: "Add repository" }),
 		).toHaveLength(2);
+	});
+
+	it("shows the illustration and a way to add when no repository exists", async () => {
+		useSignedIn({ repositories: [s3Repository] });
+		await openAfterGuard("/settings/repositories", () =>
+			server.use(http.get("/api/v1/repositories", () => HttpResponse.json([]))),
+		);
+
+		expect(await screen.findByText("No repositories yet")).toBeInTheDocument();
+		expect(document.querySelectorAll("main img")).toHaveLength(1);
+		expect(document.querySelector("main img")).toHaveAttribute(
+			"src",
+			expect.stringContaining("repos-empty"),
+		);
+		for (const link of screen.getAllByRole("link", {
+			name: "Add repository",
+		})) {
+			expect(link).toHaveAttribute("href", "/settings/repositories/new");
+		}
+	});
+
+	it("reveals the full location in a tooltip", async () => {
+		const location = "s3://a-very-long-bucket-name/with/a/long/prefix/path";
+		useSignedIn({
+			repositories: [{ ...s3Repository, location_display: location }],
+		});
+		renderApp("/settings/repositories");
+		const user = userEvent.setup();
+
+		await user.tab();
+		const trigger = await screen.findByText(location);
+		await user.hover(trigger);
+		expect(await screen.findByRole("tooltip")).toHaveTextContent(location);
 	});
 
 	it("keeps the previous rows and offers a retry when loading fails", async () => {
@@ -109,10 +155,22 @@ describe("repositories list", () => {
 		renderApp("/settings/repositories");
 		const user = userEvent.setup();
 		await user.click(
-			await screen.findByRole("button", { name: "Check storage again" }),
+			await screen.findByRole("button", { name: "Actions for main" }),
 		);
-		await screen.findByRole("button", { name: "Check storage again" });
-		expect(checked).toBe(1);
+		await user.click(
+			await screen.findByRole("menuitem", { name: "Check storage again" }),
+		);
+		await waitFor(() => expect(checked).toBe(1));
+	});
+
+	it("links the repository name to its page", async () => {
+		useSignedIn({ repositories: [s3Repository] });
+		renderApp("/settings/repositories");
+
+		expect(await screen.findByRole("link", { name: "main" })).toHaveAttribute(
+			"href",
+			"/settings/repositories/repo-1",
+		);
 	});
 });
 
@@ -146,6 +204,27 @@ function mockDetail(options: { local?: boolean } = {}) {
 }
 
 describe("repository page", () => {
+	it("shows Repository not found with a way back for an unknown id", async () => {
+		useSignedIn();
+		server.use(
+			http.get("/api/v1/repositories/missing", () =>
+				apiError(404, "not_found", "no"),
+			),
+		);
+		renderApp("/settings/repositories/missing");
+
+		expect(
+			await screen.findByRole("heading", {
+				level: 1,
+				name: "Repository not found",
+			}),
+		).toBeInTheDocument();
+		expect(
+			screen.getByRole("link", { name: "Back to Repositories" }),
+		).toHaveAttribute("href", "/settings/repositories");
+		expect(screen.queryByText(/Couldn't load this repository/)).toBeNull();
+	});
+
 	it("warns while the agent key can delete and lists the stored checks", async () => {
 		useSignedIn({ repositories: [s3Repository] });
 		mockDetail();

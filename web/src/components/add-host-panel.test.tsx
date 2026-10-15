@@ -6,11 +6,11 @@ import {
 	createRouter,
 	RouterProvider,
 } from "@tanstack/react-router";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AddHostPanel } from "@/components/add-host-panel";
+import { AddHostPanel, type AddHostStage } from "@/components/add-host-panel";
 import { repository, serverInfo } from "@/test/app";
 import { server } from "@/test/server";
 
@@ -115,7 +115,7 @@ describe("AddHostPanel", () => {
 			screen.getByRole("button", { name: "Copy install command" }),
 		).toBeEnabled();
 		expect(
-			screen.getByText("Waiting for the host to connect..."),
+			screen.getByText("Waiting for the host to connect…"),
 		).toBeInTheDocument();
 	});
 
@@ -183,6 +183,46 @@ describe("AddHostPanel", () => {
 		).toBeDisabled();
 	});
 
+	it("issues one token when Generate new token is double-clicked", async () => {
+		mockServer({
+			tokenStatus: {
+				status: "expired",
+				expires_at: realNow() - 1000,
+				server_time: realNow(),
+				host: null,
+			},
+		});
+		let issuedTokens = 0;
+		server.use(
+			http.post("/api/v1/join-tokens", async () => {
+				issuedTokens += 1;
+				await new Promise((resolve) => setTimeout(resolve, 100));
+				const serverTime = realNow();
+				return HttpResponse.json(
+					{
+						id: "token-1",
+						token: SECRET,
+						command: `install --join ${SECRET}`,
+						expires_at: serverTime + 3_600_000,
+						server_time: serverTime,
+					},
+					{ status: 201 },
+				);
+			}),
+		);
+		renderPanel();
+		await generate();
+		const regenerate = await screen.findByRole("button", {
+			name: "Generate new token",
+		});
+		await waitFor(() => expect(issuedTokens).toBe(1));
+
+		await userEvent.setup().dblClick(regenerate);
+		await waitFor(() => expect(issuedTokens).toBe(2));
+		await new Promise((resolve) => setTimeout(resolve, 200));
+		expect(issuedTokens).toBe(2);
+	});
+
 	it("asks for a repository first when there are none", async () => {
 		mockServer({ repositories: [] });
 		renderPanel();
@@ -199,7 +239,9 @@ describe("AddHostPanel", () => {
 		mockServer({ agentArches: [] });
 		renderPanel();
 
-		expect(await screen.findByText(/Add --from-github/)).toBeInTheDocument();
+		expect(
+			await screen.findByText(/This server has no agent binaries/),
+		).toHaveTextContent("Add --from-github to the install command");
 	});
 
 	it("keeps the token out of storage, the URL and the query cache", async () => {
@@ -224,4 +266,42 @@ describe("AddHostPanel", () => {
 		).not.toContain(SECRET);
 		expect(window.location.href).not.toContain(SECRET);
 	});
+
+	it("reports the stages in order while the token is polled", async () => {
+		mockServer();
+		const answers = [
+			{ status: "pending", host: null },
+			{ status: "used", host: null },
+			{
+				status: "used",
+				host: {
+					id: "host-1",
+					hostname: "db-1",
+					version: "0.1.0",
+					status: "online",
+				},
+			},
+		];
+		let polled = 0;
+		server.use(
+			http.get("/api/v1/join-tokens/token-1", () =>
+				HttpResponse.json({
+					expires_at: realNow() + 3_600_000,
+					server_time: realNow(),
+					...answers[Math.min(polled++, answers.length - 1)],
+				}),
+			),
+		);
+		const stages: AddHostStage[] = [];
+		const onStage = (stage: AddHostStage) => stages.push(stage);
+		renderPanel({ onStage });
+		await generate();
+
+		await waitFor(
+			() => expect(stages).toEqual(["issued", "enrolling", "online"]),
+			{
+				timeout: 12_000,
+			},
+		);
+	}, 15_000);
 });

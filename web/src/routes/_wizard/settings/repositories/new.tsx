@@ -2,7 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { parseStep, type Step } from "@/components/wizard/draft";
 import { RepositoryWizard } from "@/components/wizard/repository-wizard";
 
-export const Route = createFileRoute("/_app/settings/repositories/new")({
+export const Route = createFileRoute("/_wizard/settings/repositories/new")({
 	validateSearch: (search: Record<string, unknown>): { step?: Step } => {
 		const step = parseStep(search.step);
 		return step ? { step } : {};
