@@ -4,6 +4,7 @@ import { Copy } from "lucide-react";
 import { type ReactNode, useRef, useState } from "react";
 import { toast } from "sonner";
 import type { HostDetail, HostMount } from "@/api/gen/model";
+import { HostPolicies } from "@/components/hosts/host-policies";
 import { CertificateText, VersionCell } from "@/components/hosts/hosts-table";
 import { RelativeTime } from "@/components/relative-time";
 import { StatusBadge } from "@/components/status-badge";
@@ -21,21 +22,10 @@ import {
 } from "@/components/ui/table";
 import { copy } from "@/copy";
 import { copyText } from "@/lib/clipboard";
+import { formatBytes } from "@/lib/format";
 import { infoQuery } from "@/lib/session";
 
 const FILESYSTEMS_SHOWN = 20;
-const UNITS = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
-
-function formatBytes(bytes: number) {
-	let value = bytes;
-	let unit = 0;
-	while (value >= 1024 && unit < UNITS.length - 1) {
-		value /= 1024;
-		unit += 1;
-	}
-	return `${unit === 0 ? value : value.toFixed(1)} ${UNITS[unit]}`;
-}
-
 function formatUptime(seconds: number) {
 	const days = Math.floor(seconds / 86_400);
 	const hours = Math.floor((seconds % 86_400) / 3_600);
@@ -143,7 +133,7 @@ function Filesystems({ mounts }: { mounts: HostMount[] }) {
 			</Table>
 			{!all && sorted.length > FILESYSTEMS_SHOWN && (
 				<Button
-					variant="ghost"
+					variant="outline"
 					size="sm"
 					className="self-start"
 					onClick={() => setAll(true)}
@@ -220,7 +210,7 @@ export function HostOverview({ host }: { host: HostDetail }) {
 							key="r"
 							to="/settings/repositories/$id"
 							params={{ id: host.repository_id }}
-							className="font-semibold underline underline-offset-4"
+							className="rounded-sm text-primary-strong underline-offset-4 hover:underline"
 						>
 							{host.repository_name}
 						</Link>,
@@ -251,6 +241,7 @@ export function HostOverview({ host }: { host: HostDetail }) {
 				]}
 			/>
 			<LabelsCard host={host} />
+			<HostPolicies host={host} />
 			<FactsCard
 				title={copy.hostPage.cards.certificate}
 				facts={[

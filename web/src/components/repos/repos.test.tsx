@@ -38,10 +38,14 @@ const detail = {
 	],
 };
 
-async function openAfterGuard(path: string, swap: () => void, first = "/jobs") {
+async function openAfterGuard(
+	path: string,
+	swap: () => void,
+	first = "/overview",
+) {
 	const { router } = renderApp(first);
 	await screen.findByRole("heading", {
-		name: "Follow every backup as it runs",
+		name: "See every backup at a glance",
 	});
 	swap();
 	await act(() => router.navigate({ to: path }));

@@ -235,3 +235,24 @@ fn keys_passwd_refused_when_opened_by_recovery_key() {
     assert_eq!(count_files(&repo.join("keys")), 2);
     opens_with(&repo, PASSWORD).success();
 }
+
+#[test]
+fn keys_writer_stdin_backup_has_no_parent() {
+    let (_tmp, repo, _src, keys) = setup();
+    for _ in 0..2 {
+        let summary = backup_summary(
+            lode_writer(&repo, &keys)
+                .args(["backup", "--stdin", "--json", "--name", "app.dump"])
+                .write_stdin("dump bytes"),
+        );
+        assert!(summary["parent"].is_null());
+    }
+    let dumped = lode(&repo)
+        .args(["dump", "latest", "/app.dump"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(dumped, b"dump bytes");
+}

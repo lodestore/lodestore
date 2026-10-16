@@ -1,17 +1,23 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { Camera, ListChecks } from "lucide-react";
 import { useState } from "react";
 import { z } from "zod";
 import { ApiError } from "@/api/fetcher";
-import { useGetHost } from "@/api/gen/endpoints";
+import { useGetHost, useListJobs } from "@/api/gen/endpoints";
 import type { HostDetail } from "@/api/gen/model";
+import { Illustration } from "@/components/brand/illustration";
 import { EditLabelsDialog } from "@/components/hosts/edit-labels-dialog";
 import {
 	HostOverview,
 	HostOverviewSkeleton,
 } from "@/components/hosts/host-overview";
 import { RevokeHostDialog } from "@/components/hosts/revoke-host-dialog";
-import { PreviewPage } from "@/components/preview-page";
+import { RunBackupButton } from "@/components/hosts/run-backup-button";
+import { SnapshotsTable } from "@/components/hosts/snapshots-table";
+import {
+	CancelJobDialog,
+	useRerunAction,
+} from "@/components/jobs/cancel-job-dialog";
+import { type JobRow, JobsTable, toJobRow } from "@/components/jobs/jobs-table";
 import { formatRelative } from "@/components/relative-time";
 import { StatusBadge } from "@/components/status-badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -36,6 +42,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { copy } from "@/copy";
 
 const TABS = ["overview", "snapshots", "jobs"] as const;
+const JOBS_REFRESH_MS = 5_000;
 
 export const Route = createFileRoute("/_app/hosts/$id")({
 	validateSearch: z.object({ tab: z.enum(TABS).optional().catch(undefined) }),
@@ -59,6 +66,77 @@ function NotFound() {
 				</Button>
 			</EmptyContent>
 		</Empty>
+	);
+}
+
+function HostJobs({ host }: { host: HostDetail }) {
+	const query = useListJobs(
+		{ host_id: host.id },
+		{
+			query: {
+				refetchInterval: JOBS_REFRESH_MS,
+				refetchIntervalInBackground: false,
+			},
+		},
+	);
+	const rerun = useRerunAction({ open: true });
+	const [cancelling, setCancelling] = useState<JobRow>();
+	const jobs = query.data?.items.map(toJobRow);
+
+	if (jobs === undefined && query.isError) {
+		return (
+			<Alert variant="destructive" role="alert" className="mt-4">
+				<AlertDescription className="flex items-center justify-between gap-4">
+					{copy.jobs.loadFailed}
+					<Button
+						type="button"
+						variant="secondary"
+						size="sm"
+						onClick={() => query.refetch()}
+					>
+						{copy.errors.retry}
+					</Button>
+				</AlertDescription>
+			</Alert>
+		);
+	}
+	if (jobs?.length === 0) {
+		return (
+			<Empty className="py-24">
+				<EmptyHeader>
+					<Illustration
+						name="preview-host-tabs"
+						width={320}
+						height={216}
+						className="h-auto w-80 max-w-full"
+					/>
+					<EmptyTitle>{copy.hostBackup.jobsEmptyHeading}</EmptyTitle>
+					<EmptyDescription>{copy.hostBackup.jobsEmptyBody}</EmptyDescription>
+				</EmptyHeader>
+			</Empty>
+		);
+	}
+	return (
+		<div className="flex flex-col gap-4 pt-4">
+			<JobsTable
+				jobs={jobs ?? []}
+				loading={jobs === undefined}
+				hide={["host"]}
+				onCancel={setCancelling}
+				onRerun={rerun.run}
+			/>
+			<CancelJobDialog
+				job={cancelling}
+				onClose={() => setCancelling(undefined)}
+			/>
+			<Link
+				to="/jobs"
+				search={{ host: host.hostname }}
+				className="self-start text-sm font-semibold text-primary-strong underline-offset-4 hover:underline"
+			>
+				{copy.hostBackup.openInJobs}
+			</Link>
+		</div>
 	);
 }
 
@@ -146,6 +224,7 @@ function HostPage() {
 						</div>
 						{!revoked && (
 							<div className="flex gap-2">
+								<RunBackupButton host={host} />
 								<Button variant="outline" onClick={() => setEditing(host)}>
 									{copy.hostPage.editLabels}
 								</Button>
@@ -188,20 +267,10 @@ function HostPage() {
 							<HostOverview host={host} />
 						</TabsContent>
 						<TabsContent value="snapshots">
-							<PreviewPage
-								embedded
-								icon={Camera}
-								illustration="preview-host-tabs"
-								{...copy.preview.hostSnapshots}
-							/>
+							<SnapshotsTable key={host.id} host={host} />
 						</TabsContent>
 						<TabsContent value="jobs">
-							<PreviewPage
-								embedded
-								icon={ListChecks}
-								illustration="preview-jobs"
-								{...copy.preview.hostJobs}
-							/>
+							<HostJobs host={host} />
 						</TabsContent>
 					</Tabs>
 				</>

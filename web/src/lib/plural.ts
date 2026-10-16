@@ -10,3 +10,13 @@ export const expiresInDays = (n: number) =>
 	`Expires in ${n} ${noun(n, "day", "days")}`;
 
 export const hostCount = (n: number) => `${n} ${noun(n, "host", "hosts")}`;
+
+export const jobCount = (n: number) => `${n} ${noun(n, "job", "jobs")}`;
+
+export const policyCount = (n: number) =>
+	`${n} ${noun(n, "policy", "policies")}`;
+
+export const warningCount = (n: number) =>
+	`${n} ${noun(n, "warning", "warnings")}`;
+
+export const fileCount = (n: number) => `${n} ${noun(n, "file", "files")}`;

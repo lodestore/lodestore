@@ -15,7 +15,7 @@ zstd = "0.14.2"
 chacha20poly1305 = { version = "0.11.0", features = ["zeroize"] }
 hpke = { version = "=0.14.1", default-features = false, features = ["alloc", "getrandom", "mlkem", "x25519", "hkdfsha2", "chacha"] }
 argon2 = "0.6.0"
-rustix = { version = "1.1.5", features = ["fs", "system"] }
+rustix = { version = "1.1.5", features = ["fs", "process", "system"] }
 getrandom = "0.4.3"
 rand_core = "0.10.1"
 zeroize = { version = "1.9.1", features = ["derive"] }
@@ -24,6 +24,7 @@ thiserror = "2.0.21"
 tokio = { version = "1.53.2", features = ["rt", "rt-multi-thread"] }
 data-encoding = "2.11.1"
 ignore = "0.4.33"
+serde_json = "1.0.154"
 opendal = { version = "0.59.4", default-features = false, features = ["services-s3", "layers-retry", "layers-timeout", "executors-tokio", "http-transport-reqwest"] }
 
 [features]
@@ -41,6 +42,5 @@ protox = "0.10.0"
 lodestore-format = { path = ".", features = ["test-hooks"] }
 tempfile = "3.27.0"
 rand_chacha = "0.10.0"
-serde_json = "1.0.154"
 tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros"] }
 lodestore-testkit = { path = "../lodestore-testkit" }

@@ -4,13 +4,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
-use indicatif::HumanBytes;
+use indicatif::{HumanBytes, ProgressBar};
+use lodestore_format::crypto::BlobId;
 use lodestore_format::fs;
 use lodestore_format::fs::filter::PathMatcher;
 use lodestore_format::fs::walk::WalkOptions;
 use lodestore_format::index::hex32;
+use lodestore_format::reader::Reader;
 use lodestore_format::snapshot::{ParentTree, find_parent};
-use lodestore_format::writer::{BackupOptions, BackupProgress, canonical_roots};
+use lodestore_format::store::Store;
+use lodestore_format::writer::{BackupOptions, BackupOutcome, BackupProgress, canonical_roots};
 use serde::Serialize;
 
 use crate::cli::{BackupFlags, SecretArgs, UsageError};
@@ -26,6 +29,10 @@ struct ProgressJson<'a> {
     bytes_done: u64,
     bytes_added: u64,
     current_path: JsonPath<'a>,
+    files_total: u64,
+    bytes_total: u64,
+    scan_done: bool,
+    bytes_processed: u64,
 }
 
 #[derive(Serialize)]
@@ -71,6 +78,9 @@ pub async fn run(
     paths: &[PathBuf],
     flags: BackupFlags,
 ) -> Result<u8> {
+    if flags.stdin {
+        return run_stdin(url, args, out, flags).await;
+    }
     if args.writer_keys.is_some() && flags.parent.is_some() {
         return Err(UsageError(
             "--parent cannot be used with --writer-keys: writer keys cannot read snapshots".into(),
@@ -94,20 +104,7 @@ pub async fn run(
                     find_parent(&list.entries, &hostname, &roots).map(|e| e.id)
                 }
             };
-            match found {
-                Some(id) => match ParentTree::open(reader, id).await {
-                    Ok(parent) => Some(parent),
-                    Err(e) if flags.parent.is_none() => {
-                        eprintln!(
-                            "warning: parent snapshot {} is unreadable ({e}); backing up without a parent",
-                            hex32(&id)
-                        );
-                        None
-                    }
-                    Err(e) => return Err(e.into()),
-                },
-                None => None,
-            }
+            open_parent(reader, found, flags.parent.is_some()).await?
         }
     };
     let parent_id = parent.as_ref().map(|p| hex32(&p.id()));
@@ -122,30 +119,7 @@ pub async fn run(
     };
     let throttle = Throttle::new();
     let bar = if out.json { None } else { spinner() };
-    let progress = |p: &BackupProgress| {
-        if p.starting || !throttle.ready() {
-            return;
-        }
-        if out.json {
-            out.emit(
-                "backup_progress",
-                ProgressJson {
-                    files_done: p.files_done,
-                    bytes_done: p.bytes_done,
-                    bytes_added: p.bytes_added,
-                    current_path: JsonPath(&p.current),
-                },
-            );
-        } else if let Some(bar) = &bar {
-            bar.set_message(format!(
-                "{} files, {} read, {} added  {}",
-                p.files_done,
-                HumanBytes(p.bytes_done),
-                HumanBytes(p.bytes_added),
-                String::from_utf8_lossy(&p.current)
-            ));
-        }
-    };
+    let progress = progress_sink(out, &throttle, bar.as_ref());
     let outcome = writer
         .backup(
             paths,
@@ -160,6 +134,7 @@ pub async fn run(
                     exclude_caches: flags.exclude_caches,
                 },
                 cancel: cancel_on_ctrl_c(),
+                prescan: true,
                 ..Default::default()
             },
             &progress,
@@ -168,8 +143,130 @@ pub async fn run(
     if let Some(bar) = &bar {
         bar.finish_and_clear();
     }
-    let outcome = outcome?;
+    finish(out, outcome?, parent_id)
+}
 
+async fn open_parent(
+    reader: Reader<Store>,
+    found: Option<BlobId>,
+    explicit: bool,
+) -> Result<Option<ParentTree<'static>>> {
+    let Some(id) = found else {
+        return Ok(None);
+    };
+    match ParentTree::open(reader, id).await {
+        Ok(parent) => Ok(Some(parent)),
+        Err(e) if !explicit => {
+            eprintln!(
+                "warning: parent snapshot {} is unreadable ({e}); backing up without a parent",
+                hex32(&id)
+            );
+            Ok(None)
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn progress_sink<'a>(
+    out: Output,
+    throttle: &'a Throttle,
+    bar: Option<&'a ProgressBar>,
+) -> impl Fn(&BackupProgress) + 'a {
+    move |p| {
+        if p.starting || !throttle.ready() {
+            return;
+        }
+        if out.json {
+            out.emit(
+                "backup_progress",
+                ProgressJson {
+                    files_done: p.files_done,
+                    bytes_done: p.bytes_done,
+                    bytes_added: p.bytes_added,
+                    current_path: JsonPath(&p.current),
+                    files_total: p.files_total,
+                    bytes_total: p.bytes_total,
+                    scan_done: p.scan_done,
+                    bytes_processed: p.bytes_processed,
+                },
+            );
+        } else if let Some(bar) = bar {
+            let files = if p.scan_done {
+                format!("{}/{}", p.files_done, p.files_total)
+            } else {
+                p.files_done.to_string()
+            };
+            bar.set_message(format!(
+                "{files} files, {} read, {} added  {}",
+                HumanBytes(p.bytes_done),
+                HumanBytes(p.bytes_added),
+                String::from_utf8_lossy(&p.current)
+            ));
+        }
+    }
+}
+
+async fn run_stdin(url: &str, args: &SecretArgs, out: Output, flags: BackupFlags) -> Result<u8> {
+    let name = flags.name.unwrap_or_default();
+    if name.is_empty() {
+        return Err(UsageError("--name must not be empty".into()).into());
+    }
+    if args.writer_keys.is_some() && flags.parent.is_some() {
+        return Err(UsageError(
+            "--parent cannot be used with --writer-keys: writer keys cannot read snapshots".into(),
+        )
+        .into());
+    }
+    let (mut writer, reader) = open_for_write(url, args).await?;
+    let hostname = flags.host.map_or_else(fs::hostname, String::into_bytes);
+    let tag = format!("stdin={name}");
+    let parent = match reader {
+        None => None,
+        Some(reader) => {
+            let found = match &flags.parent {
+                Some(spec) => Some(reader.resolve_snapshot(spec).await?.id),
+                None => {
+                    let list = reader.list_snapshots().await?;
+                    warn_skipped(&list.skipped);
+                    list.entries
+                        .iter()
+                        .rev()
+                        .find(|e| e.snapshot.hostname == hostname && e.snapshot.tags.contains(&tag))
+                        .map(|e| e.id)
+                }
+            };
+            open_parent(reader, found, flags.parent.is_some()).await?
+        }
+    };
+    let parent_id = parent.as_ref().map(|p| hex32(&p.id()));
+    let mut tags = flags.tag;
+    if let Some(policy) = flags.policy {
+        tags.push(format!("policy={policy}"));
+    }
+    let throttle = Throttle::new();
+    let bar = if out.json { None } else { spinner() };
+    let progress = progress_sink(out, &throttle, bar.as_ref());
+    let outcome = writer
+        .backup_stream(
+            name.as_bytes(),
+            &mut std::io::stdin().lock(),
+            BackupOptions {
+                hostname: Some(hostname),
+                tags,
+                parent,
+                cancel: cancel_on_ctrl_c(),
+                ..Default::default()
+            },
+            &progress,
+        )
+        .await;
+    if let Some(bar) = &bar {
+        bar.finish_and_clear();
+    }
+    finish(out, outcome?, parent_id)
+}
+
+fn finish(out: Output, outcome: BackupOutcome, parent_id: Option<String>) -> Result<u8> {
     let id = hex32(&outcome.snapshot_id);
     let stats = &outcome.stats;
     if out.json {

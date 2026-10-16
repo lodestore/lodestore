@@ -27,6 +27,9 @@ pub struct ServerInfo {
 
 #[utoipa::path(
     get,
+    tag = "Server",
+    summary = "Get server status",
+    security(()),
     path = "/api/v1/server/status",
     responses((status = 200, description = "Whether the first administrator still has to be created", body = ServerStatus))
 )]
@@ -38,6 +41,8 @@ async fn status(State(state): State<AppState>) -> Result<Json<ServerStatus>, Api
 
 #[utoipa::path(
     get,
+    tag = "Server",
+    summary = "Get server information",
     path = "/api/v1/server/info",
     responses(
         (status = 200, description = "Server version and connection details", body = ServerInfo),

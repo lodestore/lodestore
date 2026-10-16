@@ -85,7 +85,7 @@ export function LabelsEditor({
 			)}
 			<Button
 				type="button"
-				variant="ghost"
+				variant="outline"
 				size="sm"
 				className="self-start"
 				disabled={rows.length >= MAX_LABELS}

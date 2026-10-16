@@ -25,6 +25,12 @@ impl Paths {
     pub fn agent_json(&self) -> PathBuf {
         self.config_dir.join("agent.json")
     }
+    pub fn agent_yaml(&self) -> PathBuf {
+        self.config_dir.join("agent.yaml")
+    }
+    pub fn hooks_dir(&self) -> PathBuf {
+        self.config_dir.join("hooks.d")
+    }
     pub fn identity_json(&self) -> PathBuf {
         self.state_dir.join("identity.json")
     }
@@ -51,6 +57,12 @@ impl Paths {
     }
     pub fn repository_json(&self) -> PathBuf {
         self.state_dir.join("repository.json")
+    }
+    pub fn jobs_dir(&self) -> PathBuf {
+        self.state_dir.join("jobs")
+    }
+    pub fn cache_dir(&self) -> PathBuf {
+        self.state_dir.join("cache")
     }
 }
 

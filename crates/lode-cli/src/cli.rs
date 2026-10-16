@@ -82,7 +82,7 @@ pub enum Command {
     },
     /// Back up files and directories into the repository
     Backup {
-        #[arg(required = true, value_name = "PATHS")]
+        #[arg(required_unless_present = "stdin", value_name = "PATHS")]
         paths: Vec<PathBuf>,
         #[command(flatten)]
         flags: BackupFlags,
@@ -154,6 +154,31 @@ pub struct RestoreFlags {
 
 #[derive(Debug, Args)]
 pub struct BackupFlags {
+    /// Back up what is read from standard input as one file instead of paths;
+    /// needs --name
+    #[arg(long, requires = "name", conflicts_with = "paths")]
+    pub stdin: bool,
+
+    /// With --stdin: the file name the data is stored under (`/<NAME>` in the
+    /// snapshot, which is tagged `stdin=<NAME>`)
+    #[arg(long, value_name = "NAME", requires = "stdin")]
+    pub name: Option<String>,
+
+    /// With --stdin: add the tag `policy=<NAME>` to the snapshot
+    #[arg(long, value_name = "NAME", requires = "stdin")]
+    pub policy: Option<String>,
+
+    /// With --stdin: hand the data to the local agent instead of writing to a
+    /// repository; used by default when no repository is configured and the
+    /// agent socket exists
+    #[arg(long, requires = "stdin")]
+    pub agent: bool,
+
+    /// With --stdin: path of the agent socket (default /run/lodestore/agent.sock);
+    /// implies --agent
+    #[arg(long, value_name = "PATH", requires = "stdin")]
+    pub agent_socket: Option<PathBuf>,
+
     /// Compare files with this snapshot (id or unique prefix) instead of the
     /// latest one of this host with the same paths. Not available with --writer-keys
     #[arg(long, value_name = "SNAPSHOT")]

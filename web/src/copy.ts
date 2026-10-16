@@ -1,4 +1,12 @@
+import { hostBackup, snapshots } from "@/copy.host";
+import { jobs } from "@/copy.jobs";
+import { policies } from "@/copy.policies";
+
 export const copy = {
+	jobs,
+	policies,
+	hostBackup,
+	snapshots,
 	nav: {
 		overview: "Overview",
 		hosts: "Hosts",
@@ -10,6 +18,7 @@ export const copy = {
 	soon: "Soon",
 	brand: "Lodestore",
 	signOut: "Sign out",
+	apiReference: "API reference",
 	theme: { label: "Theme", light: "Light", dark: "Dark", system: "System" },
 
 	shell: {
@@ -31,6 +40,7 @@ export const copy = {
 		},
 		addHost: "Add host",
 		addRepository: "Add repository",
+		createPolicy: "Create policy",
 		lightTheme: "Switch to light theme",
 		darkTheme: "Switch to dark theme",
 		systemTheme: "Use system theme",
@@ -178,7 +188,7 @@ export const copy = {
 		timeline: ["Run the command", "The agent enrolls", "The host appears here"],
 		successHeading: (name: string) => `${name} is connected`,
 		successDetail: (version: string) => `Online, version ${version}.`,
-		nextStep: "Next: create a backup policy — coming soon",
+		nextStep: "Next: create a backup policy",
 	},
 
 	login: {

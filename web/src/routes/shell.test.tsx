@@ -14,8 +14,6 @@ describe("app shell", () => {
 
 	it.each([
 		["/overview", "See every backup at a glance"],
-		["/policies", "Decide what gets backed up, and when"],
-		["/jobs", "Follow every backup as it runs"],
 		["/restore", "Restore any file from any snapshot"],
 	])("shows an honest preview on %s", async (path, title) => {
 		await renderAt(path);
@@ -26,6 +24,11 @@ describe("app shell", () => {
 		expect(within(main).getByText(copy.preview.footnote)).toBeInTheDocument();
 		expect(within(main).queryAllByRole("button")).toHaveLength(0);
 		expect(within(main).queryAllByRole("link")).toHaveLength(0);
+	});
+
+	it.each(["/policies", "/jobs"])("opens the %s section", async (path) => {
+		await renderAt(path);
+		expect(document.querySelector("h1[data-page-title]")).toBeInTheDocument();
 	});
 
 	it("swaps the preview illustration with the theme", async () => {
@@ -51,18 +54,12 @@ describe("app shell", () => {
 	it("moves focus to the heading on every route change", async () => {
 		const user = userEvent.setup();
 		await renderAt("/overview");
-		await user.click(screen.getByRole("link", { name: "Policies" }));
-		expect(
-			await screen.findByRole("heading", {
-				name: "Decide what gets backed up, and when",
-			}),
-		).toHaveFocus();
-		await user.click(screen.getByRole("link", { name: "Jobs" }));
-		expect(
-			await screen.findByRole("heading", {
-				name: "Follow every backup as it runs",
-			}),
-		).toHaveFocus();
+		for (const name of ["Policies", "Jobs"]) {
+			await user.click(screen.getByRole("link", { name }));
+			await vi.waitFor(() => {
+				expect(document.querySelector("h1[data-page-title]")).toHaveFocus();
+			});
+		}
 	});
 
 	it("keeps the skip link as the first tab stop on the first render", async () => {
@@ -102,9 +99,9 @@ describe("app shell", () => {
 		expect(current[0]).toHaveTextContent("Overview");
 	});
 
-	it("shows a Soon badge on the four stub sections", async () => {
+	it("shows a Soon badge on the two stub sections", async () => {
 		await renderAt("/overview");
-		expect(screen.getAllByText("Soon")).toHaveLength(4);
+		expect(screen.getAllByText("Soon")).toHaveLength(2);
 	});
 
 	it("makes the skip link the first tab stop and targets main", async () => {
@@ -138,5 +135,8 @@ describe("app shell", () => {
 		expect(
 			screen.getByRole("menuitem", { name: "Sign out" }),
 		).toBeInTheDocument();
+		const reference = screen.getByRole("menuitem", { name: "API reference" });
+		expect(reference).toHaveAttribute("href", "/api/docs");
+		expect(reference).toHaveAttribute("target", "_blank");
 	});
 });

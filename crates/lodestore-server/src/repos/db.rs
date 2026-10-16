@@ -336,14 +336,16 @@ pub struct ServerAccess {
     pub server_creds: Option<AccessKey>,
     pub agent_creds: Option<AccessKey>,
     pub config_hash: [u8; 32],
+    pub format_repo_id: [u8; 16],
     pub master: Zeroizing<Vec<u8>>,
     pub server_slot_secret: Option<Zeroizing<Vec<u8>>>,
 }
 
 pub async fn server_access(state: &AppState, id: &str) -> anyhow::Result<ServerAccess> {
     let row = sqlx::query(
-        "SELECT backend, location_json, config_hash, master_secret_id, server_slot_secret_id, \
-         server_creds_secret_id, agent_creds_secret_id FROM repositories WHERE id = $1",
+        "SELECT backend, location_json, config_hash, format_repo_id, master_secret_id, \
+         server_slot_secret_id, server_creds_secret_id, agent_creds_secret_id \
+         FROM repositories WHERE id = $1",
     )
     .bind(id)
     .fetch_optional(&state.db.pool)
@@ -376,6 +378,10 @@ pub async fn server_access(state: &AppState, id: &str) -> anyhow::Result<ServerA
             .try_get::<Vec<u8>, _>("config_hash")?
             .try_into()
             .map_err(|_| anyhow::anyhow!("config_hash must be 32 bytes"))?,
+        format_repo_id: row
+            .try_get::<Vec<u8>, _>("format_repo_id")?
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("format_repo_id must be 16 bytes"))?,
         master: state
             .sealer
             .get_secret(&row.try_get::<String, _>("master_secret_id")?)

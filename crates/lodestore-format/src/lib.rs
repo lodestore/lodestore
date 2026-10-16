@@ -13,6 +13,7 @@ pub mod repo;
 pub mod snapshot;
 pub mod store;
 pub mod tree;
+pub mod tree_cache;
 pub mod writer;
 
 #[allow(clippy::all, clippy::pedantic)]

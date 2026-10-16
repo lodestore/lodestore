@@ -10,6 +10,7 @@ use data_encoding::BASE64URL_NOPAD;
 use lodestore_agent::{AgentError, EnrollArgs, NetOptions, RunArgs, connect, tls};
 use lodestore_format::keys::WriteKeys;
 use lodestore_format::store::{BlobStore, LocalFsStore};
+use lodestore_proto::PROTOCOL_VERSION;
 use lodestore_proto::agent::v1::agent_client::AgentClient;
 use lodestore_proto::agent::v1::agent_message::Body;
 use lodestore_proto::agent::v1::enrollment_client::EnrollmentClient;
@@ -97,7 +98,10 @@ fn enroll_request(token: &str, csr_der: Vec<u8>) -> EnrollRequest {
         os: "linux".to_string(),
         arch: "x86_64".to_string(),
         agent_version: "test".to_string(),
-        versions: Some(Versions { min: 1, max: 1 }),
+        versions: Some(Versions {
+            min: PROTOCOL_VERSION,
+            max: PROTOCOL_VERSION,
+        }),
     }
 }
 
@@ -297,8 +301,12 @@ async fn session_requires_client_cert() {
         let (channel, _) = pinned_channel(&ts, None).await;
         let hello = AgentMessage {
             body: Some(Body::Hello(Hello {
-                versions: Some(Versions { min: 1, max: 1 }),
+                versions: Some(Versions {
+                    min: PROTOCOL_VERSION,
+                    max: PROTOCOL_VERSION,
+                }),
                 agent_version: "test".to_string(),
+                ..Default::default()
             })),
         };
         let status = AgentClient::new(channel)

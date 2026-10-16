@@ -6,6 +6,7 @@
 //! `AlreadyExists` therefore means the identical object is already there.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::io::Read;
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
@@ -21,6 +22,7 @@ use crate::chunker::{Chunker, blob_id, check_params};
 use crate::config;
 use crate::crypto::{BLOB_TYPE_DATA, BLOB_TYPE_TREE, BlobId, Entropy};
 use crate::error::{Error, Result};
+use crate::fs::scan::{self, ScanTotals};
 use crate::fs::walk::{CACHEDIR_TAG, ExtentReader, WalkOptions, Walker, data_extents};
 use crate::fs::{conv, hostname, meta, now};
 use crate::index::{Index, index_object_key, seal_shard};
@@ -28,8 +30,8 @@ use crate::keys::WriteKeys;
 use crate::pack::{MAX_TREE_ULEN, PACK_TARGET_SIZE, PackBuilder, pack_object_key, parse_entries};
 use crate::pb;
 use crate::snapshot::{ParentTree, seal_snapshot, snapshot_object_key};
-use crate::store::{BlobStore, put_named};
-use crate::tree::{encode_tree, split_nodes};
+use crate::store::{BlobError, BlobStore, put_named};
+use crate::tree::{encode_tree, split_nodes, validate_name};
 
 /// Recorded issues beyond this many are only counted.
 const MAX_ISSUES: usize = 1000;
@@ -43,6 +45,9 @@ pub const INDEX_FLUSH_PACKS: usize = 8;
 // average chunk) is reported as TOO_LARGE and left out; lifting the ceiling
 // needs a content-list indirection and so a higher min_reader_version.
 const MAX_CONTENT_IDS: usize = (MAX_TREE_ULEN - (2 << 20)) / 34;
+
+pub type IssueFn<'a> = Box<dyn Fn(&IssueEvent<'_>) + 'a>;
+pub type TreeSinkFn<'a> = Box<dyn FnMut(&BlobId, &[u8]) + 'a>;
 
 /// Writer settings; none of them is part of the repository format.
 pub struct BackupOptions<'a> {
@@ -65,6 +70,26 @@ pub struct BackupOptions<'a> {
     /// uploaded and indexed, no snapshot is written and `backup` returns
     /// `Error::Interrupted`.
     pub cancel: Arc<AtomicBool>,
+    /// Count the files and bytes below the paths on a thread of its own while
+    /// the backup runs; the totals show in [`BackupProgress`].
+    pub prescan: bool,
+    /// Called for every warning and error at the moment it is found, also for
+    /// those beyond the number the snapshot keeps.
+    pub on_issue: Option<IssueFn<'a>>,
+    /// Called with the bytes of every tree the run writes, known to the index
+    /// or not.
+    pub tree_sink: Option<TreeSinkFn<'a>>,
+    /// Recorded in the manifest as `agent_id`.
+    pub agent_id: Option<Vec<u8>>,
+}
+
+/// A warning or error as it is found.
+#[derive(Debug, Clone, Copy)]
+pub struct IssueEvent<'e> {
+    pub warning: bool,
+    pub kind: pb::IssueKind,
+    pub path: &'e [u8],
+    pub message: &'e str,
 }
 
 impl Default for BackupOptions<'_> {
@@ -79,6 +104,10 @@ impl Default for BackupOptions<'_> {
             pack_target_size: PACK_TARGET_SIZE,
             index_flush_packs: INDEX_FLUSH_PACKS,
             cancel: Arc::default(),
+            prescan: false,
+            on_issue: None,
+            tree_sink: None,
+            agent_id: None,
         }
     }
 }
@@ -92,11 +121,21 @@ pub struct BackupProgress {
     pub bytes_done: u64,
     pub bytes_added: u64,
     pub current: Vec<u8>,
+    /// Totals of the prescan so far; 0 without one.
+    pub files_total: u64,
+    pub bytes_total: u64,
+    /// True once the prescan has seen everything, so the totals are final.
+    pub scan_done: bool,
+    /// Bytes of the tree handled so far: finished files plus the part of the
+    /// current one that has been read.
+    pub bytes_processed: u64,
 }
 
 #[derive(Debug, Clone)]
 pub struct BackupOutcome {
     pub snapshot_id: BlobId,
+    pub root_tree: BlobId,
+    pub time: pb::Timestamp,
     pub stats: pb::SnapshotStats,
     pub incomplete: bool,
     pub errors_total: u64,
@@ -143,6 +182,19 @@ impl<S: BlobStore> Writer<S> {
         })
     }
 
+    /// Opens the repository `store` holds with writer keys: reads `config`,
+    /// checks that the keys were exported for exactly it, then [`Writer::new`].
+    pub async fn connect(store: S, keys: WriteKeys) -> Result<Self> {
+        let config_bytes = match store.get("config").await {
+            Ok(bytes) => bytes,
+            Err(BlobError::NotFound) => return Err(Error::NotInitialized),
+            Err(e) => return Err(e.into()),
+        };
+        keys.verify_config(&config_bytes)?;
+        let config = config::decode(&config_bytes)?;
+        Self::new(store, keys, &config).await
+    }
+
     /// `(object key, reason)` of every listed index shard that could not be
     /// used; they only cost deduplication.
     pub fn skipped_index_shards(&self) -> &[(String, String)] {
@@ -166,7 +218,7 @@ impl<S: BlobStore> Writer<S> {
     pub async fn backup(
         &mut self,
         paths: &[PathBuf],
-        options: BackupOptions<'_>,
+        mut options: BackupOptions<'_>,
         progress: &dyn Fn(&BackupProgress),
     ) -> Result<BackupOutcome> {
         if paths.is_empty() {
@@ -189,13 +241,16 @@ impl<S: BlobStore> Writer<S> {
         }
 
         let rootfd = Walker::open_root()?;
+        let mut scan = options.prescan.then(|| {
+            Prescan::start(
+                roots.iter().cloned().collect(),
+                options.walk.clone(),
+                Arc::clone(&options.cancel),
+            )
+        });
         let mut run = Session::new(self, progress);
-        run.parent = options.parent;
-        run.force_rescan = options.force_rescan;
-        run.walk = options.walk;
-        run.pack_target = options.pack_target_size;
-        run.flush_packs = options.index_flush_packs.max(1);
-        run.cancel = options.cancel;
+        run.apply(&mut options);
+        run.scan = scan.as_ref().map(|s| Arc::clone(&s.totals));
         let walked = if trie.is_root {
             run.root_dev = fstat(&rootfd).map(|st| conv(st.st_dev))?;
             run.backup_children(&rootfd, b"").await
@@ -205,17 +260,21 @@ impl<S: BlobStore> Writer<S> {
         let top = match walked {
             Ok(top) => top,
             Err(Error::Interrupted) => {
-                run.flush(BLOB_TYPE_DATA).await?;
-                run.flush(BLOB_TYPE_TREE).await?;
-                run.commit_shard().await?;
+                run.wind_down().await?;
                 return Err(Error::Interrupted);
             }
             Err(e) => return Err(e),
         };
+        if let Some(scan) = scan.as_mut() {
+            scan.finish();
+            if run.cancelled() {
+                run.wind_down().await?;
+                return Err(Error::Interrupted);
+            }
+            run.report(false, b"");
+        }
         let root_tree = run.write_root(top).await?;
-        run.flush(BLOB_TYPE_DATA).await?;
-        run.flush(BLOB_TYPE_TREE).await?;
-        run.commit_shard().await?;
+        run.wind_down().await?;
 
         let incomplete = run.errors_total > 0;
         let (errors_total, warnings_total) = (run.errors_total, run.warnings_total);
@@ -237,23 +296,145 @@ impl<S: BlobStore> Writer<S> {
             errors_total: run.errors_total,
             warnings_total: run.warnings_total,
             index_refs: run.refs.iter().map(|r| r.to_vec()).collect(),
+            agent_id: options.agent_id.unwrap_or_default(),
             program_version: format!("lodestore-format {}", env!("CARGO_PKG_VERSION")),
             ..Default::default()
         };
-        let (id, bytes) = seal_snapshot(
-            &snapshot,
-            &self.keys.hpke_public,
-            &self.keys.repo_id,
-            &mut self.entropy,
-        )?;
-        put_named(&self.store, &snapshot_object_key(&id), bytes).await?;
+        let snapshot_id = self.put_snapshot(&snapshot).await?;
         Ok(BackupOutcome {
-            snapshot_id: id,
+            snapshot_id,
+            root_tree,
+            time: started,
             stats,
             incomplete,
             errors_total,
             warnings_total,
         })
+    }
+
+    /// Backs up the bytes `source` yields as one file `/<name>` in a snapshot
+    /// tagged `stdin=<name>`. It is cut by the same chunker as a file, so the
+    /// same bytes deduplicate against a backup of them as a file. A failing
+    /// `source` (or `options.cancel`) uploads what was read so far, writes no
+    /// snapshot and returns the error: a truncated stream must never look like
+    /// a good backup.
+    pub async fn backup_stream(
+        &mut self,
+        name: &[u8],
+        source: &mut dyn Read,
+        mut options: BackupOptions<'_>,
+        progress: &dyn Fn(&BackupProgress),
+    ) -> Result<BackupOutcome> {
+        validate_name(name).map_err(|_| {
+            Error::InvalidInput(format!(
+                "{:?} is not a valid file name: it must be 1 to 1024 bytes, without '/' or NUL, and not . or ..",
+                lossy(name)
+            ))
+        })?;
+        let started = options.time.unwrap_or_else(now);
+        let parent_id = options.parent.as_ref().map(|p| p.id().to_vec());
+        let path = join(b"", name);
+        let uid = rustix::process::getuid().as_raw();
+        let gid = rustix::process::getgid().as_raw();
+        let (user, group) = meta::owner_names(uid, gid);
+        let mut node = pb::Node {
+            name: name.to_vec(),
+            r#type: pb::NodeType::File as i32,
+            mode: 0o600,
+            uid,
+            gid,
+            user,
+            group,
+            mtime: Some(started),
+            ..Default::default()
+        };
+
+        let mut run = Session::new(self, progress);
+        run.apply(&mut options);
+        let chunker = Chunker::new(source, &run.w.keys.k_id, run.w.keys.cdc_seed);
+        let mut total = 0u64;
+        let mut content = Vec::new();
+        let mut failure = None;
+        for chunk in chunker {
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(e) => {
+                    failure = Some(e);
+                    break;
+                }
+            };
+            if run.cancelled() {
+                failure = Some(Error::Interrupted);
+                break;
+            }
+            total += chunk.data.len() as u64;
+            run.add_blob(BLOB_TYPE_DATA, chunk.id, &chunk.data).await?;
+            content.push(chunk.id.to_vec());
+            if content.len() > MAX_CONTENT_IDS {
+                failure = Some(Error::InvalidInput(
+                    "the stream has too many chunks for one tree entry".into(),
+                ));
+                break;
+            }
+            run.stats.bytes_read = total;
+            run.cur_read = total;
+            run.report(false, &path);
+        }
+        if let Some(e) = failure {
+            run.wind_down().await?;
+            return Err(e);
+        }
+
+        node.size = total;
+        node.content = content;
+        run.cur_read = 0;
+        run.stats.files_new = 1;
+        run.stats.bytes_total = total;
+        run.files_done = 1;
+        run.report(false, &path);
+        let root_tree = run.write_root(vec![node]).await?;
+        run.wind_down().await?;
+
+        let stats = run.stats;
+        let mut tags = options.tags;
+        let tag = format!("stdin={}", String::from_utf8_lossy(name));
+        if !tags.contains(&tag) {
+            tags.push(tag);
+        }
+        let snapshot = pb::Snapshot {
+            time: Some(started),
+            hostname: options.hostname.unwrap_or_else(hostname),
+            paths: vec![path],
+            tags,
+            parent: parent_id.unwrap_or_default(),
+            root_tree: root_tree.to_vec(),
+            stats: Some(stats),
+            index_refs: run.refs.iter().map(|r| r.to_vec()).collect(),
+            agent_id: options.agent_id.unwrap_or_default(),
+            program_version: format!("lodestore-format {}", env!("CARGO_PKG_VERSION")),
+            ..Default::default()
+        };
+        let snapshot_id = self.put_snapshot(&snapshot).await?;
+        Ok(BackupOutcome {
+            snapshot_id,
+            root_tree,
+            time: started,
+            stats,
+            incomplete: false,
+            errors_total: 0,
+            warnings_total: 0,
+        })
+    }
+
+    async fn put_snapshot(&mut self, snapshot: &pb::Snapshot) -> Result<BlobId> {
+        let (id, bytes) = seal_snapshot(
+            snapshot,
+            &self.keys.hpke_public,
+            &self.keys.repo_id,
+            &mut self.entropy,
+        )?;
+        put_named(&self.store, &snapshot_object_key(&id), bytes).await?;
+        Ok(id)
     }
 
     /// Stores one blob frame exactly as given: any codec, any payload bytes
@@ -393,6 +574,43 @@ fn join(path: &[u8], name: &[u8]) -> Vec<u8> {
     p
 }
 
+/// The prescan thread of one run. It is asked to stop whenever the run ends,
+/// however it ends.
+struct Prescan {
+    totals: Arc<ScanTotals>,
+    stop: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Prescan {
+    fn start(roots: Vec<PathBuf>, walk: WalkOptions, cancel: Arc<AtomicBool>) -> Self {
+        let totals = Arc::new(ScanTotals::default());
+        let stop = Arc::new(AtomicBool::new(false));
+        let handle = std::thread::spawn({
+            let (totals, stop) = (Arc::clone(&totals), Arc::clone(&stop));
+            move || scan::scan(&roots, &walk, &stop, &cancel, &totals)
+        });
+        Prescan {
+            totals,
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    /// Waits for the scan to see everything.
+    fn finish(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for Prescan {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
 /// The path components leading to the backed-up roots. A node marked as a
 /// root is walked in full and swallows anything below it.
 #[derive(Default)]
@@ -443,6 +661,11 @@ struct Session<'a, 'p, S: BlobStore> {
     pack_target: usize,
     flush_packs: usize,
     cancel: Arc<AtomicBool>,
+    on_issue: Option<IssueFn<'p>>,
+    tree_sink: Option<TreeSinkFn<'p>>,
+    scan: Option<Arc<ScanTotals>>,
+    /// Bytes read so far of the file being backed up.
+    cur_read: u64,
 }
 
 impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
@@ -470,10 +693,41 @@ impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
             pack_target: PACK_TARGET_SIZE,
             flush_packs: INDEX_FLUSH_PACKS,
             cancel: Arc::default(),
+            on_issue: None,
+            tree_sink: None,
+            scan: None,
+            cur_read: 0,
         }
     }
 
+    /// Takes the settings of the run out of `options`.
+    fn apply(&mut self, options: &mut BackupOptions<'p>) {
+        self.parent = options.parent.take();
+        self.force_rescan = options.force_rescan;
+        self.walk = std::mem::take(&mut options.walk);
+        self.pack_target = options.pack_target_size;
+        self.flush_packs = options.index_flush_packs.max(1);
+        self.cancel = Arc::clone(&options.cancel);
+        self.on_issue = options.on_issue.take();
+        self.tree_sink = options.tree_sink.take();
+    }
+
+    /// Uploads the open packs and the index shard naming them.
+    async fn wind_down(&mut self) -> Result<()> {
+        self.flush(BLOB_TYPE_DATA).await?;
+        self.flush(BLOB_TYPE_TREE).await?;
+        self.commit_shard().await
+    }
+
     fn issue(&mut self, warning: bool, kind: pb::IssueKind, path: &[u8], message: String) {
+        if let Some(on_issue) = &self.on_issue {
+            on_issue(&IssueEvent {
+                warning,
+                kind,
+                path,
+                message: &message,
+            });
+        }
         let (list, total) = if warning {
             (&mut self.warnings, &mut self.warnings_total)
         } else {
@@ -594,6 +848,12 @@ impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
         Ok(())
     }
 
+    fn sink_tree(&mut self, id: &BlobId, bytes: &[u8]) {
+        if let Some(sink) = self.tree_sink.as_mut() {
+            sink(id, bytes);
+        }
+    }
+
     /// Writes the nodes of one directory as one or more tree blobs and
     /// returns their ids in order.
     async fn write_tree(&mut self, nodes: Vec<pb::Node>) -> Result<Vec<Vec<u8>>> {
@@ -601,6 +861,7 @@ impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
         for piece in split_nodes(nodes) {
             let bytes = encode_tree(piece);
             let id = blob_id(&self.w.keys.k_id, &bytes);
+            self.sink_tree(&id, &bytes);
             self.add_blob(BLOB_TYPE_TREE, id, &bytes).await?;
             ids.push(id.to_vec());
         }
@@ -614,6 +875,7 @@ impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
             [] => {
                 let bytes = encode_tree(Vec::new());
                 let id = blob_id(&self.w.keys.k_id, &bytes);
+                self.sink_tree(&id, &bytes);
                 self.add_blob(BLOB_TYPE_TREE, id, &bytes).await?;
                 Ok(id)
             }
@@ -776,6 +1038,13 @@ impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
                 Ok(target) => node.link_target = target.into_bytes(),
                 Err(e) => self.io_issue(path, e),
             }
+        } else {
+            self.issue(
+                true,
+                pb::IssueKind::UnsupportedType,
+                path,
+                "special file: only its metadata is stored".into(),
+            );
         }
         match meta::capture_xattrs_at(dirfd, name) {
             Ok(x) => node.xattrs = x,
@@ -796,6 +1065,7 @@ impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
         if self.cancelled() {
             return Err(Error::Interrupted);
         }
+        self.cur_read = 0;
         self.report(true, path);
         let fd = match Walker::open_file(dirfd, name) {
             Ok(fd) => fd,
@@ -892,6 +1162,7 @@ impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
             let chunk = match chunk {
                 Ok(c) => c,
                 Err(Error::Io(e)) => {
+                    self.cur_read = 0;
                     self.issue(false, pb::IssueKind::Unreadable, path, e.to_string());
                     return Ok(None);
                 }
@@ -904,6 +1175,7 @@ impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
             self.add_blob(BLOB_TYPE_DATA, chunk.id, &chunk.data).await?;
             content.push(chunk.id.to_vec());
             if content.len() > MAX_CONTENT_IDS {
+                self.cur_read = 0;
                 self.issue(
                     false,
                     pb::IssueKind::TooLarge,
@@ -912,7 +1184,10 @@ impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
                 );
                 return Ok(None);
             }
+            self.cur_read = total;
+            self.report(false, path);
         }
+        self.cur_read = 0;
 
         let sparse = !node.sparse_extents.is_empty();
         let size = if sparse { logical } else { total };
@@ -984,12 +1259,21 @@ impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
     }
 
     fn report(&self, starting: bool, path: &[u8]) {
+        let done = self.scan.as_ref().is_some_and(|s| s.done());
+        let (files_total, bytes_total) = self
+            .scan
+            .as_ref()
+            .map_or((0, 0), |s| (s.files(), s.bytes()));
         (self.progress)(&BackupProgress {
             starting,
             files_done: self.files_done,
             bytes_done: self.stats.bytes_read,
             bytes_added: self.stats.bytes_added,
             current: path.to_vec(),
+            files_total,
+            bytes_total,
+            scan_done: done,
+            bytes_processed: self.stats.bytes_total + self.cur_read,
         });
     }
 

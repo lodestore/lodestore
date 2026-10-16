@@ -106,15 +106,18 @@ describe("command palette shell", () => {
 		});
 		await user.keyboard("pol");
 		const options = within(dialog).getAllByRole("option");
-		expect(options).toHaveLength(1);
-		expect(options[0]).toHaveTextContent("Policies");
+		expect(options.map((o) => o.textContent)).toEqual([
+			"Policies",
+			"Create policy",
+		]);
 		await user.keyboard("{Enter}");
-		const heading = await screen.findByRole("heading", {
-			name: "Decide what gets backed up, and when",
-		});
-		expect(router.state.location.pathname).toBe("/policies");
+		await waitFor(() =>
+			expect(router.state.location.pathname).toBe("/policies"),
+		);
 		expect(palette()).toBeNull();
-		await waitFor(() => expect(heading).toHaveFocus());
+		await waitFor(() =>
+			expect(document.querySelector("h1[data-page-title]")).toHaveFocus(),
+		);
 	});
 
 	it("finds the repositories page by its sidebar name Settings", async () => {
@@ -141,8 +144,8 @@ describe("command palette shell", () => {
 		expect(pages.map((o) => o.textContent)).toEqual([
 			"OverviewSoon",
 			"Hosts",
-			"PoliciesSoon",
-			"JobsSoon",
+			"Policies",
+			"Jobs",
 			"RestoreSoon",
 			"Repositories",
 		]);
@@ -269,6 +272,16 @@ describe("command palette hosts and repositories", () => {
 			await screen.findByRole("dialog", { name: "Add host" }),
 		).toBeInTheDocument();
 		expect(router.state.location.pathname).toBe("/hosts");
+	});
+
+	it("opens the new policy page from Create policy", async () => {
+		mockHosts([]);
+		const { user, router } = await openPalette();
+		await user.click(screen.getByRole("option", { name: "Create policy" }));
+		await waitFor(() =>
+			expect(router.state.location.pathname).toBe("/policies/new"),
+		);
+		expect(palette()).toBeNull();
 	});
 
 	it("sends Add host to the welcome page when there are no repositories", async () => {

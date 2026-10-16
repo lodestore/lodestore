@@ -137,6 +137,15 @@ PrivateTmp=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
+RuntimeDirectory=lodestore
+RuntimeDirectoryMode=0755
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+LockPersonality=yes
+RestrictRealtime=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=multi-user.target
@@ -223,6 +232,8 @@ main() {
   download_agent
 
   install -d -m 0700 "$CONF_DIR" "$STATE_DIR"
+  getent group lodestore >/dev/null 2>&1 || groupadd --system lodestore
+  [ -d "$CONF_DIR/hooks.d" ] || install -d -m 0700 -o root -g root "$CONF_DIR/hooks.d"
   install -m 0755 "$tmp/agent" "$BIN.new"
   mv "$BIN.new" "$BIN"
   write_env_file

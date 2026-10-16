@@ -42,6 +42,42 @@ async fn install_script_served_with_server_url() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn install_script_prepares_hooks_and_socket() {
+    let ts = TestServer::start(&Backend::Sqlite).await;
+    let body = reqwest::get(format!("{}/install.sh", ts.rest_url()))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    for needle in [
+        "groupadd --system lodestore",
+        "hooks.d",
+        "RuntimeDirectory=lodestore",
+        "RuntimeDirectoryMode=0755",
+    ] {
+        assert!(body.contains(needle), "install.sh lacks {needle}");
+    }
+    assert!(!body.contains("RestrictNamespaces"));
+
+    let mut bash = Command::new("bash")
+        .arg("-n")
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    bash.stdin
+        .take()
+        .unwrap()
+        .write_all(body.as_bytes())
+        .unwrap();
+    assert!(
+        bash.wait().unwrap().success(),
+        "bash -n rejected the script"
+    );
+    ts.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn install_script_refuses_plain_http_without_insecure() {
     let ts = TestServer::start(&Backend::Sqlite).await;
     let body = reqwest::get(format!("{}/install.sh", ts.rest_url()))

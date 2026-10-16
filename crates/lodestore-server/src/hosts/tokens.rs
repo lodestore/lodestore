@@ -140,6 +140,8 @@ pub struct JoinTokenStatus {
 
 #[utoipa::path(
     get,
+    tag = "Hosts",
+    summary = "Get join token status",
     path = "/api/v1/join-tokens/{id}",
     params(("id" = String, Path, description = "Join token id")),
     responses(

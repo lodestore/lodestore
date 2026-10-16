@@ -20,6 +20,8 @@ pub enum ApiError {
     Validation(String),
     #[error("{0}")]
     Conflict(String),
+    #[error("{0}")]
+    PolicyConflict(String),
     #[error("too many requests")]
     RateLimited,
     #[error("{0}")]
@@ -44,6 +46,7 @@ impl ApiError {
             ApiError::NotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
             ApiError::Validation(_) => (StatusCode::UNPROCESSABLE_ENTITY, "validation"),
             ApiError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
+            ApiError::PolicyConflict(_) => (StatusCode::CONFLICT, "policy_conflict"),
             ApiError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
             ApiError::Backend(_) => (StatusCode::BAD_GATEWAY, "backend"),
             ApiError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),

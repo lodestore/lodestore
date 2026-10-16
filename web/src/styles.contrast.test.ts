@@ -45,12 +45,16 @@ const text: [string, string][] = [
 	["muted-foreground", "primary-subtle"],
 	["destructive", "background"],
 	["destructive", "card"],
+	["destructive", "muted"],
 	["success", "background"],
 	["success", "card"],
+	["success", "muted"],
 	["warning", "background"],
 	["warning", "card"],
+	["warning", "muted"],
 	["neutral", "background"],
 	["neutral", "card"],
+	["neutral", "muted"],
 ];
 
 const graphics: [string, string][] = [
@@ -59,6 +63,7 @@ const graphics: [string, string][] = [
 	["brand", "background"],
 	["ring", "background"],
 	["ring", "card"],
+	["primary-strong", "muted"],
 	["primary-strong", "background"],
 ];
 

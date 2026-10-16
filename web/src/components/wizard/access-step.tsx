@@ -320,7 +320,7 @@ function ExperimentalFields({
 					</Button>
 					<Button
 						type="button"
-						variant="ghost"
+						variant="outline"
 						size="sm"
 						onClick={() => setShown((v) => !v)}
 					>

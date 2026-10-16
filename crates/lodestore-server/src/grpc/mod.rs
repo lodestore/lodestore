@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod dispatch;
 pub mod enrollment;
 pub mod registry;
 
@@ -137,6 +138,7 @@ pub async fn serve(
     listener: TcpListener,
     shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
+    tokio::spawn(dispatch::run(state.clone(), shutdown.clone()));
     let socket = listener.into_std()?;
     let interval = Duration::from_secs(state.config.grpc.cert_reload_secs.max(1));
     let mut material = current_material(&state)?;

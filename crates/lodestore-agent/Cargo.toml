@@ -17,7 +17,7 @@ path = "src/main.rs"
 [dependencies]
 lodestore-proto = { path = "../lodestore-proto" }
 lodestore-format = { path = "../lodestore-format" }
-tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "net", "signal", "time", "fs", "sync"] }
+tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "net", "signal", "time", "fs", "sync", "process", "io-util"] }
 tokio-util = "0.7"
 tokio-stream = "0.1"
 tonic = { version = "0.14.6", default-features = false, features = ["channel", "codegen"] }
@@ -40,9 +40,11 @@ anyhow = "1"
 thiserror = "2.0.21"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-rustix = { version = "1.1.5", features = ["fs", "system"] }
+rustix = { version = "1.1.5", features = ["fs", "system", "process"] }
 getrandom = "0.4.3"
 zeroize = "1.9.1"
+yaml_serde = "0.10.7"
+uuid = { version = "1", features = ["v7"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"

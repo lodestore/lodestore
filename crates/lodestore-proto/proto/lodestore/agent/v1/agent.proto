@@ -61,12 +61,20 @@ message AgentMessage {
   oneof body {
     Hello hello = 1;
     Heartbeat heartbeat = 2;
+    JobAccepted job_accepted = 3;
+    JobRejected job_rejected = 4;
+    JobPhase job_phase = 5;
+    JobProgress job_progress = 6;
+    JobEvents job_events = 7;
+    JobFinished job_finished = 8;
+    JobCreated job_created = 9;
   }
 }
 
 message Hello {
   Versions versions = 1;
   string agent_version = 2;
+  repeated JobReport jobs = 3;
 }
 
 message Heartbeat {
@@ -74,6 +82,7 @@ message Heartbeat {
   string kernel = 2;
   string distro = 3;
   repeated Mount mounts = 4;
+  HookFacts hook_facts = 5;
 }
 
 message Mount {
@@ -88,6 +97,11 @@ message ServerMessage {
     HelloAck hello_ack = 1;
     UpdateS3Credentials update_s3_credentials = 2;
     Disconnect disconnect = 3;
+    JobAssign job_assign = 4;
+    JobCancel job_cancel = 5;
+    JobSync job_sync = 6;
+    JobFinishedAck job_finished_ack = 7;
+    JobForget job_forget = 8;
   }
 }
 
@@ -119,4 +133,172 @@ message RenewResponse {
   string leaf_pem = 1;
   int64 issued_at = 2;
   int64 expires_at = 3;
+}
+
+message HookFacts {
+  bool allow_inline = 1;
+  repeated HookScript scripts = 2;
+}
+
+message HookScript {
+  string name = 1;
+  bool ok = 2;
+}
+
+message Hook {
+  string script = 1;
+  string command = 2;
+  repeated string args = 3;
+  uint32 timeout_s = 4;
+}
+
+message JobSpec {
+  string policy_name = 1;
+  repeated string paths = 2;
+  repeated string exclude = 3;
+  bool one_file_system = 4;
+  bool exclude_caches = 5;
+  repeated Hook before = 6;
+  repeated Hook after = 7;
+  repeated string tags = 8;
+  string stdin_name = 9;
+}
+
+message JobAssign {
+  string job_id = 1;
+  JobSpec spec = 2;
+}
+
+message JobCancel {
+  string job_id = 1;
+}
+
+message JobFinishedAck {
+  string job_id = 1;
+}
+
+message JobForget {
+  string job_id = 1;
+}
+
+message JobSync {
+  string job_id = 1;
+  uint64 resend_events_from = 2;
+}
+
+message JobAccepted {
+  string job_id = 1;
+  int64 started_at_ms = 2;
+}
+
+message JobRejected {
+  string job_id = 1;
+  string code = 2;
+  string message = 3;
+}
+
+enum JobPhaseKind {
+  JOB_PHASE_KIND_UNSPECIFIED = 0;
+  JOB_PHASE_KIND_PRE_HOOK = 1;
+  JOB_PHASE_KIND_BACKUP = 2;
+  JOB_PHASE_KIND_POST_HOOK = 3;
+  JOB_PHASE_KIND_SNAPSHOT = 4;
+}
+
+message JobPhase {
+  string job_id = 1;
+  JobPhaseKind phase = 2;
+  string script = 3;
+}
+
+message JobProgress {
+  string job_id = 1;
+  uint64 files_done = 2;
+  uint64 bytes_done = 3;
+  uint64 bytes_uploaded = 4;
+  uint64 files_total = 5;
+  uint64 bytes_total = 6;
+  bool scan_done = 7;
+  uint64 speed_bps = 8;
+  optional uint64 eta_s = 9;
+}
+
+enum JobEventLevel {
+  JOB_EVENT_LEVEL_UNSPECIFIED = 0;
+  JOB_EVENT_LEVEL_INFO = 1;
+  JOB_EVENT_LEVEL_WARNING = 2;
+  JOB_EVENT_LEVEL_ERROR = 3;
+}
+
+message JobEvent {
+  uint64 seq = 1;
+  int64 at_ms = 2;
+  JobEventLevel level = 3;
+  string kind = 4;
+  string path = 5;
+  string script = 6;
+  string message = 7;
+}
+
+message JobEvents {
+  string job_id = 1;
+  repeated JobEvent events = 2;
+}
+
+message JobStats {
+  uint64 files_new = 1;
+  uint64 files_changed = 2;
+  uint64 files_unchanged = 3;
+  uint64 dirs = 4;
+  uint64 bytes_total = 5;
+  uint64 bytes_read = 6;
+  uint64 bytes_added = 7;
+}
+
+enum JobOutcome {
+  JOB_OUTCOME_UNSPECIFIED = 0;
+  JOB_OUTCOME_SUCCEEDED = 1;
+  JOB_OUTCOME_WARNINGS = 2;
+  JOB_OUTCOME_FAILED = 3;
+  JOB_OUTCOME_CANCELLED = 4;
+  JOB_OUTCOME_INTERRUPTED = 5;
+}
+
+message JobFinished {
+  string job_id = 1;
+  JobOutcome outcome = 2;
+  string snapshot_id = 3;
+  string parent_id = 4;
+  JobStats stats = 5;
+  bool incomplete = 6;
+  uint64 errors_total = 7;
+  uint64 warnings_total = 8;
+  string error_code = 9;
+  string error_message = 10;
+  map<string, string> error_detail = 11;
+  int64 finished_at_ms = 12;
+  uint64 last_event_seq = 13;
+}
+
+message JobCreated {
+  string job_id = 1;
+  JobSpec spec = 2;
+  uint32 caller_uid = 3;
+  uint32 caller_gid = 4;
+  int64 created_at_ms = 5;
+}
+
+enum JobReportState {
+  JOB_REPORT_STATE_UNSPECIFIED = 0;
+  JOB_REPORT_STATE_ACCEPTED = 1;
+  JOB_REPORT_STATE_RUNNING = 2;
+  JOB_REPORT_STATE_FINISHED = 3;
+}
+
+message JobReport {
+  string job_id = 1;
+  JobReportState state = 2;
+  uint64 last_event_seq = 3;
+  JobFinished finished = 4;
+  JobCreated created = 5;
 }

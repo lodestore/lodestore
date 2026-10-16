@@ -61,6 +61,9 @@ pub struct Host {
 
 #[utoipa::path(
     post,
+    tag = "Hosts",
+    summary = "Create a join token",
+    security(("session" = [], "csrf" = [])),
     path = "/api/v1/join-tokens",
     request_body = CreateJoinToken,
     responses(
@@ -191,6 +194,8 @@ async fn load_detail(state: &AppState, id: &str) -> Result<HostDetail, ApiError>
 
 #[utoipa::path(
     get,
+    tag = "Hosts",
+    summary = "List hosts",
     path = "/api/v1/hosts",
     responses((status = 200, description = "All hosts", body = Vec<Host>))
 )]
@@ -211,6 +216,8 @@ async fn list_hosts(
 
 #[utoipa::path(
     get,
+    tag = "Hosts",
+    summary = "Get a host",
     path = "/api/v1/hosts/{id}",
     params(("id" = String, Path, description = "Host id")),
     responses(
@@ -233,6 +240,9 @@ pub struct SetLabels {
 
 #[utoipa::path(
     put,
+    tag = "Hosts",
+    summary = "Replace host labels",
+    security(("session" = [], "csrf" = [])),
     path = "/api/v1/hosts/{id}/labels",
     params(("id" = String, Path, description = "Host id")),
     request_body = SetLabels,
@@ -264,6 +274,9 @@ async fn set_labels(
 
 #[utoipa::path(
     post,
+    tag = "Hosts",
+    summary = "Revoke a host",
+    security(("session" = [], "csrf" = [])),
     path = "/api/v1/hosts/{id}/revoke",
     params(("id" = String, Path, description = "Host id")),
     responses(
@@ -288,6 +301,25 @@ async fn revoke_host(
         .is_some();
     if !known {
         return Err(ApiError::NotFound("host not found".into()));
+    }
+    let active = sqlx::query(
+        "SELECT id FROM jobs WHERE host_id = $1 AND state IN ('queued', 'assigned', 'running')",
+    )
+    .bind(&id)
+    .fetch_all(&state.db.pool)
+    .await?;
+    sqlx::query(
+        "UPDATE jobs SET state = CASE WHEN state = 'running' THEN 'interrupted' ELSE 'cancelled' END, \
+         finished_at = $1, phase = NULL, error_code = 'host_revoked', \
+         error_message = 'The host was revoked.' \
+         WHERE host_id = $2 AND state IN ('queued', 'assigned', 'running')",
+    )
+    .bind(now_ms())
+    .bind(&id)
+    .execute(&state.db.pool)
+    .await?;
+    for row in &active {
+        state.registry.live.remove(&row.try_get::<String, _>("id")?);
     }
     state.registry.revoke(&id);
     Ok(StatusCode::NO_CONTENT)

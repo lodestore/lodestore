@@ -1,4 +1,5 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -6,14 +7,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use lodestore_format::Error;
-use lodestore_format::crypto::{BLOB_TYPE_TREE, Entropy};
+use lodestore_format::crypto::{BLOB_TYPE_TREE, BlobId, Entropy};
+use lodestore_format::fs::filter::PathMatcher;
+use lodestore_format::fs::walk::WalkOptions;
 use lodestore_format::keys::KdfCost;
 use lodestore_format::pb;
 use lodestore_format::reader::{Reader, RestoreOptions};
 use lodestore_format::repo::{InitOptions, PendingInit, Repository};
 use lodestore_format::store::{BlobStore, LocalFsStore};
 use lodestore_format::tree::decode_tree;
-use lodestore_format::writer::{BackupOptions, Writer};
+use lodestore_format::writer::{BackupOptions, BackupProgress, IssueEvent, Writer};
 use rand_chacha::ChaCha20Rng;
 use rand_chacha::rand_core::{Rng, SeedableRng};
 
@@ -385,4 +388,391 @@ mod linux {
         assert!(restored.join("mnt").is_dir());
         assert_eq!(fs::read_dir(restored.join("mnt")).unwrap().count(), 0);
     }
+}
+
+fn make_fifo(path: &Path) {
+    let status = std::process::Command::new("mkfifo")
+        .arg(path)
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+#[tokio::test]
+async fn prescan_totals_match_outcome() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo_dir, src) = (tmp.path().join("repo"), tmp.path().join("src"));
+    fs::create_dir(&repo_dir).unwrap();
+    fs::create_dir_all(src.join("a/b")).unwrap();
+    fs::create_dir(src.join("cache")).unwrap();
+    fs::write(src.join("top.txt"), b"hello").unwrap();
+    fs::write(src.join("empty"), b"").unwrap();
+    fs::write(src.join("noise.log"), b"excluded by pattern").unwrap();
+    fs::write(src.join("a/one.bin"), random_bytes(300_000, 1)).unwrap();
+    fs::write(src.join("a/b/two.bin"), random_bytes(2 << 20, 2)).unwrap();
+    fs::write(
+        src.join("cache/CACHEDIR.TAG"),
+        b"Signature: 8a477f597d28d172789f06886806bc55",
+    )
+    .unwrap();
+    fs::write(src.join("cache/skipped.bin"), random_bytes(100_000, 3)).unwrap();
+    std::os::unix::fs::symlink("top.txt", src.join("link")).unwrap();
+
+    let store = init_repo(&repo_dir).await;
+    let mut w = writer(&store).await;
+    let reports = RefCell::new(Vec::<BackupProgress>::new());
+    let outcome = w
+        .backup(
+            std::slice::from_ref(&src),
+            BackupOptions {
+                prescan: true,
+                walk: WalkOptions {
+                    exclude: Some(PathMatcher::new(["*.log"]).unwrap()),
+                    exclude_caches: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            &|p| reports.borrow_mut().push(p.clone()),
+        )
+        .await
+        .unwrap();
+
+    let reports = reports.into_inner();
+    let last = reports.last().unwrap();
+    let stats = &outcome.stats;
+    assert!(last.scan_done);
+    assert_eq!(
+        last.files_total,
+        stats.files_new + stats.files_changed + stats.files_unchanged
+    );
+    assert_eq!(last.bytes_total, stats.bytes_total);
+    assert_eq!(last.bytes_processed, stats.bytes_total);
+    assert!(reports.iter().all(|r| r.files_total <= last.files_total));
+}
+
+#[tokio::test]
+async fn cancel_after_the_walk_with_prescan_writes_no_snapshot() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo_dir, src) = (tmp.path().join("repo"), tmp.path().join("src"));
+    fs::create_dir(&repo_dir).unwrap();
+    fs::create_dir(&src).unwrap();
+    fs::write(src.join("only.bin"), random_bytes(100_000, 1)).unwrap();
+
+    let store = init_repo(&repo_dir).await;
+    let mut w = writer(&store).await;
+    let cancel = Arc::new(AtomicBool::new(false));
+    let stop = Arc::clone(&cancel);
+    let result = w
+        .backup(
+            std::slice::from_ref(&src),
+            BackupOptions {
+                prescan: true,
+                cancel,
+                ..Default::default()
+            },
+            &|p| {
+                if !p.starting && p.files_done == 1 {
+                    stop.store(true, Ordering::Relaxed);
+                }
+            },
+        )
+        .await;
+    assert!(matches!(result, Err(Error::Interrupted)));
+    assert!(objects(&store, "snapshots/").await.is_empty());
+}
+
+#[tokio::test]
+async fn prescan_off_reports_zero_totals() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo_dir, src) = (tmp.path().join("repo"), tmp.path().join("src"));
+    fs::create_dir(&repo_dir).unwrap();
+    fs::create_dir(&src).unwrap();
+    fs::write(src.join("f"), b"data").unwrap();
+    let store = init_repo(&repo_dir).await;
+    let mut w = writer(&store).await;
+    let reports = RefCell::new(Vec::<BackupProgress>::new());
+    w.backup(std::slice::from_ref(&src), BackupOptions::default(), &|p| {
+        reports.borrow_mut().push(p.clone())
+    })
+    .await
+    .unwrap();
+    let reports = reports.into_inner();
+    assert!(!reports.is_empty());
+    assert!(
+        reports
+            .iter()
+            .all(|r| r.files_total == 0 && r.bytes_total == 0 && !r.scan_done)
+    );
+}
+
+#[tokio::test]
+async fn progress_reports_inside_large_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo_dir, src) = (tmp.path().join("repo"), tmp.path().join("src"));
+    fs::create_dir(&repo_dir).unwrap();
+    fs::create_dir(&src).unwrap();
+    fs::write(src.join("big.bin"), random_bytes(32 << 20, 4)).unwrap();
+    let store = init_repo(&repo_dir).await;
+    let mut w = writer(&store).await;
+    let reports = RefCell::new(Vec::<BackupProgress>::new());
+    w.backup(std::slice::from_ref(&src), BackupOptions::default(), &|p| {
+        reports.borrow_mut().push(p.clone())
+    })
+    .await
+    .unwrap();
+
+    let reports = reports.into_inner();
+    let inside = reports
+        .iter()
+        .filter(|r| !r.starting && r.files_done == 0)
+        .count();
+    assert!(inside > 4, "{inside} reports inside the file");
+    assert!(
+        reports
+            .windows(2)
+            .all(|w| w[0].bytes_processed <= w[1].bytes_processed)
+    );
+    assert_eq!(reports.last().unwrap().bytes_processed, 32 << 20);
+}
+
+type Seen = (bool, pb::IssueKind, Vec<u8>);
+
+fn collect_issues(seen: &RefCell<Vec<Seen>>) -> Box<dyn Fn(&IssueEvent<'_>) + '_> {
+    Box::new(|e| {
+        seen.borrow_mut().push((e.warning, e.kind, e.path.to_vec()));
+    })
+}
+
+#[tokio::test]
+async fn issue_callback_sees_warnings() {
+    const FIFOS: usize = 1005;
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo_dir, src) = (tmp.path().join("repo"), tmp.path().join("src"));
+    fs::create_dir(&repo_dir).unwrap();
+    fs::create_dir(&src).unwrap();
+    for i in 0..FIFOS {
+        make_fifo(&src.join(format!("p{i:04}")));
+    }
+    let store = init_repo(&repo_dir).await;
+    let mut w = writer(&store).await;
+    let seen = RefCell::new(Vec::new());
+    let outcome = w
+        .backup(
+            std::slice::from_ref(&src),
+            BackupOptions {
+                on_issue: Some(collect_issues(&seen)),
+                ..Default::default()
+            },
+            &|_| {},
+        )
+        .await
+        .unwrap();
+
+    let seen = seen.into_inner();
+    assert_eq!(seen.len() as u64, outcome.warnings_total);
+    assert!(seen.len() >= FIFOS);
+    assert!(seen.iter().all(|(warning, ..)| *warning));
+    let r = reader(&store).await;
+    let snapshot = r.list_snapshots().await.unwrap().entries.remove(0).snapshot;
+    assert_eq!(snapshot.warnings.len(), 1000);
+    assert_eq!(snapshot.warnings_total, outcome.warnings_total);
+}
+
+#[tokio::test]
+async fn special_files_warn() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo_dir, src) = (tmp.path().join("repo"), tmp.path().join("src"));
+    fs::create_dir(&repo_dir).unwrap();
+    fs::create_dir(&src).unwrap();
+    make_fifo(&src.join("pipe"));
+    std::os::unix::fs::symlink("pipe", src.join("link")).unwrap();
+    fs::write(src.join("file"), b"data").unwrap();
+    let pipe = src.canonicalize().unwrap().join("pipe");
+
+    let store = init_repo(&repo_dir).await;
+    let mut w = writer(&store).await;
+    let seen = RefCell::new(Vec::new());
+    let outcome = w
+        .backup(
+            std::slice::from_ref(&src),
+            BackupOptions {
+                on_issue: Some(collect_issues(&seen)),
+                ..Default::default()
+            },
+            &|_| {},
+        )
+        .await
+        .unwrap();
+
+    assert!(!outcome.incomplete);
+    assert_eq!(outcome.errors_total, 0);
+    assert_eq!(outcome.warnings_total, 1);
+    assert_eq!(
+        seen.into_inner(),
+        vec![(
+            true,
+            pb::IssueKind::UnsupportedType,
+            pipe.as_os_str().as_bytes().to_vec()
+        )]
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs root"]
+async fn special_files_warn_devices() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo_dir, src) = (tmp.path().join("repo"), tmp.path().join("src"));
+    fs::create_dir(&repo_dir).unwrap();
+    fs::create_dir(&src).unwrap();
+    let status = std::process::Command::new("mknod")
+        .arg(src.join("null"))
+        .args(["c", "1", "3"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let store = init_repo(&repo_dir).await;
+    let mut w = writer(&store).await;
+    let outcome = w
+        .backup(
+            std::slice::from_ref(&src),
+            BackupOptions::default(),
+            &|_| {},
+        )
+        .await
+        .unwrap();
+    assert!(!outcome.incomplete);
+    assert_eq!(outcome.warnings_total, 1);
+}
+
+async fn reachable_trees(r: &mut Reader<&LocalFsStore>, root: BlobId) -> HashMap<BlobId, Vec<u8>> {
+    let mut found = HashMap::new();
+    let mut todo = vec![root];
+    while let Some(id) = todo.pop() {
+        let bytes = r.read_blob(&id, BLOB_TYPE_TREE).await.unwrap();
+        for node in decode_tree(&bytes, None).unwrap() {
+            for sub in &node.subtrees {
+                todo.push(sub.as_slice().try_into().unwrap());
+            }
+        }
+        found.insert(id, bytes);
+    }
+    found
+}
+
+#[tokio::test]
+async fn tree_sink_receives_every_tree() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo_dir, src) = (tmp.path().join("repo"), tmp.path().join("src"));
+    fs::create_dir(&repo_dir).unwrap();
+    fs::create_dir_all(src.join("a/b")).unwrap();
+    fs::create_dir(src.join("c")).unwrap();
+    fs::write(src.join("a/b/f"), b"x").unwrap();
+    fs::write(src.join("c/g"), b"y").unwrap();
+
+    let store = init_repo(&repo_dir).await;
+    let mut w = writer(&store).await;
+    for run in 0..2 {
+        let sunk = RefCell::new(HashMap::<BlobId, Vec<u8>>::new());
+        let outcome = w
+            .backup(
+                std::slice::from_ref(&src),
+                BackupOptions {
+                    tree_sink: Some(Box::new(|id, bytes| {
+                        sunk.borrow_mut().insert(*id, bytes.to_vec());
+                    })),
+                    ..Default::default()
+                },
+                &|_| {},
+            )
+            .await
+            .unwrap();
+        let sunk = sunk.into_inner();
+        let mut r = reader(&store).await;
+        let reachable = reachable_trees(&mut r, outcome.root_tree).await;
+        assert!(reachable.len() >= 5, "run {run}: {} trees", reachable.len());
+        for (id, bytes) in &reachable {
+            assert_eq!(sunk.get(id), Some(bytes), "run {run}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn agent_id_recorded_in_manifest() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo_dir, src) = (tmp.path().join("repo"), tmp.path().join("src"));
+    fs::create_dir(&repo_dir).unwrap();
+    fs::create_dir(&src).unwrap();
+    fs::write(src.join("f"), b"data").unwrap();
+    let store = init_repo(&repo_dir).await;
+    let mut w = writer(&store).await;
+    let outcome = w
+        .backup(
+            std::slice::from_ref(&src),
+            BackupOptions {
+                agent_id: Some(b"agent-1".to_vec()),
+                time: Some(pb::Timestamp {
+                    seconds: 1_700_000_000,
+                    nanos: 5,
+                }),
+                ..Default::default()
+            },
+            &|_| {},
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome.time.seconds, 1_700_000_000);
+
+    let r = reader(&store).await;
+    let entry = r.list_snapshots().await.unwrap().entries.remove(0);
+    assert_eq!(entry.snapshot.agent_id, b"agent-1");
+    assert_eq!(entry.snapshot.root_tree, outcome.root_tree.to_vec());
+}
+
+#[tokio::test]
+async fn connect_opens_with_writer_keys() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo_dir, src) = (tmp.path().join("repo"), tmp.path().join("src"));
+    fs::create_dir(&repo_dir).unwrap();
+    fs::create_dir(&src).unwrap();
+    fs::write(src.join("f"), b"data").unwrap();
+    let store = init_repo(&repo_dir).await;
+    let repo = Repository::open(&store, b"pw").await.unwrap();
+    let keys = repo.read_keys().write_keys(repo.config_hash());
+
+    let mut w = Writer::connect(&store, keys).await.unwrap();
+    let outcome = w
+        .backup(
+            std::slice::from_ref(&src),
+            BackupOptions::default(),
+            &|_| {},
+        )
+        .await
+        .unwrap();
+    assert!(!outcome.incomplete);
+}
+
+#[tokio::test]
+async fn connect_rejects_foreign_keys() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (dir_a, dir_b, empty) = (
+        tmp.path().join("a"),
+        tmp.path().join("b"),
+        tmp.path().join("empty"),
+    );
+    for d in [&dir_a, &dir_b, &empty] {
+        fs::create_dir(d).unwrap();
+    }
+    let (a, b) = (init_repo(&dir_a).await, init_repo(&dir_b).await);
+    let repo_b = Repository::open(&b, b"pw").await.unwrap();
+    let keys_b = repo_b.read_keys().write_keys(repo_b.config_hash());
+    assert!(Writer::connect(&a, keys_b).await.is_err());
+
+    let keys_a = {
+        let repo = Repository::open(&a, b"pw").await.unwrap();
+        repo.read_keys().write_keys(repo.config_hash())
+    };
+    let nowhere = LocalFsStore::new(empty);
+    let err = Writer::connect(&nowhere, keys_a).await.err().unwrap();
+    assert!(matches!(err, Error::NotInitialized), "{err}");
 }

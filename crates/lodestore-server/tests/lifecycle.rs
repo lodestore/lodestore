@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use common::{Api, Backend, TestServer, backends, wait_until};
 use lodestore_agent::{AgentError, EnrollArgs, NetOptions, Paths, RunArgs, connect, tls};
+use lodestore_proto::PROTOCOL_VERSION;
 use lodestore_proto::agent::v1::agent_client::AgentClient;
 use lodestore_proto::agent::v1::agent_message::Body;
 use lodestore_proto::agent::v1::enrollment_client::EnrollmentClient;
@@ -217,8 +218,12 @@ async fn revoke_case(backend: &Backend) {
     let channel = agent_channel(&ts, Some(&agent.paths)).await;
     let hello = AgentMessage {
         body: Some(Body::Hello(Hello {
-            versions: Some(Versions { min: 1, max: 1 }),
+            versions: Some(Versions {
+                min: PROTOCOL_VERSION,
+                max: PROTOCOL_VERSION,
+            }),
             agent_version: "test".to_string(),
+            ..Default::default()
         })),
     };
     let status = AgentClient::new(channel.clone())
@@ -647,7 +652,10 @@ async fn enroll_token_expired() {
                 os: "linux".to_string(),
                 arch: "x86_64".to_string(),
                 agent_version: "test".to_string(),
-                versions: Some(Versions { min: 1, max: 1 }),
+                versions: Some(Versions {
+                    min: PROTOCOL_VERSION,
+                    max: PROTOCOL_VERSION,
+                }),
             })
             .await
             .expect_err("an expired token is refused");

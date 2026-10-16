@@ -106,6 +106,9 @@ fn random_id() -> String {
 
 #[utoipa::path(
     post,
+    tag = "Repositories",
+    summary = "Check storage access",
+    security(("session" = [], "csrf" = [])),
     path = "/api/v1/repositories/check",
     request_body = RepositoryDraft,
     responses(
@@ -122,6 +125,9 @@ async fn check_storage(
 
 #[utoipa::path(
     post,
+    tag = "Repositories",
+    summary = "Start creating a repository",
+    security(("session" = [], "csrf" = [])),
     path = "/api/v1/repositories/wizard",
     request_body = RepositoryDraft,
     responses(
@@ -188,6 +194,9 @@ async fn start_wizard(
 
 #[utoipa::path(
     post,
+    tag = "Repositories",
+    summary = "Finish creating a repository",
+    security(("session" = [], "csrf" = [])),
     path = "/api/v1/repositories/wizard/{id}/commit",
     params(("id" = String, Path, description = "Wizard id from the start response")),
     request_body = CommitRequest,
@@ -330,6 +339,9 @@ const CONNECT_REFUSED: &str =
 
 #[utoipa::path(
     post,
+    tag = "Repositories",
+    summary = "Connect an existing repository",
+    security(("session" = [], "csrf" = [])),
     path = "/api/v1/repositories/connect",
     request_body = ConnectRequest,
     responses(
@@ -426,6 +438,8 @@ pub struct AgentPolicy {
 
 #[utoipa::path(
     get,
+    tag = "Repositories",
+    summary = "Get a write-only IAM policy for agents",
     path = "/api/v1/agent-policy",
     params(PolicyQuery),
     responses(

@@ -5,6 +5,7 @@
 pub mod filter;
 pub mod meta;
 pub mod restore;
+pub mod scan;
 pub mod walk;
 
 use std::time::{SystemTime, UNIX_EPOCH};

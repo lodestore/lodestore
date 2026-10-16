@@ -1,12 +1,10 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use lodestore_format::Error;
-use lodestore_format::config;
 use lodestore_format::keys::WriteKeys;
 use lodestore_format::reader::Reader;
 use lodestore_format::repo::Repository;
-use lodestore_format::store::{BlobError, BlobStore, Store, open_url};
+use lodestore_format::store::{Store, open_url};
 use lodestore_format::writer::Writer;
 
 use crate::cli::{SecretArgs, UnlockError, UsageError};
@@ -103,20 +101,9 @@ async fn open_with_writer_keys(
     let keys = WriteKeys::from_file_text(&text)
         .with_context(|| format!("cannot use writer keys {}", path.display()))?;
     let store = open_store(url)?;
-    let config_bytes = match store.get("config").await {
-        Ok(bytes) => bytes,
-        Err(BlobError::NotFound) => {
-            return Err(Error::NotInitialized)
-                .with_context(|| format!("cannot open repository {url}"));
-        }
-        Err(err) => {
-            return Err(Error::from(err)).with_context(|| format!("cannot open repository {url}"));
-        }
-    };
-    keys.verify_config(&config_bytes)
+    let writer = Writer::connect(store, keys)
+        .await
         .with_context(|| format!("cannot back up to {url}"))?;
-    let config = config::decode(&config_bytes)?;
-    let writer = Writer::new(store, keys, &config).await?;
     warn_skipped(writer.skipped_index_shards());
     Ok((writer, None))
 }

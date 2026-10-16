@@ -1,6 +1,14 @@
 import { useQuery } from "@tanstack/react-query";
 import { type NavigateOptions, useNavigate } from "@tanstack/react-router";
-import { LogOut, Monitor, Moon, Plus, Server, Sun } from "lucide-react";
+import {
+	LogOut,
+	Monitor,
+	Moon,
+	Plus,
+	Server,
+	ShieldCheck,
+	Sun,
+} from "lucide-react";
 import { type ReactNode, useLayoutEffect, useRef, useState } from "react";
 import { getListHostsQueryOptions } from "@/api/gen/endpoints";
 import type { Host } from "@/api/gen/model";
@@ -188,6 +196,11 @@ function PaletteBody({
 			label: copy.palette.addRepository,
 			icon: Plus,
 			run: go({ to: "/settings/repositories/new" }),
+		},
+		{
+			label: copy.palette.createPolicy,
+			icon: ShieldCheck,
+			run: go({ to: "/policies/new" }),
 		},
 		{
 			label: copy.palette.lightTheme,

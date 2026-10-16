@@ -97,6 +97,9 @@ async fn probe_new_key(
 
 #[utoipa::path(
     post,
+    tag = "Repositories",
+    summary = "Check a repository again",
+    security(("session" = [], "csrf" = [])),
     path = "/api/v1/repositories/{id}/check",
     params(("id" = String, Path, description = "Repository id")),
     responses(
@@ -135,6 +138,9 @@ async fn recheck(
 
 #[utoipa::path(
     post,
+    tag = "Repositories",
+    summary = "Check new agent credentials",
+    security(("session" = [], "csrf" = [])),
     path = "/api/v1/repositories/{id}/agent-key/verify",
     params(("id" = String, Path, description = "Repository id")),
     request_body = Credentials,
@@ -161,6 +167,9 @@ async fn verify_key(
 
 #[utoipa::path(
     put,
+    tag = "Repositories",
+    summary = "Replace agent credentials",
+    security(("session" = [], "csrf" = [])),
     path = "/api/v1/repositories/{id}/agent-key",
     params(("id" = String, Path, description = "Repository id")),
     request_body = Credentials,

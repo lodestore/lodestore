@@ -1,0 +1,19 @@
+[package]
+name = "lodestore-policy"
+description = "Lodestore BackupPolicy schema, parsing and validation"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+yaml_serde = "0.10.7"
+lodestore-format = { path = "../lodestore-format" }
+utoipa = { version = "6.0.0", optional = true }
+
+[features]
+openapi = ["dep:utoipa"]
+
+[dev-dependencies]
+serde_json = "1.0.154"

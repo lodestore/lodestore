@@ -75,6 +75,9 @@ pub struct SetupRequest {
 
 #[utoipa::path(
     post,
+    tag = "Setup",
+    summary = "Check a one-time setup link",
+    security(()),
     path = "/api/v1/setup/verify",
     request_body = VerifyRequest,
     responses(
@@ -101,6 +104,9 @@ async fn verify(
 
 #[utoipa::path(
     post,
+    tag = "Setup",
+    summary = "Create the administrator",
+    security(()),
     path = "/api/v1/setup",
     request_body = SetupRequest,
     responses(

@@ -1,8 +1,12 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use lodestore_proto::agent::v1::{Heartbeat, Mount};
+use lodestore_proto::agent::v1::{Heartbeat, HookFacts, HookScript, Mount};
 use tokio::task::JoinHandle;
+
+use crate::Paths;
+use crate::config::AgentSettings;
+use crate::hooks::list_scripts;
 
 const MAX_MOUNTS: usize = 64;
 const MAX_FIELD_BYTES: usize = 255;
@@ -109,6 +113,16 @@ fn distro() -> String {
         .unwrap_or_default()
 }
 
+pub fn hook_facts(paths: &Paths) -> HookFacts {
+    HookFacts {
+        allow_inline: AgentSettings::load(paths).hooks.allow_inline,
+        scripts: list_scripts(&paths.hooks_dir())
+            .into_iter()
+            .map(|(name, ok)| HookScript { name, ok })
+            .collect(),
+    }
+}
+
 pub fn collect() -> Heartbeat {
     let uptime_s = std::fs::read_to_string("/proc/uptime")
         .ok()
@@ -125,6 +139,7 @@ pub fn collect() -> Heartbeat {
         ),
         distro: clip(distro()),
         mounts: mounts(),
+        hook_facts: None,
     }
 }
 

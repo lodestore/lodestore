@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Lodestore",
-    "description": "Lodestore server API",
+    "description": "REST API of the Lodestore server. The web UI uses the same API, so everything the UI does can be scripted.\n\n## Authentication\n\n1. `POST /api/v1/auth/login` with `{\"username\": \"...\", \"password\": \"...\"}`. The response sets the `lodestore_session` cookie.\n2. `GET /api/v1/auth/session` returns the user name and a `csrf_token`.\n3. Send the cookie with every request. Requests that change data (`POST`, `PUT`, `DELETE`) also need the `X-CSRF-Token` header with that token.\n\n```sh\nURL=https://lodestore.example.com\ncurl -c jar -H 'Content-Type: application/json' \\\n  -d '{\"username\":\"admin\",\"password\":\"...\"}' \\\n  $URL/api/v1/auth/login\nTOKEN=$(curl -s -b jar $URL/api/v1/auth/session \\\n  | jq -r .csrf_token)\ncurl -b jar -H \"X-CSRF-Token: $TOKEN\" \\\n  -X POST $URL/api/v1/policies/nightly/run\n```\n\nA browser request that changes data must also come from the server's own origin (`Origin` header).\n\n## Errors\n\nErrors return a JSON body `{\"code\": \"...\", \"message\": \"...\"}`. `code` is stable and meant for programs; `message` is meant for people. `401` means there is no valid session, `403` with code `csrf` means the token or origin check failed, `422` means the request was understood but rejected.\n",
     "license": {
       "name": "AGPL-3.0-only",
       "identifier": "AGPL-3.0-only"
@@ -12,6 +12,10 @@
   "paths": {
     "/api/v1/agent-policy": {
       "get": {
+        "tags": [
+          "Repositories"
+        ],
+        "summary": "Get a write-only IAM policy for agents",
         "operationId": "agent_policy",
         "parameters": [
           {
@@ -57,6 +61,10 @@
     },
     "/api/v1/auth/login": {
       "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Sign in",
         "operationId": "login",
         "requestBody": {
           "content": {
@@ -102,11 +110,18 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {}
+        ]
       }
     },
     "/api/v1/auth/logout": {
       "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Sign out",
         "operationId": "logout",
         "responses": {
           "204": {
@@ -122,11 +137,21 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
       }
     },
     "/api/v1/auth/session": {
       "get": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Get the current session and CSRF token",
         "operationId": "session",
         "responses": {
           "200": {
@@ -154,6 +179,10 @@
     },
     "/api/v1/hosts": {
       "get": {
+        "tags": [
+          "Hosts"
+        ],
+        "summary": "List hosts",
         "operationId": "list_hosts",
         "responses": {
           "200": {
@@ -174,6 +203,10 @@
     },
     "/api/v1/hosts/{id}": {
       "get": {
+        "tags": [
+          "Hosts"
+        ],
+        "summary": "Get a host",
         "operationId": "get_host",
         "parameters": [
           {
@@ -212,6 +245,10 @@
     },
     "/api/v1/hosts/{id}/labels": {
       "put": {
+        "tags": [
+          "Hosts"
+        ],
+        "summary": "Replace host labels",
         "operationId": "set_labels",
         "parameters": [
           {
@@ -275,11 +312,76 @@
               }
             }
           }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/hosts/{id}/policies": {
+      "get": {
+        "tags": [
+          "Hosts"
+        ],
+        "summary": "List policies that apply to a host",
+        "operationId": "list_host_policies",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Host id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Policies that apply to the host",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/HostPolicy"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown host",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The host is revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
         }
       }
     },
     "/api/v1/hosts/{id}/revoke": {
       "post": {
+        "tags": [
+          "Hosts"
+        ],
+        "summary": "Revoke a host",
         "operationId": "revoke_host",
         "parameters": [
           {
@@ -306,11 +408,477 @@
               }
             }
           }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/hosts/{id}/run": {
+      "post": {
+        "tags": [
+          "Hosts"
+        ],
+        "summary": "Run a backup on a host",
+        "operationId": "run_host",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Host id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Policy names; all policies of the host when omitted",
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/HostRunRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "One job per policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunResult"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown host",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The host is revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A policy does not apply to the host",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/hosts/{id}/snapshots": {
+      "get": {
+        "tags": [
+          "Snapshots"
+        ],
+        "summary": "List snapshots of a host",
+        "operationId": "list_host_snapshots",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Host id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "description": "One-based page number.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Snapshots of the host, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnapshotPage"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown host",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
         }
+      }
+    },
+    "/api/v1/jobs": {
+      "get": {
+        "tags": [
+          "Jobs"
+        ],
+        "summary": "List jobs",
+        "operationId": "list_jobs",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "description": "One of queued, running, succeeded, warnings, failed, cancelled, interrupted, not_started.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "policy",
+            "in": "query",
+            "description": "Exact policy name.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "source",
+            "in": "query",
+            "description": "`manual` or `cli`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "host",
+            "in": "query",
+            "description": "Case-insensitive part of the hostname.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "host_id",
+            "in": "query",
+            "description": "Exact host id.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "description": "One-based page number.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Job history, active jobs first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobPage"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unknown filter value",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}": {
+      "get": {
+        "tags": [
+          "Jobs"
+        ],
+        "summary": "Get a job",
+        "operationId": "get_job",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Job id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The job",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown job",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}/cancel": {
+      "post": {
+        "tags": [
+          "Jobs"
+        ],
+        "summary": "Cancel a job",
+        "operationId": "cancel_job",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Job id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A queued job is cancelled at once; a running job gets a cancel request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown job",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The job has finished",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/jobs/{id}/events": {
+      "get": {
+        "tags": [
+          "Jobs"
+        ],
+        "summary": "List job log events",
+        "operationId": "list_job_events",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Job id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "Return events with a greater sequence number only.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "level",
+            "in": "query",
+            "description": "`warning` or `error`: return events of this level only.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Up to 1000 log events in ascending order",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobEventPage"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown job",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unknown level",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}/rerun": {
+      "post": {
+        "tags": [
+          "Jobs"
+        ],
+        "summary": "Run a job again",
+        "operationId": "rerun_job",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Job id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The queued job of the same host and policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunJob"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown job",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The job cannot be repeated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
       }
     },
     "/api/v1/join-tokens": {
       "post": {
+        "tags": [
+          "Hosts"
+        ],
+        "summary": "Create a join token",
         "operationId": "create_join_token",
         "requestBody": {
           "content": {
@@ -353,11 +921,21 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
       }
     },
     "/api/v1/join-tokens/{id}": {
       "get": {
+        "tags": [
+          "Hosts"
+        ],
+        "summary": "Get join token status",
         "operationId": "get_token",
         "parameters": [
           {
@@ -394,8 +972,343 @@
         }
       }
     },
+    "/api/v1/policies": {
+      "get": {
+        "tags": [
+          "Policies"
+        ],
+        "summary": "List policies",
+        "operationId": "list_policies",
+        "responses": {
+          "200": {
+            "description": "All policies by name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PolicySummary"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Policies"
+        ],
+        "summary": "Create a policy",
+        "operationId": "create_policy",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PolicyInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The created policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PolicyDetail"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The name is taken",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/policies/validate": {
+      "post": {
+        "tags": [
+          "Policies"
+        ],
+        "summary": "Validate a policy",
+        "operationId": "validate_policy",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ValidateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Validation result with the hosts the policy would take",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidateResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/policies/{name}": {
+      "get": {
+        "tags": [
+          "Policies"
+        ],
+        "summary": "Get a policy",
+        "operationId": "get_policy",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Policy name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PolicyDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Policies"
+        ],
+        "summary": "Update a policy",
+        "operationId": "update_policy",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Policy name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PolicyUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The updated policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PolicyDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The policy changed since base_revision (code policy_conflict)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid policy or changed name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "Policies"
+        ],
+        "summary": "Delete a policy",
+        "operationId": "delete_policy",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Policy name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The policy is deleted"
+          },
+          "404": {
+            "description": "Unknown policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The policy has jobs in progress",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/policies/{name}/run": {
+      "post": {
+        "tags": [
+          "Policies"
+        ],
+        "summary": "Run a policy now",
+        "operationId": "run_policy",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Policy name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One job per matching host; existing active jobs are returned as is",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunResult"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      }
+    },
     "/api/v1/repositories": {
       "get": {
+        "tags": [
+          "Repositories"
+        ],
+        "summary": "List repositories",
         "operationId": "list_repositories",
         "responses": {
           "200": {
@@ -416,6 +1329,10 @@
     },
     "/api/v1/repositories/check": {
       "post": {
+        "tags": [
+          "Repositories"
+        ],
+        "summary": "Check storage access",
         "operationId": "check_storage",
         "requestBody": {
           "content": {
@@ -448,11 +1365,21 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
       }
     },
     "/api/v1/repositories/connect": {
       "post": {
+        "tags": [
+          "Repositories"
+        ],
+        "summary": "Connect an existing repository",
         "operationId": "connect_repository",
         "requestBody": {
           "content": {
@@ -495,11 +1422,21 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
       }
     },
     "/api/v1/repositories/wizard": {
       "post": {
+        "tags": [
+          "Repositories"
+        ],
+        "summary": "Start creating a repository",
         "operationId": "start_wizard",
         "requestBody": {
           "content": {
@@ -542,11 +1479,21 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
       }
     },
     "/api/v1/repositories/wizard/{id}/commit": {
       "post": {
+        "tags": [
+          "Repositories"
+        ],
+        "summary": "Finish creating a repository",
         "operationId": "commit_wizard",
         "parameters": [
           {
@@ -600,11 +1547,21 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
       }
     },
     "/api/v1/repositories/{id}": {
       "get": {
+        "tags": [
+          "Repositories"
+        ],
+        "summary": "Get a repository",
         "operationId": "get_repository",
         "parameters": [
           {
@@ -643,6 +1600,10 @@
     },
     "/api/v1/repositories/{id}/agent-key": {
       "put": {
+        "tags": [
+          "Repositories"
+        ],
+        "summary": "Replace agent credentials",
         "operationId": "replace_key",
         "parameters": [
           {
@@ -706,11 +1667,21 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
       }
     },
     "/api/v1/repositories/{id}/agent-key/verify": {
       "post": {
+        "tags": [
+          "Repositories"
+        ],
+        "summary": "Check new agent credentials",
         "operationId": "verify_key",
         "parameters": [
           {
@@ -764,11 +1735,79 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/repositories/{id}/catalog/sync": {
+      "post": {
+        "tags": [
+          "Snapshots"
+        ],
+        "summary": "Read new snapshots from storage",
+        "operationId": "sync_catalog",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Repository id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Snapshots found in the bucket",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CatalogSyncResult"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown repository",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The repository storage is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
       }
     },
     "/api/v1/repositories/{id}/check": {
       "post": {
+        "tags": [
+          "Repositories"
+        ],
+        "summary": "Check a repository again",
         "operationId": "recheck",
         "parameters": [
           {
@@ -802,11 +1841,21 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
       }
     },
     "/api/v1/server/info": {
       "get": {
+        "tags": [
+          "Server"
+        ],
+        "summary": "Get server information",
         "operationId": "info",
         "responses": {
           "200": {
@@ -834,6 +1883,10 @@
     },
     "/api/v1/server/status": {
       "get": {
+        "tags": [
+          "Server"
+        ],
+        "summary": "Get server status",
         "operationId": "status",
         "responses": {
           "200": {
@@ -846,11 +1899,18 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {}
+        ]
       }
     },
     "/api/v1/setup": {
       "post": {
+        "tags": [
+          "Setup"
+        ],
+        "summary": "Create the administrator",
         "operationId": "create_admin",
         "requestBody": {
           "content": {
@@ -906,11 +1966,18 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {}
+        ]
       }
     },
     "/api/v1/setup/verify": {
       "post": {
+        "tags": [
+          "Setup"
+        ],
+        "summary": "Check a one-time setup link",
         "operationId": "verify",
         "requestBody": {
           "content": {
@@ -946,7 +2013,10 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {}
+        ]
       }
     }
   },
@@ -964,6 +2034,55 @@
           },
           "minio_commands": {
             "type": "string"
+          }
+        }
+      },
+      "BackupPolicy": {
+        "type": "object",
+        "required": [
+          "apiVersion",
+          "kind",
+          "metadata",
+          "spec"
+        ],
+        "properties": {
+          "apiVersion": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "metadata": {
+            "$ref": "#/components/schemas/Metadata"
+          },
+          "spec": {
+            "$ref": "#/components/schemas/PolicySpec"
+          }
+        },
+        "additionalProperties": false
+      },
+      "CatalogSyncResult": {
+        "type": "object",
+        "required": [
+          "added",
+          "skipped",
+          "total"
+        ],
+        "properties": {
+          "added": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "skipped": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
           }
         }
       },
@@ -1118,6 +2237,87 @@
           }
         }
       },
+      "Hook": {
+        "type": "object",
+        "properties": {
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "command": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "script": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "timeout": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "HookWarning": {
+        "type": "object",
+        "required": [
+          "host_id",
+          "hostname",
+          "kind"
+        ],
+        "properties": {
+          "host_id": {
+            "type": "string"
+          },
+          "hostname": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/HookWarningKind"
+          },
+          "script": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "HookWarningKind": {
+        "type": "string",
+        "enum": [
+          "script_missing",
+          "script_rejected",
+          "inline_disabled"
+        ]
+      },
+      "Hooks": {
+        "type": "object",
+        "properties": {
+          "after": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Hook"
+            }
+          },
+          "before": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Hook"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
       "Host": {
         "type": "object",
         "required": [
@@ -1258,6 +2458,41 @@
           }
         }
       },
+      "HostPolicy": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "last_job": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/JobBrief"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "HostRunRequest": {
+        "type": "object",
+        "properties": {
+          "policies": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
       "HostStatus": {
         "type": "string",
         "enum": [
@@ -1265,6 +2500,467 @@
           "offline",
           "revoked"
         ]
+      },
+      "JobBrief": {
+        "type": "object",
+        "required": [
+          "id",
+          "state",
+          "queued_at"
+        ],
+        "properties": {
+          "finished_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "id": {
+            "type": "string"
+          },
+          "queued_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "state": {
+            "$ref": "#/components/schemas/JobState"
+          }
+        }
+      },
+      "JobDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/JobSummary"
+          },
+          {
+            "type": "object",
+            "required": [
+              "repository_id",
+              "error_detail",
+              "cancel_requested",
+              "log_seq",
+              "log_lines",
+              "logs_purged"
+            ],
+            "properties": {
+              "caller_gid": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64"
+              },
+              "caller_uid": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64"
+              },
+              "cancel_requested": {
+                "type": "boolean"
+              },
+              "error_detail": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "propertyNames": {
+                  "type": "string"
+                }
+              },
+              "log_lines": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "log_seq": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "logs_purged": {
+                "type": "boolean"
+              },
+              "parent_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "repository_id": {
+                "type": "string"
+              }
+            }
+          }
+        ]
+      },
+      "JobEventDto": {
+        "type": "object",
+        "required": [
+          "seq",
+          "at",
+          "level",
+          "kind",
+          "message"
+        ],
+        "properties": {
+          "at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "level": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "script": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "JobEventPage": {
+        "type": "object",
+        "required": [
+          "events",
+          "last_seq"
+        ],
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/JobEventDto"
+            }
+          },
+          "last_seq": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "JobPage": {
+        "type": "object",
+        "required": [
+          "items",
+          "total",
+          "page",
+          "page_size"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/JobSummary"
+            }
+          },
+          "page": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "page_size": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "JobPhaseName": {
+        "type": "string",
+        "enum": [
+          "pre_hook",
+          "backup",
+          "post_hook",
+          "snapshot"
+        ]
+      },
+      "JobProgressDto": {
+        "type": "object",
+        "properties": {
+          "bytes_done": {
+            "type": "integer",
+            "format": "int64",
+            "default": 0,
+            "minimum": 0
+          },
+          "bytes_total": {
+            "type": "integer",
+            "format": "int64",
+            "default": 0,
+            "minimum": 0
+          },
+          "bytes_uploaded": {
+            "type": "integer",
+            "format": "int64",
+            "default": 0,
+            "minimum": 0
+          },
+          "eta_s": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "default": null
+          },
+          "files_done": {
+            "type": "integer",
+            "format": "int64",
+            "default": 0,
+            "minimum": 0
+          },
+          "files_total": {
+            "type": "integer",
+            "format": "int64",
+            "default": 0,
+            "minimum": 0
+          },
+          "scan_done": {
+            "type": "boolean",
+            "default": false
+          },
+          "speed_bps": {
+            "type": "integer",
+            "format": "int64",
+            "default": 0,
+            "minimum": 0
+          },
+          "updated_at": {
+            "type": "integer",
+            "format": "int64",
+            "default": 0
+          }
+        }
+      },
+      "JobSource": {
+        "type": "string",
+        "enum": [
+          "manual",
+          "cli"
+        ]
+      },
+      "JobState": {
+        "type": "string",
+        "enum": [
+          "queued",
+          "running",
+          "succeeded",
+          "warnings",
+          "failed",
+          "cancelled",
+          "interrupted",
+          "not_started"
+        ]
+      },
+      "JobStatsDto": {
+        "type": "object",
+        "properties": {
+          "bytes_added": {
+            "type": "integer",
+            "format": "int64",
+            "default": 0,
+            "minimum": 0
+          },
+          "bytes_read": {
+            "type": "integer",
+            "format": "int64",
+            "default": 0,
+            "minimum": 0
+          },
+          "bytes_total": {
+            "type": "integer",
+            "format": "int64",
+            "default": 0,
+            "minimum": 0
+          },
+          "dirs": {
+            "type": "integer",
+            "format": "int64",
+            "default": 0,
+            "minimum": 0
+          },
+          "files_changed": {
+            "type": "integer",
+            "format": "int64",
+            "default": 0,
+            "minimum": 0
+          },
+          "files_new": {
+            "type": "integer",
+            "format": "int64",
+            "default": 0,
+            "minimum": 0
+          },
+          "files_unchanged": {
+            "type": "integer",
+            "format": "int64",
+            "default": 0,
+            "minimum": 0
+          }
+        }
+      },
+      "JobSummary": {
+        "type": "object",
+        "required": [
+          "id",
+          "host_id",
+          "hostname",
+          "policy_exists",
+          "source",
+          "state",
+          "queued_at",
+          "host_online",
+          "incomplete",
+          "warnings_total",
+          "errors_total"
+        ],
+        "properties": {
+          "error_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "error_message": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "errors_total": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "finished_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "host_id": {
+            "type": "string"
+          },
+          "host_online": {
+            "type": "boolean"
+          },
+          "hostname": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "incomplete": {
+            "type": "boolean"
+          },
+          "phase": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/JobPhaseName"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "policy_exists": {
+            "type": "boolean"
+          },
+          "policy_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "progress": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/JobProgressDto"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "queue_reason": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/QueueReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "queued_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "snapshot_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "$ref": "#/components/schemas/JobSource"
+          },
+          "started_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "state": {
+            "$ref": "#/components/schemas/JobState"
+          },
+          "stats": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/JobStatsDto"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "stdin_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "warnings_total": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
       },
       "JoinTokenResponse": {
         "type": "object",
@@ -1414,6 +3110,294 @@
           }
         }
       },
+      "MatchHost": {
+        "type": "object",
+        "required": [
+          "id",
+          "hostname",
+          "online",
+          "repository_id",
+          "repository_name"
+        ],
+        "properties": {
+          "hostname": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "online": {
+            "type": "boolean"
+          },
+          "repository_id": {
+            "type": "string"
+          },
+          "repository_name": {
+            "type": "string"
+          }
+        }
+      },
+      "Matching": {
+        "type": "object",
+        "required": [
+          "hosts",
+          "other_repository"
+        ],
+        "properties": {
+          "hosts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MatchHost"
+            }
+          },
+          "other_repository": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MatchHost"
+            }
+          }
+        }
+      },
+      "Metadata": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "PolicyDetail": {
+        "type": "object",
+        "required": [
+          "name",
+          "policy",
+          "yaml",
+          "revision",
+          "created_at",
+          "updated_at",
+          "repository_id",
+          "repository_name",
+          "matching",
+          "warnings"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "matching": {
+            "$ref": "#/components/schemas/Matching"
+          },
+          "name": {
+            "type": "string"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/BackupPolicy"
+          },
+          "repository_id": {
+            "type": "string"
+          },
+          "repository_name": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "updated_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HookWarning"
+            }
+          },
+          "yaml": {
+            "type": "string"
+          }
+        }
+      },
+      "PolicyInput": {
+        "type": "object",
+        "properties": {
+          "policy": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/BackupPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "yaml": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "PolicySpec": {
+        "type": "object",
+        "required": [
+          "repository",
+          "paths"
+        ],
+        "properties": {
+          "exclude": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "excludeCaches": {
+            "type": "boolean"
+          },
+          "hooks": {
+            "$ref": "#/components/schemas/Hooks"
+          },
+          "oneFileSystem": {
+            "type": "boolean"
+          },
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "repository": {
+            "type": "string"
+          },
+          "selector": {
+            "$ref": "#/components/schemas/Selector"
+          }
+        },
+        "additionalProperties": false
+      },
+      "PolicySummary": {
+        "type": "object",
+        "required": [
+          "name",
+          "repository_id",
+          "repository_name",
+          "match_labels",
+          "host_list",
+          "hosts",
+          "other_repository_hosts"
+        ],
+        "properties": {
+          "host_list": {
+            "type": "boolean"
+          },
+          "hosts": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "last_job": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/JobBrief"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "match_labels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Label"
+            }
+          },
+          "name": {
+            "type": "string"
+          },
+          "other_repository_hosts": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "repository_id": {
+            "type": "string"
+          },
+          "repository_name": {
+            "type": "string"
+          }
+        }
+      },
+      "PolicyUpdate": {
+        "type": "object",
+        "required": [
+          "base_revision"
+        ],
+        "properties": {
+          "base_revision": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "policy": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/BackupPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "yaml": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "Problem": {
+        "type": "object",
+        "description": "An error with the location of the offending value. `line`/`column` are\n1-based and only set for errors that come from the YAML text.",
+        "required": [
+          "message"
+        ],
+        "properties": {
+          "column": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "line": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "message": {
+            "type": "string"
+          },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "QueueReason": {
+        "type": "string",
+        "enum": [
+          "host_offline",
+          "host_busy"
+        ]
+      },
       "RepositoryDetail": {
         "allOf": [
           {
@@ -1522,6 +3506,67 @@
           }
         }
       },
+      "RunJob": {
+        "type": "object",
+        "required": [
+          "id",
+          "host_id",
+          "hostname",
+          "created"
+        ],
+        "properties": {
+          "created": {
+            "type": "boolean"
+          },
+          "host_id": {
+            "type": "string"
+          },
+          "hostname": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          }
+        }
+      },
+      "RunResult": {
+        "type": "object",
+        "required": [
+          "jobs"
+        ],
+        "properties": {
+          "jobs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RunJob"
+            }
+          }
+        }
+      },
+      "Selector": {
+        "type": "object",
+        "properties": {
+          "hosts": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "matchLabels": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
       "ServerInfo": {
         "type": "object",
         "required": [
@@ -1611,6 +3656,165 @@
           }
         }
       },
+      "SnapshotItem": {
+        "type": "object",
+        "required": [
+          "id",
+          "time",
+          "hostname",
+          "paths",
+          "tags",
+          "incomplete",
+          "errors_total",
+          "warnings_total",
+          "stats"
+        ],
+        "properties": {
+          "errors_total": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "hostname": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "incomplete": {
+            "type": "boolean"
+          },
+          "job_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "parent_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "policy_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "stats": {
+            "$ref": "#/components/schemas/SnapshotStatsDto"
+          },
+          "stdin_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "time": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "warnings_total": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "SnapshotPage": {
+        "type": "object",
+        "required": [
+          "items",
+          "total",
+          "page",
+          "page_size"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SnapshotItem"
+            }
+          },
+          "page": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "page_size": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "SnapshotStatsDto": {
+        "type": "object",
+        "required": [
+          "files_new",
+          "files_changed",
+          "files_unchanged",
+          "dirs",
+          "bytes_total",
+          "bytes_read",
+          "bytes_added"
+        ],
+        "properties": {
+          "bytes_added": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "bytes_read": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "bytes_total": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "dirs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "files_changed": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "files_new": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "files_unchanged": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
       "TokenHost": {
         "type": "object",
         "required": [
@@ -1641,6 +3845,88 @@
           "used",
           "expired"
         ]
+      },
+      "ValidateRequest": {
+        "type": "object",
+        "properties": {
+          "original_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "policy": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/BackupPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "yaml": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "ValidateResponse": {
+        "type": "object",
+        "required": [
+          "valid",
+          "errors",
+          "name_taken",
+          "warnings"
+        ],
+        "properties": {
+          "errors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          },
+          "matching": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Matching"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name_taken": {
+            "type": "boolean"
+          },
+          "policy": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/BackupPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "valid": {
+            "type": "boolean"
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HookWarning"
+            }
+          },
+          "yaml": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
       },
       "VerifyRequest": {
         "type": "object",
@@ -1673,6 +3959,59 @@
           }
         }
       }
+    },
+    "securitySchemes": {
+      "csrf": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-csrf-token",
+        "description": "Required on every request that changes data. Read the token from `GET /api/v1/auth/session`."
+      },
+      "session": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "lodestore_session",
+        "description": "Session cookie set by `POST /api/v1/auth/login`."
+      }
     }
-  }
+  },
+  "security": [
+    {
+      "session": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "Auth",
+      "description": "Sign in and out, read the session and its CSRF token."
+    },
+    {
+      "name": "Hosts",
+      "description": "Enrolled hosts, their labels, join tokens and manual backups."
+    },
+    {
+      "name": "Policies",
+      "description": "Backup policies: which hosts, which paths, which repository."
+    },
+    {
+      "name": "Jobs",
+      "description": "Backup jobs: history, live progress, log, cancel and rerun."
+    },
+    {
+      "name": "Snapshots",
+      "description": "Snapshots recorded in the server catalog."
+    },
+    {
+      "name": "Repositories",
+      "description": "Storage repositories and the credentials agents write with."
+    },
+    {
+      "name": "Server",
+      "description": "Server version and health."
+    },
+    {
+      "name": "Setup",
+      "description": "First start: create the administrator from the setup link."
+    }
+  ]
 }

@@ -1,4 +1,16 @@
-import { Ban, Circle, CircleCheck, Minus, TriangleAlert } from "lucide-react";
+import {
+	Ban,
+	Circle,
+	CircleCheck,
+	CircleDashed,
+	CircleSlash,
+	CircleX,
+	Clock,
+	Loader2,
+	Minus,
+	TriangleAlert,
+	Unplug,
+} from "lucide-react";
 import type { ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
 import { copy } from "@/copy";
@@ -23,6 +35,42 @@ const statuses = {
 	success: { icon: CircleCheck, tone: "text-success", label: "" },
 	warning: { icon: TriangleAlert, tone: "text-warning", label: "" },
 	neutral: { icon: Minus, tone: "text-neutral", label: "" },
+	queued: { icon: Clock, tone: "text-neutral", label: copy.jobs.status.queued },
+	running: {
+		icon: Loader2,
+		tone: "text-foreground motion-safe:[&>svg]:animate-spin",
+		label: copy.jobs.status.running,
+	},
+	succeeded: {
+		icon: CircleCheck,
+		tone: "text-success",
+		label: copy.jobs.status.succeeded,
+	},
+	warnings: {
+		icon: TriangleAlert,
+		tone: "text-warning",
+		label: copy.jobs.status.warnings,
+	},
+	failed: {
+		icon: CircleX,
+		tone: "text-destructive",
+		label: copy.jobs.status.failed,
+	},
+	cancelled: {
+		icon: CircleSlash,
+		tone: "text-neutral",
+		label: copy.jobs.status.cancelled,
+	},
+	interrupted: {
+		icon: Unplug,
+		tone: "text-warning",
+		label: copy.jobs.status.interrupted,
+	},
+	not_started: {
+		icon: CircleDashed,
+		tone: "text-neutral",
+		label: copy.jobs.status.not_started,
+	},
 } as const;
 
 export type Status = keyof typeof statuses;

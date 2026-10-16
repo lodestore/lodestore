@@ -14,6 +14,7 @@ use lodestore_format::repo::{InitOptions, PendingInit, Repository};
 use lodestore_format::store::policy::{agent_iam_policy_json, agent_minio_policy_json};
 use lodestore_format::store::{BlobStore, RepoLocation, StaticCredentials, Store};
 use lodestore_format::writer::{BackupOptions, Writer};
+use lodestore_proto::PROTOCOL_VERSION;
 use lodestore_proto::agent::v1::agent_client::AgentClient;
 use lodestore_proto::agent::v1::agent_message::Body as AgentBody;
 use lodestore_proto::agent::v1::server_message::Body as ServerBody;
@@ -760,8 +761,12 @@ async fn agent_key_replace_pushes_to_online_agents() {
         let (tx, rx) = tokio::sync::mpsc::channel(4);
         tx.send(AgentMessage {
             body: Some(AgentBody::Hello(Hello {
-                versions: Some(Versions { min: 1, max: 1 }),
+                versions: Some(Versions {
+                    min: PROTOCOL_VERSION,
+                    max: PROTOCOL_VERSION,
+                }),
                 agent_version: "test".into(),
+                ..Default::default()
             })),
         })
         .await

@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use common::{Backend, TestServer, backends};
 use data_encoding::BASE64URL_NOPAD;
 use lodestore_agent::{NetOptions, connect, tls};
+use lodestore_proto::PROTOCOL_VERSION;
 use lodestore_proto::agent::v1::enrollment_client::EnrollmentClient;
 use lodestore_proto::agent::v1::{EnrollRequest, GetTrustAnchorRequest, Versions};
 use reqwest::{Client, Response};
@@ -804,7 +805,13 @@ async fn enroll_rate_limited() {
         let bogus = BASE64URL_NOPAD.encode(&[1u8; 32]);
         for attempt in 1..=20 {
             let status = client
-                .enroll(enroll_request(bogus.clone(), Versions { min: 1, max: 1 }))
+                .enroll(enroll_request(
+                    bogus.clone(),
+                    Versions {
+                        min: PROTOCOL_VERSION,
+                        max: PROTOCOL_VERSION,
+                    },
+                ))
                 .await
                 .expect_err("a bogus token is refused");
             assert_eq!(
@@ -815,7 +822,13 @@ async fn enroll_rate_limited() {
             );
         }
         let status = client
-            .enroll(enroll_request(bogus, Versions { min: 1, max: 1 }))
+            .enroll(enroll_request(
+                bogus,
+                Versions {
+                    min: PROTOCOL_VERSION,
+                    max: PROTOCOL_VERSION,
+                },
+            ))
             .await
             .expect_err("the 21st attempt is limited");
         assert_eq!(status.code(), tonic::Code::ResourceExhausted);
@@ -833,7 +846,7 @@ async fn enroll_version_mismatch() {
         let mut client = enrollment_client(&ts).await;
 
         let status = client
-            .enroll(enroll_request(secret.clone(), Versions { min: 2, max: 3 }))
+            .enroll(enroll_request(secret.clone(), Versions { min: 3, max: 4 }))
             .await
             .expect_err("no common version");
         assert_eq!(status.code(), tonic::Code::FailedPrecondition);
@@ -842,11 +855,52 @@ async fn enroll_version_mismatch() {
             "version_unsupported"
         );
 
+        let status = client
+            .enroll(enroll_request(secret.clone(), Versions { min: 1, max: 1 }))
+            .await
+            .expect_err("a version 1 client is refused");
+        assert_eq!(
+            status.metadata().get("lodestore-error").unwrap(),
+            "version_unsupported"
+        );
+
         let response = client
-            .enroll(enroll_request(secret, Versions { min: 1, max: 1 }))
+            .enroll(enroll_request(
+                secret,
+                Versions {
+                    min: PROTOCOL_VERSION,
+                    max: PROTOCOL_VERSION,
+                },
+            ))
             .await
             .expect("the token was not consumed by the refused attempt");
         assert!(!response.into_inner().agent_id.is_empty());
         ts.stop().await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn malformed_body_gets_a_json_error() {
+    let backend = &backends()[0];
+    let ts = TestServer::start(backend).await;
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/v1/auth/login", ts.rest_url());
+
+    let response = client
+        .post(&url)
+        .header("content-type", "application/json")
+        .body("{bad")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 400);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["code"], "bad_request");
+    assert!(!body["message"].as_str().unwrap().is_empty());
+
+    let response = client.post(&url).body("{}").send().await.unwrap();
+    assert_eq!(response.status(), 415);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["code"], "unsupported_media_type");
+    ts.stop().await;
 }

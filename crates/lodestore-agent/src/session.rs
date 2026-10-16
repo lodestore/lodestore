@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lodestore_proto::PROTOCOL_VERSION;
@@ -12,15 +13,18 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Channel;
 
+use crate::config::AgentSettings;
 use crate::connect::channel;
 use crate::identity::{AgentConfig, Identity, Paths, load_pair, replace_pair, write_json_file};
-use crate::{AgentError, NetOptions, facts, tls};
+use crate::jobs::JobHub;
+use crate::{AgentError, NetOptions, facts, socket, tls};
 
 const BACKOFF_MIN: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(60);
 const STABLE_STREAM: Duration = Duration::from_secs(60);
 const RENEW_RETRY: Duration = Duration::from_secs(60);
 const MAX_SKEW_SECS: i64 = 300;
+const JOBS_DRAIN: Duration = Duration::from_secs(30);
 
 pub struct RunArgs {
     pub paths: Paths,
@@ -65,6 +69,22 @@ fn load_identity(paths: &Paths) -> Result<Identity, AgentError> {
 }
 
 pub async fn run(args: RunArgs) -> Result<(), AgentError> {
+    let first = load_identity(&args.paths)?;
+    let hub = JobHub::open(&args.paths, &first.agent_id)?;
+    let socket_stop = args.shutdown.child_token();
+    tokio::spawn(socket::serve(
+        Arc::clone(&hub),
+        AgentSettings::load(&args.paths).socket_path(),
+        socket_stop.clone(),
+    ));
+    let result = run_sessions(&args, &hub).await;
+    socket_stop.cancel();
+    hub.shutdown();
+    hub.wait_idle(JOBS_DRAIN).await;
+    result
+}
+
+async fn run_sessions(args: &RunArgs, hub: &Arc<JobHub>) -> Result<(), AgentError> {
     let config = AgentConfig::load(&args.paths)?.ok_or_else(|| {
         AgentError::NotEnrolled(format!("{} is missing", args.paths.agent_json().display()))
     })?;
@@ -78,7 +98,7 @@ pub async fn run(args: RunArgs) -> Result<(), AgentError> {
         }
         let identity = load_identity(&args.paths)?;
         warn_if_expired(&identity);
-        match session_once(&args, &config, &identity).await {
+        match session_once(args, &config, &identity, hub).await {
             Ok(Outcome::Shutdown) => return Ok(()),
             Ok(Outcome::Renewed) => {
                 tracing::info!("certificate renewed; reconnecting");
@@ -155,6 +175,7 @@ async fn session_once(
     args: &RunArgs,
     config: &AgentConfig,
     identity: &Identity,
+    hub: &Arc<JobHub>,
 ) -> Result<Outcome, AgentError> {
     let paths = &args.paths;
     let ca_pem = std::fs::read_to_string(paths.ca())?;
@@ -169,6 +190,7 @@ async fn session_once(
     .await?;
 
     let (tx, rx) = mpsc::channel::<AgentMessage>(8);
+    let jobs = hub.session_reset();
     tx.send(AgentMessage {
         body: Some(AgentBody::Hello(Hello {
             versions: Some(Versions {
@@ -176,6 +198,7 @@ async fn session_once(
                 max: PROTOCOL_VERSION,
             }),
             agent_version: env!("CARGO_PKG_VERSION").to_string(),
+            jobs,
         })),
     })
     .await
@@ -227,9 +250,18 @@ async fn session_once(
                 }
             },
             _ = ticker.tick() => {
-                let message = AgentMessage { body: Some(AgentBody::Heartbeat(facts.next().await)) };
+                let mut heartbeat = facts.next().await;
+                heartbeat.hook_facts = Some(facts::hook_facts(paths));
+                let message = AgentMessage { body: Some(AgentBody::Heartbeat(heartbeat)) };
                 if tx.send(message).await.is_err() {
                     return Ok(Outcome::Closed { lived: started.elapsed() });
+                }
+            }
+            _ = hub.changed() => {
+                for message in hub.outbound() {
+                    if tx.send(message).await.is_err() {
+                        return Ok(Outcome::Closed { lived: started.elapsed() });
+                    }
                 }
             }
             message = inbound.message() => match message {
@@ -248,7 +280,8 @@ async fn session_once(
                             store_s3_credentials(paths, &key)?;
                         }
                     }
-                    _ => {}
+                    Some(body) => hub.handle(body),
+                    None => {}
                 },
                 Ok(None) => return Ok(Outcome::Closed { lived: started.elapsed() }),
                 Err(s) => return Err(AgentError::from_status(&s)),

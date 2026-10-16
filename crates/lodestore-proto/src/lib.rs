@@ -7,7 +7,7 @@ pub mod agent {
     }
 }
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 pub const ERROR_METADATA_KEY: &str = "lodestore-error";
 pub const ERROR_REVOKED: &str = "revoked";

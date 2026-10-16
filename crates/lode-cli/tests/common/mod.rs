@@ -45,7 +45,7 @@ pub fn stdout_of(cmd: &mut Command) -> String {
 }
 
 /// Deterministic incompressible bytes (splitmix64).
-fn pseudo_random(len: usize) -> Vec<u8> {
+pub fn pseudo_random(len: usize) -> Vec<u8> {
     let mut state = 0x9E37_79B9_7F4A_7C15u64;
     let mut out = Vec::with_capacity(len + 8);
     while out.len() < len {

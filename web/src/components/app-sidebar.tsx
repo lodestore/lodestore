@@ -3,6 +3,7 @@ import { Link, type LinkProps, useRouterState } from "@tanstack/react-router";
 import {
 	ArchiveRestore,
 	ChevronsUpDown,
+	ExternalLink,
 	LayoutDashboard,
 	ListChecks,
 	type LucideIcon,
@@ -69,14 +70,12 @@ export const NAV_ITEMS: NavItem[] = [
 		label: copy.nav.policies,
 		to: "/policies",
 		icon: ShieldCheck,
-		soon: true,
 		group: backup,
 	},
 	{
 		label: copy.nav.jobs,
 		to: "/jobs",
 		icon: ListChecks,
-		soon: true,
 		group: backup,
 	},
 	{
@@ -223,6 +222,12 @@ export function AppSidebar({ onOpenPalette }: { onOpenPalette: () => void }) {
 							>
 								{copy.shell.commandPalette}
 								<ModK className="ml-auto" />
+							</DropdownMenuItem>
+							<DropdownMenuItem asChild>
+								<a href="/api/docs" target="_blank" rel="noopener noreferrer">
+									{copy.apiReference}
+									<ExternalLink className="ml-auto" />
+								</a>
 							</DropdownMenuItem>
 							<DropdownMenuItem onSelect={signOut}>
 								{copy.signOut}

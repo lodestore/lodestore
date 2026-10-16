@@ -32,7 +32,7 @@ export function FirstHostStep({ repositoryId }: { repositoryId: string }) {
 						<Link to="/hosts">{copy.wizard.openHosts}</Link>
 					</Button>
 				) : (
-					<Button variant="ghost" asChild>
+					<Button variant="outline" asChild>
 						<Link to="/hosts">{copy.wizard.skipHost}</Link>
 					</Button>
 				)

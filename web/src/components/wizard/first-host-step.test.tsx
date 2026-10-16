@@ -143,7 +143,7 @@ describe("FirstHostStep", () => {
 			within(moment).getByText("Online, version 0.1.0."),
 		).toBeInTheDocument();
 		expect(
-			within(moment).getByText("Next: create a backup policy — coming soon"),
+			within(moment).getByText("Next: create a backup policy"),
 		).toBeInTheDocument();
 		expect(screen.queryByText("What happens next")).toBeNull();
 		expect(screen.getByRole("link", { name: "Open Hosts" })).toBeVisible();
@@ -154,15 +154,38 @@ describe("FirstHostStep", () => {
 });
 
 describe("SuccessMoment", () => {
-	it("announces the host and draws the check after mounting", async () => {
-		render(<SuccessMoment hostname="web-01" version="0.1.0" />);
+	async function renderMoment() {
+		const root = createRootRoute({
+			component: () => <SuccessMoment hostname="web-01" version="0.1.0" />,
+		});
+		const router = createRouter({
+			routeTree: root.addChildren([
+				createRoute({ getParentRoute: () => root, path: "/policies/new" }),
+			]),
+			history: createMemoryHistory({ initialEntries: ["/"] }),
+		});
+		render(<RouterProvider router={router} />);
+		return screen.findByRole("status");
+	}
 
-		const region = screen.getByRole("status");
+	it("announces the host and draws the check after mounting", async () => {
+		const region = await renderMoment();
+
 		expect(within(region).getByText("web-01 is connected")).toHaveClass(
 			"text-display",
 		);
 		const path = region.querySelector("path");
 		await waitFor(() => expect(path).toHaveAttribute("stroke-dashoffset", "0"));
 		expect(path).toHaveClass("duration-400");
+	});
+
+	it("links the next step to the new policy page", async () => {
+		const region = await renderMoment();
+
+		expect(
+			within(region).getByRole("link", {
+				name: "Next: create a backup policy",
+			}),
+		).toHaveAttribute("href", "/policies/new");
 	});
 });

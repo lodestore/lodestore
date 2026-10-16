@@ -58,6 +58,7 @@ async fn agent_status(state: &AppState, agent_id: &str) -> Result<(String, Strin
 }
 
 const MAX_MOUNTS: usize = 64;
+const MAX_HOOK_SCRIPTS: usize = 256;
 const MAX_FIELD_BYTES: usize = 255;
 
 fn clip(text: &str) -> String {
@@ -81,7 +82,16 @@ async fn write_seen(state: &AppState, agent_id: &str, heartbeat: Option<&Heartbe
                 .await
         }
         Some(hb) => {
-            let facts = serde_json::json!({
+            let hooks = hb.hook_facts.as_ref().map(|h| {
+                serde_json::json!({
+                    "allow_inline": h.allow_inline,
+                    "scripts": h.scripts.iter().take(MAX_HOOK_SCRIPTS).map(|s| serde_json::json!({
+                        "name": clip(&s.name),
+                        "ok": s.ok,
+                    })).collect::<Vec<_>>(),
+                })
+            });
+            let mut facts = serde_json::json!({
                 "uptime_s": hb.uptime_s,
                 "mounts": hb.mounts.iter().take(MAX_MOUNTS).map(|m| serde_json::json!({
                     "path": clip(&m.path),
@@ -90,6 +100,9 @@ async fn write_seen(state: &AppState, agent_id: &str, heartbeat: Option<&Heartbe
                     "free_bytes": m.free_bytes,
                 })).collect::<Vec<_>>(),
             });
+            if let Some(hooks) = hooks {
+                facts["hooks"] = hooks;
+            }
             sqlx::query(
                 "UPDATE agents SET last_seen_at = $1, kernel = $2, distro = $3, facts_json = $4 WHERE id = $5",
             )
@@ -175,6 +188,7 @@ impl Agent for AgentService {
             }
             Err(error) => tracing::warn!(%error, %agent_id, "could not load the agent S3 key"),
         }
+        crate::grpc::dispatch::messages::session_started(&state, &agent_id, &hello.jobs).await;
         tracing::info!(agent_id = %agent_id, cert_serial = %cert_serial, "agent session started");
 
         tokio::spawn(async move {
@@ -197,6 +211,9 @@ impl Agent for AgentService {
                                 write_seen(&state, &agent_id, Some(&hb)).await;
                                 last_write = Some(Instant::now());
                             }
+                        }
+                        Ok(Some(AgentMessage { body: Some(body) })) => {
+                            crate::grpc::dispatch::messages::on_message(&state, &agent_id, body).await;
                         }
                         Ok(Some(_)) => {}
                         Ok(None) | Err(_) => break,

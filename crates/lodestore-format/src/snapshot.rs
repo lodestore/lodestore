@@ -150,8 +150,9 @@ pub fn find_parent<'a>(
         .find(|e| e.snapshot.hostname == hostname && sorted(&e.snapshot.paths) == want)
 }
 
-/// What [`ParentTree`] needs from a reader; implemented by `Reader`.
-pub(crate) trait TreeSource {
+/// What [`ParentTree`] needs from a reader; implemented by `Reader` and by
+/// the agent's local tree cache.
+pub trait TreeSource {
     fn snapshot_root<'a>(&'a mut self, id: &'a BlobId) -> Fut<'a, (pb::Snapshot, Vec<pb::Node>)>;
     fn tree<'a>(&'a mut self, ids: &'a [Vec<u8>]) -> Fut<'a, Vec<pb::Node>>;
 }
@@ -169,7 +170,10 @@ pub struct ParentTree<'a> {
 
 impl<'a> ParentTree<'a> {
     pub async fn open<S: BlobStore + 'a>(reader: Reader<S>, id: BlobId) -> Result<Self> {
-        let mut source: Box<dyn TreeSource + 'a> = Box::new(reader);
+        Self::from_source(Box::new(reader), id).await
+    }
+
+    pub async fn from_source(mut source: Box<dyn TreeSource + 'a>, id: BlobId) -> Result<Self> {
         let (snapshot, root) = source.snapshot_root(&id).await?;
         Ok(ParentTree {
             id,

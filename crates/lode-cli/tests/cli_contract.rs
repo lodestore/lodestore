@@ -316,8 +316,85 @@ fn cli_backup_json_lines() {
     assert!(summary["parent"].is_null());
     for l in &lines[..lines.len() - 1] {
         assert!(l["files_done"].is_u64() && l["bytes_done"].is_u64() && l["bytes_added"].is_u64());
+        assert!(l["files_total"].is_u64() && l["bytes_total"].is_u64());
+        assert!(l["scan_done"].is_boolean() && l["bytes_processed"].is_u64());
         assert!(l["current_path"].is_string() || l["current_path"]["b64"].is_string());
     }
+}
+
+fn stdin_backup(repo: &Path, name: &str, data: &[u8]) -> Value {
+    let lines = json_lines(&stdout_of(
+        lode(repo)
+            .args(["backup", "--stdin", "--json", "--name", name])
+            .write_stdin(data.to_vec()),
+    ));
+    assert_progress_then_summary(&lines, "backup_progress", "backup_summary");
+    lines.last().unwrap().clone()
+}
+
+#[test]
+fn cli_backup_stdin_json_lines() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    init_repo(&repo);
+    let data = common::pseudo_random(1 << 20);
+
+    let summary = stdin_backup(&repo, "app.dump", &data);
+    assert_eq!(summary["incomplete"], false);
+    assert_eq!(summary["stats"]["files_new"], 1);
+    assert_eq!(summary["stats"]["bytes_total"], data.len());
+
+    let dumped = lode(&repo)
+        .args(["dump", "latest", "/app.dump"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(dumped, data);
+
+    let doc = json_of(lode(&repo).args(["snapshots", "--json"]));
+    let snap = &doc["snapshots"][0];
+    assert_eq!(snap["tags"][0], "stdin=app.dump");
+    assert_eq!(snap["paths"][0], "/app.dump");
+}
+
+#[test]
+fn cli_backup_stdin_requires_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    init_repo(&repo);
+
+    lode(&repo)
+        .args(["backup", "--stdin"])
+        .write_stdin("x")
+        .assert()
+        .code(2);
+    lode(&repo)
+        .args(["backup", "--stdin", "--name", ""])
+        .write_stdin("x")
+        .assert()
+        .code(2);
+    lode(&repo)
+        .args(["backup", "--stdin", "--name", "a/b"])
+        .write_stdin("x")
+        .assert()
+        .failure();
+    assert_eq!(snapshot_count(lode(&repo).args(["snapshots", "--json"])), 0);
+}
+
+#[test]
+fn cli_backup_stdin_parent_by_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    init_repo(&repo);
+
+    let first = stdin_backup(&repo, "a.dump", b"one");
+    assert!(first["parent"].is_null());
+    let again = stdin_backup(&repo, "a.dump", b"two");
+    assert_eq!(again["parent"], first["snapshot_id"]);
+    let other = stdin_backup(&repo, "b.dump", b"three");
+    assert!(other["parent"].is_null());
 }
 
 #[test]

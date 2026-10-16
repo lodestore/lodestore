@@ -56,3 +56,26 @@ An agent holds a writer keyset and a write-only S3 key. It can add data to the r
 - The install command passes the token in the arguments of `sh`, so it is briefly visible to local users in the process list on the host being enrolled. Treat it as a short-lived secret and do not paste it into shared channels.
 - The first-run setup link is printed to the server log once. Whoever reads the log before the administrator is created can create the administrator, so restrict access to the log or use the Helm `Secret` to set the administrator password up front.
 - The server has no TLS on the REST and UI port. Terminate TLS on a reverse proxy, otherwise sign-in cookies and tokens cross the network in clear text. See [networking](../deploy/networking.md).
+
+## Backup hooks
+
+A backup policy can run a script on the host before and after a backup. The server chooses which hook runs and with which arguments, and the agent decides whether it may run.
+
+**What the boundary guarantees.**
+
+- The agent runs only a regular file in `/etc/lodestore/hooks.d` that the administrator installed. The file must be owned by the agent's user (root in the systemd unit), must not be a symlink, and must not be writable by group or others. The directory has to meet the same rules. Anything else is refused with `hook_rejected`, and a missing script is `hook_missing`.
+- A compromised server cannot create a script, because `hooks.d` is writable only by root on the host. It can only pick among the scripts that are already there.
+- An inline `command` runs only when `/etc/lodestore/agent.yaml` contains `hooks: { allow_inline: true }`. The server cannot set this flag. The file counts only when it is owned by the agent's user and is not writable by group or others; otherwise the flag is off. `agent.yaml` is separate from `agent.json`, so `install.sh --force` keeps it.
+- Arguments reach the script through `execve`, never through a shell. The hook gets an empty environment except `PATH`, `LODESTORE_POLICY`, `LODESTORE_JOB_ID`, `LODESTORE_HOOK_PHASE` and, for the post hook, `LODESTORE_BACKUP_STATUS`. S3 keys, writer keys and proxy settings are not passed. Standard input is `/dev/null`.
+- A hook runs in its own process group. On timeout (one hour by default, set in the policy) or cancel, the group gets SIGTERM and, after 10 seconds, SIGKILL, so child processes end as well.
+
+**What it does not guarantee.**
+
+- A compromised server can still pass hostile arguments to a powerful installed script. Write scripts to validate `$@`, and prefer scripts that take no arguments.
+- The hook runs as the agent's user, which is root. Anyone who can write `hooks.d` or `agent.yaml` already owns the host.
+
+**Writing hooks.**
+
+- Hooks inherit the agent's systemd sandbox: `NoNewPrivileges`, `PrivateTmp`, `ProtectKernelTunables`, `ProtectKernelModules`, `ProtectControlGroups`, `RestrictAddressFamilies`, `LockPersonality`, `RestrictRealtime`, `ProtectClock`, `ProtectHostname`, `ProtectKernelLogs` and `SystemCallArchitectures=native`. Namespace restrictions and a read-only file system are not applied, so mount and `unshare` based hooks still work.
+- `NoNewPrivileges` makes `sudo` fail. To run a step as another user, use `runuser -u <user> --` or `setpriv`.
+- `PrivateTmp` gives the agent and its hooks a private `/tmp` that is not the host's `/tmp`. A dump written there is invisible to the database process, and a policy path under `/tmp` backs up the private tree. Write dumps to `/var/lib/lodestore/staging` or `/var/backups`.

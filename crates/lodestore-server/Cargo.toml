@@ -17,6 +17,7 @@ embed-ui = ["dep:rust-embed"]
 [dependencies]
 lodestore-format = { path = "../lodestore-format", features = ["backend-azblob", "backend-gcs", "backend-sftp", "backend-webdav"] }
 lodestore-proto = { path = "../lodestore-proto" }
+lodestore-policy = { path = "../lodestore-policy", features = ["openapi"] }
 tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync", "fs"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio-util = { version = "0.7", features = ["io"] }

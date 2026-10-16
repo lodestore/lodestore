@@ -37,9 +37,9 @@ describe("banners", () => {
 		);
 		expect(screen.queryByText(UNLOCK)).not.toBeInTheDocument();
 
-		await router.navigate({ to: "/policies" });
+		await router.navigate({ to: "/restore" });
 		await screen.findByRole("heading", {
-			name: "Decide what gets backed up, and when",
+			name: "Restore any file from any snapshot",
 		});
 		expect(screen.queryByText(UNLOCK)).not.toBeInTheDocument();
 	});

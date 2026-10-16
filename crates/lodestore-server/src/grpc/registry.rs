@@ -7,6 +7,8 @@ use lodestore_proto::agent::v1::{Disconnect, DisconnectReason, ServerMessage};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::grpc::dispatch::live::Live;
+
 pub const ONLINE_WINDOW: Duration = Duration::from_secs(45);
 const CHANNEL_DEPTH: usize = 16;
 
@@ -28,6 +30,7 @@ struct Inner {
 #[derive(Clone, Default)]
 pub struct Registry {
     inner: Arc<Mutex<Inner>>,
+    pub live: Live,
 }
 
 pub struct SessionGuard {
@@ -65,6 +68,7 @@ impl Registry {
     pub fn register(&self, agent_id: &str, repository_id: &str) -> SessionGuard {
         let (tx, rx) = mpsc::channel(CHANNEL_DEPTH);
         let cancel = CancellationToken::new();
+        self.live.set_ready(agent_id, false);
         let mut inner = self.lock();
         inner.next_generation += 1;
         let generation = inner.next_generation;

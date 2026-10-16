@@ -1,3 +1,4 @@
+import { Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { copy } from "@/copy";
 
@@ -46,7 +47,12 @@ export function SuccessMoment({
 			<p className="text-base text-muted-foreground">
 				{copy.firstHost.successDetail(version)}
 			</p>
-			<p className="text-sm text-muted-foreground">{copy.firstHost.nextStep}</p>
+			<Link
+				to="/policies/new"
+				className="text-sm font-semibold text-primary-strong underline-offset-4 hover:underline"
+			>
+				{copy.firstHost.nextStep}
+			</Link>
 		</div>
 	);
 }

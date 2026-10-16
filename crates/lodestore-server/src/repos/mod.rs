@@ -169,6 +169,8 @@ pub(crate) async fn unlock_with_server_slot(access: &db::ServerAccess) -> anyhow
 
 #[utoipa::path(
     get,
+    tag = "Repositories",
+    summary = "List repositories",
     path = "/api/v1/repositories",
     responses((status = 200, description = "All repositories", body = Vec<RepositorySummary>))
 )]
@@ -194,6 +196,8 @@ async fn list_repositories(
 
 #[utoipa::path(
     get,
+    tag = "Repositories",
+    summary = "Get a repository",
     path = "/api/v1/repositories/{id}",
     params(("id" = String, Path, description = "Repository id")),
     responses(

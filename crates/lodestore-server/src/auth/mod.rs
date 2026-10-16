@@ -305,6 +305,9 @@ pub(crate) async fn start_session(
 
 #[utoipa::path(
     post,
+    tag = "Auth",
+    summary = "Sign in",
+    security(()),
     path = "/api/v1/auth/login",
     request_body = LoginRequest,
     responses(
@@ -352,6 +355,9 @@ async fn login(
 
 #[utoipa::path(
     post,
+    tag = "Auth",
+    summary = "Sign out",
+    security(("session" = [], "csrf" = [])),
     path = "/api/v1/auth/logout",
     responses(
         (status = 204, description = "The session is ended and the cookie cleared"),
@@ -375,6 +381,8 @@ async fn logout(
 
 #[utoipa::path(
     get,
+    tag = "Auth",
+    summary = "Get the current session and CSRF token",
     path = "/api/v1/auth/session",
     responses(
         (status = 200, description = "The signed-in user", body = SessionInfo),

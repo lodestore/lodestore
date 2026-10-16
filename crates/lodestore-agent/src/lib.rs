@@ -1,11 +1,15 @@
 //! Lodestore host agent: registers with the server over mTLS and keeps a
 //! session open. The agent only ever dials out.
 
+pub mod config;
 pub mod connect;
 pub mod enroll;
-mod facts;
+pub mod facts;
+pub mod hooks;
 pub mod identity;
+pub mod jobs;
 pub mod session;
+pub mod socket;
 pub mod tls;
 pub mod token;
 
