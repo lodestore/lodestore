@@ -34,7 +34,8 @@ Usage: curl --proto '=https' --tlsv1.2 -fsSL <server>/install.sh | sh -s -- --jo
   --join <token>   register this host with a one-time join token
   --insecure       allow downloading the agent over plain HTTP (a network attacker
                    can then replace the agent binary and its checksum)
-  --force          forget the local identity and register this host again
+  --force          forget the local identity and register this host again; the previous
+                   agent id is kept when the server does not know it
   --from-github    download the agent from GitHub releases instead of the server
   --uninstall      stop and remove the agent service and binary
   --purge          with --uninstall, also remove /etc/lodestore and /var/lib/lodestore
@@ -248,13 +249,17 @@ main() {
     exit 0
   fi
 
+  prev=
   if [ "$registered" = 1 ]; then
+    prev=$(agent_id)
     ! service_active || was_active=1
     systemctl stop lodestore-agent </dev/null || true
     stash_identity
   fi
 
-  if ! LODESTORE_JOIN_TOKEN="$token" "$BIN" enroll </dev/null; then
+  set -- enroll
+  [ -z "$prev" ] || set -- enroll --previous-agent-id "$prev"
+  if ! LODESTORE_JOIN_TOKEN="$token" "$BIN" "$@" </dev/null; then
     [ -z "$backup" ] || die "registration failed; the previous registration is restored, fix the problem and run the installer again"
     die "registration failed; the agent binary is installed, fix the problem and run the installer again"
   fi

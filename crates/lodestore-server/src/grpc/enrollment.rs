@@ -18,6 +18,7 @@ use crate::repos::db::writer_material;
 use crate::state::AppState;
 
 const MAX_FIELD: usize = 255;
+const MAX_AGENT_ID: usize = 64;
 
 pub struct EnrollmentService {
     pub state: AppState,
@@ -28,6 +29,13 @@ fn field(name: &str, value: &str) -> Result<(), Status> {
         return Err(Status::invalid_argument(format!("{name} is too long")));
     }
     Ok(())
+}
+
+fn valid_agent_id(id: &str) -> bool {
+    id.len() <= MAX_AGENT_ID
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 #[tonic::async_trait]
@@ -69,6 +77,9 @@ impl Enrollment for EnrollmentService {
         field("os", &req.os)?;
         field("arch", &req.arch)?;
         field("agent_version", &req.agent_version)?;
+        if !valid_agent_id(&req.previous_agent_id) {
+            return Err(Status::invalid_argument("previous_agent_id is invalid"));
+        }
 
         let secret = tokens::decode_secret(&req.join_secret).ok_or_else(invalid)?;
         let token_hash = tokens::hash_secret(&secret);
@@ -80,7 +91,18 @@ impl Enrollment for EnrollmentService {
             .await
             .map_err(internal)?;
 
-        let agent_id = uuid::Uuid::now_v7().to_string();
+        let reused = !req.previous_agent_id.is_empty()
+            && sqlx::query("SELECT 1 FROM agents WHERE id = $1")
+                .bind(&req.previous_agent_id)
+                .fetch_optional(&state.db.pool)
+                .await
+                .map_err(internal)?
+                .is_none();
+        let agent_id = if reused {
+            req.previous_agent_id.clone()
+        } else {
+            uuid::Uuid::now_v7().to_string()
+        };
         let lifetime = Duration::from_secs(state.config.agent_cert_lifetime_secs.max(1) as u64);
         let mut tx = state.db.pool.begin().await.map_err(internal)?;
         let consumed = tokens::consume(&mut tx, &token_hash, &agent_id)
@@ -115,8 +137,21 @@ impl Enrollment for EnrollmentService {
         .execute(&mut *tx)
         .await
         .map_err(internal)?;
+        let mut rebound = 0;
+        if reused {
+            rebound = sqlx::query(
+                "UPDATE snapshots SET host_id = $1 \
+                 WHERE repository_id = $2 AND agent_id_claim = $1 AND host_id IS NULL",
+            )
+            .bind(&agent_id)
+            .bind(&consumed.repository_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(internal)?
+            .rows_affected();
+        }
         tx.commit().await.map_err(internal)?;
-        tracing::info!(agent_id = %agent_id, hostname, "agent enrolled");
+        tracing::info!(agent_id = %agent_id, hostname, reused, rebound, "agent enrolled");
 
         let server_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)

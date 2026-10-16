@@ -16,13 +16,15 @@ use lodestore_proto::agent::v1::server_message::Body as ServerBody;
 use lodestore_proto::agent::v1::{
     AgentMessage, JobAccepted, JobCreated, JobEvent, JobEventLevel, JobEvents, JobFinished,
     JobOutcome, JobPhase, JobPhaseKind, JobProgress, JobRejected, JobReport, JobReportState,
-    JobSpec,
+    JobSpec, RestoreSpec,
 };
 use tokio::sync::Notify;
 
 use crate::socket::StdinHeader;
-use crate::{AgentError, Paths};
+use crate::{AgentError, NetOptions, Paths};
 
+pub mod fetch;
+pub mod restore;
 pub mod runner;
 mod store;
 pub(crate) mod stream;
@@ -35,6 +37,7 @@ const SPEED_WINDOW: usize = 10;
 const SAMPLE_TICK: Duration = Duration::from_secs(1);
 const KIND_FILE: &str = "file";
 const KIND_STDIN: &str = "stdin";
+const KIND_RESTORE: &str = "restore";
 const MAX_STDIN_JOBS: usize = 2;
 
 fn reports_of(st: &State) -> Vec<JobReport> {
@@ -70,6 +73,7 @@ pub struct ProgressCell {
     pub files_total: AtomicU64,
     pub bytes_total: AtomicU64,
     pub scan_done: AtomicBool,
+    pub bytes_downloaded: AtomicU64,
 }
 
 #[derive(Debug, Default)]
@@ -104,6 +108,7 @@ pub struct JobHub {
     notify: Notify,
     stopping: AtomicBool,
     tick: Duration,
+    net: Mutex<NetOptions>,
 }
 
 /// What a job executor gets: report phases, events and the final result, and
@@ -126,6 +131,16 @@ impl JobCtx {
 
     pub fn agent_id(&self) -> &str {
         &self.hub.agent_id
+    }
+
+    /// Proxy settings the session was started with, for connections a job
+    /// opens itself.
+    pub fn net(&self) -> NetOptions {
+        self.hub
+            .net
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// True once the server asked to cancel this job.
@@ -261,7 +276,12 @@ impl JobHub {
             notify: Notify::new(),
             stopping: AtomicBool::new(false),
             tick,
+            net: Mutex::new(NetOptions::default()),
         }))
+    }
+
+    pub fn set_net(&self, net: NetOptions) {
+        *self.net.lock().unwrap_or_else(|e| e.into_inner()) = net;
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -280,7 +300,12 @@ impl JobHub {
 
     pub fn handle(self: &Arc<Self>, body: ServerBody) {
         match body {
-            ServerBody::JobAssign(a) => self.assign(a.job_id, a.spec.unwrap_or_default()),
+            ServerBody::JobAssign(a) => match a.restore {
+                Some(restore) => {
+                    self.start_restore_with(a.job_id, restore, restore::run_restore_job);
+                }
+                None => self.assign(a.job_id, a.spec.unwrap_or_default()),
+            },
             ServerBody::JobCancel(c) => self.cancel(&c.job_id),
             ServerBody::JobSync(s) => self.sync(&s.job_id, s.resend_events_from),
             ServerBody::JobFinishedAck(a) => self.drop_job(&a.job_id, false),
@@ -382,49 +407,57 @@ impl JobHub {
             })));
     }
 
-    fn assign(self: &Arc<Self>, job_id: String, spec: JobSpec) {
+    /// Registers a job the server assigned: refuses it while another backup or
+    /// restore runs, stores its record and queues `JobAccepted`. `None` when
+    /// the job was refused or is already known.
+    fn accept(
+        self: &Arc<Self>,
+        job_id: &str,
+        kind: &str,
+        spec: Option<&JobSpec>,
+    ) -> Option<JobCtx> {
         let mut st = self.lock();
-        if st.jobs.contains_key(&job_id) {
-            return;
+        if st.jobs.contains_key(job_id) {
+            return None;
         }
-        if !valid_id(&job_id) {
-            self.reject(&mut st, &job_id, "invalid_job", "the job id is not valid");
+        let refusal = if !valid_id(job_id) {
+            Some(("invalid_job", "the job id is not valid".to_string()))
+        } else if st.jobs.values().any(|e| {
+            matches!(e.record.kind.as_str(), KIND_FILE | KIND_RESTORE) && e.finished.is_none()
+        }) {
+            Some(("busy", "another backup or restore is running".to_string()))
+        } else {
+            None
+        };
+        if let Some((code, text)) = refusal {
+            self.reject(&mut st, job_id, code, &text);
             drop(st);
             self.notify.notify_one();
-            return;
-        }
-        if st
-            .jobs
-            .values()
-            .any(|e| e.record.kind == KIND_FILE && e.finished.is_none())
-        {
-            self.reject(&mut st, &job_id, "busy", "another backup is running");
-            drop(st);
-            self.notify.notify_one();
-            return;
+            return None;
         }
         let record = JobRecord {
-            job_id: job_id.clone(),
-            kind: KIND_FILE.into(),
+            job_id: job_id.to_string(),
+            kind: kind.into(),
             state: ACCEPTED.into(),
             finished: None,
             created: None,
             last_event_seq: 0,
         };
-        if let Err(e) = self
-            .store
-            .write_spec(&job_id, &spec)
-            .and_then(|()| self.store.save(&record))
-        {
-            self.store.remove(&job_id);
-            self.reject(&mut st, &job_id, "store_failed", &e.to_string());
+        let stored = match spec {
+            Some(spec) => self.store.write_spec(job_id, spec),
+            None => Ok(()),
+        }
+        .and_then(|()| self.store.save(&record));
+        if let Err(e) = stored {
+            self.store.remove(job_id);
+            self.reject(&mut st, job_id, "store_failed", &e.to_string());
             drop(st);
             self.notify.notify_one();
-            return;
+            return None;
         }
         let shared = Arc::new(JobShared::default());
         st.jobs.insert(
-            job_id.clone(),
+            job_id.to_string(),
             Entry {
                 record,
                 finished: None,
@@ -438,27 +471,52 @@ impl JobHub {
         );
         st.out
             .push_back(message(AgentBody::JobAccepted(JobAccepted {
-                job_id: job_id.clone(),
+                job_id: job_id.to_string(),
                 started_at_ms: now_ms(),
             })));
         drop(st);
-
-        let ctx = JobCtx {
+        Some(JobCtx {
             hub: Arc::clone(self),
-            job_id: job_id.as_str().into(),
+            job_id: job_id.into(),
             shared,
-        };
+        })
+    }
+
+    fn spawn_task(
+        self: &Arc<Self>,
+        ctx: JobCtx,
+        what: &'static str,
+        run: impl FnOnce(JobCtx) + Send + 'static,
+    ) {
         let spawned = std::thread::Builder::new()
-            .name(format!("job-{job_id}"))
+            .name(format!("job-{}", ctx.job_id()))
             .spawn({
                 let hub = Arc::clone(self);
                 let ctx = ctx.clone();
-                move || hub.run_job(ctx, spec)
+                move || hub.run_task(ctx, what, run)
             });
         if let Err(e) = spawned {
             ctx.finish(failed("spawn_failed", &e.to_string()));
         }
         self.notify.notify_one();
+    }
+
+    fn assign(self: &Arc<Self>, job_id: String, spec: JobSpec) {
+        if let Some(ctx) = self.accept(&job_id, KIND_FILE, Some(&spec)) {
+            self.spawn_task(ctx, "backup", move |ctx| runner::run_file_job(ctx, spec));
+        }
+    }
+
+    /// Starts a restore job with `run` as its executor. The agent passes
+    /// `restore::run_restore_job`; tests pass their own. The spec is not kept
+    /// on disk: it carries the repository's chunk id key.
+    pub fn start_restore_with<R>(self: &Arc<Self>, job_id: String, spec: RestoreSpec, run: R)
+    where
+        R: FnOnce(JobCtx, RestoreSpec) + Send + 'static,
+    {
+        if let Some(ctx) = self.accept(&job_id, KIND_RESTORE, None) {
+            self.spawn_task(ctx, "restore", move |ctx| run(ctx, spec));
+        }
     }
 
     /// Takes a stream from the local socket. Such a job is the agent's own:
@@ -574,7 +632,7 @@ impl JobHub {
         }
     }
 
-    fn run_job(self: Arc<Self>, ctx: JobCtx, spec: JobSpec) {
+    fn run_task(self: Arc<Self>, ctx: JobCtx, what: &str, run: impl FnOnce(JobCtx)) {
         self.set_state(ctx.job_id(), RUNNING);
         let (stop, stopped) = mpsc::channel::<()>();
         let sampler = std::thread::spawn({
@@ -582,17 +640,18 @@ impl JobHub {
             let tick = self.tick;
             move || sample_loop(&ctx, &stopped, tick)
         });
-        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            runner::run_file_job(ctx.clone(), spec);
-        }));
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| run(ctx.clone())));
         drop(stop);
         let _ = sampler.join();
         if result.is_err() {
-            ctx.finish(failed("internal_error", "the backup task panicked"));
+            ctx.finish(failed(
+                "internal_error",
+                &format!("the {what} task panicked"),
+            ));
         } else {
             ctx.finish(failed(
                 "internal_error",
-                "the backup task ended without a result",
+                &format!("the {what} task ended without a result"),
             ));
         }
     }
@@ -743,6 +802,8 @@ impl JobHub {
         e.record.set_finished(&finished);
         self.persist(&e.record);
         e.finished = Some(finished.clone());
+        let last = progress_of(id, &e.shared.progress, 0, None);
+        st.out.push_back(message(AgentBody::JobProgress(last)));
         st.out.push_back(message(AgentBody::JobFinished(finished)));
         drop(st);
         self.notify.notify_one();
@@ -779,19 +840,29 @@ fn sample_loop(ctx: &JobCtx, stopped: &mpsc::Receiver<()>, tick: Duration) {
         let bytes_total = cell.bytes_total.load(Ordering::Relaxed);
         let eta_s =
             (scan_done && speed > 0).then(|| bytes_total.saturating_sub(processed).div_ceil(speed));
-        ctx.hub.set_progress(
-            ctx.job_id(),
-            JobProgress {
-                job_id: ctx.job_id().to_string(),
-                files_done: cell.files_done.load(Ordering::Relaxed),
-                bytes_done: processed,
-                bytes_uploaded: cell.bytes_added.load(Ordering::Relaxed),
-                files_total: cell.files_total.load(Ordering::Relaxed),
-                bytes_total,
-                scan_done,
-                speed_bps: speed,
-                eta_s,
-            },
-        );
+        ctx.hub
+            .set_progress(ctx.job_id(), progress_of(ctx.job_id(), &cell, speed, eta_s));
+    }
+}
+
+/// A progress sample of the counters as they are now. The hub also sends one
+/// when a job finishes, so a job shorter than a tick still reports its totals.
+fn progress_of(
+    job_id: &str,
+    cell: &ProgressCell,
+    speed_bps: u64,
+    eta_s: Option<u64>,
+) -> JobProgress {
+    JobProgress {
+        job_id: job_id.to_string(),
+        files_done: cell.files_done.load(Ordering::Relaxed),
+        bytes_done: cell.bytes_processed.load(Ordering::Relaxed),
+        bytes_uploaded: cell.bytes_added.load(Ordering::Relaxed),
+        files_total: cell.files_total.load(Ordering::Relaxed),
+        bytes_total: cell.bytes_total.load(Ordering::Relaxed),
+        scan_done: cell.scan_done.load(Ordering::Relaxed),
+        speed_bps,
+        eta_s,
+        bytes_downloaded: cell.bytes_downloaded.load(Ordering::Relaxed),
     }
 }

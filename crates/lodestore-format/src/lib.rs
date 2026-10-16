@@ -10,6 +10,7 @@ pub mod keys;
 pub mod pack;
 pub mod reader;
 pub mod repo;
+pub mod selection;
 pub mod snapshot;
 pub mod store;
 pub mod tree;

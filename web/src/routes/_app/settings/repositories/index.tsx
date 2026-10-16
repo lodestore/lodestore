@@ -9,6 +9,7 @@ import {
 } from "@/api/gen/endpoints";
 import type { RepositorySummary } from "@/api/gen/model";
 import { Illustration } from "@/components/brand/illustration";
+import { PathText } from "@/components/path-text";
 import { RelativeTime } from "@/components/relative-time";
 import { AgentKeyBadge } from "@/components/repos/agent-key-badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -75,7 +76,9 @@ function Location({ value }: { value: string }) {
 					{value}
 				</span>
 			</TooltipTrigger>
-			<TooltipContent className="break-all">{value}</TooltipContent>
+			<TooltipContent className="max-w-lg">
+				<PathText value={value} />
+			</TooltipContent>
 		</Tooltip>
 	);
 }

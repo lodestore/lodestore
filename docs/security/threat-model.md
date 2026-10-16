@@ -57,6 +57,35 @@ An agent holds a writer keyset and a write-only S3 key. It can add data to the r
 - The first-run setup link is printed to the server log once. Whoever reads the log before the administrator is created can create the administrator, so restrict access to the log or use the Helm `Secret` to set the administrator password up front.
 - The server has no TLS on the REST and UI port. Terminate TLS on a reverse proxy, otherwise sign-in cookies and tokens cross the network in clear text. See [networking](../deploy/networking.md).
 
+## What an agent sees during a restore
+
+A restore job runs on the target agent, and the server decides what that agent receives. The master secret never leaves the server. The decision is recorded in [ADR 0004](../adr/0004-restore-data-path.md).
+
+**What the agent receives for a job.**
+
+- **A plan of the selection only.** The server opens the snapshot, walks the selected subtrees with its own keys and streams the entries it finds: names, modes, owners, times, links, extents and, for each file, the list of chunks as pack, offset and frame length. Directory trees are not sent as blobs, and snapshot keys and the master secret are not sent at all. The agent learns the paths and metadata of what it restores and nothing about the rest of the snapshot.
+- **The keys of the packs the plan uses.** Each pack key opens the frames of that pack and no other pack. The set of packs issued to a job is kept by the server, and a refresh or a ciphertext read for a pack outside that set is refused. The set is dropped when the job finishes or is interrupted.
+- **Presigned URLs.** On S3 the server signs a `GET` for each issued pack, valid for one hour, and the agent reads the frames it needs with `Range` requests. The agent asks for fresh URLs through `RefreshPackAccess` when a link is close to expiry or refused, and only for packs already issued to the job. A URL grants read access to that one object until it expires, so it is kept in memory, never logged and left out of error messages.
+- **The identity of the source repository: `repo_id` and `k_id`.** To check a chunk against its keyed hash and to compare files with what is already on disk, the agent needs the chunk-hash key of the repository the snapshot came from. `k_id` is a derived key, not the master secret, and without access to the bucket and the index it opens nothing. It is handed over only to the agent that the administrator chose as the target of a restore, including an agent of another repository (a new machine replacing a dead one). It lives in the job assignment, is wiped from the agent's memory after the run and is never written to disk.
+
+**What the agent still holds after a restore.**
+
+- **Neighbouring chunks of a pack.** A pack key opens every frame in its pack, not only the chunks the plan names. An agent that keeps the key can decrypt the other chunks of those packs if it can also read the pack, which its own S3 key cannot do (below). This residue is accepted: packs are 32 MiB, the key is held in memory only for the job, and the agent has no read access to the bucket.
+- **The target's own S3 key still cannot read packs.** The key an agent holds is write-only, and a restore does not change that: the test `restore_s3_agent_key_cannot_read_packs` tries a direct `GET` of pack objects with it and expects a refusal. Data reaches the agent only through presigned URLs for the packs of its job.
+- **Storage without presigning.** For the local folder and the other backends that cannot sign URLs, the server reads the requested pack ranges and relays the ciphertext to the agent over gRPC, `ReadPackRange`, in parts of at most 1 MiB, for packs issued to the job only. It does not decrypt anything for the agent. The path is the same when the repository sits on the agent's own machine.
+
+**Where the agent writes.**
+
+- The agent runs as root and writes wherever the job says. A restore **in place** therefore replaces files anywhere on the host, and the interface asks for explicit confirmation before it sends one. There is no separate privilege model for restores. The default is a new folder, and files that exist in the target but not in the snapshot are never deleted.
+- Names in the plan are validated again on the agent and every write goes through directory descriptors with `*at` calls, so a hostile plan cannot reach outside the target through `..` or a symlink.
+- The target path itself is opened one component at a time. Missing folders are created `0700`. A component that a local user other than root could swap is refused: a symlink that user owns, or a folder that user owns when others can write to it or to the folder it sits in. The default location `/var/lodestore/restore` sits under root-owned folders, so a local user can neither plant nor redirect it; a custom target under a world-writable folder can at most be made to fail.
+
+**Re-enrolment and the previous agent id.**
+
+- A host that is enrolled again may claim its earlier `agent_id`, and the server then binds the snapshots of that id to it. This only changes which host the interface offers as the original one. The agent is write-only and cannot read snapshots, so claiming an id gives it no data. A host that took over another id could, however, be offered "restore to the original host" in the interface, a social-engineering risk. Join tokens are issued by the administrator only.
+
+**Download as an archive is the exception.** Downloading a selection as `tar.gz`, `tar.zst` or `zip` is the one place where the server decrypts data for a person. The server streams the archive to the browser without temporary files, and no agent is involved.
+
 ## Backup hooks
 
 A backup policy can run a script on the host before and after a backup. The server chooses which hook runs and with which arguments, and the agent decides whether it may run.

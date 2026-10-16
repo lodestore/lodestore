@@ -58,6 +58,7 @@ async fn run_job(hub: &std::sync::Arc<JobHub>, id: &str, spec: JobSpec) -> Vec<A
     hub.handle(ServerBody::JobAssign(JobAssign {
         job_id: id.into(),
         spec: Some(spec),
+        restore: None,
     }));
     let mut all = Vec::new();
     let deadline = tokio::time::Instant::now() + WAIT;

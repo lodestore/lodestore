@@ -78,6 +78,7 @@ function makeSnapshot(over: Partial<SnapshotItem> = {}): SnapshotItem {
 function makeJob(host: HostDetail, over: Partial<JobSummary> = {}): JobSummary {
 	return {
 		id: "job-1",
+		kind: "backup",
 		host_id: host.id,
 		hostname: host.hostname,
 		policy_name: "etc",
@@ -641,7 +642,27 @@ describe("Host page", () => {
 			expect(rows[2]).toHaveTextContent("/var/lib, /srv");
 			expect(rows[2]).toHaveTextContent("Incomplete");
 			expect(
-				screen.getByText("Restore arrives in a later release."),
+				screen.getByText("Open a snapshot in Restore to browse its files."),
+			).toBeInTheDocument();
+		});
+
+		it("opens a snapshot in Restore from its Browse files link", async () => {
+			const detail = makeDetail("web-1");
+			server.use(
+				http.get("/api/v1/restore/hosts", () => HttpResponse.json([])),
+			);
+			await openHost(detail, "?tab=snapshots", { snapshots: [makeSnapshot()] });
+			const link = await screen.findByRole("link", {
+				name: "Browse files in snapshot a1b2c3d4",
+			});
+			const href = link.getAttribute("href") ?? "";
+			expect(href).toContain("/restore?");
+			expect(href).toContain(`host=${detail.id}`);
+			expect(href).toContain("snapshot=a1b2c3d4e5f60718293a4b5c6d7e8f90");
+
+			await userEvent.click(link);
+			expect(
+				await screen.findByRole("heading", { level: 1, name: "Restore" }),
 			).toBeInTheDocument();
 		});
 

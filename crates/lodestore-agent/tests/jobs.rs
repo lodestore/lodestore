@@ -33,6 +33,7 @@ fn assign(id: &str, spec: JobSpec) -> ServerBody {
     ServerBody::JobAssign(JobAssign {
         job_id: id.to_string(),
         spec: Some(spec),
+        restore: None,
     })
 }
 

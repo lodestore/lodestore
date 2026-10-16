@@ -656,6 +656,7 @@ async fn enroll_token_expired() {
                     min: PROTOCOL_VERSION,
                     max: PROTOCOL_VERSION,
                 }),
+                ..Default::default()
             })
             .await
             .expect_err("an expired token is refused");

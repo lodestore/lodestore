@@ -1,17 +1,21 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use anyhow::Context;
 use axum::Json;
 use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
 use lodestore_format::index::{hex32, parse_hex32};
 use lodestore_format::keys::{MasterKey, ReadKeys};
 use lodestore_format::pb;
 use lodestore_format::snapshot::{open_snapshot, snapshot_object_key};
-use lodestore_format::store::{BlobStore, Store};
+use lodestore_format::store::{BlobError, BlobStore, Store};
 use lodestore_format::{Error as FormatError, Result as FormatResult};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
+use tokio::sync::{Semaphore, watch};
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use utoipa::{IntoParams, ToSchema};
 use utoipa_axum::router::OpenApiRouter;
@@ -27,6 +31,11 @@ use crate::state::AppState;
 const SYNC_INTERVAL: Duration = Duration::from_secs(300);
 const PAGE_SIZE: i64 = 50;
 const SNAPSHOT_PREFIX: &str = "snapshots/";
+const CONFIG_OBJECT: &str = "config";
+const READ_CONCURRENCY: usize = 8;
+pub(crate) const SNAPSHOT_COLUMNS: &str = "id, time_ms, hostname, paths_json, tags_json, \
+     policy_name, stdin_name, job_id, parent_id, incomplete, errors_total, warnings_total, \
+     stats_json";
 
 pub struct JobLink<'a> {
     pub job_id: &'a str,
@@ -40,25 +49,32 @@ pub struct SyncReport {
     pub total: u64,
 }
 
-struct Source {
-    store: Store,
-    keys: ReadKeys,
+pub struct OpenRepository {
+    pub store: Store,
+    pub keys: ReadKeys,
+    pub config: pb::Config,
 }
 
-async fn open_source(state: &AppState, repository_id: &str) -> anyhow::Result<Source> {
+pub async fn open_repository(
+    state: &AppState,
+    repository_id: &str,
+) -> anyhow::Result<OpenRepository> {
     let access = server_access(state, repository_id).await?;
     let master: [u8; 32] = access
         .master
         .as_slice()
         .try_into()
         .map_err(|_| anyhow::anyhow!("master secret must be 32 bytes"))?;
-    Ok(Source {
-        store: open_store(&access.location, access.server_creds.as_ref())?,
+    let store = open_store(&access.location, access.server_creds.as_ref())?;
+    let config = lodestore_format::config::decode(&store.get(CONFIG_OBJECT).await?)?;
+    Ok(OpenRepository {
+        store,
         keys: ReadKeys::derive(MasterKey::from_bytes(master), access.format_repo_id),
+        config,
     })
 }
 
-async fn read_snapshot(source: &Source, id: &[u8; 32]) -> FormatResult<pb::Snapshot> {
+async fn read_snapshot(source: &OpenRepository, id: &[u8; 32]) -> FormatResult<pb::Snapshot> {
     let bytes = source.store.get(&snapshot_object_key(id)).await?;
     open_snapshot(
         source.keys.hpke_private_key(),
@@ -190,7 +206,7 @@ pub async fn ingest_snapshot(
         }
         return Ok(false);
     }
-    let source = open_source(state, repository_id).await?;
+    let source = open_repository(state, repository_id).await?;
     let snapshot = read_snapshot(&source, &id).await?;
     if let Some(link) = &link
         && std::str::from_utf8(&snapshot.agent_id)
@@ -231,11 +247,257 @@ async fn link_snapshot(
     Ok(())
 }
 
-async fn sync_inner(
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogPhase {
+    Idle,
+    Listing,
+    Reading,
+    Done,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SkippedSnapshot {
+    pub key: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct CatalogStatus {
+    pub repository_id: String,
+    pub repository_name: String,
+    pub phase: CatalogPhase,
+    pub read: u64,
+    pub total: Option<u64>,
+    pub added: u64,
+    pub skipped: Vec<SkippedSnapshot>,
+    pub error: Option<String>,
+    pub started_at: Option<i64>,
+    pub finished_at: Option<i64>,
+    pub last_sync_at: Option<i64>,
+    pub snapshots: u64,
+}
+
+impl CatalogStatus {
+    fn new(repository_id: &str, phase: CatalogPhase) -> Self {
+        CatalogStatus {
+            repository_id: repository_id.to_string(),
+            repository_name: String::new(),
+            phase,
+            read: 0,
+            total: None,
+            added: 0,
+            skipped: Vec::new(),
+            error: None,
+            started_at: None,
+            finished_at: None,
+            last_sync_at: None,
+            snapshots: 0,
+        }
+    }
+
+    fn running(&self) -> bool {
+        matches!(self.phase, CatalogPhase::Listing | CatalogPhase::Reading)
+    }
+}
+
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum RebuildError {
+    #[error("{0}")]
+    Storage(String),
+    #[error("{0}")]
+    Other(String),
+}
+
+impl RebuildError {
+    fn of(error: &anyhow::Error) -> Self {
+        let storage = error.downcast_ref::<FormatError>().is_some()
+            || error.downcast_ref::<BlobError>().is_some();
+        if storage {
+            RebuildError::Storage(error.to_string())
+        } else {
+            RebuildError::Other(error.to_string())
+        }
+    }
+}
+
+type Outcome = Result<SyncReport, RebuildError>;
+
+struct Job {
+    status: CatalogStatus,
+    outcome: watch::Receiver<Option<Outcome>>,
+    /// A routine sync: the API keeps showing `shown`, the last rebuild an
+    /// operator saw, instead of this run.
+    quiet: bool,
+    shown: Option<CatalogStatus>,
+}
+
+#[derive(Clone, Default)]
+pub struct CatalogJobs {
+    inner: Arc<Mutex<HashMap<String, Job>>>,
+}
+
+impl CatalogJobs {
+    fn lock(&self) -> MutexGuard<'_, HashMap<String, Job>> {
+        self.inner.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn update(&self, repository_id: &str, change: impl FnOnce(&mut CatalogStatus)) {
+        if let Some(job) = self.lock().get_mut(repository_id) {
+            change(&mut job.status);
+        }
+    }
+
+    fn status(&self, repository_id: &str) -> Option<CatalogStatus> {
+        self.lock().get(repository_id).map(|j| j.status.clone())
+    }
+
+    /// What the API reports: a routine sync stays out of sight.
+    fn shown(&self, repository_id: &str) -> Option<CatalogStatus> {
+        self.lock().get(repository_id).and_then(|j| {
+            if j.quiet {
+                j.shown.clone()
+            } else {
+                Some(j.status.clone())
+            }
+        })
+    }
+
+    /// Starts a run unless one is going on. A rebuild asked for while a quiet
+    /// sync runs joins it and makes it visible.
+    fn start(
+        &self,
+        state: &AppState,
+        repository_id: &str,
+        quiet: bool,
+    ) -> (CatalogStatus, watch::Receiver<Option<Outcome>>) {
+        let mut jobs = self.lock();
+        let mut shown = None;
+        if let Some(job) = jobs.get_mut(repository_id) {
+            if job.status.running() {
+                job.quiet &= quiet;
+                return (job.status.clone(), job.outcome.clone());
+            }
+            shown = if job.quiet {
+                job.shown.take()
+            } else {
+                Some(job.status.clone())
+            };
+        }
+        let (tx, rx) = watch::channel(None);
+        let mut status = CatalogStatus::new(repository_id, CatalogPhase::Listing);
+        status.started_at = Some(now_ms());
+        jobs.insert(
+            repository_id.to_string(),
+            Job {
+                status: status.clone(),
+                outcome: rx.clone(),
+                quiet,
+                shown,
+            },
+        );
+        drop(jobs);
+        spawn_job(state.clone(), repository_id.to_string(), tx);
+        (status, rx)
+    }
+
+    fn finish(&self, repository_id: &str, outcome: &Outcome) {
+        self.update(repository_id, |status| {
+            status.finished_at = Some(now_ms());
+            match outcome {
+                Ok(_) => status.phase = CatalogPhase::Done,
+                Err(e) => {
+                    status.phase = CatalogPhase::Failed;
+                    status.error = Some(e.to_string());
+                }
+            }
+        });
+    }
+}
+
+fn spawn_job(state: AppState, repository_id: String, done: watch::Sender<Option<Outcome>>) {
+    tokio::spawn(async move {
+        let worker = tokio::spawn({
+            let state = state.clone();
+            let repository_id = repository_id.clone();
+            async move { rebuild(&state, &repository_id).await }
+        });
+        let outcome = match worker.await {
+            Ok(Ok(report)) => Ok(report),
+            Ok(Err(error)) => {
+                if let Err(e) =
+                    record_state(&state, &repository_id, Some(&error.to_string()), &[]).await
+                {
+                    tracing::warn!(error = %e, "recording the catalog rebuild error failed");
+                }
+                Err(RebuildError::of(&error))
+            }
+            Err(e) => Err(RebuildError::Other(format!(
+                "the catalog rebuild stopped unexpectedly: {e}"
+            ))),
+        };
+        state.catalog.finish(&repository_id, &outcome);
+        done.send_replace(Some(outcome));
+    });
+}
+
+pub fn start_rebuild(state: &AppState, repository_id: &str) -> CatalogStatus {
+    state.catalog.start(state, repository_id, false).0
+}
+
+pub async fn resume_unsynced(state: &AppState) {
+    let rows = sqlx::query(
+        "SELECT r.id FROM repositories r LEFT JOIN catalog_state c ON c.repository_id = r.id \
+         WHERE c.last_sync_at IS NULL",
+    )
+    .fetch_all(&state.db.pool)
+    .await;
+    match rows {
+        Ok(rows) => {
+            for row in rows {
+                if let Ok(id) = row.try_get::<String, _>("id") {
+                    start_rebuild(state, &id);
+                }
+            }
+        }
+        Err(error) => tracing::warn!(%error, "listing unsynced repositories failed"),
+    }
+}
+
+async fn read_one(
     state: &AppState,
     repository_id: &str,
-) -> anyhow::Result<(SyncReport, Vec<String>)> {
-    let source = open_source(state, repository_id).await?;
+    source: &OpenRepository,
+    key: String,
+    id: [u8; 32],
+) -> anyhow::Result<()> {
+    match read_snapshot(source, &id).await {
+        Ok(snapshot) => {
+            let inserted = insert_snapshot(state, repository_id, &id, &snapshot, None).await?;
+            state.catalog.update(repository_id, |s| {
+                s.read += 1;
+                s.added += u64::from(inserted);
+            });
+        }
+        Err(e) => {
+            if !is_unreadable(&e) {
+                tracing::warn!(%key, error = %e, "reading a snapshot failed");
+            }
+            state.catalog.update(repository_id, |s| {
+                s.read += 1;
+                s.skipped.push(SkippedSnapshot {
+                    key,
+                    reason: e.to_string(),
+                });
+            });
+        }
+    }
+    Ok(())
+}
+
+async fn rebuild(state: &AppState, repository_id: &str) -> anyhow::Result<SyncReport> {
+    let source = Arc::new(open_repository(state, repository_id).await?);
     let listed = source.store.list(SNAPSHOT_PREFIX).await?;
     let known: HashSet<String> = sqlx::query("SELECT id FROM snapshots WHERE repository_id = $1")
         .bind(repository_id)
@@ -244,51 +506,71 @@ async fn sync_inner(
         .iter()
         .map(|r| r.try_get("id"))
         .collect::<Result<_, _>>()?;
-    let mut added = 0;
-    let mut skipped = Vec::new();
+    let mut unreadable = Vec::new();
+    let mut candidates = Vec::new();
     for entry in listed {
-        let Some(id) = entry
+        match entry
             .key
             .strip_prefix(SNAPSHOT_PREFIX)
             .and_then(parse_hex32)
-        else {
-            skipped.push(entry.key);
-            continue;
-        };
-        if known.contains(&hex32(&id)) {
-            continue;
-        }
-        match read_snapshot(&source, &id).await {
-            Ok(snapshot) => {
-                if insert_snapshot(state, repository_id, &id, &snapshot, None).await? {
-                    added += 1;
-                }
-            }
-            Err(e) if is_unreadable(&e) => skipped.push(entry.key),
-            Err(e) => {
-                tracing::warn!(key = %entry.key, error = %e, "reading a snapshot failed");
-                skipped.push(entry.key);
-            }
+        {
+            None => unreadable.push(SkippedSnapshot {
+                key: entry.key,
+                reason: "not a snapshot name".into(),
+            }),
+            Some(id) if known.contains(&hex32(&id)) => {}
+            Some(id) => candidates.push((entry.key, id)),
         }
     }
+    state.catalog.update(repository_id, |s| {
+        s.phase = CatalogPhase::Reading;
+        s.total = Some(candidates.len() as u64);
+        s.skipped = unreadable;
+    });
+
+    let permits = Arc::new(Semaphore::new(READ_CONCURRENCY));
+    let mut tasks = JoinSet::new();
+    for (key, id) in candidates {
+        let permit = permits.clone().acquire_owned().await?;
+        while let Some(done) = tasks.try_join_next() {
+            done??;
+        }
+        let (state, source, repository_id) =
+            (state.clone(), source.clone(), repository_id.to_string());
+        tasks.spawn(async move {
+            let _permit = permit;
+            read_one(&state, &repository_id, &source, key, id).await
+        });
+    }
+    while let Some(done) = tasks.join_next().await {
+        done??;
+    }
+
+    state.catalog.update(repository_id, |s| {
+        s.skipped.sort_by(|a, b| a.key.cmp(&b.key));
+    });
+    let status = state
+        .catalog
+        .status(repository_id)
+        .context("the rebuild state vanished")?;
+    record_state(state, repository_id, None, &status.skipped).await?;
     let total: i64 = sqlx::query("SELECT COUNT(*) AS n FROM snapshots WHERE repository_id = $1")
         .bind(repository_id)
         .fetch_one(&state.db.pool)
         .await?
         .try_get("n")?;
-    let report = SyncReport {
-        added,
-        skipped: skipped.len() as u64,
+    Ok(SyncReport {
+        added: status.added,
+        skipped: status.skipped.len() as u64,
         total: total.max(0) as u64,
-    };
-    Ok((report, skipped))
+    })
 }
 
 async fn record_state(
     state: &AppState,
     repository_id: &str,
     error: Option<&str>,
-    skipped: &[String],
+    skipped: &[SkippedSnapshot],
 ) -> anyhow::Result<()> {
     let at = error.is_none().then(now_ms);
     let skipped_json = error
@@ -313,19 +595,14 @@ async fn record_state(
 }
 
 pub async fn sync_repository(state: &AppState, repository_id: &str) -> anyhow::Result<SyncReport> {
-    match sync_inner(state, repository_id).await {
-        Ok((report, skipped)) => {
-            record_state(state, repository_id, None, &skipped).await?;
-            Ok(report)
-        }
-        Err(error) => {
-            if let Err(e) = record_state(state, repository_id, Some(&error.to_string()), &[]).await
-            {
-                tracing::warn!(error = %e, "recording the catalog sync error failed");
-            }
-            Err(error)
-        }
-    }
+    let (_, mut done) = state.catalog.start(state, repository_id, true);
+    let outcome = done
+        .wait_for(Option::is_some)
+        .await
+        .context("the catalog rebuild was dropped")?
+        .clone()
+        .context("the catalog rebuild has no outcome")?;
+    Ok(outcome?)
 }
 
 pub async fn sync_loop(state: AppState, stop: CancellationToken) -> anyhow::Result<()> {
@@ -349,7 +626,6 @@ pub async fn sync_loop(state: AppState, stop: CancellationToken) -> anyhow::Resu
         }
     }
 }
-
 #[derive(Serialize, ToSchema)]
 pub struct CatalogSyncResult {
     pub added: u64,
@@ -415,7 +691,10 @@ pub struct PageQuery {
 }
 
 fn sync_error(error: anyhow::Error) -> ApiError {
-    if error.downcast_ref::<FormatError>().is_some() {
+    if matches!(
+        error.downcast_ref::<RebuildError>(),
+        Some(RebuildError::Storage(_))
+    ) {
         ApiError::Backend(format!("the repository storage failed: {error}"))
     } else {
         ApiError::Internal(error)
@@ -451,7 +730,7 @@ async fn sync_catalog(
     }))
 }
 
-fn item_from_row(row: &sqlx::any::AnyRow) -> Result<SnapshotItem, ApiError> {
+pub(crate) fn item_from_row(row: &sqlx::any::AnyRow) -> Result<SnapshotItem, ApiError> {
     let parse = |e: serde_json::Error| ApiError::Internal(e.into());
     Ok(SnapshotItem {
         id: row.try_get("id")?,
@@ -519,8 +798,124 @@ async fn list_host_snapshots(
     }))
 }
 
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredSkip {
+    Legacy(String),
+    Full(SkippedSnapshot),
+}
+
+fn stored_skipped(json: Option<&str>) -> Vec<SkippedSnapshot> {
+    let parsed: Vec<StoredSkip> = json
+        .and_then(|j| serde_json::from_str(j).ok())
+        .unwrap_or_default();
+    parsed
+        .into_iter()
+        .map(|s| match s {
+            StoredSkip::Legacy(key) => SkippedSnapshot {
+                key,
+                reason: String::new(),
+            },
+            StoredSkip::Full(full) => full,
+        })
+        .collect()
+}
+
+async fn statuses(state: &AppState) -> anyhow::Result<Vec<CatalogStatus>> {
+    let repositories = list_repositories(state).await?;
+    let mut stored = HashMap::new();
+    for row in sqlx::query(
+        "SELECT repository_id, last_sync_at, last_error, skipped_json FROM catalog_state",
+    )
+    .fetch_all(&state.db.pool)
+    .await?
+    {
+        let id: String = row.try_get("repository_id")?;
+        stored.insert(
+            id,
+            (
+                row.try_get::<Option<i64>, _>("last_sync_at")?,
+                row.try_get::<Option<String>, _>("last_error")?,
+                row.try_get::<Option<String>, _>("skipped_json")?,
+            ),
+        );
+    }
+    let mut counts = HashMap::new();
+    for row in
+        sqlx::query("SELECT repository_id, COUNT(*) AS n FROM snapshots GROUP BY repository_id")
+            .fetch_all(&state.db.pool)
+            .await?
+    {
+        let id: String = row.try_get("repository_id")?;
+        counts.insert(id, row.try_get::<i64, _>("n")?.max(0) as u64);
+    }
+    Ok(repositories
+        .into_iter()
+        .map(|repo| {
+            let stored = stored.remove(&repo.id);
+            let mut status = state.catalog.shown(&repo.id).unwrap_or_else(|| {
+                let mut idle = CatalogStatus::new(&repo.id, CatalogPhase::Idle);
+                if let Some((_, error, skipped)) = &stored {
+                    idle.error.clone_from(error);
+                    idle.skipped = stored_skipped(skipped.as_deref());
+                }
+                idle
+            });
+            status.repository_name = repo.name;
+            status.last_sync_at = stored.and_then(|(at, ..)| at);
+            status.snapshots = counts.get(&repo.id).copied().unwrap_or(0);
+            status
+        })
+        .collect())
+}
+
+#[utoipa::path(
+    get,
+    tag = "Snapshots",
+    summary = "Catalog rebuild status of every repository",
+    path = "/api/v1/catalog",
+    responses((status = 200, description = "Phase and progress per repository", body = Vec<CatalogStatus>))
+)]
+async fn list_catalog_status(
+    State(state): State<AppState>,
+    _user: AuthUser,
+) -> Result<Json<Vec<CatalogStatus>>, ApiError> {
+    Ok(Json(statuses(&state).await?))
+}
+
+#[utoipa::path(
+    post,
+    tag = "Snapshots",
+    summary = "Rebuild the catalog of a repository from storage",
+    security(("session" = [], "csrf" = [])),
+    path = "/api/v1/repositories/{id}/catalog/rebuild",
+    params(("id" = String, Path, description = "Repository id")),
+    responses(
+        (status = 202, description = "The rebuild runs in the background", body = CatalogStatus),
+        (status = 404, description = "Unknown repository", body = ErrorBody),
+    )
+)]
+async fn rebuild_catalog(
+    State(state): State<AppState>,
+    _user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<(StatusCode, Json<CatalogStatus>), ApiError> {
+    get_repository(&state, &id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("repository not found".into()))?;
+    start_rebuild(&state, &id);
+    let status = statuses(&state)
+        .await?
+        .into_iter()
+        .find(|s| s.repository_id == id)
+        .ok_or_else(|| ApiError::NotFound("repository not found".into()))?;
+    Ok((StatusCode::ACCEPTED, Json(status)))
+}
+
 pub fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(sync_catalog))
+        .routes(routes!(list_catalog_status))
+        .routes(routes!(rebuild_catalog))
         .routes(routes!(list_host_snapshots))
 }

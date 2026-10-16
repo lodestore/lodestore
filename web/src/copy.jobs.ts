@@ -1,3 +1,5 @@
+import { sentence } from "@/lib/sentence";
+
 export const jobs = {
 	title: "Jobs",
 	breadcrumbRoot: "Jobs",
@@ -12,6 +14,12 @@ export const jobs = {
 	allPolicies: "All policies",
 	cliPolicy: "CLI (no policy)",
 	statusFilterLabel: "Filter by status",
+	allTypes: "All types",
+	kindFilterLabel: "Filter by type",
+	kinds: { backup: "Backups", restore: "Restores", download: "Downloads" },
+	restoreLine: (id: string) => `Restore · snapshot ${id}`,
+	downloadLine: (format: string) => `Download · ${format}`,
+	archiveFormat: { tar_gz: "tar.gz", tar_zst: "tar.zst", zip: "zip" },
 	policyFilterLabel: "Filter by policy",
 	cancelFailed: "cancel the job",
 	rerunFailed: "run the job",
@@ -68,7 +76,16 @@ export const jobs = {
 		`Showing ${from}-${to} of ${total}`,
 	previous: "Previous",
 	next: "Next",
+	otherStatusHint: {
+		queuedDownload: "Waiting for the browser to start the download.",
+		failedDownload: "The archive could not be built. Download it again.",
+		cancelled: "Files already written stay on the host.",
+		notStartedDownload: "The browser did not start the download.",
+	},
 	result: {
+		downloadSent: (size: string, format: string) => `${size} sent · ${format}`,
+		archiveIncomplete: "Archive incomplete",
+		restoreProgressLabel: "Restore progress",
 		scanning: (files: string) => `Scanning · ${files} files`,
 		percent: (pct: number) => `${pct}%`,
 		succeeded: (size: string, files: string) => `${size} · ${files} files`,
@@ -83,12 +100,19 @@ export const jobs = {
 			`Waiting for ${host} to connect. The job is dropped if it does not connect within 24 hours.`,
 		busyLong: (host: string) =>
 			`Waiting for another backup on ${host} to finish.`,
+		busyJob: "Waiting for another job on this host",
+		busyJobLong: (host: string) =>
+			`Waiting for another job on ${host} to finish.`,
 		dropAfter:
 			"The job is dropped if the host does not connect within 24 hours.",
 	},
 	detail: {
 		offlineWhileRunning: (host: string) =>
 			`${host} is offline. The agent keeps backing up and reports the result when it reconnects.`,
+		offlineWhileRestoring: (host: string) =>
+			`${host} is offline. The agent keeps restoring and reports the result when it reconnects.`,
+		restoreOf: "Restore of snapshot",
+		downloadOf: "Download of snapshot",
 		lastUpdate: (time: string) => `Last update ${time}`,
 		scanningNote:
 			"Scanning the file tree. The time estimate appears when the scan finishes.",
@@ -114,12 +138,21 @@ export const jobs = {
 		backup: "Backing up",
 		post_hook: "Running the after-backup hook",
 		finalize: "Writing the snapshot",
+		restore_plan: "Preparing the restore plan",
+		restore_files: "Restoring files",
+		restore_metadata: "Applying permissions and times",
+		restore_finishing: "Finishing",
+		download_queued: "Waiting for the browser to start the download",
+		download_stream: "Streaming the archive",
 	},
 	metrics: {
 		files: "Files",
 		data: "Data",
 		uploaded: "Uploaded",
 		uploadedSub: "new data after dedup",
+		readFromStorage: "Read from storage",
+		readFromStorageSub: "data downloaded from the bucket",
+		sent: "Sent",
 		speed: "Speed",
 		speedSub: "average of the last 10 s",
 		timeLeft: "Time left",
@@ -153,6 +186,27 @@ export const jobs = {
 		incompleteBadge: "Incomplete snapshot",
 		incomplete:
 			"Incomplete snapshot. Some files could not be read. See the warnings in the log.",
+		browseFiles: "Browse files",
+		sourceHost: "Source host",
+		destination: "Destination",
+		copyDestination: "destination",
+		ifExists: "Existing files",
+		conflict: {
+			overwrite_changed: "Overwrite changed files",
+			skip_existing: "Skip existing files",
+			stop_if_not_empty: "Stop if the folder is not empty",
+		},
+		owners: "Owners",
+		ownersOriginal: "Restore original owners",
+		ownersAgent: "Owned by the user the agent runs as",
+		startedBy: "Started by",
+		items: "Items",
+		format: "Format",
+		created: "Created",
+		overwritten: "Overwritten",
+		skipped: "Skipped",
+		warnings: "Warnings",
+		sent: "Sent",
 	},
 	cancel: {
 		title: "Cancel job",
@@ -162,6 +216,10 @@ export const jobs = {
 		confirm: "Cancel job",
 		keep: "Keep running",
 		toast: "Job cancelled.",
+		restoreHeading: "Cancel this restore?",
+		restoreBody:
+			"The host stops writing. Files already written stay on the host, so run it again to finish.",
+		restoreBodyQueued: "The restore is removed from the queue.",
 	},
 	log: {
 		title: "Log",
@@ -173,6 +231,14 @@ export const jobs = {
 			unreadable: "Unreadable",
 			disappeared: "Disappeared",
 			special: "Special file skipped",
+			owner_not_applied: "Owner not applied",
+			attributes_not_applied: "Attributes not applied",
+			time_not_applied: "Time not applied",
+			unsafe_path_rejected: "Unsafe path rejected",
+			link_not_created: "Link not created",
+			restore_integrity: "Data failed the integrity check",
+			plan_restarted: "Restore plan reopened",
+			restore_entry_failed: "Item not restored",
 		},
 		jumpToLatest: "Jump to latest",
 		hookOutput: (script: string) => `Output of ${script} (last 64 KiB)`,
@@ -202,6 +268,28 @@ export const jobs = {
 			`A hook timed out. ${script} ran longer than ${timeout}. Raise the timeout in the policy or fix the script, then run again.`,
 		interrupted:
 			"The agent stopped while this job ran. Run it again; data already uploaded is not sent twice.",
+		restoreFailed: (message: string) =>
+			`The restore failed. ${sentence(message)}Check the log, then restore again.`,
+		restore_target_unwritable: (host: string, path: string) =>
+			`The destination is not writable. The agent on ${host} cannot write to ${path}. Choose another folder or fix its permissions, then restore again.`,
+		restore_target_not_empty: (host: string, path: string) =>
+			`The destination folder is not empty. ${path} on ${host} has content and the restore was set to stop. Choose an empty folder or another option, then restore again.`,
+		restore_disk_full: (host: string, path: string) =>
+			`The host ran out of space. ${host} has no space left at ${path}. Free some space or choose another folder, then restore again.`,
+		restore_data_missing:
+			"Data is missing from storage. A pack this snapshot needs was not found in the bucket. Run a storage check in Settings, or restore another snapshot.",
+		restore_integrity:
+			"Data failed the integrity check. A chunk read from storage does not match its hash, so that file was not written. Try another snapshot and check the repository.",
+		restore_access_denied: (host: string) =>
+			`The host could not read from storage. The temporary access link expired or was refused. Check that ${host} can reach the bucket, then restore again.`,
+		restoreInterrupted:
+			"The agent stopped while this restore ran. Files already written stay on the host. Start the restore again to finish.",
+		restoreNotStarted: (host: string) =>
+			`${host} did not connect within 24 hours, so the restore was dropped. Check that the agent is running, then restore again.`,
+		downloadInterrupted:
+			"The connection closed before the archive was complete. The file you received is incomplete. Download it again.",
+		downloadNotStarted:
+			"The browser did not start the download in time. Download it again.",
 		notStarted: (host: string) =>
 			`${host} did not connect within 24 hours, so the job was dropped. Check that the agent is running, then run it again.`,
 	},

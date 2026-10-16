@@ -319,7 +319,9 @@ async fn revoke_host(
     .execute(&state.db.pool)
     .await?;
     for row in &active {
-        state.registry.live.remove(&row.try_get::<String, _>("id")?);
+        let job_id: String = row.try_get("id")?;
+        state.registry.live.remove(&job_id);
+        state.registry.clear_issued(&job_id);
     }
     state.registry.revoke(&id);
     Ok(StatusCode::NO_CONTENT)

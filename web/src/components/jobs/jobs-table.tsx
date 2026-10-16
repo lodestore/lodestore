@@ -1,6 +1,8 @@
 import { Link, useNavigate } from "@tanstack/react-router";
 import { MoreHorizontal } from "lucide-react";
-import type { JobSummary } from "@/api/gen/model";
+import type { JobKind, JobSummary } from "@/api/gen/model";
+import { restoreFailureText } from "@/components/jobs/job-cards";
+import { TextWithPaths } from "@/components/path-text";
 import { formatRelative } from "@/components/relative-time";
 import { StatusBadge } from "@/components/status-badge";
 import { Badge } from "@/components/ui/badge";
@@ -34,6 +36,7 @@ import {
 	percent,
 } from "@/lib/format";
 import { warningCount } from "@/lib/plural";
+import { shortId } from "@/lib/snapshot";
 import { cn } from "@/lib/utils";
 
 export type JobState =
@@ -48,6 +51,10 @@ export type JobState =
 
 export type JobRow = {
 	id: string;
+	kind?: JobKind;
+	restore?: JobSummary["restore"];
+	restore_result?: JobSummary["restore_result"];
+	download?: JobSummary["download"];
 	host_id: string;
 	hostname: string;
 	policy_name?: string | null;
@@ -67,6 +74,7 @@ export type JobRow = {
 		bytes_done: number;
 		bytes_total: number;
 		bytes_uploaded: number;
+		bytes_downloaded?: number;
 		scan_done: boolean;
 		speed_bps: number;
 		eta_s?: number | null;
@@ -126,6 +134,108 @@ const SHOW_STATUS = "hidden @min-[1024px]:table-cell";
 const isActive = (job: JobRow) =>
 	job.state === "queued" || job.state === "running";
 
+const isAgentless = (hostId: string) => hostId.startsWith("agentless:");
+
+/** Why a queued job waits; undefined when nothing holds it on an online host. */
+export const waitReason = (job: Pick<JobRow, "queue_reason" | "host_online">) =>
+	job.queue_reason ?? (job.host_online ? undefined : "host_offline");
+
+const queuedHint = (job: JobRow, busy: string) => {
+	const reason = waitReason(job);
+	if (reason === "host_offline") return copy.jobs.queueReason.offline;
+	return reason === "host_busy" ? busy : copy.jobs.phases.queued;
+};
+
+const archiveFormat = (job: JobRow) =>
+	job.download ? copy.jobs.archiveFormat[job.download.format] : "";
+
+function OtherJobResult({ job }: { job: JobRow }) {
+	const restore = job.kind === "restore";
+	const { progress, restore_result: result, download } = job;
+	switch (job.state) {
+		case "running":
+			if (!restore) {
+				return (
+					<span className="text-sm">{copy.jobs.phases.download_stream}</span>
+				);
+			}
+			return (
+				<div className="flex items-center gap-2">
+					<Progress
+						value={percent(progress ?? {})}
+						aria-label={copy.jobs.result.restoreProgressLabel}
+						className="w-32 shrink-0"
+					/>
+					<span className="text-sm">
+						{copy.jobs.result.percent(percent(progress ?? {}))}
+					</span>
+				</div>
+			);
+		case "queued":
+			return (
+				<span className="text-sm text-muted-foreground">
+					{restore
+						? queuedHint(job, copy.jobs.queueReason.busyJob)
+						: copy.jobs.otherStatusHint.queuedDownload}
+				</span>
+			);
+		case "succeeded":
+		case "warnings": {
+			if (!restore) {
+				if (!download) return <span>{copy.common.dash}</span>;
+				return (
+					<span className="text-sm">
+						{copy.jobs.result.downloadSent(
+							formatBytes(download.bytes_sent),
+							archiveFormat(job),
+						)}
+					</span>
+				);
+			}
+			const size = formatBytes(result?.bytes ?? 0);
+			return (
+				<span className="text-sm">
+					{job.state === "warnings"
+						? copy.jobs.result.warnings(size, warningCount(job.warnings_total))
+						: copy.jobs.result.succeeded(size, formatCount(result?.files ?? 0))}
+				</span>
+			);
+		}
+		case "interrupted":
+			if (!restore) {
+				return (
+					<span className="text-sm">{copy.jobs.result.archiveIncomplete}</span>
+				);
+			}
+			return (
+				<span className="text-sm text-muted-foreground">
+					{copy.jobs.statusHint.interrupted}
+				</span>
+			);
+		case "failed": {
+			const reason = restore
+				? restoreFailureText(job)
+				: job.error_message?.split("\n")[0].trim() ||
+					copy.jobs.otherStatusHint.failedDownload;
+			return <Truncated text={reason} className="max-w-64 text-sm" />;
+		}
+		case "cancelled":
+			return (
+				<span className="text-sm text-muted-foreground">
+					{copy.jobs.otherStatusHint.cancelled}
+				</span>
+			);
+		default:
+			return (
+				<span className="text-sm text-muted-foreground">
+					{restore
+						? copy.jobs.statusHint.not_started
+						: copy.jobs.otherStatusHint.notStartedDownload}
+				</span>
+			);
+	}
+}
+
 function Truncated({
 	text,
 	className,
@@ -142,12 +252,17 @@ function Truncated({
 					{children ?? text}
 				</span>
 			</TooltipTrigger>
-			<TooltipContent>{text}</TooltipContent>
+			<TooltipContent>
+				<TextWithPaths text={text} />
+			</TooltipContent>
 		</Tooltip>
 	);
 }
 
 export function JobResult({ job }: { job: JobRow }) {
+	if (job.kind === "restore" || job.kind === "download") {
+		return <OtherJobResult job={job} />;
+	}
 	const { progress, stats } = job;
 	switch (job.state) {
 		case "running":
@@ -174,16 +289,12 @@ export function JobResult({ job }: { job: JobRow }) {
 					)}
 				</span>
 			);
-		case "queued": {
-			const offline = job.queue_reason
-				? job.queue_reason === "host_offline"
-				: !job.host_online;
+		case "queued":
 			return (
 				<span className="text-sm text-muted-foreground">
-					{offline ? copy.jobs.queueReason.offline : copy.jobs.queueReason.busy}
+					{queuedHint(job, copy.jobs.queueReason.busy)}
 				</span>
 			);
-		}
 		case "succeeded":
 			if (!stats) return <span>{copy.common.dash}</span>;
 			return (
@@ -261,6 +372,17 @@ function Duration({ job }: { job: JobRow }) {
 }
 
 function PolicyLine({ job }: { job: JobRow }) {
+	if (job.kind === "restore" || job.kind === "download") {
+		const line =
+			job.kind === "restore"
+				? copy.jobs.restoreLine(shortId(job.restore?.snapshot_id ?? ""))
+				: copy.jobs.downloadLine(archiveFormat(job));
+		return (
+			<div className="text-sm whitespace-nowrap text-muted-foreground">
+				{line}
+			</div>
+		);
+	}
 	if (job.source === "cli") {
 		return (
 			<Badge variant="outline" title={copy.jobs.runFromCli}>
@@ -313,6 +435,12 @@ export function JobActions({
 	onCancel?: (job: JobRow) => void;
 	onRerun?: (job: JobRow) => void;
 }) {
+	const cancellable = isActive(job) && job.kind !== "download";
+	const rerunnable =
+		!isActive(job) &&
+		(job.kind === undefined || job.kind === "backup") &&
+		job.source !== "cli" &&
+		job.policy_exists;
 	return (
 		<DropdownMenu modal={false}>
 			<DropdownMenuTrigger asChild>
@@ -329,7 +457,7 @@ export function JobActions({
 				<DropdownMenuItem onSelect={() => onOpen(job)}>
 					{copy.jobs.viewJob}
 				</DropdownMenuItem>
-				{isActive(job) && (
+				{cancellable && (
 					<DropdownMenuItem
 						variant="destructive"
 						onSelect={() => onCancel?.(job)}
@@ -337,7 +465,7 @@ export function JobActions({
 						{copy.jobs.cancelJob}
 					</DropdownMenuItem>
 				)}
-				{!isActive(job) && job.source !== "cli" && job.policy_exists && (
+				{rerunnable && (
 					<DropdownMenuItem onSelect={() => onRerun?.(job)}>
 						{copy.jobs.runAgain}
 					</DropdownMenuItem>
@@ -414,13 +542,19 @@ export function JobsTable({
 									{showHost ? (
 										<>
 											<Truncated text={job.hostname} className="max-w-52">
-												<Link
-													to="/hosts/$id"
-													params={{ id: job.host_id }}
-													className="block max-w-52 truncate rounded-sm text-base font-semibold"
-												>
-													{job.hostname}
-												</Link>
+												{isAgentless(job.host_id) ? (
+													<span className="block max-w-52 truncate text-base font-semibold">
+														{job.hostname}
+													</span>
+												) : (
+													<Link
+														to="/hosts/$id"
+														params={{ id: job.host_id }}
+														className="block max-w-52 truncate rounded-sm text-base font-semibold"
+													>
+														{job.hostname}
+													</Link>
+												)}
 											</Truncated>
 											{showPolicy && <PolicyLine job={job} />}
 											<div className="@min-[1024px]:hidden">

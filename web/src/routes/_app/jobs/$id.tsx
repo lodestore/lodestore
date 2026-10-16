@@ -10,6 +10,7 @@ import {
 import { JobCards } from "@/components/jobs/job-cards";
 import { JobLog, LOG_ANCHOR, type LogFilter } from "@/components/jobs/job-log";
 import { JobProgress, phaseLabel } from "@/components/jobs/job-progress";
+import { waitReason } from "@/components/jobs/jobs-table";
 import { StatusBadge } from "@/components/status-badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
@@ -31,12 +32,13 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { copy } from "@/copy";
+import { shortId } from "@/lib/snapshot";
 
 export const Route = createFileRoute("/_app/jobs/$id")({
 	component: JobPage,
 });
 
-const POLL_MS = 1_000;
+const POLL_MS = 2_000;
 
 const isActive = (state?: string) => state === "queued" || state === "running";
 
@@ -65,28 +67,78 @@ function NotFound() {
 	);
 }
 
+function Notice({ children }: { children: string }) {
+	return (
+		<Alert role="note">
+			<AlertDescription className="text-current">{children}</AlertDescription>
+		</Alert>
+	);
+}
+
 function JobNotices({ job }: { job: JobDetail }) {
+	if (job.kind === "download") return null;
+	const restore = job.kind === "restore";
+	const d = copy.jobs.detail;
+	const q = copy.jobs.queueReason;
 	if (job.state === "running" && !job.host_online) {
 		return (
-			<Alert role="note">
-				<AlertDescription className="text-current">
-					{copy.jobs.detail.offlineWhileRunning(job.hostname)}
-				</AlertDescription>
-			</Alert>
+			<Notice>
+				{restore
+					? d.offlineWhileRestoring(job.hostname)
+					: d.offlineWhileRunning(job.hostname)}
+			</Notice>
 		);
 	}
 	if (job.state !== "queued") return null;
-	const offline = job.queue_reason
-		? job.queue_reason === "host_offline"
-		: !job.host_online;
+	const reason = waitReason(job);
+	if (reason === undefined) return null;
+	const offline = reason === "host_offline";
+	if (restore) {
+		return (
+			<Notice>
+				{offline ? q.offlineLong(job.hostname) : q.busyJobLong(job.hostname)}
+			</Notice>
+		);
+	}
 	return (
-		<Alert role="note">
-			<AlertDescription className="text-current">
-				{offline
-					? `${copy.jobs.queueReason.offlineShort(job.hostname)} ${copy.jobs.queueReason.dropAfter}`
-					: copy.jobs.queueReason.busyLong(job.hostname)}
-			</AlertDescription>
-		</Alert>
+		<Notice>
+			{offline
+				? `${q.offlineShort(job.hostname)} ${q.dropAfter}`
+				: q.busyLong(job.hostname)}
+		</Notice>
+	);
+}
+
+function JobSubline({ job }: { job: JobDetail }) {
+	const info = job.restore ?? job.download;
+	if (job.kind === "restore" || job.kind === "download") {
+		if (!info) return null;
+		const host = job.restore?.source_host_key ?? job.host_id;
+		return (
+			<>
+				{job.kind === "restore"
+					? copy.jobs.detail.restoreOf
+					: copy.jobs.detail.downloadOf}{" "}
+				<Link
+					to="/restore"
+					search={{ host, snapshot: info.snapshot_id }}
+					className="rounded-sm text-primary-strong"
+				>
+					<code className="font-mono">{shortId(info.snapshot_id)}</code>
+				</Link>
+			</>
+		);
+	}
+	if (job.source === "cli" || !job.policy_name) return copy.jobs.runFromCli;
+	if (!job.policy_exists) return copy.jobs.policyLine(job.policy_name);
+	return (
+		<Link
+			to="/policies/$name"
+			params={{ name: job.policy_name }}
+			className="rounded-sm text-primary-strong"
+		>
+			{copy.jobs.policyLine(job.policy_name)}
+		</Link>
 	);
 }
 
@@ -178,23 +230,11 @@ function JobPage() {
 								<StatusBadge status={job.state} />
 							</div>
 							<p className="text-sm text-muted-foreground wrap-anywhere">
-								{job.source === "cli" || !job.policy_name ? (
-									copy.jobs.runFromCli
-								) : job.policy_exists ? (
-									<Link
-										to="/policies/$name"
-										params={{ name: job.policy_name }}
-										className="rounded-sm text-primary-strong"
-									>
-										{copy.jobs.policyLine(job.policy_name)}
-									</Link>
-								) : (
-									copy.jobs.policyLine(job.policy_name)
-								)}
+								<JobSubline job={job} />
 							</p>
 						</div>
 						<div className="flex gap-2">
-							{isActive(job.state) && (
+							{isActive(job.state) && job.kind !== "download" && (
 								<Button
 									variant="outline"
 									className="text-destructive"
@@ -204,6 +244,7 @@ function JobPage() {
 								</Button>
 							)}
 							{!isActive(job.state) &&
+								job.kind === "backup" &&
 								job.source !== "cli" &&
 								job.policy_exists && (
 									<Button
@@ -227,14 +268,16 @@ function JobPage() {
 						<JobProgress job={job} onShowWarnings={showWarnings} />
 					)}
 					<JobCards job={job} />
-					<JobLog
-						key={job.id}
-						jobId={job.id}
-						active={isActive(job.state)}
-						purged={job.logs_purged}
-						filter={logFilter}
-						onFilterChange={setLogFilter}
-					/>
+					{job.kind !== "download" && (
+						<JobLog
+							key={job.id}
+							jobId={job.id}
+							active={isActive(job.state)}
+							purged={job.logs_purged}
+							filter={logFilter}
+							onFilterChange={setLogFilter}
+						/>
+					)}
 				</>
 			)}
 

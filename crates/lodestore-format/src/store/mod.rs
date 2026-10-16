@@ -5,8 +5,10 @@ pub mod policy;
 pub mod probe;
 pub mod s3;
 
+use std::fmt;
 use std::future::Future;
 use std::ops::Range;
+use std::time::Duration;
 
 use bytes::Bytes;
 
@@ -35,6 +37,22 @@ impl BlobError {
             message: message.into(),
             temporary: false,
         }
+    }
+}
+
+/// A signed, time-limited GET URL for one object. The URL grants read access,
+/// so it stays out of `Debug` output.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Presigned {
+    pub url: String,
+    pub expires_at_ms: i64,
+}
+
+impl fmt::Debug for Presigned {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Presigned")
+            .field("expires_at_ms", &self.expires_at_ms)
+            .finish_non_exhaustive()
     }
 }
 
@@ -146,6 +164,21 @@ impl Store {
         match self {
             Store::Local(_) | Store::S3(_) => true,
             Store::Opendal(s) => s.conditional_write_supported(),
+        }
+    }
+
+    /// A URL that serves `key` to whoever holds it, for `ttl`. `None` when the
+    /// store cannot sign URLs (a local folder). Not part of [`BlobStore`]: the
+    /// trait stays what a writer may be handed.
+    pub async fn presign_read(
+        &self,
+        key: &str,
+        ttl: Duration,
+    ) -> std::result::Result<Option<Presigned>, BlobError> {
+        match self {
+            Store::Local(_) => Ok(None),
+            Store::S3(s) => s.presign_read(key, ttl).await,
+            Store::Opendal(s) => s.presign_read(key, ttl).await,
         }
     }
 

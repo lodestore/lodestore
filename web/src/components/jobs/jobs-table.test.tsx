@@ -136,8 +136,12 @@ describe("JobsTable", () => {
 					host_online: false,
 				}),
 				job({ id: "b", state: "queued", queue_reason: "host_busy" }),
+				job({ id: "c", state: "queued", queue_reason: null }),
 			],
 		});
+		expect(
+			within(await rowOf("c")).getByText("Waiting in the queue"),
+		).toBeInTheDocument();
 		expect(
 			within(await rowOf("a")).getByText("Waiting for the host to connect"),
 		).toBeInTheDocument();
@@ -299,5 +303,191 @@ describe("toJobRow", () => {
 		} as never);
 		expect(row.progress).toBeNull();
 		expect(row.stats).toBeUndefined();
+	});
+});
+
+describe("JobsTable restore and download rows", () => {
+	const SNAP = "0123456789abcdef0123456789abcdef";
+	const restore = (over: Partial<JobRow> = {}) =>
+		job({
+			kind: "restore",
+			policy_name: null,
+			policy_exists: true,
+			stats: null,
+			restore: {
+				snapshot_id: SNAP,
+				source_host_key: "host-2",
+				source_hostname: "db-1",
+				destination: "/var/tmp/restore",
+				in_place: false,
+				conflict: "overwrite_changed",
+				restore_owners: true,
+				other_repository: false,
+				items: 2,
+				started_by: "admin",
+			},
+			...over,
+		});
+	const download = (over: Partial<JobRow> = {}) =>
+		job({
+			id: "dl-1",
+			kind: "download",
+			policy_name: null,
+			policy_exists: false,
+			stats: null,
+			download: {
+				snapshot_id: SNAP,
+				format: "tar_gz",
+				items: 2,
+				bytes_sent: 3_145_728,
+				started_by: "admin",
+			},
+			...over,
+		});
+
+	it("names the snapshot under the host and shows a determinate bar while running", async () => {
+		renderTable({
+			jobs: [
+				restore({
+					state: "running",
+					finished_at: null,
+					progress: {
+						files_done: 5,
+						files_total: 10,
+						bytes_done: 50,
+						bytes_total: 200,
+						bytes_uploaded: 0,
+						scan_done: false,
+						speed_bps: 1,
+						updated_at: NOW,
+					},
+				}),
+			],
+		});
+		const row = await rowOf();
+		expect(within(row).getByText("Restore · snapshot 01234567")).toBeVisible();
+		const bar = within(row).getByRole("progressbar", {
+			name: "Restore progress",
+		});
+		expect(bar).toHaveAttribute("aria-valuenow", "25");
+		expect(within(row).getByText("25%")).toBeInTheDocument();
+	});
+
+	it("summarises finished restores", async () => {
+		renderTable({
+			jobs: [
+				restore({
+					id: "ok",
+					restore_result: { bytes: 2_097_152, files: 1_250 },
+				}),
+				restore({
+					id: "warn",
+					state: "warnings",
+					warnings_total: 3,
+					restore_result: { bytes: 2_097_152, files: 1_250 },
+				}),
+			],
+		});
+		expect(
+			within(await rowOf("ok")).getByText("2 MiB · 1,250 files"),
+		).toBeInTheDocument();
+		expect(
+			within(await rowOf("warn")).getByText("2 MiB · 3 warnings"),
+		).toBeInTheDocument();
+	});
+
+	it("explains a failed restore the way the job page does", async () => {
+		renderTable({
+			jobs: [
+				restore({
+					id: "denied",
+					state: "failed",
+					error_code: "restore_target_unwritable",
+					error_message: "Permission denied (os error 13)",
+				}),
+				restore({
+					id: "other",
+					state: "failed",
+					error_code: null,
+					error_message: "Permission denied (os error 13)",
+				}),
+			],
+		});
+		expect(
+			within(await rowOf("denied")).getByText(
+				/^The destination is not writable\./,
+			),
+		).toBeInTheDocument();
+		expect(
+			within(await rowOf("other")).getByText(
+				/^The restore failed\. Permission denied \(os error 13\)\./,
+			),
+		).toBeInTheDocument();
+	});
+
+	it("offers Cancel for restores and never Run again", async () => {
+		const user = userEvent.setup();
+		renderTable({
+			jobs: [
+				restore({ id: "q", state: "queued" }),
+				restore({ id: "done" }),
+				download({ id: "dl-run", state: "running" }),
+			],
+			onCancel: vi.fn(),
+			onRerun: vi.fn(),
+		});
+		const open = async (id: string) =>
+			user.click(
+				within(await rowOf(id)).getByRole("button", {
+					name: "Actions for web-1",
+				}),
+			);
+
+		await open("q");
+		expect(screen.getByRole("menuitem", { name: "Cancel job" })).toBeVisible();
+		expect(screen.queryByRole("menuitem", { name: "Run again" })).toBeNull();
+		await user.keyboard("{Escape}");
+
+		await open("done");
+		expect(screen.queryByRole("menuitem", { name: "Run again" })).toBeNull();
+		await user.keyboard("{Escape}");
+
+		await open("dl-run");
+		expect(screen.getByRole("menuitem", { name: "View job" })).toBeVisible();
+		expect(screen.queryByRole("menuitem", { name: "Cancel job" })).toBeNull();
+	});
+
+	it("shows what a download sent and flags an incomplete archive", async () => {
+		renderTable({
+			jobs: [
+				download(),
+				download({ id: "dl-2", state: "interrupted" }),
+				download({ id: "dl-3", state: "running" }),
+				download({ id: "dl-4", state: "failed", error_message: null }),
+			],
+		});
+		expect(
+			within(await rowOf("dl-4")).getByText(
+				"The archive could not be built. Download it again.",
+			),
+		).toBeVisible();
+		const row = await rowOf("dl-1");
+		expect(within(row).getByText("Download · tar.gz")).toBeVisible();
+		expect(within(row).getByText("3 MiB sent · tar.gz")).toBeVisible();
+		expect(
+			within(await rowOf("dl-2")).getByText("Archive incomplete"),
+		).toBeVisible();
+		expect(
+			within(await rowOf("dl-3")).getByText("Streaming the archive"),
+		).toBeVisible();
+	});
+
+	it("shows the name of a host without an agent as plain text", async () => {
+		renderTable({
+			jobs: [download({ host_id: "agentless:old-box", hostname: "old-box" })],
+		});
+		const row = await rowOf("dl-1");
+		expect(within(row).getByText("old-box")).toBeVisible();
+		expect(within(row).queryByRole("link", { name: "old-box" })).toBeNull();
 	});
 });

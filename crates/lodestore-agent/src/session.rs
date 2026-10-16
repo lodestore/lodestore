@@ -25,6 +25,7 @@ const STABLE_STREAM: Duration = Duration::from_secs(60);
 const RENEW_RETRY: Duration = Duration::from_secs(60);
 const MAX_SKEW_SECS: i64 = 300;
 const JOBS_DRAIN: Duration = Duration::from_secs(30);
+const CAP_RESTORE: &str = "restore_v1";
 
 pub struct RunArgs {
     pub paths: Paths,
@@ -71,6 +72,7 @@ fn load_identity(paths: &Paths) -> Result<Identity, AgentError> {
 pub async fn run(args: RunArgs) -> Result<(), AgentError> {
     let first = load_identity(&args.paths)?;
     let hub = JobHub::open(&args.paths, &first.agent_id)?;
+    hub.set_net(args.net.clone());
     let socket_stop = args.shutdown.child_token();
     tokio::spawn(socket::serve(
         Arc::clone(&hub),
@@ -171,6 +173,25 @@ async fn renew(channel: Channel, paths: &Paths, identity: &Identity) -> Result<(
     .save(paths)
 }
 
+/// A new mTLS channel to the server with the agent's current certificate.
+pub async fn agent_channel(paths: &Paths, net: &NetOptions) -> Result<Channel, AgentError> {
+    let config = AgentConfig::load(paths)?.ok_or_else(|| {
+        AgentError::NotEnrolled(format!("{} is missing", paths.agent_json().display()))
+    })?;
+    channel_for(paths, &config, net).await
+}
+
+async fn channel_for(
+    paths: &Paths,
+    config: &AgentConfig,
+    net: &NetOptions,
+) -> Result<Channel, AgentError> {
+    let ca_pem = std::fs::read_to_string(paths.ca())?;
+    let (cert_pem, key_pem) = load_pair(paths, tls::pair_matches)?;
+    let tls_config = tls::client_config(&config.trust, &ca_pem, Some((&cert_pem, &key_pem)))?;
+    channel(&config.grpc_address, &config.server_name, tls_config, net).await
+}
+
 async fn session_once(
     args: &RunArgs,
     config: &AgentConfig,
@@ -178,16 +199,7 @@ async fn session_once(
     hub: &Arc<JobHub>,
 ) -> Result<Outcome, AgentError> {
     let paths = &args.paths;
-    let ca_pem = std::fs::read_to_string(paths.ca())?;
-    let (cert_pem, key_pem) = load_pair(paths, tls::pair_matches)?;
-    let tls_config = tls::client_config(&config.trust, &ca_pem, Some((&cert_pem, &key_pem)))?;
-    let channel = channel(
-        &config.grpc_address,
-        &config.server_name,
-        tls_config,
-        &args.net,
-    )
-    .await?;
+    let channel = channel_for(paths, config, &args.net).await?;
 
     let (tx, rx) = mpsc::channel::<AgentMessage>(8);
     let jobs = hub.session_reset();
@@ -199,6 +211,7 @@ async fn session_once(
             }),
             agent_version: env!("CARGO_PKG_VERSION").to_string(),
             jobs,
+            capabilities: vec![CAP_RESTORE.into()],
         })),
     })
     .await

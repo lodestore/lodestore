@@ -154,7 +154,14 @@ fn timespec(ts: Option<&pb::Timestamp>) -> rustix::fs::Timespec {
 /// Applies owner, xattrs, mode and times, in that order: a chown clears
 /// setuid and setgid, an ACL xattr rewrites the group bits, and any of them
 /// touches ctime. Every failure is recorded in `out` and the rest still runs.
-pub fn apply_metadata(target: &Target<'_>, node: &pb::Node, path: &[u8], out: &mut Vec<Unapplied>) {
+/// Without `owners` the owner is left alone and nothing is reported about it.
+pub fn apply_metadata(
+    target: &Target<'_>,
+    node: &pb::Node,
+    path: &[u8],
+    owners: bool,
+    out: &mut Vec<Unapplied>,
+) {
     let mut fail = |what: String, e: Errno| {
         out.push(Unapplied {
             path: path.to_vec(),
@@ -165,6 +172,7 @@ pub fn apply_metadata(target: &Target<'_>, node: &pb::Node, path: &[u8], out: &m
 
     let (uid, gid) = (Uid::from_raw(node.uid), Gid::from_raw(node.gid));
     let owner = match target {
+        _ if !owners => Ok(()),
         Target::Fd(fd) => fchown(fd, Some(uid), Some(gid)),
         Target::Entry { dir, name, .. } => {
             chownat(dir, *name, Some(uid), Some(gid), AtFlags::SYMLINK_NOFOLLOW)

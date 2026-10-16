@@ -1,13 +1,13 @@
 use std::fmt;
 use std::ops::Range;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use opendal::layers::{RetryLayer, TimeoutLayer};
 use opendal::{ErrorKind, Operator, services};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use super::{BlobDelete, BlobError, BlobStore, ListEntry};
+use super::{BlobDelete, BlobError, BlobStore, ListEntry, Presigned};
 use crate::error::{Error, Result};
 
 pub(crate) const DEFAULT_REGION: &str = "us-east-1";
@@ -151,6 +151,25 @@ pub(super) fn layered(op: Operator) -> Operator {
     )
 }
 
+pub(super) async fn presign_op(
+    op: &Operator,
+    key: &str,
+    ttl: Duration,
+) -> std::result::Result<Option<Presigned>, BlobError> {
+    check_key(key)?;
+    if !op.info().capability().presign_read {
+        return Ok(None);
+    }
+    let request = op.presign_read(key, ttl).await.map_err(map_err)?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    Ok(Some(Presigned {
+        url: request.uri().to_string(),
+        expires_at_ms: i64::try_from((now + ttl).as_millis()).unwrap_or(i64::MAX),
+    }))
+}
+
 /// Lists by directory-like prefix; the rest of `prefix` is a plain string
 /// filter, which matches what the local store does.
 pub(super) async fn list_op(
@@ -229,6 +248,14 @@ impl S3Store {
 }
 
 impl S3Store {
+    pub async fn presign_read(
+        &self,
+        key: &str,
+        ttl: Duration,
+    ) -> std::result::Result<Option<Presigned>, BlobError> {
+        presign_op(&self.op, key, ttl).await
+    }
+
     /// Replaces the object without `If-None-Match`. Only the capability probe
     /// uses this, to find out whether a key could overwrite existing data.
     pub(super) async fn overwrite_for_probe(

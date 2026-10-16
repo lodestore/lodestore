@@ -419,6 +419,7 @@ async fn connect_repository(
         },
     )
     .await?;
+    crate::catalog::start_rebuild(&state, &summary.id);
     Ok((StatusCode::CREATED, Json(summary)).into_response())
 }
 

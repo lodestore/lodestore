@@ -133,7 +133,7 @@ describe("command palette shell", () => {
 		expect(options[0]).toHaveTextContent("Repositories");
 	});
 
-	it("lists six pages with Soon on the stubs", async () => {
+	it("lists six pages with Soon on the stub", async () => {
 		const user = userEvent.setup();
 		await openApp();
 		await user.click(trigger());
@@ -146,7 +146,7 @@ describe("command palette shell", () => {
 			"Hosts",
 			"Policies",
 			"Jobs",
-			"RestoreSoon",
+			"Restore",
 			"Repositories",
 		]);
 	});

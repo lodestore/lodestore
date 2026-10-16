@@ -3,10 +3,11 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use lodestore_agent::Paths;
+use lodestore_agent::{AgentError, EnrollArgs, NetOptions, Paths, RunArgs};
 use lodestore_format::crypto::Entropy;
 use lodestore_format::keys::KdfCost;
 use lodestore_format::repo::{InitOptions, PendingInit};
@@ -19,6 +20,8 @@ use serde_json::{Value, json};
 use sqlx::{AnyConnection, Connection};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 pub const ADMIN_PASSWORD: &str = "test-admin-password";
 const LOW_KDF: KdfCost = KdfCost {
@@ -325,5 +328,222 @@ where
             return false;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+pub const WAIT: Duration = Duration::from_secs(90);
+
+const FINAL_STATES: [&str; 6] = [
+    "succeeded",
+    "warnings",
+    "failed",
+    "cancelled",
+    "interrupted",
+    "not_started",
+];
+
+type AgentTask = (CancellationToken, JoinHandle<Result<(), AgentError>>);
+
+pub struct AgentEnv {
+    server: Option<TestServer>,
+    pub api: Api,
+    pub host: String,
+    pub hostname: String,
+    pub repo: String,
+    pub repo_name: String,
+    pub paths: Paths,
+    pub work: TempDir,
+    agent: Option<AgentTask>,
+    policies: AtomicUsize,
+}
+
+impl AgentEnv {
+    pub async fn start(backend: &Backend) -> AgentEnv {
+        let ts = TestServer::start(backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let labels = json!([
+            { "key": "env", "value": "e2e" },
+            { "key": "agent", "value": "host-e2e" },
+        ]);
+        let mut env = Self::enroll(&ts, api, &repo, "main", "host-e2e", "e2e", labels).await;
+        env.server = Some(ts);
+        env.start_agent().await;
+        env
+    }
+
+    pub async fn start_on(
+        ts: &TestServer,
+        repo: &str,
+        repo_name: &str,
+        hostname: &str,
+    ) -> AgentEnv {
+        let labels = json!([{ "key": "agent", "value": hostname }]);
+        let api = ts.api().await;
+        let mut env = Self::enroll(ts, api, repo, repo_name, hostname, hostname, labels).await;
+        env.start_agent().await;
+        env
+    }
+
+    async fn enroll(
+        ts: &TestServer,
+        api: Api,
+        repo: &str,
+        repo_name: &str,
+        hostname: &str,
+        dir: &str,
+        labels: Value,
+    ) -> AgentEnv {
+        let token = api.join_token(repo, labels).await;
+        let paths = ts.agent_paths(dir);
+        lodestore_agent::enroll(EnrollArgs {
+            token,
+            paths: paths.clone(),
+            hostname: Some(hostname.to_string()),
+            net: NetOptions::default(),
+        })
+        .await
+        .expect("enroll");
+        let host = api
+            .hosts()
+            .await
+            .into_iter()
+            .find(|h| h["hostname"] == hostname)
+            .expect("the enrolled host is listed")["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        AgentEnv {
+            server: None,
+            api,
+            host,
+            hostname: hostname.to_string(),
+            repo: repo.to_string(),
+            repo_name: repo_name.to_string(),
+            paths,
+            work: tempfile::tempdir().unwrap(),
+            agent: None,
+            policies: AtomicUsize::new(0),
+        }
+    }
+
+    pub fn ts(&self) -> &TestServer {
+        self.server
+            .as_ref()
+            .expect("this host does not own the server")
+    }
+
+    pub fn ts_mut(&mut self) -> &mut TestServer {
+        self.server
+            .as_mut()
+            .expect("this host does not own the server")
+    }
+
+    pub async fn start_agent(&mut self) {
+        let shutdown = CancellationToken::new();
+        let handle = tokio::spawn(lodestore_agent::run(RunArgs {
+            paths: self.paths.clone(),
+            net: NetOptions::default(),
+            heartbeat: Duration::from_secs(1),
+            shutdown: shutdown.clone(),
+        }));
+        self.agent = Some((shutdown, handle));
+        let (api, host) = (&self.api, &self.host);
+        assert!(
+            wait_until(WAIT, || async {
+                api.hosts()
+                    .await
+                    .iter()
+                    .any(|h| h["id"] == host.as_str() && h["status"] == "online")
+            })
+            .await,
+            "the agent never became online"
+        );
+    }
+
+    pub async fn stop_agent(&mut self) {
+        let (shutdown, handle) = self.agent.take().expect("the agent is running");
+        shutdown.cancel();
+        tokio::time::timeout(WAIT, handle)
+            .await
+            .expect("the agent stops in time")
+            .unwrap()
+            .expect("the agent stops cleanly");
+    }
+
+    pub async fn stop(mut self) {
+        if self.agent.is_some() {
+            self.stop_agent().await;
+        }
+        if let Some(ts) = self.server.take() {
+            ts.stop().await;
+        }
+    }
+
+    pub async fn json(&self, path: &str) -> Value {
+        let response = self.api.get(path).await;
+        assert_eq!(response.status(), 200, "GET {path}");
+        response.json().await.unwrap()
+    }
+
+    pub async fn wait_for(&self, id: &str, states: &[&str]) -> Value {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let job = self.json(&format!("/api/v1/jobs/{id}")).await;
+            if states.contains(&job["state"].as_str().unwrap()) {
+                return job;
+            }
+            assert!(Instant::now() < deadline, "job {id} stuck: {job}");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    pub async fn wait_job(&self, id: &str) -> Value {
+        self.wait_for(id, &FINAL_STATES).await
+    }
+
+    pub async fn events(&self, id: &str, query: &str) -> Vec<Value> {
+        self.json(&format!("/api/v1/jobs/{id}/events{query}")).await["events"]
+            .as_array()
+            .unwrap()
+            .clone()
+    }
+
+    pub async fn backup(&self, paths: &[&Path]) -> String {
+        let n = self.policies.fetch_add(1, Ordering::Relaxed);
+        let name = format!("backup-{}-{n}", self.hostname);
+        let listed: String = paths
+            .iter()
+            .map(|p| format!("    - {}\n", p.display()))
+            .collect();
+        let yaml = format!(
+            "apiVersion: lodestore.io/v1alpha1\nkind: BackupPolicy\nmetadata:\n  name: {name}\n\
+             spec:\n  repository: {}\n  selector:\n    matchLabels:\n      agent: {}\n  \
+             paths:\n{listed}",
+            self.repo_name, self.hostname
+        );
+        let response = self
+            .api
+            .post("/api/v1/policies", &json!({ "yaml": yaml }))
+            .await;
+        let status = response.status();
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(status, 201, "{body}");
+        let response = self
+            .api
+            .post(&format!("/api/v1/policies/{name}/run"), &json!({}))
+            .await;
+        assert_eq!(response.status(), 200);
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(body["jobs"][0]["created"], true, "{body}");
+        let job = self.wait_job(body["jobs"][0]["id"].as_str().unwrap()).await;
+        assert!(
+            job["state"] == "succeeded" || job["state"] == "warnings",
+            "{job}"
+        );
+        job["snapshot_id"]
+            .as_str()
+            .expect("a snapshot id")
+            .to_string()
     }
 }

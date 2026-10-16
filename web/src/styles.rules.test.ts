@@ -58,6 +58,10 @@ describe("style rules", () => {
 			/(?<![\w-])(?:gap(?:-[xy])?|[pm][xylrtb]?)-\d+\.5(?![\w-])/,
 		],
 		["no pr-28", /(?<![\w-])pr-28(?![\w-])/],
+		[
+			"no break-all, paths wrap through PathText",
+			/(?<![\w-])break-all(?![\w-])/,
+		],
 	];
 	for (const [rule, re] of offScale) {
 		it(`${rule} outside components/ui`, () => {
@@ -90,4 +94,48 @@ describe("style rules", () => {
 			expect(found).toEqual([]);
 		});
 	}
+});
+
+describe("control borders", () => {
+	const button = files.find((f) => f.rel === "components/ui/button.tsx");
+
+	it.each(["outline", "secondary"])(
+		"%s buttons draw their edge with the 3:1 --input token",
+		(variant) => {
+			const classes = button?.text.match(
+				new RegExp(`\\b${variant}:\\s*"([^"]*)"`),
+			)?.[1];
+			expect(classes, `${variant} variant missing`).toBeDefined();
+			expect(classes).toMatch(/(?:^|\s)border-input(?:\s|$)/);
+			expect(classes).not.toMatch(/(?:^|\s)border-(?:border|transparent)\b/);
+		},
+	);
+
+	it("ghost buttons are icon buttons or chevron disclosures", () => {
+		const found = files
+			.filter((f) => !f.rel.startsWith("components/ui/"))
+			.flatMap((f) =>
+				[...f.text.matchAll(/<Button\b[\s\S]*?<\/Button>/g)]
+					.filter(
+						(m) =>
+							/variant="ghost"/.test(m[0]) &&
+							!/size="icon/.test(m[0]) &&
+							!/<Chevron/.test(m[0]),
+					)
+					.map(
+						(m) => `${f.rel}:${f.text.slice(0, m.index).split("\n").length}`,
+					),
+			);
+		expect(found).toEqual([]);
+	});
+
+	it("no Button call site swaps the edge for a faint border", () => {
+		expect(
+			violations(
+				"no faint Button border",
+				/<Button\b[^>]*className=["{][^>]*\bborder-(?:border|transparent|0)\b/,
+				true,
+			),
+		).toEqual([]);
+	});
 });

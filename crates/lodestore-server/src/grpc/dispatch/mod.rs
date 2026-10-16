@@ -4,15 +4,20 @@ pub mod messages;
 use std::collections::HashSet;
 use std::time::Duration;
 
+use lodestore_format::keys::{MasterKey, ReadKeys};
 use lodestore_proto::agent::v1::server_message::Body as ServerBody;
-use lodestore_proto::agent::v1::{JobAssign, JobCancel, JobSpec, ServerMessage};
+use lodestore_proto::agent::v1::{JobAssign, JobCancel, JobSpec, RestoreSpec, ServerMessage};
 use prost::Message;
 use sqlx::Row;
 use tokio_util::sync::CancellationToken;
 
 use crate::db::now_ms;
+use crate::grpc::registry::CAP_RESTORE;
+use crate::jobs::restore::RestoreRecord;
+use crate::repos::db::server_access;
 use crate::state::AppState;
 
+const KIND_RESTORE: &str = "restore";
 const TICK: Duration = Duration::from_secs(1);
 const JANITOR_EVERY: Duration = Duration::from_secs(60);
 const PROGRESS_FLUSH: Duration = Duration::from_secs(10);
@@ -52,22 +57,26 @@ pub async fn run(state: AppState, stop: CancellationToken) -> anyhow::Result<()>
 }
 
 pub async fn assign_queued(state: &AppState, only_agent: Option<&str>) -> anyhow::Result<()> {
-    let rows =
-        match only_agent {
-            Some(agent) => sqlx::query(
-                "SELECT id, host_id, spec FROM jobs WHERE state = 'queued' AND source = 'manual' \
+    let rows = match only_agent {
+        Some(agent) => {
+            sqlx::query(
+                "SELECT id, host_id, spec, kind, restore_json FROM jobs \
+                 WHERE state = 'queued' AND source = 'manual' \
                  AND host_id = $1 ORDER BY queued_at, id",
             )
             .bind(agent)
             .fetch_all(&state.db.pool)
-            .await?,
-            None => sqlx::query(
-                "SELECT id, host_id, spec FROM jobs WHERE state = 'queued' AND source = 'manual' \
-                 ORDER BY queued_at, id",
+            .await?
+        }
+        None => {
+            sqlx::query(
+                "SELECT id, host_id, spec, kind, restore_json FROM jobs \
+                 WHERE state = 'queued' AND source = 'manual' ORDER BY queued_at, id",
             )
             .fetch_all(&state.db.pool)
-            .await?,
-        };
+            .await?
+        }
+    };
     let mut seen = HashSet::new();
     for row in rows {
         let job_id: String = row.try_get("id")?;
@@ -78,9 +87,34 @@ pub async fn assign_queued(state: &AppState, only_agent: Option<&str>) -> anyhow
         {
             continue;
         }
-        let Ok(spec) = JobSpec::decode(row.try_get::<Vec<u8>, _>("spec")?.as_slice()) else {
-            fail_unreadable(state, &job_id).await?;
-            continue;
+        let kind: String = row.try_get("kind")?;
+        let raw: Vec<u8> = row.try_get("spec")?;
+        let (spec, restore) = if kind == KIND_RESTORE {
+            if !state.registry.supports(&host_id, CAP_RESTORE) {
+                fail_job(
+                    state,
+                    &job_id,
+                    "restore_agent_outdated",
+                    "Update the agent on this host to restore to it.",
+                )
+                .await?;
+                continue;
+            }
+            match RestoreSpec::decode(raw.as_slice()) {
+                Ok(spec) => (None, Some(spec)),
+                Err(_) => {
+                    fail_unreadable(state, &job_id, &kind).await?;
+                    continue;
+                }
+            }
+        } else {
+            match JobSpec::decode(raw.as_slice()) {
+                Ok(spec) => (Some(spec), None),
+                Err(_) => {
+                    fail_unreadable(state, &job_id, &kind).await?;
+                    continue;
+                }
+            }
         };
         let claimed = sqlx::query(
             "UPDATE jobs SET state = 'assigned', assigned_at = $1 WHERE id = $2 AND state = 'queued' \
@@ -98,11 +132,32 @@ pub async fn assign_queued(state: &AppState, only_agent: Option<&str>) -> anyhow
             Err(sqlx::Error::Database(db)) if db.is_unique_violation() => continue,
             Err(error) => return Err(error.into()),
         }
+        let restore = match restore {
+            Some(spec) => {
+                let record: Option<String> = row.try_get("restore_json")?;
+                match with_source_keys(state, spec, record.as_deref()).await {
+                    Ok(spec) => Some(spec),
+                    Err(error) => {
+                        tracing::warn!(%error, job_id, "preparing a restore job failed");
+                        fail_job(
+                            state,
+                            &job_id,
+                            "restore_failed",
+                            "The source repository could not be opened.",
+                        )
+                        .await?;
+                        continue;
+                    }
+                }
+            }
+            None => None,
+        };
         let sent = state.registry.send(
             &host_id,
             server_message(ServerBody::JobAssign(JobAssign {
                 job_id: job_id.clone(),
-                spec: Some(spec),
+                spec,
+                restore,
             })),
         );
         if !sent {
@@ -110,6 +165,25 @@ pub async fn assign_queued(state: &AppState, only_agent: Option<&str>) -> anyhow
         }
     }
     Ok(())
+}
+
+async fn with_source_keys(
+    state: &AppState,
+    mut spec: RestoreSpec,
+    record: Option<&str>,
+) -> anyhow::Result<RestoreSpec> {
+    let record: RestoreRecord =
+        serde_json::from_str(record.ok_or_else(|| anyhow::anyhow!("restore_json is missing"))?)?;
+    let access = server_access(state, &record.source_repository_id).await?;
+    let master: [u8; 32] = access
+        .master
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("master secret must be 32 bytes"))?;
+    let keys = ReadKeys::derive(MasterKey::from_bytes(master), access.format_repo_id);
+    spec.source_repo_id = keys.repo_id().to_vec();
+    spec.k_id = keys.k_id().to_vec();
+    Ok(spec)
 }
 
 pub async fn requeue_assigned(state: &AppState, job_id: &str, host_id: &str) -> anyhow::Result<()> {
@@ -137,16 +211,27 @@ pub async fn requeue_assigned(state: &AppState, job_id: &str, host_id: &str) -> 
     Ok(())
 }
 
-async fn fail_unreadable(state: &AppState, job_id: &str) -> anyhow::Result<()> {
+async fn fail_job(state: &AppState, job_id: &str, code: &str, message: &str) -> anyhow::Result<()> {
     sqlx::query(
-        "UPDATE jobs SET state = 'failed', finished_at = $1, error_code = 'backup_failed', \
-         error_message = 'The job spec could not be read.' WHERE id = $2 AND state = 'queued'",
+        "UPDATE jobs SET state = 'failed', finished_at = $1, error_code = $2, error_message = $3 \
+         WHERE id = $4 AND state IN ('queued', 'assigned')",
     )
     .bind(now_ms())
+    .bind(code)
+    .bind(message)
     .bind(job_id)
     .execute(&state.db.pool)
     .await?;
     Ok(())
+}
+
+async fn fail_unreadable(state: &AppState, job_id: &str, kind: &str) -> anyhow::Result<()> {
+    let code = if kind == KIND_RESTORE {
+        "restore_failed"
+    } else {
+        "backup_failed"
+    };
+    fail_job(state, job_id, code, "The job spec could not be read.").await
 }
 
 async fn push_cancels(state: &AppState) -> anyhow::Result<()> {

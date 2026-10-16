@@ -7,6 +7,7 @@ import {
 	useCancelJob,
 	useRerunJob,
 } from "@/api/gen/endpoints";
+import { TextWithPaths } from "@/components/path-text";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
 	AlertDialog,
@@ -23,7 +24,7 @@ import { copy } from "@/copy";
 
 const TOAST_MS = 8000;
 
-export type CancellableJob = { id: string; state: string };
+export type CancellableJob = { id: string; state: string; kind?: string };
 
 export function CancelJobDialog({
 	job,
@@ -61,6 +62,18 @@ export function CancelJobDialog({
 		);
 	}
 
+	const c = copy.jobs.cancel;
+	const restore = job?.kind === "restore";
+	const queued = job?.state === "queued";
+	const headingText = restore ? c.restoreHeading : c.heading;
+	const bodyText = restore
+		? queued
+			? c.restoreBodyQueued
+			: c.restoreBody
+		: queued
+			? c.bodyQueued
+			: c.body;
+
 	return (
 		<AlertDialog
 			open={job !== undefined}
@@ -70,17 +83,18 @@ export function CancelJobDialog({
 		>
 			<AlertDialogContent onCloseAutoFocus={onCloseAutoFocus}>
 				<AlertDialogHeader>
-					<AlertDialogTitle>{copy.jobs.cancel.heading}</AlertDialogTitle>
-					<AlertDialogDescription>
-						{job?.state === "queued"
-							? copy.jobs.cancel.bodyQueued
-							: copy.jobs.cancel.body}
-					</AlertDialogDescription>
+					<AlertDialogTitle>{headingText}</AlertDialogTitle>
+					<AlertDialogDescription>{bodyText}</AlertDialogDescription>
 				</AlertDialogHeader>
 				{cancel.isError && (
 					<Alert variant="destructive" role="alert">
 						<AlertDescription>
-							{copy.errors.submit(copy.jobs.cancelFailed, cancel.error.message)}
+							<TextWithPaths
+								text={copy.errors.submit(
+									copy.jobs.cancelFailed,
+									cancel.error.message,
+								)}
+							/>
 						</AlertDescription>
 					</Alert>
 				)}
@@ -137,7 +151,9 @@ export function useRerunAction({ open = false }: { open?: boolean } = {}) {
 					},
 					onError: (error) =>
 						toast.error(
-							copy.errors.submit(copy.jobs.rerunFailed, error.message),
+							<TextWithPaths
+								text={copy.errors.submit(copy.jobs.rerunFailed, error.message)}
+							/>,
 						),
 				},
 			);

@@ -109,6 +109,7 @@ export function RepositoryWizard({
 	const [draft, setDraft] = useState(loadDraft);
 	const [check, setCheck] = useState<CheckState>({ phase: "idle" });
 	const [created, setCreated] = useState<RepositorySummary>();
+	const [rebuilding, setRebuilding] = useState(false);
 	const [confirmExit, setConfirmExit] = useState(false);
 
 	const steps = mode === "welcome" ? STEPS : STEPS.slice(0, 3);
@@ -172,11 +173,27 @@ export function RepositoryWizard({
 		}
 	}
 
-	async function finish(repository: RepositorySummary, message: string) {
+	async function finish(
+		repository: RepositorySummary,
+		message: string,
+		rebuilding = false,
+	) {
 		clearSavedDraft();
 		setDraft((d) => withoutSecrets(d));
 		setCreated(repository);
-		toast.success(message);
+		setRebuilding(rebuilding);
+		toast.success(
+			message,
+			rebuilding
+				? {
+						description: copy.catalog.connectedExisting,
+						action: {
+							label: copy.catalog.openRestore,
+							onClick: () => void navigate({ to: "/restore" }),
+						},
+					}
+				: undefined,
+		);
 		await queryClient.invalidateQueries({
 			queryKey: repositoriesQuery.queryKey,
 		});
@@ -265,7 +282,7 @@ export function RepositoryWizard({
 							draft={draft}
 							onBack={() => go("access")}
 							onConnected={(repository) =>
-								void finish(repository, copy.existingRepo.connected)
+								void finish(repository, copy.existingRepo.connected, true)
 							}
 						/>
 					) : (
@@ -281,7 +298,7 @@ export function RepositoryWizard({
 						/>
 					))}
 				{current === "host" && created && (
-					<FirstHostStep repositoryId={created.id} />
+					<FirstHostStep repositoryId={created.id} rebuilding={rebuilding} />
 				)}
 			</div>
 			<AlertDialog open={confirmExit} onOpenChange={setConfirmExit}>

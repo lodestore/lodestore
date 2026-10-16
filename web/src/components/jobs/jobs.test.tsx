@@ -26,6 +26,7 @@ const NOW = Date.now();
 function makeJob(id: string, over: Partial<JobSummary> = {}): JobSummary {
 	return {
 		id,
+		kind: "backup",
 		host_id: "host-1",
 		hostname: "web-1",
 		policy_name: "etc-and-home",
@@ -166,6 +167,41 @@ describe("Jobs list", () => {
 		expect(last?.searchParams.get("policy")).toBeNull();
 		expect(last?.searchParams.get("host")).toBe("web");
 		expect(last?.searchParams.get("page")).toBe("2");
+	});
+
+	it("puts the type filter in the URL and the request", async () => {
+		const seen = mockJobs((url) =>
+			url.searchParams.get("kind") === "restore"
+				? page([
+						makeJob("r-1", {
+							kind: "restore",
+							hostname: "db-1",
+							host_id: "host-2",
+							policy_name: null,
+						}),
+					])
+				: page([makeJob("done-1")]),
+		);
+		const { router } = await openJobs();
+		await screen.findByRole("table");
+
+		await userEvent.click(
+			screen.getByRole("combobox", { name: "Filter by type" }),
+		);
+		expect(
+			await screen.findByRole("option", { name: "All types" }),
+		).toBeVisible();
+		expect(screen.getByRole("option", { name: "Backups" })).toBeVisible();
+		expect(screen.getByRole("option", { name: "Downloads" })).toBeVisible();
+		await userEvent.click(screen.getByRole("option", { name: "Restores" }));
+
+		await waitFor(() =>
+			expect(router.state.location.search).toMatchObject({ kind: "restore" }),
+		);
+		await waitFor(() =>
+			expect(seen.at(-1)?.searchParams.get("kind")).toBe("restore"),
+		);
+		expect(await screen.findByText("db-1")).toBeInTheDocument();
 	});
 
 	it("corrects an out-of-range page without adding a history entry", async () => {
@@ -650,7 +686,10 @@ describe("Job log", () => {
 		await within(log).findByText("upload failed");
 		await userEvent.click(screen.getByRole("radio", { name: "Warnings" }));
 		expect(within(log).getByText("Disappeared")).toBeInTheDocument();
-		expect(within(log).getByText("/srv/gone").tagName).toBe("CODE");
+		const gone = within(log)
+			.getByText("Disappeared")
+			.parentElement?.querySelector("code");
+		expect(gone).toHaveTextContent("/srv/gone");
 		expect(within(log).queryByText("upload failed")).toBeNull();
 		expect(within(log).queryByText("event 1")).toBeNull();
 
@@ -805,5 +844,338 @@ describe("Job log", () => {
 			"on",
 		);
 		expect(screen.queryByText("event 1")).toBeNull();
+	});
+});
+
+const SNAP = "0123456789abcdef0123456789abcdef";
+
+function makeRestore(over: Partial<JobDetail> = {}): JobDetail {
+	return makeDetail({
+		kind: "restore",
+		policy_name: null,
+		policy_exists: false,
+		snapshot_id: null,
+		stats: null,
+		restore: {
+			snapshot_id: SNAP,
+			source_host_key: "host-2",
+			source_hostname: "db-1",
+			destination: "/var/tmp/restore",
+			in_place: false,
+			conflict: "overwrite_changed",
+			restore_owners: true,
+			other_repository: false,
+			items: 3,
+			started_by: "admin",
+		},
+		...over,
+	});
+}
+
+function makeDownload(over: Partial<JobDetail> = {}): JobDetail {
+	return makeDetail({
+		kind: "download",
+		policy_name: null,
+		policy_exists: false,
+		snapshot_id: null,
+		stats: null,
+		download: {
+			snapshot_id: SNAP,
+			format: "tar_gz",
+			items: 2,
+			bytes_sent: 3_145_728,
+			started_by: "admin",
+		},
+		...over,
+	});
+}
+
+describe("Restore job page", () => {
+	it("shows the phase, storage reads and no empty Result while running", async () => {
+		mockJob(
+			makeRestore({
+				state: "running",
+				finished_at: null,
+				phase: "restore_files",
+				progress: progress({
+					scan_done: false,
+					bytes_downloaded: 1_048_576,
+				}),
+			}),
+		);
+		await openJob();
+
+		expect(
+			await screen.findByRole("heading", { name: "Restoring files" }),
+		).toBeVisible();
+		const bar = screen.getByRole("progressbar", { name: "Restore progress" });
+		expect(bar).toHaveAttribute("aria-valuenow", "50");
+		expect(screen.getByText("Read from storage")).toBeVisible();
+		expect(screen.getByText("data downloaded from the bucket")).toBeVisible();
+		expect(screen.getByText("1 MiB")).toBeVisible();
+		expect(screen.getByText("Time left")).toBeVisible();
+		expect(screen.queryByRole("heading", { name: "Result" })).toBeNull();
+		expect(screen.getByRole("button", { name: "Cancel job" })).toBeVisible();
+		expect(screen.queryByRole("button", { name: "Run again" })).toBeNull();
+		const links = screen.getAllByRole("link", { name: "01234567" });
+		expect(links[0]).toHaveAttribute(
+			"href",
+			`/restore?host=host-2&snapshot=${SNAP}`,
+		);
+		expect(screen.getByText(/Restore of snapshot/)).toBeVisible();
+	});
+
+	it("names the metadata phase", async () => {
+		mockJob(
+			makeRestore({
+				state: "running",
+				finished_at: null,
+				phase: "restore_metadata",
+				progress: progress(),
+			}),
+		);
+		await openJob();
+		expect(
+			await screen.findByRole("heading", {
+				name: "Applying permissions and times",
+			}),
+		).toBeVisible();
+	});
+
+	it("explains an offline host", async () => {
+		mockJob(
+			makeRestore({
+				state: "running",
+				finished_at: null,
+				host_online: false,
+				progress: progress(),
+			}),
+		);
+		await openJob();
+		expect(
+			await screen.findByText(
+				"web-1 is offline. The agent keeps restoring and reports the result when it reconnects.",
+			),
+		).toBeVisible();
+	});
+
+	it("explains a queue wait", async () => {
+		mockJob(
+			makeRestore({
+				state: "queued",
+				started_at: null,
+				finished_at: null,
+				queue_reason: "host_busy",
+			}),
+		);
+		await openJob();
+		expect(
+			await screen.findByText("Waiting for another job on web-1 to finish."),
+		).toBeVisible();
+	});
+
+	it("does not blame another job when nothing holds the host", async () => {
+		mockJob(
+			makeRestore({
+				state: "queued",
+				started_at: null,
+				finished_at: null,
+				queue_reason: null,
+				host_online: true,
+			}),
+		);
+		await openJob();
+		expect(
+			(await screen.findAllByText("Waiting in the queue"))[0],
+		).toBeVisible();
+		expect(screen.queryByText(/Waiting for another job/)).toBeNull();
+		expect(screen.queryByText(/to connect/)).toBeNull();
+	});
+
+	it("shows the job parameters and the result when it is done", async () => {
+		mockJob(
+			makeRestore({
+				state: "warnings",
+				warnings_total: 2,
+				restore_result: {
+					created: 10,
+					overwritten: 4,
+					skipped: 1,
+					files: 15,
+					bytes: 2_097_152,
+				},
+			}),
+		);
+		await openJob();
+
+		const jobCard = (
+			await screen.findByRole("heading", { name: "Job" })
+		).closest("[data-slot=card]") as HTMLElement;
+		expect(within(jobCard).getByText("db-1")).toBeVisible();
+		const destination = within(jobCard).getByTitle("web-1:/var/tmp/restore");
+		expect(destination).toHaveTextContent("web-1:/var/tmp/restore");
+		expect(destination.querySelector("wbr")).not.toBeNull();
+		expect(within(jobCard).getByText("Existing files")).toBeVisible();
+		expect(within(jobCard).getByText("Overwrite changed files")).toBeVisible();
+		expect(within(jobCard).getByText("Restore original owners")).toBeVisible();
+		expect(within(jobCard).getByText("admin")).toBeVisible();
+
+		const result = screen
+			.getByRole("heading", { name: "Result" })
+			.closest("[data-slot=card]") as HTMLElement;
+		for (const [label, value] of [
+			["Created", "10"],
+			["Overwritten", "4"],
+			["Skipped", "1"],
+			["Warnings", "2"],
+		]) {
+			expect(
+				within(result).getByText(label).nextElementSibling,
+			).toHaveTextContent(value);
+		}
+		expect(screen.queryByRole("button", { name: "Run again" })).toBeNull();
+	});
+
+	it("cancels with the restore wording", async () => {
+		mockJob(
+			makeRestore({
+				state: "running",
+				finished_at: null,
+				progress: progress(),
+			}),
+		);
+		await openJob();
+		await userEvent.click(
+			await screen.findByRole("button", { name: "Cancel job" }),
+		);
+		const dialog = await screen.findByRole("alertdialog");
+		expect(within(dialog).getByText("Cancel this restore?")).toBeVisible();
+		expect(
+			within(dialog).getByText(
+				"The host stops writing. Files already written stay on the host, so run it again to finish.",
+			),
+		).toBeVisible();
+	});
+
+	it("explains a destination that is not empty with the path", async () => {
+		mockJob(
+			makeRestore({
+				state: "failed",
+				error_code: "restore_target_not_empty",
+				error_message: "target not empty",
+			}),
+		);
+		await openJob();
+		const alert = await screen.findByRole("alert");
+		expect(alert).toHaveTextContent(
+			"The destination folder is not empty. /var/tmp/restore on web-1 has content and the restore was set to stop. Choose an empty folder or another option, then restore again.",
+		);
+		expect(alert.querySelector("wbr")).not.toBeNull();
+	});
+
+	it("falls back to the server message for other restore errors", async () => {
+		mockJob(
+			makeRestore({
+				state: "failed",
+				error_code: "restore_agent_outdated",
+				error_message: "Update the agent on this host to restore to it.",
+			}),
+		);
+		await openJob();
+		expect(
+			await screen.findByText(
+				"The restore failed. Update the agent on this host to restore to it. Check the log, then restore again.",
+			),
+		).toBeVisible();
+	});
+
+	it("labels restore warnings in the log", async () => {
+		mockJob(makeRestore({ state: "warnings", warnings_total: 1 }), {
+			events: [
+				makeEvent(1, {
+					level: "warning",
+					kind: "owner_not_applied",
+					path: "/etc/app.conf",
+					message: "chown failed",
+				}),
+			],
+			last_seq: 1,
+		});
+		await openJob();
+		const log = await screen.findByRole("log");
+		expect(await within(log).findByText("Owner not applied")).toBeVisible();
+	});
+});
+
+describe("Download job page", () => {
+	it("shows the stream phase with Sent and Speed and no bar or actions", async () => {
+		mockJob(
+			makeDownload({
+				state: "running",
+				finished_at: null,
+				progress: progress({ bytes_done: 2_097_152, speed_bps: 1024 }),
+			}),
+		);
+		await openJob();
+
+		expect(
+			await screen.findByRole("heading", { name: "Streaming the archive" }),
+		).toBeVisible();
+		expect(screen.getByText("Sent")).toBeVisible();
+		expect(screen.getByText("Speed")).toBeVisible();
+		expect(screen.queryByRole("progressbar")).toBeNull();
+		expect(screen.queryByRole("button", { name: "Cancel job" })).toBeNull();
+		expect(screen.queryByRole("button", { name: "Run again" })).toBeNull();
+		expect(screen.queryByRole("log")).toBeNull();
+	});
+
+	it("shows the job card and what was sent", async () => {
+		mockJob(makeDownload());
+		await openJob();
+
+		const jobCard = (
+			await screen.findByRole("heading", { name: "Job" })
+		).closest("[data-slot=card]") as HTMLElement;
+		expect(within(jobCard).getByText("tar.gz")).toBeVisible();
+		expect(within(jobCard).getByText("2 items")).toBeVisible();
+		const result = screen
+			.getByRole("heading", { name: "Result" })
+			.closest("[data-slot=card]") as HTMLElement;
+		expect(within(result).getByText("3 MiB")).toBeVisible();
+	});
+
+	it("says the archive is incomplete when the connection closed", async () => {
+		mockJob(makeDownload({ state: "interrupted" }));
+		await openJob();
+		expect(
+			await screen.findByText(
+				"The connection closed before the archive was complete. The file you received is incomplete. Download it again.",
+			),
+		).toBeVisible();
+	});
+
+	it("shows a host without an agent as plain text", async () => {
+		mockJob(
+			makeDownload({ host_id: "agentless:old-box", hostname: "old-box" }),
+		);
+		await openJob();
+		const jobCard = (
+			await screen.findByRole("heading", { name: "Job" })
+		).closest("[data-slot=card]") as HTMLElement;
+		expect(within(jobCard).getByText("old-box")).toBeVisible();
+		expect(within(jobCard).queryByRole("link", { name: "old-box" })).toBeNull();
+	});
+});
+
+describe("Backup job page link to Restore", () => {
+	it("links the snapshot to Restore", async () => {
+		mockJob(makeDetail());
+		await openJob();
+		expect(
+			await screen.findByRole("link", { name: "Browse files" }),
+		).toHaveAttribute("href", `/restore?host=host-1&snapshot=${SNAP}`);
+		expect(
+			screen.getByRole("link", { name: "View host snapshots" }),
+		).toBeVisible();
 	});
 });

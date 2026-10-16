@@ -1,9 +1,10 @@
 use std::collections::HashMap;
-use std::fs::File;
+use std::fs::{File, FileTimes};
 use std::io::Write;
 use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::fs::FileExt;
 use std::path::Path;
+use std::time::SystemTime;
 
 use rustix::fs::{
     AtFlags, CWD, Dir, FileType, Mode, OFlags, ftruncate, mkdirat, openat, renameat, statat,
@@ -15,6 +16,7 @@ use super::conv;
 use super::meta::{Target, apply_metadata};
 use super::walk::ExtentReader;
 use crate::chunker::Chunker;
+use crate::crypto::Key32;
 use crate::error::{Error, Result};
 use crate::pb;
 use crate::tree::validate_name;
@@ -35,14 +37,17 @@ pub enum Overwrite {
 
 /// How a [`Restorer`] treats what it finds in the target.
 #[derive(Clone)]
-pub(crate) struct Settings {
+pub struct RestoreSettings {
     pub overwrite: Overwrite,
     pub verify: bool,
     pub dry_run: bool,
     /// Chunk id key and chunker seed of the repository, to recognise files
-    /// that already hold the right content.
-    pub k_id: [u8; 32],
+    /// that already hold the right content. Wiped when the settings drop.
+    pub k_id: Key32,
     pub seed: u64,
+    /// Give restored entries the owner of the snapshot. Off, the owner is
+    /// whoever creates them and nothing is reported about it.
+    pub restore_owners: bool,
 }
 
 /// A file or entry that could not be restored; the rest of the restore went on.
@@ -54,8 +59,13 @@ pub struct RestoreFailure {
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct Stats {
+pub struct RestoreStats {
+    /// Files written or hard-linked: `created + overwritten`.
     pub restored: u64,
+    /// Restored files that were not there before.
+    pub created: u64,
+    /// Restored files that replaced something already there.
+    pub overwritten: u64,
     pub bytes: u64,
     pub skipped: u64,
     pub verified: u64,
@@ -65,7 +75,7 @@ pub(crate) struct Stats {
 
 /// Whether the chunks of `source`, cut and hashed like a backup does, are
 /// exactly the ones in `content`.
-fn chunks_match(source: impl std::io::Read, content: &[Vec<u8>], s: &Settings) -> bool {
+fn chunks_match(source: impl std::io::Read, content: &[Vec<u8>], s: &RestoreSettings) -> bool {
     let mut ids = content.iter();
     for chunk in Chunker::new(source, &s.k_id, s.seed) {
         let Ok(chunk) = chunk else { return false };
@@ -101,14 +111,18 @@ struct Level {
     fd: Option<OwnedFd>,
     node: Option<pb::Node>,
     kind: Kind,
+    /// Access and modification time to put back when the level is left: an
+    /// ancestor of the restored paths keeps them although entries come and go.
+    /// Left alone when the restore did not change the folder.
+    keep_times: Option<(SystemTime, SystemTime)>,
 }
 
 /// Writes a snapshot tree below one target directory using only `*at` calls
 /// relative to open directory descriptors. Names reach it already validated
 /// by the tree decoder and are checked again here.
 pub struct Restorer {
-    settings: Settings,
-    stats: Stats,
+    settings: RestoreSettings,
+    stats: RestoreStats,
     failures: Vec<RestoreFailure>,
     stack: Vec<Level>,
     names: Vec<Vec<u8>>,
@@ -128,6 +142,8 @@ pub struct FileSink {
     extents: Vec<(u64, u64)>,
     extent: usize,
     extent_pos: u64,
+    /// Something was at the final name when the file was begun.
+    replaced: bool,
     done: bool,
 }
 
@@ -173,7 +189,7 @@ impl Drop for FileSink {
 }
 
 /// Extents must be ascending, disjoint and inside the file.
-pub(crate) fn check_extents(node: &pb::Node) -> Result<Vec<(u64, u64)>> {
+pub fn check_extents(node: &pb::Node) -> Result<Vec<(u64, u64)>> {
     let bad = || {
         Error::corrupt(
             String::from_utf8_lossy(&node.name),
@@ -204,24 +220,18 @@ fn tmp_name() -> Result<String> {
 
 impl Restorer {
     /// Opens the target once, creating it unless this is a dry run.
-    pub(crate) fn open(target: &Path, settings: Settings) -> Result<Self> {
+    pub fn open(target: &Path, settings: RestoreSettings) -> Result<Self> {
         let virtual_root = settings.dry_run && !target.exists();
         let root = if virtual_root {
             Level {
                 fd: None,
                 node: None,
                 kind: Kind::Virtual,
+                keep_times: None,
             }
         } else {
-            if !settings.dry_run {
-                std::fs::create_dir_all(target)?;
-            }
-            let fd = openat(
-                CWD,
-                target,
-                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
-                Mode::empty(),
-            )?;
+            let me = rustix::process::geteuid().as_raw();
+            let fd = open_target(target, !settings.dry_run, |uid| uid == 0 || uid == me)?;
             if !settings.dry_run && settings.overwrite != Overwrite::Never {
                 remove_leftovers(&fd);
             }
@@ -229,11 +239,12 @@ impl Restorer {
                 fd: Some(fd),
                 node: None,
                 kind: Kind::Live,
+                keep_times: None,
             }
         };
         Ok(Restorer {
             settings,
-            stats: Stats::default(),
+            stats: RestoreStats::default(),
             failures: Vec::new(),
             stack: vec![root],
             names: Vec::new(),
@@ -246,11 +257,11 @@ impl Restorer {
         std::mem::take(&mut self.unapplied)
     }
 
-    pub(crate) fn stats(&self) -> &Stats {
+    pub fn stats(&self) -> &RestoreStats {
         &self.stats
     }
 
-    pub(crate) fn take_stats(&mut self) -> Stats {
+    pub fn take_stats(&mut self) -> RestoreStats {
         std::mem::take(&mut self.stats)
     }
 
@@ -343,6 +354,7 @@ impl Restorer {
                     fd: None,
                     node: None,
                     kind,
+                    keep_times: None,
                 },
             );
             return Ok(());
@@ -367,6 +379,7 @@ impl Restorer {
                         fd: None,
                         node: None,
                         kind: Kind::Dead,
+                        keep_times: None,
                     },
                 );
                 return Ok(());
@@ -407,6 +420,7 @@ impl Restorer {
                     ..node.clone()
                 }),
                 kind: Kind::Live,
+                keep_times: None,
             },
         );
         Ok(())
@@ -419,6 +433,7 @@ impl Restorer {
                 fd: None,
                 node: None,
                 kind: Kind::Virtual,
+                keep_times: None,
             },
         );
     }
@@ -432,8 +447,99 @@ impl Restorer {
         let path = self.names.join(&b'/');
         self.names.pop();
         if let (Some(node), Some(fd)) = (&level.node, &level.fd) {
-            apply_metadata(&Target::Fd(fd.as_fd()), node, &path, &mut self.unapplied);
+            apply_metadata(
+                &Target::Fd(fd.as_fd()),
+                node,
+                &path,
+                self.settings.restore_owners,
+                &mut self.unapplied,
+            );
         }
+        if let (Some((accessed, modified)), Some(fd)) = (level.keep_times, &level.fd)
+            && let Err(e) = fd.try_clone().and_then(|fd| {
+                let dir = File::from(fd);
+                if dir.metadata()?.modified()? == modified {
+                    return Ok(());
+                }
+                dir.set_times(
+                    FileTimes::new()
+                        .set_accessed(accessed)
+                        .set_modified(modified),
+                )
+            })
+        {
+            self.unapplied.push(Unapplied {
+                path,
+                what: "times".into(),
+                error: e.to_string(),
+            });
+        }
+    }
+
+    /// Enters a directory that only leads to what is being restored. One that
+    /// exists is entered as it is: its owner, mode, xattrs and times stay as
+    /// they were and nothing in it is removed. One that is missing is created
+    /// like [`Restorer::enter_dir`] does. Something that is not a directory is
+    /// never replaced: the failure is reported and everything below skipped.
+    pub fn enter_ancestor(&mut self, node: &pb::Node) -> Result<()> {
+        validate_name(&node.name)?;
+        let name = node.name.as_slice();
+        if self.kind() != Kind::Live {
+            return self.enter_dir(node);
+        }
+        match self.existing(name)? {
+            None => return self.enter_dir(node),
+            Some(FileType::Directory) => {}
+            Some(_) => {
+                self.block_ancestor(name);
+                return Ok(());
+            }
+        }
+        let fd = match openat(
+            self.here(),
+            name,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(fd) => fd,
+            Err(Errno::LOOP | Errno::NOTDIR) => {
+                self.block_ancestor(name);
+                return Ok(());
+            }
+            Err(e) => return Err(self.fail("cannot open directory", name, e)),
+        };
+        let keep_times = if self.settings.dry_run {
+            None
+        } else {
+            let meta = File::from(fd.try_clone().map_err(Error::Io)?).metadata()?;
+            Some((meta.accessed()?, meta.modified()?))
+        };
+        self.push_level(
+            name,
+            Level {
+                fd: Some(fd),
+                node: None,
+                kind: Kind::Live,
+                keep_times,
+            },
+        );
+        Ok(())
+    }
+
+    fn block_ancestor(&mut self, name: &[u8]) {
+        self.record_failure(
+            name,
+            "a non-directory is in the way of a parent folder".into(),
+        );
+        self.push_level(
+            name,
+            Level {
+                fd: None,
+                node: None,
+                kind: Kind::Dead,
+                keep_times: None,
+            },
+        );
     }
 
     fn remember_link(&mut self, node: &pb::Node) {
@@ -459,7 +565,9 @@ impl Restorer {
             Kind::Live => {}
         }
         let name = node.name.as_slice();
-        match self.existing(name)? {
+        let existing = self.existing(name)?;
+        let replaced = existing.is_some();
+        match existing {
             Some(FileType::Directory) => {
                 self.record_failure(name, "a directory is in the way of this file".into());
                 return Ok(None);
@@ -477,6 +585,7 @@ impl Restorer {
                                 &Target::Fd(file.as_fd()),
                                 node,
                                 &path,
+                                self.settings.restore_owners,
                                 &mut self.unapplied,
                             );
                             self.remember_link(node);
@@ -516,6 +625,7 @@ impl Restorer {
             extents,
             extent: 0,
             extent_pos: 0,
+            replaced,
             done: false,
         }))
     }
@@ -599,7 +709,13 @@ impl Restorer {
             self.stats.verified += 1;
         }
         let path = self.path_of(&node.name);
-        apply_metadata(&Target::Fd(file.as_fd()), node, &path, &mut self.unapplied);
+        apply_metadata(
+            &Target::Fd(file.as_fd()),
+            node,
+            &path,
+            self.settings.restore_owners,
+            &mut self.unapplied,
+        );
         drop(file);
         renameat(
             &sink.dir,
@@ -610,6 +726,11 @@ impl Restorer {
         .map_err(|e| self.fail("cannot place file", &sink.name, e))?;
         sink.done = true;
         self.stats.restored += 1;
+        if sink.replaced {
+            self.stats.overwritten += 1;
+        } else {
+            self.stats.created += 1;
+        }
         self.stats.bytes += node.size;
         if node.hardlink_group != 0 {
             self.links.entry(node.hardlink_group).or_insert(path);
@@ -693,6 +814,7 @@ impl Restorer {
         }
         self.place(&tmp, &node.name)?;
         self.stats.restored += 1;
+        self.stats.created += 1;
         self.stats.bytes += node.size;
         Ok(true)
     }
@@ -791,11 +913,95 @@ impl Restorer {
             },
             node,
             &path,
+            self.settings.restore_owners,
             &mut unapplied,
         );
         self.unapplied = unapplied;
         self.place(&tmp, &node.name)
     }
+}
+
+/// Opens the restore target one component at a time, creating missing folders
+/// `0700` when `create` is set. A component that a user other than a
+/// `trusted` one could swap is refused: a symlink it owns, or a folder it owns
+/// that others can write to or that sits in a folder others can write to
+/// (a name planted in `/var/tmp`).
+fn open_target(
+    target: &Path,
+    create: bool,
+    trusted: impl Fn(u32) -> bool,
+) -> std::io::Result<OwnedFd> {
+    let start = if target.is_absolute() { "/" } else { "." };
+    let dir = openat(
+        CWD,
+        start,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    open_below(dir, target, create, trusted)
+}
+
+fn open_below(
+    mut dir: OwnedFd,
+    target: &Path,
+    create: bool,
+    trusted: impl Fn(u32) -> bool,
+) -> std::io::Result<OwnedFd> {
+    use std::path::Component;
+
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
+    let refused = |name: &std::ffi::OsStr, why: &str| {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "refusing to restore into {}: {} {why}",
+                target.display(),
+                name.display()
+            ),
+        )
+    };
+    let mut shared = false;
+    for part in target.components() {
+        let name = match part {
+            Component::Normal(name) => name,
+            Component::RootDir | Component::CurDir => continue,
+            Component::ParentDir | Component::Prefix(_) => {
+                return Err(refused(part.as_os_str(), "is not allowed in the target"));
+            }
+        };
+        let fd = match openat(&dir, name, flags | OFlags::NOFOLLOW, Mode::empty()) {
+            Ok(fd) => fd,
+            Err(Errno::NOENT) if create => {
+                match mkdirat(&dir, name, Mode::from_bits_truncate(conv(0o700u32))) {
+                    Ok(()) | Err(Errno::EXIST) => {}
+                    Err(e) => return Err(e.into()),
+                }
+                openat(&dir, name, flags | OFlags::NOFOLLOW, Mode::empty())?
+            }
+            Err(Errno::LOOP | Errno::NOTDIR) => {
+                let st = statat(&dir, name, AtFlags::SYMLINK_NOFOLLOW)?;
+                if FileType::from_raw_mode(st.st_mode) != FileType::Symlink {
+                    return Err(Errno::NOTDIR.into());
+                }
+                if !trusted(st.st_uid) {
+                    return Err(refused(name, "is a symlink owned by another user"));
+                }
+                openat(&dir, name, flags, Mode::empty())?
+            }
+            Err(e) => return Err(e.into()),
+        };
+        let st = rustix::fs::fstat(&fd)?;
+        let mode: u32 = conv(st.st_mode);
+        if !trusted(st.st_uid) && (mode & 0o022 != 0 || shared) {
+            return Err(refused(
+                name,
+                "belongs to another user and could be swapped by others",
+            ));
+        }
+        shared = mode & 0o002 != 0;
+        dir = fd;
+    }
+    Ok(dir)
 }
 
 /// Removes what an interrupted restore left behind in `dir`. The prefix differs
@@ -812,5 +1018,68 @@ fn remove_leftovers(dir: &OwnedFd) {
         .collect();
     for name in stale {
         let _ = unlinkat(dir, name.as_c_str(), AtFlags::empty());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    use super::*;
+
+    fn base(tmp: &tempfile::TempDir) -> OwnedFd {
+        openat(
+            CWD,
+            tmp.path(),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap()
+    }
+
+    fn mode(path: &Path) -> u32 {
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o7777
+    }
+
+    #[test]
+    fn open_target_creates_missing_folders_private() {
+        let tmp = tempfile::tempdir().unwrap();
+        open_below(base(&tmp), Path::new("a/./b"), true, |_| true).unwrap();
+        assert_eq!(mode(&tmp.path().join("a")), 0o700);
+        assert_eq!(mode(&tmp.path().join("a/b")), 0o700);
+        let missing = open_below(base(&tmp), Path::new("c"), false, |_| true).unwrap_err();
+        assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
+        assert!(open_below(base(&tmp), Path::new("a/../a"), true, |_| true).is_err());
+    }
+
+    #[test]
+    fn open_target_refuses_what_another_user_could_swap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir(root.join("real")).unwrap();
+        symlink("real", root.join("link")).unwrap();
+        std::fs::create_dir(root.join("open")).unwrap();
+        std::fs::set_permissions(root.join("open"), std::fs::Permissions::from_mode(0o777))
+            .unwrap();
+        std::fs::write(root.join("file"), b"x").unwrap();
+
+        let mine = |_| true;
+        open_below(base(&tmp), Path::new("link/sub"), true, mine).unwrap();
+        assert!(
+            root.join("real/sub").is_dir(),
+            "a trusted symlink is followed"
+        );
+        open_below(base(&tmp), Path::new("open"), false, mine).unwrap();
+
+        let foreign = |_| false;
+        for (path, why) in [("link", "symlink"), ("open", "could be swapped")] {
+            let err = open_below(base(&tmp), Path::new(path), false, foreign).unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{path}");
+            assert!(err.to_string().contains(why), "{path}: {err}");
+        }
+        open_below(base(&tmp), Path::new("real"), false, foreign).unwrap();
+
+        let not_dir = open_below(base(&tmp), Path::new("file/x"), true, mine).unwrap_err();
+        assert_eq!(not_dir.raw_os_error(), Some(Errno::NOTDIR.raw_os_error()));
     }
 }

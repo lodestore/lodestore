@@ -163,3 +163,24 @@ async fn install_unknown_arch_404() {
         ts.stop().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn install_script_force_keeps_previous_agent_id() {
+    let ts = TestServer::start(&Backend::Sqlite).await;
+    let body = reqwest::get(format!("{}/install.sh", ts.rest_url()))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(body.contains("--previous-agent-id"));
+    let read = body.find("prev=$(agent_id)").expect("reads the agent id");
+    let stash = body
+        .find("\n    stash_identity\n")
+        .expect("stashes the identity");
+    assert!(
+        read < stash,
+        "the id is read before the identity is stashed"
+    );
+    ts.stop().await;
+}

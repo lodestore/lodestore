@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import type { HostDetail, HostMount } from "@/api/gen/model";
 import { HostPolicies } from "@/components/hosts/host-policies";
 import { CertificateText, VersionCell } from "@/components/hosts/hosts-table";
+import { PathText } from "@/components/path-text";
 import { RelativeTime } from "@/components/relative-time";
 import { StatusBadge } from "@/components/status-badge";
 import { Badge } from "@/components/ui/badge";
@@ -117,8 +118,8 @@ function Filesystems({ mounts }: { mounts: HostMount[] }) {
 				<TableBody>
 					{shown.map((m, index) => (
 						<TableRow key={`${m.path}:${m.fs_type}:${index}`}>
-							<TableCell className="font-mono break-all whitespace-normal">
-								{m.path}
+							<TableCell className="font-mono whitespace-normal">
+								<PathText value={m.path} />
 							</TableCell>
 							<TableCell>{m.fs_type}</TableCell>
 							<TableCell className="text-right tabular-nums">
@@ -177,7 +178,7 @@ function LabelsCard({ host }: { host: HostDetail }) {
 					<Badge
 						key={label.key}
 						variant="outline"
-						className="h-auto max-w-full font-mono break-all whitespace-normal"
+						className="h-auto max-w-full font-mono wrap-anywhere whitespace-normal"
 					>
 						{label.key}={label.value}
 					</Badge>

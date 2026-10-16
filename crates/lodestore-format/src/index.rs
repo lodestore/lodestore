@@ -17,7 +17,7 @@ use crate::pack::{
 use crate::pb;
 use crate::store::{BlobError, BlobStore, put_named};
 
-const INDEX_PREFIX: &str = "index/";
+pub(crate) const INDEX_PREFIX: &str = "index/";
 const PACKS_PREFIX: &str = "packs/";
 /// Pack records per shard written by a rebuild.
 const REBUILD_SHARD_PACKS: usize = 1024;

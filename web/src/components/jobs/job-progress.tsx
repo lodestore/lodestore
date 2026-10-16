@@ -20,8 +20,26 @@ const TICK_MS = 1_000;
 export const formatClock = (at: number) =>
 	new Date(at).toLocaleTimeString("en", { timeStyle: "medium" });
 
-export function phaseLabel(job: Pick<JobDetail, "state" | "phase">) {
-	if (job.state === "queued") return copy.jobs.phases.queued;
+export function phaseLabel(job: Pick<JobDetail, "state" | "phase" | "kind">) {
+	const p = copy.jobs.phases;
+	if (job.kind === "download") {
+		return job.state === "queued" ? p.download_queued : p.download_stream;
+	}
+	if (job.state === "queued") return p.queued;
+	if (job.kind === "restore") {
+		switch (job.phase) {
+			case "restore_files":
+				return p.restore_files;
+			case "restore_metadata":
+				return p.restore_metadata;
+			case "restore_plan":
+			case null:
+			case undefined:
+				return p.restore_plan;
+			default:
+				return p.restore_finishing;
+		}
+	}
 	switch (job.phase) {
 		case "pre_hook":
 			return copy.jobs.phases.pre_hook;
@@ -82,14 +100,42 @@ export function JobProgress({
 	const now = useNow(running);
 	const progress = job.progress;
 	const seenAt = useSeenAt(progress?.updated_at);
-	const scanned = running && progress?.scan_done === true;
-	const pct = scanned && progress ? percent(progress) : null;
+	const restore = job.kind === "restore";
+	const download = job.kind === "download";
+	const scanned = running && (restore || progress?.scan_done === true);
+	const pct = scanned ? percent(progress ?? {}) : null;
+	const sent = progress?.bytes_done || job.download?.bytes_sent || 0;
 	const stale =
 		running &&
 		job.host_online &&
 		progress != null &&
 		(progress.updated_at ?? 0) > 0 &&
 		now - seenAt > STALE_MS;
+
+	if (download && running) {
+		return (
+			<Card>
+				<CardContent className="flex flex-col gap-4">
+					<h2 className="text-sm font-semibold">{phaseLabel(job)}</h2>
+					<dl aria-live="off" className="grid grid-cols-2 gap-4">
+						<Metric
+							label={copy.jobs.metrics.sent}
+							value={sent > 0 ? formatBytes(sent) : copy.common.dash}
+						/>
+						<Metric
+							label={copy.jobs.metrics.speed}
+							value={
+								progress?.speed_bps
+									? formatRate(progress.speed_bps)
+									: copy.common.dash
+							}
+							sub={copy.jobs.metrics.speedSub}
+						/>
+					</dl>
+				</CardContent>
+			</Card>
+		);
+	}
 
 	return (
 		<Card>
@@ -121,7 +167,11 @@ export function JobProgress({
 						<div className="flex items-center gap-4">
 							<Progress
 								value={pct}
-								aria-label={copy.jobs.result.progressLabel}
+								aria-label={
+									restore
+										? copy.jobs.result.restoreProgressLabel
+										: copy.jobs.result.progressLabel
+								}
 							/>
 							{pct !== null && (
 								<span className="text-sm font-semibold tabular-nums">
@@ -160,11 +210,19 @@ export function JobProgress({
 										: undefined
 								}
 							/>
-							<Metric
-								label={copy.jobs.metrics.uploaded}
-								value={formatBytes(progress?.bytes_uploaded ?? 0)}
-								sub={copy.jobs.metrics.uploadedSub}
-							/>
+							{restore ? (
+								<Metric
+									label={copy.jobs.metrics.readFromStorage}
+									value={formatBytes(progress?.bytes_downloaded ?? 0)}
+									sub={copy.jobs.metrics.readFromStorageSub}
+								/>
+							) : (
+								<Metric
+									label={copy.jobs.metrics.uploaded}
+									value={formatBytes(progress?.bytes_uploaded ?? 0)}
+									sub={copy.jobs.metrics.uploadedSub}
+								/>
+							)}
 							<Metric
 								label={copy.jobs.metrics.speed}
 								value={formatRate(progress?.speed_bps ?? 0)}

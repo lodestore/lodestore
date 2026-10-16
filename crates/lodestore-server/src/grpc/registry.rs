@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use lodestore_format::crypto::{BlobId, Key32};
 use lodestore_proto::agent::v1::server_message::Body;
 use lodestore_proto::agent::v1::{Disconnect, DisconnectReason, ServerMessage};
 use tokio::sync::mpsc;
@@ -9,6 +10,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::grpc::dispatch::live::Live;
 
+pub const CAP_RESTORE: &str = "restore_v1";
 pub const ONLINE_WINDOW: Duration = Duration::from_secs(45);
 const CHANNEL_DEPTH: usize = 16;
 
@@ -18,6 +20,12 @@ struct Entry {
     last_seen: Instant,
     tx: mpsc::Sender<ServerMessage>,
     cancel: CancellationToken,
+    capabilities: Vec<String>,
+}
+
+struct Issued {
+    generation: u64,
+    packs: HashMap<u32, (BlobId, Key32)>,
 }
 
 #[derive(Default)]
@@ -25,6 +33,7 @@ struct Inner {
     next_generation: u64,
     sessions: HashMap<String, Entry>,
     revoked: HashSet<String>,
+    issued: HashMap<String, Issued>,
 }
 
 #[derive(Clone, Default)]
@@ -78,6 +87,7 @@ impl Registry {
             last_seen: Instant::now(),
             tx,
             cancel: cancel.clone(),
+            capabilities: Vec::new(),
         };
         if let Some(old) = inner.sessions.insert(agent_id.to_string(), entry) {
             let _ = old.tx.try_send(ServerMessage {
@@ -100,6 +110,61 @@ impl Registry {
         if let Some(e) = self.lock().sessions.get_mut(agent_id) {
             e.last_seen = Instant::now();
         }
+    }
+
+    pub fn set_capabilities(&self, agent_id: &str, caps: Vec<String>) {
+        if let Some(e) = self.lock().sessions.get_mut(agent_id) {
+            e.capabilities = caps;
+        }
+    }
+
+    pub fn supports(&self, agent_id: &str, cap: &str) -> bool {
+        self.lock().sessions.get(agent_id).is_some_and(|e| {
+            e.last_seen.elapsed() < ONLINE_WINDOW && e.capabilities.iter().any(|c| c == cap)
+        })
+    }
+
+    pub fn begin_plan(&self, job_id: &str) -> u64 {
+        let mut inner = self.lock();
+        inner.next_generation += 1;
+        let generation = inner.next_generation;
+        inner.issued.insert(
+            job_id.to_string(),
+            Issued {
+                generation,
+                packs: HashMap::new(),
+            },
+        );
+        generation
+    }
+
+    pub fn issue_pack(
+        &self,
+        job_id: &str,
+        generation: u64,
+        number: u32,
+        pack_id: BlobId,
+        key: Key32,
+    ) -> bool {
+        let mut inner = self.lock();
+        match inner.issued.get_mut(job_id) {
+            Some(issued) if issued.generation == generation => {
+                issued.packs.insert(number, (pack_id, key));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn issued_pack(&self, job_id: &str, number: u32) -> Option<(BlobId, Key32)> {
+        self.lock()
+            .issued
+            .get(job_id)
+            .and_then(|issued| issued.packs.get(&number).cloned())
+    }
+
+    pub fn clear_issued(&self, job_id: &str) {
+        self.lock().issued.remove(job_id);
     }
 
     pub fn is_online(&self, agent_id: &str) -> bool {

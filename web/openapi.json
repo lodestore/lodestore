@@ -177,6 +177,174 @@
         }
       }
     },
+    "/api/v1/catalog": {
+      "get": {
+        "tags": [
+          "Snapshots"
+        ],
+        "summary": "Catalog rebuild status of every repository",
+        "operationId": "list_catalog_status",
+        "responses": {
+          "200": {
+            "description": "Phase and progress per repository",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/CatalogStatus"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/downloads": {
+      "post": {
+        "tags": [
+          "Restore"
+        ],
+        "summary": "Prepare an archive download",
+        "operationId": "create_download",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DownloadBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "A single-use link to the archive",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DownloadCreated"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown snapshot, gone from storage, or a selected path is missing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The selection is not valid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The repository storage is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/downloads/{id}/archive": {
+      "get": {
+        "tags": [
+          "Restore"
+        ],
+        "summary": "Download the archive",
+        "operationId": "download_archive",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Download id from the link",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The archive, streamed while it is built; no resume",
+            "content": {
+              "application/gzip": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "format": "int32",
+                    "minimum": 0
+                  }
+                }
+              },
+              "application/zstd": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "format": "int32",
+                    "minimum": 0
+                  }
+                }
+              },
+              "application/zip": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "format": "int32",
+                    "minimum": 0
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The link was already used or expired, or the snapshot is gone",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The repository storage is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/hosts": {
       "get": {
         "tags": [
@@ -603,6 +771,15 @@
             "name": "host_id",
             "in": "query",
             "description": "Exact host id.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "`backup`, `restore` or `download`.",
             "required": false,
             "schema": {
               "type": "string"
@@ -1744,6 +1921,54 @@
         ]
       }
     },
+    "/api/v1/repositories/{id}/catalog/rebuild": {
+      "post": {
+        "tags": [
+          "Snapshots"
+        ],
+        "summary": "Rebuild the catalog of a repository from storage",
+        "operationId": "rebuild_catalog",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Repository id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "The rebuild runs in the background",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CatalogStatus"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown repository",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      }
+    },
     "/api/v1/repositories/{id}/catalog/sync": {
       "post": {
         "tags": [
@@ -1833,6 +2058,179 @@
           },
           "404": {
             "description": "Unknown repository",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/restore/hosts": {
+      "get": {
+        "tags": [
+          "Restore"
+        ],
+        "summary": "List hosts to restore from",
+        "operationId": "list_restore_hosts",
+        "responses": {
+          "200": {
+            "description": "Hosts with an agent, then hosts known only from snapshots",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RestoreHost"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/restore/snapshots": {
+      "get": {
+        "tags": [
+          "Restore"
+        ],
+        "summary": "List the snapshots of a host, newest first",
+        "operationId": "list_restore_snapshots",
+        "parameters": [
+          {
+            "name": "host",
+            "in": "query",
+            "description": "Host key from the host list: an agent id or `agentless:{hostname}`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "description": "Cursor from the previous page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size, 1 to 200; 50 by default.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of snapshots",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestoreSnapshotPage"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown host",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Missing host, bad cursor or limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/restores": {
+      "post": {
+        "tags": [
+          "Restore"
+        ],
+        "summary": "Restore selected paths of a snapshot to a host",
+        "operationId": "create_restore",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RestoreBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The restore job is queued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestoreCreated"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`restore_destination_root`: a restore into a new folder names `/`; `restore_in_place_not_empty`: a restore in place with `stop_if_not_empty`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown snapshot or host, or a selected path is missing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The selection, destination or host is not valid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The repository storage is unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -2018,6 +2416,289 @@
           {}
         ]
       }
+    },
+    "/api/v1/snapshots/{id}": {
+      "get": {
+        "tags": [
+          "Restore"
+        ],
+        "summary": "Get one snapshot",
+        "operationId": "get_snapshot",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Snapshot id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The snapshot with its repository and host key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestoreSnapshot"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/snapshots/{id}/entries": {
+      "get": {
+        "tags": [
+          "Restore"
+        ],
+        "summary": "List a directory of a snapshot",
+        "operationId": "list_snapshot_entries",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Snapshot id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "description": "Directory path as base64url bytes; empty is the top of the snapshot.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "Index of the first entry, in steps of 200.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of the directory: folders first, then names without regard to case",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntryPage"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown snapshot, gone from storage, or no such directory",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The path is not valid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The repository storage is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/snapshots/{id}/search": {
+      "get": {
+        "tags": [
+          "Restore"
+        ],
+        "summary": "Find names below a directory of a snapshot",
+        "description": "Streams one JSON object per line as the walk goes: `{\"match\": ...}` for each name that contains the text, then `{\"done\": {\"count\", \"truncated\"}}`, or `{\"error\": \"...\"}` if the walk fails midway.",
+        "operationId": "search_snapshot",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Snapshot id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "description": "Directory to search below, as base64url bytes; empty is the whole snapshot.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Text to find in names, ignoring case; 1 to 255 characters.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Newline-delimited JSON, at most 500 matches",
+            "content": {
+              "application/x-ndjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchLine"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown snapshot, gone from storage, or no such directory",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The path or the text is not valid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The repository storage is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/snapshots/{id}/summary": {
+      "post": {
+        "tags": [
+          "Restore"
+        ],
+        "summary": "Count what a selection of a snapshot holds",
+        "operationId": "summarize_selection",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Snapshot id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SelectionBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Files, folders and bytes the selection would restore",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SelectionSummary"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown snapshot, gone from storage, or a selected path is missing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Empty selection or a path that is not valid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The repository storage is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      }
     }
   },
   "components": {
@@ -2036,6 +2717,14 @@
             "type": "string"
           }
         }
+      },
+      "ArchiveFormat": {
+        "type": "string",
+        "enum": [
+          "tar_gz",
+          "tar_zst",
+          "zip"
+        ]
       },
       "BackupPolicy": {
         "type": "object",
@@ -2060,6 +2749,95 @@
           }
         },
         "additionalProperties": false
+      },
+      "CatalogPhase": {
+        "type": "string",
+        "enum": [
+          "idle",
+          "listing",
+          "reading",
+          "done",
+          "failed"
+        ]
+      },
+      "CatalogStatus": {
+        "type": "object",
+        "required": [
+          "repository_id",
+          "repository_name",
+          "phase",
+          "read",
+          "added",
+          "skipped",
+          "snapshots"
+        ],
+        "properties": {
+          "added": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "finished_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "last_sync_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "phase": {
+            "$ref": "#/components/schemas/CatalogPhase"
+          },
+          "read": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "repository_id": {
+            "type": "string"
+          },
+          "repository_name": {
+            "type": "string"
+          },
+          "skipped": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SkippedSnapshot"
+            }
+          },
+          "snapshots": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "started_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "total": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          }
+        }
       },
       "CatalogSyncResult": {
         "type": "object",
@@ -2167,6 +2945,14 @@
           }
         }
       },
+      "ConflictPolicyDto": {
+        "type": "string",
+        "enum": [
+          "overwrite_changed",
+          "skip_existing",
+          "stop_if_not_empty"
+        ]
+      },
       "ConnectRequest": {
         "type": "object",
         "required": [
@@ -2219,6 +3005,179 @@
           },
           "secret_access_key": {
             "type": "string"
+          }
+        }
+      },
+      "DownloadBody": {
+        "type": "object",
+        "required": [
+          "snapshot_id",
+          "items",
+          "format"
+        ],
+        "properties": {
+          "format": {
+            "$ref": "#/components/schemas/ArchiveFormat"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Selected paths as base64url bytes without padding."
+          },
+          "snapshot_id": {
+            "type": "string"
+          }
+        }
+      },
+      "DownloadCreated": {
+        "type": "object",
+        "required": [
+          "id",
+          "url",
+          "file_name"
+        ],
+        "properties": {
+          "file_name": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string",
+            "description": "Single-use link, valid for 60 seconds; open it as a normal page load."
+          }
+        }
+      },
+      "DownloadInfo": {
+        "type": "object",
+        "required": [
+          "snapshot_id",
+          "format",
+          "items",
+          "bytes_sent",
+          "started_by"
+        ],
+        "properties": {
+          "bytes_sent": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "format": {
+            "$ref": "#/components/schemas/ArchiveFormat"
+          },
+          "items": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "snapshot_id": {
+            "type": "string"
+          },
+          "started_by": {
+            "type": "string"
+          }
+        }
+      },
+      "EntryItem": {
+        "type": "object",
+        "required": [
+          "name",
+          "name_b64",
+          "kind",
+          "size",
+          "mtime_ms",
+          "mode",
+          "uid",
+          "gid"
+        ],
+        "properties": {
+          "gid": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "kind": {
+            "$ref": "#/components/schemas/EntryKind"
+          },
+          "link_target": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mode": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "mtime_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "name_b64": {
+            "type": "string",
+            "description": "Exact name bytes, base64url without padding."
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "uid": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "EntryKind": {
+        "type": "string",
+        "enum": [
+          "dir",
+          "file",
+          "symlink",
+          "other"
+        ]
+      },
+      "EntryPage": {
+        "type": "object",
+        "required": [
+          "path",
+          "path_b64",
+          "entries",
+          "total",
+          "offset"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EntryItem"
+            }
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "path": {
+            "type": "string"
+          },
+          "path_b64": {
+            "type": "string",
+            "description": "Exact path bytes, base64url without padding."
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
           }
         }
       },
@@ -2656,6 +3615,14 @@
           }
         }
       },
+      "JobKind": {
+        "type": "string",
+        "enum": [
+          "backup",
+          "restore",
+          "download"
+        ]
+      },
       "JobPage": {
         "type": "object",
         "required": [
@@ -2694,13 +3661,22 @@
           "pre_hook",
           "backup",
           "post_hook",
-          "snapshot"
+          "snapshot",
+          "restore_plan",
+          "restore_files",
+          "restore_metadata"
         ]
       },
       "JobProgressDto": {
         "type": "object",
         "properties": {
           "bytes_done": {
+            "type": "integer",
+            "format": "int64",
+            "default": 0,
+            "minimum": 0
+          },
+          "bytes_downloaded": {
             "type": "integer",
             "format": "int64",
             "default": 0,
@@ -2826,6 +3802,7 @@
         "type": "object",
         "required": [
           "id",
+          "kind",
           "host_id",
           "hostname",
           "policy_exists",
@@ -2838,6 +3815,16 @@
           "errors_total"
         ],
         "properties": {
+          "download": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DownloadInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "error_code": {
             "type": [
               "string",
@@ -2876,6 +3863,9 @@
           },
           "incomplete": {
             "type": "boolean"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/JobKind"
           },
           "phase": {
             "oneOf": [
@@ -2919,6 +3909,26 @@
           "queued_at": {
             "type": "integer",
             "format": "int64"
+          },
+          "restore": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RestoreInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "restore_result": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RestoreResultDto"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "snapshot_id": {
             "type": [
@@ -3506,6 +4516,258 @@
           }
         }
       },
+      "RestoreBody": {
+        "type": "object",
+        "required": [
+          "snapshot_id",
+          "items",
+          "target_host_id",
+          "destination",
+          "in_place",
+          "conflict",
+          "restore_owners"
+        ],
+        "properties": {
+          "conflict": {
+            "$ref": "#/components/schemas/ConflictPolicyDto"
+          },
+          "destination": {
+            "type": "string",
+            "description": "Absolute path of the folder to restore into; `/` with `in_place`."
+          },
+          "in_place": {
+            "type": "boolean"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Selected paths as base64url bytes without padding."
+          },
+          "restore_owners": {
+            "type": "boolean"
+          },
+          "snapshot_id": {
+            "type": "string"
+          },
+          "target_host_id": {
+            "type": "string"
+          }
+        }
+      },
+      "RestoreCreated": {
+        "type": "object",
+        "required": [
+          "job_id"
+        ],
+        "properties": {
+          "job_id": {
+            "type": "string"
+          }
+        }
+      },
+      "RestoreHost": {
+        "type": "object",
+        "required": [
+          "key",
+          "hostname",
+          "agent",
+          "labels",
+          "snapshot_count"
+        ],
+        "properties": {
+          "agent": {
+            "type": "boolean"
+          },
+          "host_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "hostname": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Label"
+            }
+          },
+          "latest_snapshot_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "repository_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "repository_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "snapshot_count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "status": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/HostStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "RestoreInfo": {
+        "type": "object",
+        "required": [
+          "snapshot_id",
+          "source_host_key",
+          "source_hostname",
+          "destination",
+          "in_place",
+          "conflict",
+          "restore_owners",
+          "other_repository",
+          "items",
+          "started_by"
+        ],
+        "properties": {
+          "conflict": {
+            "$ref": "#/components/schemas/ConflictPolicyDto"
+          },
+          "destination": {
+            "type": "string"
+          },
+          "in_place": {
+            "type": "boolean"
+          },
+          "items": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "other_repository": {
+            "type": "boolean",
+            "description": "The snapshot is read from a repository other than the one the target host writes to."
+          },
+          "restore_owners": {
+            "type": "boolean"
+          },
+          "snapshot_id": {
+            "type": "string"
+          },
+          "source_host_key": {
+            "type": "string",
+            "description": "Agent id of the source host, or `agentless:{hostname}`."
+          },
+          "source_hostname": {
+            "type": "string"
+          },
+          "started_by": {
+            "type": "string"
+          }
+        }
+      },
+      "RestoreResultDto": {
+        "type": "object",
+        "properties": {
+          "bytes": {
+            "type": "integer",
+            "format": "int64",
+            "default": 0,
+            "minimum": 0
+          },
+          "created": {
+            "type": "integer",
+            "format": "int64",
+            "default": 0,
+            "minimum": 0
+          },
+          "files": {
+            "type": "integer",
+            "format": "int64",
+            "default": 0,
+            "minimum": 0
+          },
+          "overwritten": {
+            "type": "integer",
+            "format": "int64",
+            "default": 0,
+            "minimum": 0
+          },
+          "skipped": {
+            "type": "integer",
+            "format": "int64",
+            "default": 0,
+            "minimum": 0
+          }
+        }
+      },
+      "RestoreSnapshot": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/SnapshotItem"
+          },
+          {
+            "type": "object",
+            "required": [
+              "repository_id",
+              "host_key"
+            ],
+            "properties": {
+              "host_key": {
+                "type": "string"
+              },
+              "repository_id": {
+                "type": "string"
+              }
+            }
+          }
+        ]
+      },
+      "RestoreSnapshotPage": {
+        "type": "object",
+        "required": [
+          "items",
+          "total"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RestoreSnapshot"
+            }
+          },
+          "next": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
       "RunJob": {
         "type": "object",
         "required": [
@@ -3540,6 +4802,126 @@
             "items": {
               "$ref": "#/components/schemas/RunJob"
             }
+          }
+        }
+      },
+      "SearchDone": {
+        "type": "object",
+        "required": [
+          "count",
+          "truncated"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "More than 500 names match; the rest was not sent."
+          }
+        }
+      },
+      "SearchLine": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "match"
+            ],
+            "properties": {
+              "match": {
+                "$ref": "#/components/schemas/SearchMatch"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "done"
+            ],
+            "properties": {
+              "done": {
+                "$ref": "#/components/schemas/SearchDone"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "error"
+            ],
+            "properties": {
+              "error": {
+                "type": "string"
+              }
+            }
+          }
+        ],
+        "description": "One line of the search stream."
+      },
+      "SearchMatch": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/EntryItem"
+          },
+          {
+            "type": "object",
+            "required": [
+              "parent",
+              "parent_b64"
+            ],
+            "properties": {
+              "parent": {
+                "type": "string",
+                "description": "Directory holding the match."
+              },
+              "parent_b64": {
+                "type": "string",
+                "description": "Exact bytes of the directory path, base64url without padding."
+              }
+            }
+          }
+        ]
+      },
+      "SelectionBody": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Absolute snapshot paths as base64url bytes; a folder brings everything below it."
+          }
+        }
+      },
+      "SelectionSummary": {
+        "type": "object",
+        "required": [
+          "files",
+          "dirs",
+          "bytes"
+        ],
+        "properties": {
+          "bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "dirs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "files": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
           }
         }
       },
@@ -3652,6 +5034,21 @@
             "type": "string"
           },
           "username": {
+            "type": "string"
+          }
+        }
+      },
+      "SkippedSnapshot": {
+        "type": "object",
+        "required": [
+          "key",
+          "reason"
+        ],
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "reason": {
             "type": "string"
           }
         }
@@ -4000,6 +5397,10 @@
     {
       "name": "Snapshots",
       "description": "Snapshots recorded in the server catalog."
+    },
+    {
+      "name": "Restore",
+      "description": "Hosts and snapshots to restore from, newest first."
     },
     {
       "name": "Repositories",

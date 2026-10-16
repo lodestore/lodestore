@@ -40,6 +40,71 @@ export function formatTimeLeft(seconds?: number | null) {
 	return copy.jobs.timeLeft.hoursMinutes(Math.floor(total / 60), total % 60);
 }
 
+const dateTime = new Intl.DateTimeFormat("en", {
+	dateStyle: "medium",
+	timeStyle: "short",
+});
+const clock = new Intl.DateTimeFormat("en-GB", {
+	hour: "2-digit",
+	minute: "2-digit",
+	hourCycle: "h23",
+});
+const dayParts = new Intl.DateTimeFormat("en", {
+	day: "numeric",
+	month: "short",
+	year: "numeric",
+});
+
+function dayName(ms: number) {
+	const part = (type: Intl.DateTimeFormatPartTypes) =>
+		dayParts.formatToParts(ms).find((p) => p.type === type)?.value;
+	return `${part("day")} ${part("month")} ${part("year")}`;
+}
+
+export const formatDateTime = (ms: number) => dateTime.format(ms);
+
+const shortDateTime = new Intl.DateTimeFormat("en", {
+	dateStyle: "short",
+	timeStyle: "short",
+});
+
+/** `10/16/26, 11:36 AM`, for labels that share a narrow line. */
+export const formatShortDateTime = (ms: number) => shortDateTime.format(ms);
+
+const dateTimeSeconds = new Intl.DateTimeFormat("en", {
+	dateStyle: "medium",
+	timeStyle: "medium",
+});
+
+export const formatDateTimeSeconds = (ms: number) => dateTimeSeconds.format(ms);
+
+export function formatMode(mode: number) {
+	const bit = (mask: number, on: string) => (mode & mask ? on : "-");
+	const special = (exec: number, flag: number, lower: string, upper: string) =>
+		mode & flag ? (mode & exec ? lower : upper) : bit(exec, "x");
+	return [
+		bit(0o400, "r"),
+		bit(0o200, "w"),
+		special(0o100, 0o4000, "s", "S"),
+		bit(0o040, "r"),
+		bit(0o020, "w"),
+		special(0o010, 0o2000, "s", "S"),
+		bit(0o004, "r"),
+		bit(0o002, "w"),
+		special(0o001, 0o1000, "t", "T"),
+	].join("");
+}
+
+export const formatClock = (ms: number) => clock.format(ms);
+
+export function formatDay(ms: number, now = Date.now()) {
+	const startOfDay = (value: number) => new Date(value).setHours(0, 0, 0, 0);
+	const days = Math.round((startOfDay(now) - startOfDay(ms)) / 86_400_000);
+	if (days === 0) return copy.restore.timeline.today;
+	if (days === 1) return copy.restore.timeline.yesterday;
+	return dayName(ms);
+}
+
 export function percent(progress: {
 	bytes_done?: number;
 	bytes_total?: number;

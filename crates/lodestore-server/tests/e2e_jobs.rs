@@ -3,103 +3,18 @@ mod common;
 use std::fs::File;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
-use common::{Api, Backend, TestServer, backends, wait_until};
-use lodestore_agent::{AgentError, EnrollArgs, NetOptions, Paths, RunArgs};
+use common::{AgentEnv, WAIT, backends, wait_until};
 use lodestore_format::reader::Reader;
 use lodestore_format::repo::Repository;
 use lodestore_format::snapshot::SnapshotEntry;
 use lodestore_format::store::LocalFsStore;
 use serde_json::{Value, json};
-use tempfile::TempDir;
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
 
-const WAIT: Duration = Duration::from_secs(90);
 const SMALL: u64 = 64 * 1024;
 
-struct Env {
-    ts: TestServer,
-    api: Api,
-    host: String,
-    paths: Paths,
-    work: TempDir,
-    agent: Option<(CancellationToken, JoinHandle<Result<(), AgentError>>)>,
-}
-
-impl Env {
-    async fn start(backend: &Backend) -> Env {
-        let ts = TestServer::start(backend).await;
-        let api = ts.api().await;
-        let repo = ts.create_local_repository("main").await;
-        let token = api
-            .join_token(&repo, json!([{ "key": "env", "value": "e2e" }]))
-            .await;
-        let paths = ts.agent_paths("e2e");
-        lodestore_agent::enroll(EnrollArgs {
-            token,
-            paths: paths.clone(),
-            hostname: Some("host-e2e".to_string()),
-            net: NetOptions::default(),
-        })
-        .await
-        .expect("enroll");
-        let host = api.hosts().await[0]["id"].as_str().unwrap().to_string();
-        let mut env = Env {
-            ts,
-            api,
-            host,
-            paths,
-            work: tempfile::tempdir().unwrap(),
-            agent: None,
-        };
-        env.start_agent().await;
-        env
-    }
-
-    async fn start_agent(&mut self) {
-        let shutdown = CancellationToken::new();
-        let handle = tokio::spawn(lodestore_agent::run(RunArgs {
-            paths: self.paths.clone(),
-            net: NetOptions::default(),
-            heartbeat: Duration::from_secs(1),
-            shutdown: shutdown.clone(),
-        }));
-        self.agent = Some((shutdown, handle));
-        let api = &self.api;
-        assert!(
-            wait_until(WAIT, || async {
-                api.hosts().await.iter().any(|h| h["status"] == "online")
-            })
-            .await,
-            "the agent never became online"
-        );
-    }
-
-    async fn stop_agent(&mut self) {
-        let (shutdown, handle) = self.agent.take().expect("the agent is running");
-        shutdown.cancel();
-        tokio::time::timeout(WAIT, handle)
-            .await
-            .expect("the agent stops in time")
-            .unwrap()
-            .expect("the agent stops cleanly");
-    }
-
-    async fn stop(mut self) {
-        if self.agent.is_some() {
-            self.stop_agent().await;
-        }
-        self.ts.stop().await;
-    }
-
-    async fn json(&self, path: &str) -> Value {
-        let response = self.api.get(path).await;
-        assert_eq!(response.status(), 200, "GET {path}");
-        response.json().await.unwrap()
-    }
-
+impl AgentEnv {
     fn data(&self, name: &str) -> (PathBuf, u64) {
         let dir = self.work.path().join(name);
         std::fs::create_dir_all(&dir).unwrap();
@@ -156,43 +71,9 @@ impl Env {
         body["jobs"][0]["id"].as_str().unwrap().to_string()
     }
 
-    async fn wait_for(&self, id: &str, states: &[&str]) -> Value {
-        let deadline = Instant::now() + WAIT;
-        loop {
-            let job = self.json(&format!("/api/v1/jobs/{id}")).await;
-            if states.contains(&job["state"].as_str().unwrap()) {
-                return job;
-            }
-            assert!(Instant::now() < deadline, "job {id} stuck: {job}");
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    }
-
-    async fn finish(&self, id: &str) -> Value {
-        self.wait_for(
-            id,
-            &[
-                "succeeded",
-                "warnings",
-                "failed",
-                "cancelled",
-                "interrupted",
-                "not_started",
-            ],
-        )
-        .await
-    }
-
     async fn run_to_end(&self, policy: &str) -> Value {
         let id = self.run(policy).await;
-        self.finish(&id).await
-    }
-
-    async fn events(&self, id: &str, query: &str) -> Vec<Value> {
-        self.json(&format!("/api/v1/jobs/{id}/events{query}")).await["events"]
-            .as_array()
-            .unwrap()
-            .clone()
+        self.wait_job(&id).await
     }
 
     async fn snapshots(&self) -> Vec<Value> {
@@ -204,7 +85,7 @@ impl Env {
     }
 
     async fn repo_snapshots(&self) -> Vec<SnapshotEntry> {
-        let store = LocalFsStore::new(self.ts.local_repo_root("main"));
+        let store = LocalFsStore::new(self.ts().local_repo_root("main"));
         let repo = Repository::open(&store, b"test-password").await.unwrap();
         let reader = Reader::open(&store, repo.read_keys().duplicate(), repo.config()).unwrap();
         reader.list_snapshots().await.unwrap().entries
@@ -228,7 +109,7 @@ fn pid_alive(pid: &str) -> bool {
         .success()
 }
 
-fn sleeper(env: &Env, pid_file: &Path) {
+fn sleeper(env: &AgentEnv, pid_file: &Path) {
     env.install_hook(
         "slow",
         &format!("echo $$ > {}\nexec sleep 30", pid_file.display()),
@@ -246,7 +127,7 @@ fn stat(job: &Value, key: &str) -> u64 {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e2e_run_now_creates_snapshot() {
     for backend in backends() {
-        let env = Env::start(&backend).await;
+        let env = AgentEnv::start(&backend).await;
         let (src, _) = env.data("src");
         env.policy("nightly", &src, "").await;
 
@@ -281,7 +162,7 @@ async fn e2e_run_now_creates_snapshot() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e2e_second_run_uploads_almost_nothing() {
     for backend in backends() {
-        let env = Env::start(&backend).await;
+        let env = AgentEnv::start(&backend).await;
         let (src, _) = env.data("src");
         env.policy("nightly", &src, "").await;
 
@@ -302,7 +183,7 @@ async fn e2e_second_run_uploads_almost_nothing() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e2e_cache_loss_full_rehash() {
     for backend in backends() {
-        let env = Env::start(&backend).await;
+        let env = AgentEnv::start(&backend).await;
         let (src, total) = env.data("src");
         env.policy("nightly", &src, "").await;
 
@@ -324,7 +205,7 @@ async fn e2e_cache_loss_full_rehash() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e2e_special_files_warn() {
     for backend in backends() {
-        let env = Env::start(&backend).await;
+        let env = AgentEnv::start(&backend).await;
         let (src, _) = env.data("src");
         let status = std::process::Command::new("mkfifo")
             .arg(src.join("pipe"))
@@ -350,7 +231,7 @@ async fn e2e_special_files_warn() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e2e_missing_path_fails() {
     for backend in backends() {
-        let env = Env::start(&backend).await;
+        let env = AgentEnv::start(&backend).await;
         let missing = env.work.path().join("nope");
         env.policy("nightly", &missing, "").await;
 
@@ -371,7 +252,7 @@ async fn e2e_missing_path_fails() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e2e_hooks_named_only() {
     for backend in backends() {
-        let env = Env::start(&backend).await;
+        let env = AgentEnv::start(&backend).await;
         let (src, _) = env.data("src");
         env.policy(
             "inline",
@@ -402,7 +283,7 @@ async fn e2e_hooks_named_only() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e2e_server_restart_mid_job_no_loss_no_dupes() {
     for backend in backends() {
-        let mut env = Env::start(&backend).await;
+        let mut env = AgentEnv::start(&backend).await;
         let (src, _) = env.data("src");
         let marker = env.work.path().join("hook-started");
         env.install_hook("slow", &format!("touch {}\nsleep 4", marker.display()));
@@ -410,10 +291,10 @@ async fn e2e_server_restart_mid_job_no_loss_no_dupes() {
 
         let id = env.run("nightly").await;
         env.wait_file(&marker).await;
-        env.ts.restart().await;
-        env.api = env.ts.api().await;
+        env.ts_mut().restart().await;
+        env.api = env.ts().api().await;
 
-        let job = env.finish(&id).await;
+        let job = env.wait_job(&id).await;
         assert_eq!(job["state"], "succeeded", "[{}] {job}", backend.name());
         let page = env.json("/api/v1/jobs?policy=nightly").await;
         assert_eq!(page["total"], 1, "{page}");
@@ -435,7 +316,7 @@ async fn e2e_server_restart_mid_job_no_loss_no_dupes() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e2e_cancel_running_job() {
     for backend in backends() {
-        let env = Env::start(&backend).await;
+        let env = AgentEnv::start(&backend).await;
         let (src, _) = env.data("src");
         let pid_file = env.work.path().join("slow.pid");
         sleeper(&env, &pid_file);
@@ -454,7 +335,7 @@ async fn e2e_cancel_running_job() {
             .post(&format!("/api/v1/jobs/{id}/cancel"), &json!({}))
             .await;
         assert_eq!(response.status(), 200);
-        let job = env.finish(&id).await;
+        let job = env.wait_job(&id).await;
         assert_eq!(job["state"], "cancelled", "{job}");
         assert!(job["snapshot_id"].is_null());
         assert!(env.snapshots().await.is_empty());
@@ -469,7 +350,7 @@ async fn e2e_cancel_running_job() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e2e_agent_restart_marks_interrupted() {
     for backend in backends() {
-        let mut env = Env::start(&backend).await;
+        let mut env = AgentEnv::start(&backend).await;
         let (src, _) = env.data("src");
         let pid_file = env.work.path().join("slow.pid");
         sleeper(&env, &pid_file);
@@ -480,7 +361,7 @@ async fn e2e_agent_restart_marks_interrupted() {
         env.stop_agent().await;
         env.start_agent().await;
 
-        let job = env.finish(&id).await;
+        let job = env.wait_job(&id).await;
         assert_eq!(job["state"], "interrupted", "[{}] {job}", backend.name());
         assert!(job["snapshot_id"].is_null());
         let queued = env.json("/api/v1/jobs?status=queued").await;
@@ -493,7 +374,7 @@ async fn e2e_agent_restart_marks_interrupted() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e2e_progress_recorded() {
     for backend in backends() {
-        let env = Env::start(&backend).await;
+        let env = AgentEnv::start(&backend).await;
         let (src, _) = env.data("src");
         env.install_hook("linger", "sleep 3");
         env.policy(

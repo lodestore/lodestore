@@ -9,6 +9,7 @@ import {
 	useRunPolicy,
 } from "@/api/gen/endpoints";
 import type { RunResult } from "@/api/gen/model";
+import { TextWithPaths } from "@/components/path-text";
 import { warningText } from "@/components/policies/matching-hosts";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -172,7 +173,9 @@ export function RunNowDialog({
 				{run.isError && (
 					<Alert variant="destructive" role="alert">
 						<AlertDescription>
-							{copy.errors.submit(text.failed, run.error.message)}
+							<TextWithPaths
+								text={copy.errors.submit(text.failed, run.error.message)}
+							/>
 						</AlertDescription>
 					</Alert>
 				)}

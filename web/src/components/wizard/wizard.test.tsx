@@ -1,6 +1,7 @@
 import { cleanup, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
+import { toast } from "sonner";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderApp, repository, useSignedIn } from "@/test/app";
 import { server } from "@/test/server";
@@ -588,12 +589,13 @@ describe("repository wizard with S3", () => {
 		await fillS3(user);
 		await user.click(screen.getByRole("button", { name: "Check storage" }));
 		expect(
-			await screen.findByText("Couldn't check the storage. boom. Try again."),
+			await screen.findByText("Couldn't check the storage. Boom. Try again."),
 		).toBeInTheDocument();
 		expect(screen.getByRole("button", { name: "Check storage" })).toBeEnabled();
 	});
 
 	it("connects an existing repository", async () => {
+		const success = vi.spyOn(toast, "success");
 		mockS3(s3Result({}, { existing_repository: true }));
 		const bodies: unknown[] = [];
 		server.use(
@@ -649,9 +651,24 @@ describe("repository wizard with S3", () => {
 		expect(
 			await screen.findByText("Repository connected."),
 		).toBeInTheDocument();
+		expect(success).toHaveBeenCalledWith(
+			"Repository connected.",
+			expect.objectContaining({
+				description:
+					"Rebuilding the catalog from storage. Snapshots appear in Restore as they are read.",
+				action: expect.objectContaining({ label: "Open Restore" }),
+			}),
+		);
+		const step = (await screen.findByRole("heading", { name: "Add host" }))
+			.parentElement as HTMLElement;
 		expect(
-			await screen.findByRole("heading", { name: "Add host" }),
-		).toBeInTheDocument();
+			within(step).getByText(
+				/^Rebuilding the catalog from storage\. Snapshots appear in Restore as they are read\./,
+			),
+		).toBeVisible();
+		expect(
+			within(step).getByRole("link", { name: "Open Restore" }),
+		).toHaveAttribute("href", "/restore");
 		expect(bodies[1]).toMatchObject({ password: "wrong password" });
 	});
 

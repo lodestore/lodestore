@@ -27,6 +27,7 @@ type RequestConfig = {
 	data?: unknown;
 	headers?: Record<string, string>;
 	signal?: AbortSignal;
+	responseType?: "blob";
 };
 
 const MUTATING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
@@ -47,6 +48,11 @@ export function onUnauthorized(handler: (() => void) | undefined) {
 	unauthorizedHandler = handler;
 }
 
+/** Sends the user to login for a 401 from a request that bypasses apiFetch. */
+export function notifyUnauthorized() {
+	unauthorizedHandler?.();
+}
+
 function withParams(url: string, params?: Record<string, unknown>) {
 	if (!params) return url;
 	const search = new URLSearchParams();
@@ -58,7 +64,7 @@ function withParams(url: string, params?: Record<string, unknown>) {
 }
 
 export async function apiFetch<T>(
-	{ url, method, params, data, headers, signal }: RequestConfig,
+	{ url, method, params, data, headers, signal, responseType }: RequestConfig,
 	options?: RequestInit,
 ): Promise<T> {
 	const verb = method.toUpperCase();
@@ -97,5 +103,6 @@ export async function apiFetch<T>(
 	}
 
 	if (response.status === 204) return undefined as T;
+	if (responseType === "blob") return (await response.blob()) as T;
 	return (await response.json()) as T;
 }

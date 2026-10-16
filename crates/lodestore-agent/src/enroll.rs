@@ -42,7 +42,31 @@ fn default_hostname() -> String {
         .into_owned()
 }
 
+fn valid_agent_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 pub async fn enroll(args: EnrollArgs) -> Result<Enrolled, AgentError> {
+    enroll_inner(args, "").await
+}
+
+pub async fn enroll_with_previous(
+    args: EnrollArgs,
+    previous_agent_id: &str,
+) -> Result<Enrolled, AgentError> {
+    if !valid_agent_id(previous_agent_id) {
+        return Err(AgentError::Other(anyhow::anyhow!(
+            "the previous agent id must be 1 to 64 characters of letters, digits, '-' or '_'"
+        )));
+    }
+    enroll_inner(args, previous_agent_id).await
+}
+
+async fn enroll_inner(args: EnrollArgs, previous_agent_id: &str) -> Result<Enrolled, AgentError> {
     if let Some(existing) = Identity::load(&args.paths)? {
         return Err(AgentError::AlreadyEnrolled(existing.agent_id));
     }
@@ -109,6 +133,7 @@ pub async fn enroll(args: EnrollArgs) -> Result<Enrolled, AgentError> {
                 min: PROTOCOL_VERSION,
                 max: PROTOCOL_VERSION,
             }),
+            previous_agent_id: previous_agent_id.to_string(),
         })
         .await
         .map_err(|s| AgentError::from_status(&s))?

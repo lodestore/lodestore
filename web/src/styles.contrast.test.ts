@@ -41,6 +41,7 @@ const text: [string, string][] = [
 	["primary-strong", "card"],
 	["primary-strong", "sidebar"],
 	["primary-strong", "muted"],
+	["foreground", "primary-subtle"],
 	["primary-strong", "primary-subtle"],
 	["muted-foreground", "primary-subtle"],
 	["destructive", "background"],

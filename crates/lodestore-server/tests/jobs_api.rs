@@ -561,3 +561,259 @@ async fn jobs_api_rerun() {
         ts.stop().await;
     }
 }
+
+async fn insert_restore(
+    ts: &TestServer,
+    host: &str,
+    repo: &str,
+    state: &str,
+    queued_at: i64,
+) -> String {
+    let id = format!("restore-{queued_at}");
+    let record = json!({
+        "snapshot_id": "a".repeat(64),
+        "source_repository_id": repo,
+        "source_host_id": null,
+        "source_hostname": "old-box",
+        "items_b64": ["L2V0Yw"],
+        "destination": "/srv/out",
+        "in_place": false,
+        "conflict": "overwrite_changed",
+        "restore_owners": false,
+        "started_by": "admin",
+    });
+    let finished = (state != "queued").then_some(queued_at + 1);
+    sqlx::query(
+        "INSERT INTO jobs (id, host_id, source, state, spec, queued_at, finished_at, kind, \
+         restore_json) VALUES ($1, $2, 'manual', $3, $4, $5, $6, 'restore', $7)",
+    )
+    .bind(&id)
+    .bind(host)
+    .bind(state)
+    .bind(Vec::<u8>::new())
+    .bind(queued_at)
+    .bind(finished)
+    .bind(record.to_string())
+    .execute(&ts.state().db.pool)
+    .await
+    .unwrap();
+    id
+}
+
+async fn insert_download(
+    ts: &TestServer,
+    repo: &str,
+    host: Option<&str>,
+    hostname: &str,
+    state: &str,
+    created_at: i64,
+) -> String {
+    let id = format!("download-{created_at}");
+    sqlx::query(
+        "INSERT INTO downloads (id, repository_id, host_id, hostname, snapshot_id, items_json, \
+         format, started_by, state, created_at, bytes_sent) \
+         VALUES ($1, $2, $3, $4, $5, $6, 'tar_zst', 'admin', $7, $8, 4096)",
+    )
+    .bind(&id)
+    .bind(repo)
+    .bind(host)
+    .bind(hostname)
+    .bind("b".repeat(64))
+    .bind(json!(["L2V0Yw", "L3Zhcg"]).to_string())
+    .bind(state)
+    .bind(created_at)
+    .execute(&ts.state().db.pool)
+    .await
+    .unwrap();
+    id
+}
+
+fn ids(page: &Value) -> Vec<String> {
+    page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|j| j["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+async fn seed_mixed(ts: &TestServer, host: &str, repo: &str) -> Vec<String> {
+    let now = lodestore_server::db::now_ms();
+    let mut expected = Vec::new();
+    expected.push(insert_download(ts, repo, Some(host), "host-a", "pending", now).await);
+    expected.push(insert_restore(ts, host, repo, "queued", 200).await);
+    expected.push(insert_download(ts, repo, None, "old-box", "succeeded", 150).await);
+    for queued_at in [102, 101, 100] {
+        expected.push(
+            insert_job(
+                ts,
+                NewJob {
+                    host,
+                    policy_name: Some("p1"),
+                    source: "manual",
+                    state: "succeeded",
+                    queued_at,
+                },
+            )
+            .await,
+        );
+    }
+    expected.push(insert_restore(ts, host, repo, "succeeded", 50).await);
+    expected
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn jobs_api_merges_downloads_and_restores() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let host = enroll(&ts, &api, &repo, "host-a").await;
+        let expected = seed_mixed(&ts, &host, &repo).await;
+
+        let (status, all) = get_json(&api, "/api/v1/jobs").await;
+        assert_eq!(status, 200);
+        assert_eq!(all["total"], 7, "[{}]", backend.name());
+        assert_eq!(ids(&all), expected);
+        let (_, second) = get_json(&api, "/api/v1/jobs?page=2").await;
+        assert_eq!(second["total"], 7);
+        assert!(second["items"].as_array().unwrap().is_empty());
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn jobs_api_kind_filter() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let host = enroll(&ts, &api, &repo, "host-a").await;
+        seed_mixed(&ts, &host, &repo).await;
+
+        for (kind, want, block) in [
+            ("download", 2, Some("download")),
+            ("restore", 2, Some("restore")),
+            ("backup", 3, None),
+        ] {
+            let (status, page) = get_json(&api, &format!("/api/v1/jobs?kind={kind}")).await;
+            assert_eq!(status, 200);
+            assert_eq!(page["total"], want, "{kind} [{}]", backend.name());
+            let items = page["items"].as_array().unwrap();
+            assert_eq!(items.len(), want);
+            for item in items {
+                assert_eq!(item["kind"], kind);
+                if let Some(block) = block {
+                    assert!(item[block].is_object(), "{kind} has no {block}");
+                }
+            }
+        }
+
+        let (_, by_host) = get_json(&api, "/api/v1/jobs?host=OLD").await;
+        assert_eq!(by_host["total"], 1);
+        assert_eq!(by_host["items"][0]["kind"], "download");
+        let (_, by_host) = get_json(&api, "/api/v1/jobs?kind=download&host=host-a").await;
+        assert_eq!(by_host["total"], 1);
+        assert_eq!(by_host["items"][0]["hostname"], "host-a");
+
+        let (_, queued) = get_json(&api, "/api/v1/jobs?status=queued&kind=download").await;
+        assert_eq!(queued["total"], 1);
+        let (_, done) = get_json(&api, "/api/v1/jobs?status=succeeded&kind=download").await;
+        assert_eq!(done["total"], 1);
+        let (_, failed) = get_json(&api, "/api/v1/jobs?status=failed&kind=download").await;
+        assert_eq!(failed["total"], 0);
+        let (_, by_policy) = get_json(&api, "/api/v1/jobs?kind=download&policy=p1").await;
+        assert_eq!(by_policy["total"], 0);
+
+        let (status, _) = get_json(&api, "/api/v1/jobs?kind=other").await;
+        assert_eq!(status, 422);
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn jobs_api_download_detail_and_refusals() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let now = lodestore_server::db::now_ms();
+        let done = insert_download(&ts, &repo, None, "old-box", "succeeded", 150).await;
+        let expired = insert_download(&ts, &repo, None, "old-box", "pending", now - 120_000).await;
+        let broken = insert_download(&ts, &repo, None, "old-box", "interrupted", 160).await;
+        sqlx::query("UPDATE downloads SET error_code = 'client_closed' WHERE id = $1")
+            .bind(&broken)
+            .execute(&ts.state().db.pool)
+            .await
+            .unwrap();
+
+        let (status, detail) = get_json(&api, &format!("/api/v1/jobs/{done}")).await;
+        assert_eq!(status, 200, "[{}]", backend.name());
+        assert_eq!(detail["kind"], "download");
+        assert_eq!(detail["state"], "succeeded");
+        assert_eq!(detail["repository_id"], repo);
+        assert_eq!(detail["download"]["format"], "tar_zst");
+        assert_eq!(detail["download"]["bytes_sent"], 4096);
+        assert_eq!(detail["download"]["items"], 2);
+        assert_eq!(detail["download"]["started_by"], "admin");
+        assert_eq!(detail["source"], "manual");
+
+        let (_, detail) = get_json(&api, &format!("/api/v1/jobs/{expired}")).await;
+        assert_eq!(detail["state"], "not_started");
+        let (_, detail) = get_json(&api, &format!("/api/v1/jobs/{broken}")).await;
+        assert_eq!(detail["state"], "interrupted");
+        assert_eq!(detail["error_code"], "client_closed");
+
+        for action in ["cancel", "rerun"] {
+            let (status, body) = post_json(&api, &format!("/api/v1/jobs/{done}/{action}")).await;
+            assert_eq!(status, 409, "{action}");
+            assert_eq!(
+                body["message"],
+                "Downloads cannot be cancelled or run again."
+            );
+            let (status, _) = post_json(&api, &format!("/api/v1/jobs/nope/{action}")).await;
+            assert_eq!(status, 404, "{action}");
+        }
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn jobs_api_agentless_download_host() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let agent = enroll(&ts, &api, &repo, "host-a").await;
+        let now = lodestore_server::db::now_ms();
+        insert_download(&ts, &repo, None, "old-box", "succeeded", now - 10).await;
+        insert_download(&ts, &repo, Some(&agent), "host-a", "succeeded", now - 20).await;
+
+        let (_, page) = get_json(&api, "/api/v1/jobs?kind=download").await;
+        let hosts: Vec<(&str, &str)> = page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|j| {
+                (
+                    j["host_id"].as_str().unwrap(),
+                    j["hostname"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            hosts,
+            [("agentless:old-box", "old-box"), (agent.as_str(), "host-a")],
+            "[{}]",
+            backend.name()
+        );
+        assert_eq!(page["items"][0]["host_online"], false);
+
+        let (_, by_id) = get_json(&api, "/api/v1/jobs?host_id=agentless:old-box").await;
+        assert_eq!(by_id["total"], 1);
+        assert_eq!(by_id["items"][0]["hostname"], "old-box");
+        let (_, by_agent) = get_json(&api, &format!("/api/v1/jobs?host_id={agent}")).await;
+        assert_eq!(by_agent["total"], 1);
+        ts.stop().await;
+    }
+}

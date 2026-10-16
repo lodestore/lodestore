@@ -11,6 +11,7 @@ import { useListJobEvents } from "@/api/gen/endpoints";
 import type { JobEventDto } from "@/api/gen/model";
 import { CodeBlock } from "@/components/code-block";
 import { formatClock } from "@/components/jobs/job-progress";
+import { PathText, TextWithPaths } from "@/components/path-text";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -55,6 +56,14 @@ const KIND_LABEL: Record<string, string> = {
 	unreadable: copy.jobs.log.warningKind.unreadable,
 	vanished: copy.jobs.log.warningKind.disappeared,
 	special_file: copy.jobs.log.warningKind.special,
+	owner_not_applied: copy.jobs.log.warningKind.owner_not_applied,
+	attributes_not_applied: copy.jobs.log.warningKind.attributes_not_applied,
+	time_not_applied: copy.jobs.log.warningKind.time_not_applied,
+	unsafe_path_rejected: copy.jobs.log.warningKind.unsafe_path_rejected,
+	link_not_created: copy.jobs.log.warningKind.link_not_created,
+	restore_integrity: copy.jobs.log.warningKind.restore_integrity,
+	plan_restarted: copy.jobs.log.warningKind.plan_restarted,
+	restore_entry_failed: copy.jobs.log.warningKind.restore_entry_failed,
 };
 
 type Row =
@@ -93,11 +102,13 @@ function Message({ event }: { event: JobEventDto }) {
 	if (!label) {
 		return (
 			<>
-				{detail ?? event.message}
+				<TextWithPaths text={detail ?? event.message} />
 				{path && !event.message.includes(path) && (
 					<>
 						{" "}
-						<code>{path}</code>
+						<code>
+							<PathText value={path} />
+						</code>
 					</>
 				)}
 			</>
@@ -109,11 +120,16 @@ function Message({ event }: { event: JobEventDto }) {
 			{path && (
 				<>
 					{" "}
-					<code>{path}</code>
+					<code>
+						<PathText value={path} />
+					</code>
 				</>
 			)}
 			{detail && !(path && detail.includes(path)) && (
-				<span className="text-muted-foreground"> {detail}</span>
+				<span className="text-muted-foreground">
+					{" "}
+					<TextWithPaths text={detail} />
+				</span>
 			)}
 		</>
 	);

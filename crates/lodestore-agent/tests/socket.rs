@@ -360,6 +360,7 @@ async fn socket_runs_alongside_file_job() {
             paths: vec![src.to_string_lossy().into_owned()],
             ..Default::default()
         }),
+        restore: None,
     }));
     assert!(
         run.hub

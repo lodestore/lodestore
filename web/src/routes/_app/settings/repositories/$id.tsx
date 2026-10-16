@@ -5,6 +5,7 @@ import { useAgentPolicy, useGetRepository } from "@/api/gen/endpoints";
 import { agentKeyWarning } from "@/components/capability-checklist";
 import { PolicyPanel } from "@/components/policy-panel";
 import { AgentKeyBadge } from "@/components/repos/agent-key-badge";
+import { CatalogCard } from "@/components/repos/catalog-card";
 import { ReplaceAgentKeyDialog } from "@/components/repos/replace-agent-key-dialog";
 import { StorageChecksCard } from "@/components/repos/storage-checks-card";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -125,7 +126,7 @@ function RepositoryPage() {
 					<header className="flex items-center gap-2">
 						<h1
 							data-page-title
-							className="min-w-0 text-2xl font-semibold break-all"
+							className="min-w-0 text-2xl font-semibold wrap-anywhere"
 						>
 							{repository.name}
 						</h1>
@@ -149,6 +150,8 @@ function RepositoryPage() {
 						agentKeyState={repository.agent_key_state}
 						checkedAt={repository.checked_at}
 					/>
+
+					<CatalogCard repositoryId={repository.id} />
 
 					<Card>
 						<CardHeader>

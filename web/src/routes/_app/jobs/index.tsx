@@ -46,6 +46,8 @@ const STATES = [
 	"not_started",
 ] as const;
 
+const KINDS = ["backup", "restore", "download"] as const;
+
 const PAGE_SIZE = 50;
 const SEARCH_DEBOUNCE_MS = 300;
 const ALL = "all";
@@ -60,6 +62,7 @@ const text = z
 export const Route = createFileRoute("/_app/jobs/")({
 	validateSearch: z.object({
 		status: z.enum(STATES).optional().catch(undefined),
+		kind: z.enum(KINDS).optional().catch(undefined),
 		policy: text,
 		host: text,
 		page: z.number().int().min(1).optional().catch(undefined),
@@ -68,7 +71,7 @@ export const Route = createFileRoute("/_app/jobs/")({
 });
 
 function JobsPage() {
-	const { status, policy, host, page = 1 } = Route.useSearch();
+	const { status, kind, policy, host, page = 1 } = Route.useSearch();
 	const navigate = Route.useNavigate();
 	const [cancelling, setCancelling] = useState<JobRow>();
 	const rerun = useRerunAction();
@@ -76,6 +79,7 @@ function JobsPage() {
 
 	const params: ListJobsParams = {
 		status,
+		kind,
 		policy: policy === CLI_POLICY ? undefined : policy,
 		source: policy === CLI_POLICY ? "cli" : undefined,
 		host: host || undefined,
@@ -114,8 +118,8 @@ function JobsPage() {
 		return () => clearTimeout(timer);
 	}, [query, navigate]);
 
-	const filtered = Boolean(status || policy || host);
-	const setFilter = (key: "status" | "policy", value: string) =>
+	const filtered = Boolean(status || kind || policy || host);
+	const setFilter = (key: "status" | "kind" | "policy", value: string) =>
 		void navigate({
 			search: (prev) => ({
 				...prev,
@@ -254,6 +258,25 @@ function JobsPage() {
 								{STATES.map((state) => (
 									<SelectItem key={state} value={state}>
 										{copy.jobs.status[state]}
+									</SelectItem>
+								))}
+							</SelectContent>
+						</Select>
+						<Select
+							value={kind ?? ALL}
+							onValueChange={(value) => setFilter("kind", value)}
+						>
+							<SelectTrigger
+								aria-label={copy.jobs.kindFilterLabel}
+								className="data-[size=default]:h-10 w-44"
+							>
+								<SelectValue />
+							</SelectTrigger>
+							<SelectContent>
+								<SelectItem value={ALL}>{copy.jobs.allTypes}</SelectItem>
+								{KINDS.map((k) => (
+									<SelectItem key={k} value={k}>
+										{copy.jobs.kinds[k]}
 									</SelectItem>
 								))}
 							</SelectContent>

@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
 use crate::auth::AuthState;
+use crate::browse::tree::RepoReaders;
+use crate::catalog::CatalogJobs;
 use crate::config::Config;
 use crate::db::Db;
 use crate::grpc::registry::Registry;
@@ -17,4 +19,6 @@ pub struct AppState {
     pub registry: Registry,
     pub auth: AuthState,
     pub repos: ReposState,
+    pub catalog: CatalogJobs,
+    pub readers: RepoReaders,
 }

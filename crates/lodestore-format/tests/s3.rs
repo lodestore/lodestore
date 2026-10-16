@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
+use std::time::Duration;
 
 use bytes::Bytes;
 use lodestore_format::crypto::Entropy;
@@ -9,7 +10,9 @@ use lodestore_format::keys::KdfCost;
 use lodestore_format::pack::pack_object_key;
 use lodestore_format::reader::{Reader, RestoreOptions};
 use lodestore_format::repo::{InitOptions, PendingInit, Repository};
-use lodestore_format::store::{BlobError, BlobStore, S3Store, StaticCredentials};
+use lodestore_format::store::{
+    BlobError, BlobStore, LocalFsStore, S3Store, StaticCredentials, Store,
+};
 use lodestore_format::writer::{BackupOptions, BackupOutcome, Writer};
 use lodestore_testkit::fault_proxy::{FaultAction, FaultPlan, FaultProxy, FaultRule};
 use lodestore_testkit::minio::MinioServer;
@@ -124,6 +127,45 @@ async fn s3_roundtrip_minio() {
     init_repo(&store).await;
     let outcome = backup(&store, src.path()).await;
     restore_and_compare(&store, &outcome, src.path()).await;
+}
+
+#[tokio::test]
+async fn s3_presign_read_returns_signed_url() {
+    let minio = MinioServer::start().await;
+    minio.create_bucket("presign").await;
+    let store = Store::S3(open_store(minio.endpoint(), "presign", creds(&minio)));
+
+    let signed = store
+        .presign_read("config", Duration::from_secs(3600))
+        .await
+        .unwrap()
+        .expect("an S3 store signs URLs");
+    assert!(signed.url.contains("X-Amz-Signature"), "{}", signed.url);
+    assert!(signed.url.contains("X-Amz-Expires=3600"), "{}", signed.url);
+    assert!(signed.url.starts_with(minio.endpoint()), "{}", signed.url);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    assert!((signed.expires_at_ms - now - 3_600_000).abs() < 60_000);
+    assert!(!format!("{signed:?}").contains("X-Amz"));
+
+    assert!(
+        store
+            .presign_read("a/../b", Duration::from_secs(60))
+            .await
+            .is_err()
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let local = Store::Local(LocalFsStore::new(dir.path().to_path_buf()));
+    assert!(
+        local
+            .presign_read("config", Duration::from_secs(60))
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]

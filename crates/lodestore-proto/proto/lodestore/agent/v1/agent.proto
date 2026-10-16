@@ -10,6 +10,9 @@ service Enrollment {
 service Agent {
   rpc Session(stream AgentMessage) returns (stream ServerMessage);
   rpc Renew(RenewRequest) returns (RenewResponse);
+  rpc RestorePlan(RestorePlanRequest) returns (stream RestorePlanBatch);
+  rpc RefreshPackAccess(RefreshPackAccessRequest) returns (RefreshPackAccessResponse);
+  rpc ReadPackRange(ReadPackRangeRequest) returns (stream PackBytes);
 }
 
 message Versions {
@@ -31,6 +34,7 @@ message EnrollRequest {
   string arch = 5;
   string agent_version = 6;
   Versions versions = 7;
+  string previous_agent_id = 8;
 }
 
 message EnrollResponse {
@@ -75,6 +79,7 @@ message Hello {
   Versions versions = 1;
   string agent_version = 2;
   repeated JobReport jobs = 3;
+  repeated string capabilities = 4;
 }
 
 message Heartbeat {
@@ -167,6 +172,7 @@ message JobSpec {
 message JobAssign {
   string job_id = 1;
   JobSpec spec = 2;
+  RestoreSpec restore = 3;
 }
 
 message JobCancel {
@@ -203,6 +209,9 @@ enum JobPhaseKind {
   JOB_PHASE_KIND_BACKUP = 2;
   JOB_PHASE_KIND_POST_HOOK = 3;
   JOB_PHASE_KIND_SNAPSHOT = 4;
+  JOB_PHASE_KIND_RESTORE_PLAN = 5;
+  JOB_PHASE_KIND_RESTORE_FILES = 6;
+  JOB_PHASE_KIND_RESTORE_METADATA = 7;
 }
 
 message JobPhase {
@@ -221,6 +230,7 @@ message JobProgress {
   bool scan_done = 7;
   uint64 speed_bps = 8;
   optional uint64 eta_s = 9;
+  uint64 bytes_downloaded = 10;
 }
 
 enum JobEventLevel {
@@ -278,6 +288,7 @@ message JobFinished {
   map<string, string> error_detail = 11;
   int64 finished_at_ms = 12;
   uint64 last_event_seq = 13;
+  RestoreStats restore = 14;
 }
 
 message JobCreated {
@@ -301,4 +312,109 @@ message JobReport {
   uint64 last_event_seq = 3;
   JobFinished finished = 4;
   JobCreated created = 5;
+}
+
+enum ConflictPolicy {
+  CONFLICT_POLICY_UNSPECIFIED = 0;
+  CONFLICT_POLICY_OVERWRITE_CHANGED = 1;
+  CONFLICT_POLICY_SKIP_EXISTING = 2;
+  CONFLICT_POLICY_STOP_IF_NOT_EMPTY = 3;
+}
+
+message RestoreSpec {
+  string snapshot_id = 1;
+  bytes source_repo_id = 2;
+  bytes k_id = 3;
+  string destination = 4;
+  bool in_place = 5;
+  ConflictPolicy conflict = 6;
+  bool restore_owners = 7;
+}
+
+message RestoreStats {
+  uint64 created = 1;
+  uint64 overwritten = 2;
+  uint64 skipped = 3;
+  uint64 files = 4;
+  uint64 bytes = 5;
+}
+
+message RestorePlanRequest {
+  string job_id = 1;
+}
+
+message RestoreTotals {
+  uint64 files = 1;
+  uint64 bytes = 2;
+}
+
+message PackAccess {
+  uint32 pack = 1;
+  bytes pack_id = 2;
+  bytes key = 3;
+  string url = 4;
+  int64 expires_at_ms = 5;
+}
+
+message ChunkLoc {
+  uint32 pack = 1;
+  uint32 offset = 2;
+  uint32 enc_len = 3;
+  uint32 ulen = 4;
+  bytes id = 5;
+}
+
+message PlanEnter {
+  bytes node = 1;
+  bool ancestor = 2;
+}
+
+message PlanEntry {
+  bytes node = 1;
+  repeated ChunkLoc chunks = 2;
+  bool more = 3;
+}
+
+message PlanChunks {
+  repeated ChunkLoc chunks = 1;
+  bool more = 2;
+}
+
+message PlanLeave {}
+
+message PlanItem {
+  oneof kind {
+    PlanEnter enter = 1;
+    PlanEntry entry = 2;
+    PlanChunks chunks = 3;
+    PlanLeave leave = 4;
+  }
+}
+
+message RestorePlanBatch {
+  RestoreTotals totals = 1;
+  repeated PackAccess packs = 2;
+  repeated PlanItem items = 3;
+  // Set on the final batch only. A stream that ends without it was cut short.
+  bool last = 4;
+}
+
+message RefreshPackAccessRequest {
+  string job_id = 1;
+  repeated uint32 packs = 2;
+}
+
+message RefreshPackAccessResponse {
+  repeated PackAccess packs = 1;
+}
+
+message ReadPackRangeRequest {
+  string job_id = 1;
+  uint32 pack = 2;
+  uint64 offset = 3;
+  uint32 length = 4;
+}
+
+message PackBytes {
+  bytes data = 1;
 }

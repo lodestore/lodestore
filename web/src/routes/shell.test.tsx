@@ -1,8 +1,10 @@
 import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { HttpResponse, http } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { copy } from "@/copy";
 import { renderApp, useSignedIn } from "@/test/app";
+import { server } from "@/test/server";
 
 async function renderAt(path: string) {
 	renderApp(path);
@@ -12,18 +14,29 @@ async function renderAt(path: string) {
 describe("app shell", () => {
 	beforeEach(() => useSignedIn());
 
-	it.each([
-		["/overview", "See every backup at a glance"],
-		["/restore", "Restore any file from any snapshot"],
-	])("shows an honest preview on %s", async (path, title) => {
-		await renderAt(path);
-		const h1 = screen.getByRole("heading", { level: 1, name: title });
+	it("shows an honest preview on /overview", async () => {
+		await renderAt("/overview");
+		const h1 = screen.getByRole("heading", {
+			level: 1,
+			name: "See every backup at a glance",
+		});
 		const main = h1.closest("section") as HTMLElement;
 		expect(within(main).getByText(copy.preview.badge)).toBeInTheDocument();
 		expect(within(main).getAllByRole("listitem")).toHaveLength(3);
 		expect(within(main).getByText(copy.preview.footnote)).toBeInTheDocument();
 		expect(within(main).queryAllByRole("button")).toHaveLength(0);
 		expect(within(main).queryAllByRole("link")).toHaveLength(0);
+	});
+
+	it("opens the working Restore section instead of a preview", async () => {
+		server.use(http.get("/api/v1/restore/hosts", () => HttpResponse.json([])));
+		await renderAt("/restore");
+		const h1 = screen.getByRole("heading", { level: 1, name: "Restore" });
+		expect(h1).toHaveAttribute("data-page-title");
+		expect(
+			await screen.findByText(copy.restore.empty.heading),
+		).toBeInTheDocument();
+		expect(screen.queryByText(copy.preview.badge)).not.toBeInTheDocument();
 	});
 
 	it.each(["/policies", "/jobs"])("opens the %s section", async (path) => {
@@ -99,9 +112,9 @@ describe("app shell", () => {
 		expect(current[0]).toHaveTextContent("Overview");
 	});
 
-	it("shows a Soon badge on the two stub sections", async () => {
+	it("shows a Soon badge on the stub section", async () => {
 		await renderAt("/overview");
-		expect(screen.getAllByText("Soon")).toHaveLength(2);
+		expect(screen.getAllByText("Soon")).toHaveLength(1);
 	});
 
 	it("makes the skip link the first tab stop and targets main", async () => {

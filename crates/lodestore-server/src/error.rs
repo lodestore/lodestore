@@ -18,6 +18,9 @@ pub enum ApiError {
     NotFound(String),
     #[error("{0}")]
     Validation(String),
+    /// A request refused with its own error code.
+    #[error("{1}")]
+    BadRequest(&'static str, String),
     #[error("{0}")]
     Conflict(String),
     #[error("{0}")]
@@ -45,6 +48,7 @@ impl ApiError {
             ApiError::SetupRequired => (StatusCode::CONFLICT, "setup_required"),
             ApiError::NotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
             ApiError::Validation(_) => (StatusCode::UNPROCESSABLE_ENTITY, "validation"),
+            ApiError::BadRequest(code, _) => (StatusCode::BAD_REQUEST, code),
             ApiError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
             ApiError::PolicyConflict(_) => (StatusCode::CONFLICT, "policy_conflict"),
             ApiError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),

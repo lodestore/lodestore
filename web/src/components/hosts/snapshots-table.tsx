@@ -1,4 +1,5 @@
 import { keepPreviousData, useQueryClient } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
 import { RefreshCw } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
@@ -9,6 +10,7 @@ import {
 } from "@/api/gen/endpoints";
 import type { HostDetail, SnapshotItem } from "@/api/gen/model";
 import { Illustration } from "@/components/brand/illustration";
+import { TextWithPaths } from "@/components/path-text";
 import { RelativeTime } from "@/components/relative-time";
 import { StatusBadge } from "@/components/status-badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -61,7 +63,9 @@ function Truncated({ text, className }: { text: string; className?: string }) {
 			<TooltipTrigger asChild>
 				<span className={cn("block truncate", className)}>{text}</span>
 			</TooltipTrigger>
-			<TooltipContent className="max-w-lg break-all">{text}</TooltipContent>
+			<TooltipContent className="max-w-lg wrap-anywhere">
+				<TextWithPaths text={text} />
+			</TooltipContent>
 		</Tooltip>
 	);
 }
@@ -89,6 +93,9 @@ function SkeletonRows() {
 			</TableCell>
 			<TableCell className="px-4">
 				<Skeleton className="h-4 w-16" />
+			</TableCell>
+			<TableCell className="px-4">
+				<Skeleton className="h-8 w-28" />
 			</TableCell>
 		</TableRow>
 	));
@@ -210,6 +217,11 @@ export function SnapshotsTable({ host }: { host: HostDetail }) {
 								<TableHead className="px-4">
 									{copy.snapshots.columns.status}
 								</TableHead>
+								<TableHead className="px-4">
+									<span className="sr-only">
+										{copy.snapshots.columns.actions}
+									</span>
+								</TableHead>
 							</TableRow>
 						</TableHeader>
 						<TableBody>
@@ -257,6 +269,19 @@ export function SnapshotsTable({ host }: { host: HostDetail }) {
 													{copy.snapshots.complete}
 												</StatusBadge>
 											)}
+										</TableCell>
+										<TableCell className="px-4 text-right">
+											<Button asChild variant="outline" size="sm">
+												<Link
+													to="/restore"
+													search={{ host: host.id, snapshot: snapshot.id }}
+													aria-label={copy.snapshots.browseFilesFor(
+														snapshot.id.slice(0, SHORT_ID),
+													)}
+												>
+													{copy.snapshots.browseFiles}
+												</Link>
+											</Button>
 										</TableCell>
 									</TableRow>
 								))

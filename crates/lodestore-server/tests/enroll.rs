@@ -102,6 +102,7 @@ fn enroll_request(token: &str, csr_der: Vec<u8>) -> EnrollRequest {
             min: PROTOCOL_VERSION,
             max: PROTOCOL_VERSION,
         }),
+        ..Default::default()
     }
 }
 

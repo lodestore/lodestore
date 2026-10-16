@@ -16,7 +16,7 @@ export const snapshots = {
 	title: "Snapshots",
 	emptyHeading: "No snapshots yet",
 	emptyBody: "Once a job finishes, its snapshot is listed here.",
-	footnote: "Restore arrives in a later release.",
+	footnote: "Open a snapshot in Restore to browse its files.",
 	loadFailed:
 		"Couldn't load snapshots. Check that the server is reachable, then retry.",
 	columns: {
@@ -27,7 +27,10 @@ export const snapshots = {
 		size: "Size",
 		files: "Files",
 		status: "Status",
+		actions: "Actions",
 	},
+	browseFiles: "Browse files",
+	browseFilesFor: (id: string) => `Browse files in snapshot ${id}`,
 	cliSource: (name: string) => `CLI · ${name}`,
 	incomplete: "Incomplete",
 	complete: "Complete",

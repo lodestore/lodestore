@@ -1,0 +1,2 @@
+ALTER TABLE jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'backup';
+ALTER TABLE jobs ADD COLUMN restore_json TEXT;

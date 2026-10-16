@@ -4,26 +4,33 @@
 //! their names, frames against their authentication tags and declared sizes,
 //! and plaintext against its keyed hash before it is used.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::path::Path;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::time::{Duration, Instant};
 
 use crate::Fut;
 use crate::chunker::blob_id;
 use crate::config;
-use crate::crypto::{BLOB_TYPE_DATA, BLOB_TYPE_TREE, BlobId, Key32, open_frame};
+use crate::crypto::{BLOB_TYPE_DATA, BLOB_TYPE_TREE, BlobId, Key32, RepoId, open_frame};
 use crate::error::{Error, Result};
 use crate::fs::filter::PathMatcher;
-use crate::fs::restore::{Restorer, Settings, check_extents};
-use crate::index::{BlobLocation, Index, hex32};
+use crate::fs::restore::{RestoreSettings, Restorer, check_extents};
+use crate::index::{
+    BlobLocation, INDEX_PREFIX, Index, hex32, index_object_key, open_shard, parse_hex32,
+};
 use crate::keys::ReadKeys;
 use crate::pack::{PACK_PREFIX_LEN, decompress, open_prefix, pack_object_key};
 use crate::pb;
+use crate::selection::Selection;
 use crate::snapshot::{
     SnapshotEntry, SnapshotList, TreeSource, list_snapshots, open_snapshot, snapshot_object_key,
 };
 use crate::store::{BlobError, BlobStore};
-use crate::tree::{Action, SelectedWalk, Step, TreeCursor, decode_tree, validate_subtree};
+use crate::tree::{
+    Action, SelectedWalk, Step, TreeCursor, decode_tree, selection_totals, validate_subtree,
+};
 
 pub use crate::fs::restore::{Overwrite, RestoreFailure, Unapplied};
 
@@ -100,23 +107,113 @@ pub struct RestoreReport {
     pub errors: Vec<RestoreFailure>,
 }
 
+/// What a selection would restore.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SelectionTotals {
+    pub files: u64,
+    pub dirs: u64,
+    pub bytes: u64,
+}
+
+/// Opens one chunk fetched by whoever holds the pack key: authenticates the
+/// frame against the repository, blob type and id, decompresses it into at
+/// most `ulen` bytes and checks that the plaintext hashes back to `id` under
+/// `k_id`. The server and the agent read chunks through this one function.
+pub fn open_chunk(
+    pack_key: &Key32,
+    repo_id: &RepoId,
+    blob_type: u8,
+    id: &BlobId,
+    frame: &[u8],
+    ulen: u32,
+    k_id: &[u8; 32],
+) -> Result<Vec<u8>> {
+    let name = || format!("blob {}", hex32(id));
+    let (codec, payload) = open_frame(pack_key, repo_id, blob_type, id, frame)
+        .map_err(|_| Error::corrupt(name(), "authentication failed"))?;
+    let plain = decompress(codec, payload, ulen as usize, blob_type)?;
+    if &blob_id(k_id, &plain) != id {
+        return Err(Error::corrupt(name(), "content does not match its id"));
+    }
+    Ok(plain)
+}
+
+/// Tree bytes a [`ReaderCache`] keeps unless told otherwise.
+pub const DEFAULT_TREE_BUDGET: usize = 128 << 20;
+
+const RELIST_AFTER: Duration = Duration::from_secs(30);
+
+fn locked<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+struct TreeBytes {
+    bytes: HashMap<BlobId, Arc<Vec<u8>>>,
+    order: VecDeque<BlobId>,
+    used: usize,
+    budget: usize,
+}
+
+impl TreeBytes {
+    fn insert(&mut self, id: BlobId, bytes: Arc<Vec<u8>>) {
+        if bytes.len() > self.budget || self.bytes.contains_key(&id) {
+            return;
+        }
+        while self.used + bytes.len() > self.budget {
+            let Some(old) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(gone) = self.bytes.remove(&old) {
+                self.used -= gone.len();
+            }
+        }
+        self.used += bytes.len();
+        self.order.push_back(id);
+        self.bytes.insert(id, bytes);
+    }
+}
+
+/// What the readers of one repository can share: the index, the keys of the
+/// packs read so far and the decrypted tree blobs. Nothing in it can go stale
+/// except the list of index shards, which a snapshot names itself and which is
+/// listed again after [`RELIST_AFTER`] when a blob is not found.
+// ponytail: trees leave in the order they came in, not the order they were
+// last used; an LRU would keep a hot directory longer if that ever shows in a profile.
+pub struct ReaderCache {
+    repo_id: OnceLock<RepoId>,
+    index: tokio::sync::RwLock<Index>,
+    load: tokio::sync::Mutex<()>,
+    listed_at: Mutex<Option<Instant>>,
+    pack_keys: Mutex<HashMap<BlobId, Key32>>,
+    trees: Mutex<TreeBytes>,
+}
+
+impl ReaderCache {
+    /// An empty cache holding at most `tree_budget_bytes` of tree blobs.
+    pub fn new(tree_budget_bytes: usize) -> Arc<Self> {
+        Arc::new(ReaderCache {
+            repo_id: OnceLock::new(),
+            index: tokio::sync::RwLock::default(),
+            load: tokio::sync::Mutex::new(()),
+            listed_at: Mutex::new(None),
+            pack_keys: Mutex::default(),
+            trees: Mutex::new(TreeBytes {
+                bytes: HashMap::new(),
+                order: VecDeque::new(),
+                used: 0,
+                budget: tree_budget_bytes,
+            }),
+        })
+    }
+
+    fn may_list(&self) -> bool {
+        locked(&self.listed_at).is_none_or(|at| at.elapsed() >= RELIST_AFTER)
+    }
+}
+
 impl<S: BlobStore> TreeSource for Reader<S> {
     fn snapshot_root<'a>(&'a mut self, id: &'a BlobId) -> Fut<'a, (pb::Snapshot, Vec<pb::Node>)> {
-        Box::pin(async move {
-            let snapshot = self.load_snapshot(id).await?;
-            self.index
-                .load_refs(
-                    &self.store,
-                    self.keys.k_idx(),
-                    self.keys.repo_id(),
-                    &snapshot.index_refs,
-                )
-                .await?;
-            let root = self
-                .load_tree(std::slice::from_ref(&snapshot.root_tree))
-                .await?;
-            Ok((snapshot, root))
-        })
+        Box::pin(self.open_root(id))
     }
 
     fn tree<'a>(&'a mut self, ids: &'a [Vec<u8>]) -> Fut<'a, Vec<pb::Node>> {
@@ -127,26 +224,34 @@ impl<S: BlobStore> TreeSource for Reader<S> {
 pub struct Reader<S: BlobStore> {
     store: S,
     keys: ReadKeys,
-    index: Index,
-    listed: bool,
-    pack_keys: HashMap<BlobId, Key32>,
+    cache: Arc<ReaderCache>,
 }
 
 impl<S: BlobStore> Reader<S> {
+    /// A reader with a cache of its own.
     pub fn open(store: S, keys: ReadKeys, config: &pb::Config) -> Result<Self> {
+        Self::open_shared(store, keys, config, ReaderCache::new(DEFAULT_TREE_BUDGET))
+    }
+
+    /// A reader that shares `cache` with the others of the same repository.
+    pub fn open_shared(
+        store: S,
+        keys: ReadKeys,
+        config: &pb::Config,
+        cache: Arc<ReaderCache>,
+    ) -> Result<Self> {
         config::check_read_version(config)?;
         if config::repo_id_of(config)? != *keys.repo_id() {
             return Err(Error::InvalidInput(
                 "the keys belong to a different repository".into(),
             ));
         }
-        Ok(Reader {
-            store,
-            keys,
-            index: Index::default(),
-            listed: false,
-            pack_keys: HashMap::new(),
-        })
+        if cache.repo_id.get_or_init(|| *keys.repo_id()) != keys.repo_id() {
+            return Err(Error::InvalidInput(
+                "the cache belongs to a different repository".into(),
+            ));
+        }
+        Ok(Reader { store, keys, cache })
     }
 
     pub async fn list_snapshots(&self) -> Result<SnapshotList> {
@@ -185,7 +290,15 @@ impl<S: BlobStore> Reader<S> {
         }
     }
 
-    async fn load_snapshot(&self, id: &BlobId) -> Result<pb::Snapshot> {
+    pub fn keys(&self) -> &ReadKeys {
+        &self.keys
+    }
+
+    pub fn store(&self) -> &S {
+        &self.store
+    }
+
+    pub async fn snapshot(&self, id: &BlobId) -> Result<pb::Snapshot> {
         let bytes = self.store.get(&snapshot_object_key(id)).await?;
         open_snapshot(
             self.keys.hpke_private_key(),
@@ -195,30 +308,68 @@ impl<S: BlobStore> Reader<S> {
         )
     }
 
-    async fn pack_key(&mut self, pack_id: &BlobId) -> Result<Key32> {
-        if let Some(key) = self.pack_keys.get(pack_id) {
-            return Ok(key.clone());
+    /// The key that opens the frames of a pack, read from the pack's prefix.
+    pub async fn pack_key(&mut self, pack_id: &BlobId) -> Result<Key32> {
+        let known = locked(&self.cache.pack_keys).get(pack_id).cloned();
+        if let Some(key) = known {
+            return Ok(key);
         }
         let prefix = self
             .store
             .get_range(&pack_object_key(pack_id), 0..PACK_PREFIX_LEN as u64)
             .await?;
         let key = open_prefix(self.keys.hpke_private_key(), self.keys.repo_id(), &prefix)?;
-        self.pack_keys.insert(*pack_id, key.clone());
+        locked(&self.cache.pack_keys).insert(*pack_id, key.clone());
         Ok(key)
+    }
+
+    /// Makes sure one index shard is in the shared index. Reading it from the
+    /// store happens outside the index lock; only one shard is fetched at a
+    /// time, and a shard another reader fetched meanwhile is not fetched again.
+    /// `false` when the store does not have it.
+    async fn load_shard(&self, shard_id: BlobId) -> Result<bool> {
+        if self.cache.index.read().await.has_shard(&shard_id) {
+            return Ok(true);
+        }
+        let _one_at_a_time = self.cache.load.lock().await;
+        if self.cache.index.read().await.has_shard(&shard_id) {
+            return Ok(true);
+        }
+        match self.store.get(&index_object_key(&shard_id)).await {
+            Ok(bytes) => {
+                let shard = open_shard(self.keys.k_idx(), self.keys.repo_id(), &shard_id, &bytes)?;
+                self.cache.index.write().await.add_shard(shard_id, &shard)?;
+                Ok(true)
+            }
+            Err(BlobError::NotFound) => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Lists the shards in the store and loads those that open; one that does
+    /// not costs deduplication only, and a rebuild finds its packs again.
+    async fn load_all_shards(&self) -> Result<()> {
+        for entry in self.store.list(INDEX_PREFIX).await? {
+            let Some(shard_id) = entry.key.strip_prefix(INDEX_PREFIX).and_then(parse_hex32) else {
+                continue;
+            };
+            match self.load_shard(shard_id).await {
+                Ok(_) | Err(Error::Corrupt { .. }) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        *locked(&self.cache.listed_at) = Some(Instant::now());
+        Ok(())
     }
 
     /// Where the index says a blob is. The index named by the snapshot is
     /// loaded already; a blob missing from it triggers one listing of all shards.
     async fn locate_blob(&mut self, id: &BlobId, blob_type: u8) -> Result<BlobLocation> {
         let name = || format!("blob {}", hex32(id));
-        let mut loc = self.index.get(id, blob_type).copied();
-        if loc.is_none() && !self.listed {
-            self.index
-                .load_all(&self.store, self.keys.k_idx(), self.keys.repo_id())
-                .await?;
-            self.listed = true;
-            loc = self.index.get(id, blob_type).copied();
+        let mut loc = self.cache.index.read().await.get(id, blob_type).copied();
+        if loc.is_none() && self.cache.may_list() {
+            self.load_all_shards().await?;
+            loc = self.cache.index.read().await.get(id, blob_type).copied();
         }
         loc.ok_or_else(|| {
             Error::corrupt(
@@ -255,13 +406,40 @@ impl<S: BlobStore> Reader<S> {
                 "pack is shorter than the index says",
             ));
         }
-        let (codec, payload) = open_frame(&pack_key, self.keys.repo_id(), blob_type, id, &frame)
-            .map_err(|_| Error::corrupt(name(), "authentication failed"))?;
-        let plain = decompress(codec, payload, loc.ulen as usize, blob_type)?;
-        if &blob_id(self.keys.k_id(), &plain) != id {
-            return Err(Error::corrupt(name(), "content does not match its id"));
+        open_chunk(
+            &pack_key,
+            self.keys.repo_id(),
+            blob_type,
+            id,
+            &frame,
+            loc.ulen,
+            self.keys.k_id(),
+        )
+    }
+
+    /// Where the data chunks of a file are stored, in content order.
+    pub async fn chunk_locations(&mut self, node: &pb::Node) -> Result<Vec<BlobLocation>> {
+        let mut out = Vec::with_capacity(node.content.len());
+        for raw in &node.content {
+            let id: BlobId = raw
+                .as_slice()
+                .try_into()
+                .map_err(|_| Error::corrupt("tree", "content id must be 32 bytes"))?;
+            out.push(self.locate_blob(&id, BLOB_TYPE_DATA).await?);
         }
-        Ok(plain)
+        Ok(out)
+    }
+
+    /// A tree blob, from the cache when it is there. A blob never changes
+    /// under its id, so what the cache holds was verified when it was read.
+    async fn tree_bytes(&mut self, id: &BlobId) -> Result<Arc<Vec<u8>>> {
+        let known = locked(&self.cache.trees).bytes.get(id).cloned();
+        if let Some(bytes) = known {
+            return Ok(bytes);
+        }
+        let bytes = Arc::new(self.read_blob(id, BLOB_TYPE_TREE).await?);
+        locked(&self.cache.trees).insert(*id, Arc::clone(&bytes));
+        Ok(bytes)
     }
 
     /// Loads one directory: its tree blobs read back as one ordered run.
@@ -273,7 +451,7 @@ impl<S: BlobStore> Reader<S> {
                 .as_slice()
                 .try_into()
                 .map_err(|_| Error::corrupt("tree", "tree id must be 32 bytes"))?;
-            let bytes = self.read_blob(&id, BLOB_TYPE_TREE).await?;
+            let bytes = self.tree_bytes(&id).await?;
             let piece = decode_tree(&bytes, previous.as_deref())?;
             if let Some(last) = piece.last() {
                 previous = Some(last.name.clone());
@@ -283,9 +461,26 @@ impl<S: BlobStore> Reader<S> {
         Ok(nodes)
     }
 
+    /// Loads a snapshot and the index shards it names; returns it with its
+    /// top-level nodes.
+    pub(crate) async fn open_root(&mut self, id: &BlobId) -> Result<(pb::Snapshot, Vec<pb::Node>)> {
+        let snapshot = self.snapshot(id).await?;
+        for raw in &snapshot.index_refs {
+            let shard_id: BlobId = raw
+                .as_slice()
+                .try_into()
+                .map_err(|_| Error::corrupt("snapshot", "index reference must be 32 bytes"))?;
+            self.load_shard(shard_id).await?;
+        }
+        let root = self
+            .load_tree(std::slice::from_ref(&snapshot.root_tree))
+            .await?;
+        Ok((snapshot, root))
+    }
+
     /// Loads a snapshot and the index shards it names; returns its top-level nodes.
     async fn open_tree(&mut self, snapshot_id: &BlobId) -> Result<Vec<pb::Node>> {
-        let (_, root) = self.snapshot_root(snapshot_id).await?;
+        let (_, root) = self.open_root(snapshot_id).await?;
         Ok(root)
     }
 
@@ -342,6 +537,33 @@ impl<S: BlobStore> Reader<S> {
                 Ok((vec![node], parent))
             }
         }
+    }
+
+    /// The entries of the directory at `path`; an empty path or `/` is the
+    /// top of the snapshot.
+    pub async fn list_dir(&mut self, snapshot_id: &BlobId, path: &[u8]) -> Result<Vec<pb::Node>> {
+        let top = self.open_tree(snapshot_id).await?;
+        let at = self.locate(top, path).await?;
+        match at.node {
+            None => Ok(at.top),
+            Some(node) if node.r#type == pb::NodeType::Dir as i32 => {
+                self.load_tree(&node.subtrees).await
+            }
+            Some(_) => Err(Error::InvalidInput(format!(
+                "{:?} is not a directory",
+                String::from_utf8_lossy(path)
+            ))),
+        }
+    }
+
+    /// Counts what a selection would restore. Every tree and file it touches
+    /// is checked as a restore checks them, so a bad one fails here.
+    pub async fn selection_totals(
+        &mut self,
+        snapshot_id: &BlobId,
+        selection: &Selection,
+    ) -> Result<SelectionTotals> {
+        selection_totals(self, snapshot_id, selection).await
     }
 
     /// Calls `visit` with the absolute path and node of `path` itself and then
@@ -474,19 +696,20 @@ impl<S: BlobStore> Reader<S> {
         let (nodes, base) = self.entries_at(snapshot_id, &options.path).await?;
         // Nothing is written until every tree that will be used has passed.
         validate_subtree(self, nodes.clone(), base.clone(), options.include.as_ref()).await?;
-        let settings = Settings {
+        let settings = RestoreSettings {
             overwrite: options.overwrite,
             verify: options.verify && !options.dry_run,
             dry_run: options.dry_run,
-            k_id: *self.keys.k_id(),
+            k_id: Key32::new(*self.keys.k_id()),
             seed: self.keys.cdc_seed(),
+            restore_owners: true,
         };
         let mut restorer = Restorer::open(target, settings)?;
         let mut walk = SelectedWalk::new(TreeCursor::new(nodes, base), options.include.as_ref());
         while let Some(action) = walk.next(self).await? {
             let node = match action {
-                Action::Enter(dir) => {
-                    restorer.enter_dir(&dir)?;
+                Action::Enter { node, .. } => {
+                    restorer.enter_dir(&node)?;
                     continue;
                 }
                 Action::Leave => {

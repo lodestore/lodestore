@@ -787,6 +787,7 @@ fn enroll_request(secret: String, versions: Versions) -> EnrollRequest {
         arch: "x86_64".to_string(),
         agent_version: "test".to_string(),
         versions: Some(versions),
+        ..Default::default()
     }
 }
 

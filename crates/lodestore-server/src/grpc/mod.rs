@@ -2,6 +2,7 @@ pub mod agent;
 pub mod dispatch;
 pub mod enrollment;
 pub mod registry;
+pub mod restore;
 
 use std::time::Duration;
 

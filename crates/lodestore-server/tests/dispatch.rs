@@ -108,6 +108,7 @@ impl Fake {
                 }),
                 agent_version: "test".to_string(),
                 jobs,
+                capabilities: Vec::new(),
             })),
         })
         .await

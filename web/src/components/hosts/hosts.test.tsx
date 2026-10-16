@@ -552,7 +552,7 @@ describe("Edit labels", () => {
 			within(dialog).getByRole("button", { name: "Save labels" }),
 		);
 		expect(await within(dialog).findByRole("alert")).toHaveTextContent(
-			"label key reserved",
+			"Label key reserved",
 		);
 	});
 
@@ -633,7 +633,7 @@ describe("Revoke host", () => {
 			within(dialog).getByRole("button", { name: "Revoke host" }),
 		);
 		expect(await within(dialog).findByRole("alert")).toHaveTextContent(
-			"database busy",
+			"Database busy",
 		);
 		expect(
 			within(dialog).getByRole("button", { name: "Keep host" }),

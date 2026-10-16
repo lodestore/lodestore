@@ -41,6 +41,8 @@ enum Command {
         hostname: Option<String>,
         #[arg(long = "ca-bundle")]
         ca_bundle: Option<PathBuf>,
+        #[arg(long = "previous-agent-id", env = "LODESTORE_PREVIOUS_AGENT_ID")]
+        previous_agent_id: Option<String>,
     },
     Run {
         #[command(flatten)]
@@ -85,8 +87,9 @@ async fn execute(command: Command) -> Result<(), AgentError> {
             dirs,
             hostname,
             ca_bundle,
+            previous_agent_id,
         } => {
-            let enrolled = lodestore_agent::enroll(EnrollArgs {
+            let args = EnrollArgs {
                 token: read_token()?,
                 paths: dirs.paths(),
                 hostname,
@@ -94,8 +97,11 @@ async fn execute(command: Command) -> Result<(), AgentError> {
                     ca_bundle,
                     ..NetOptions::from_env()
                 },
-            })
-            .await?;
+            };
+            let enrolled = match previous_agent_id.filter(|id| !id.is_empty()) {
+                Some(id) => lodestore_agent::enroll_with_previous(args, &id).await?,
+                None => lodestore_agent::enroll(args).await?,
+            };
             println!("registered as {}", enrolled.agent_id);
             Ok(())
         }

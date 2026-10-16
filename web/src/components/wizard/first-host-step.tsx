@@ -19,7 +19,13 @@ const ACTIVE_ITEM: Record<AddHostStage, number> = {
 	online: 3,
 };
 
-export function FirstHostStep({ repositoryId }: { repositoryId: string }) {
+export function FirstHostStep({
+	repositoryId,
+	rebuilding = false,
+}: {
+	repositoryId: string;
+	rebuilding?: boolean;
+}) {
 	const [connected, setConnected] = useState<TokenHost>();
 	const [stage, setStage] = useState<AddHostStage>("idle");
 	const active = ACTIVE_ITEM[stage];
@@ -39,6 +45,14 @@ export function FirstHostStep({ repositoryId }: { repositoryId: string }) {
 			}
 		>
 			<StepHeading>{text.stepHeading.host}</StepHeading>
+			{rebuilding && (
+				<p className="text-sm text-muted-foreground">
+					{copy.catalog.connectedExisting}{" "}
+					<Link to="/restore" className="text-primary-strong underline">
+						{copy.catalog.openRestore}
+					</Link>
+				</p>
+			)}
 			<div className="grid gap-6 xl:grid-cols-2">
 				<AddHostPanel
 					repositoryId={repositoryId}

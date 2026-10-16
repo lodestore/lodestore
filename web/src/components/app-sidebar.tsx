@@ -82,7 +82,6 @@ export const NAV_ITEMS: NavItem[] = [
 		label: copy.nav.restore,
 		to: "/restore",
 		icon: ArchiveRestore,
-		soon: true,
 		group: backup,
 	},
 	{

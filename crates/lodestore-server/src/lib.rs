@@ -3,9 +3,11 @@
 pub mod api;
 pub mod assets;
 pub mod auth;
+pub mod browse;
 pub mod catalog;
 pub mod config;
 pub mod db;
+pub mod download;
 pub mod error;
 pub mod grpc;
 pub mod hosts;
@@ -87,8 +89,12 @@ pub async fn serve(config: Config, listeners: Listeners) -> anyhow::Result<Serve
         registry: Registry::default(),
         auth: auth::AuthState::default(),
         repos: repos::ReposState::default(),
+        catalog: catalog::CatalogJobs::default(),
+        readers: browse::tree::RepoReaders::default(),
     };
     auth::bootstrap_admin(&state).await?;
+    download::interrupt_running(&state).await?;
+    catalog::resume_unsynced(&state).await;
 
     let rest_addr = listeners.rest.local_addr()?;
     let grpc_addr = listeners.grpc.local_addr()?;

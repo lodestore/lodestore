@@ -17,7 +17,12 @@ function RootLayout() {
 			<ThemeProvider>
 				<TooltipProvider>
 					<Outlet />
-					<Toaster position="bottom-right" duration={4000} />
+					<Toaster
+						position="bottom-right"
+						duration={4000}
+						offset={{ bottom: 88 }}
+						mobileOffset={{ bottom: 80 }}
+					/>
 				</TooltipProvider>
 			</ThemeProvider>
 		</QueryClientProvider>

@@ -1,12 +1,13 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::Range;
+use std::time::Duration;
 
 use bytes::Bytes;
 use opendal::{ErrorKind, Operator};
 
-use super::s3::{check_key, layered, list_op, map_err};
-use super::{BlobDelete, BlobError, BlobStore, ListEntry};
+use super::s3::{check_key, layered, list_op, map_err, presign_op};
+use super::{BlobDelete, BlobError, BlobStore, ListEntry, Presigned};
 use crate::error::{Error, Result};
 
 /// Any OpenDAL service opened by scheme name at run time. Used for the
@@ -49,6 +50,14 @@ impl OpendalStore {
 }
 
 impl OpendalStore {
+    pub async fn presign_read(
+        &self,
+        key: &str,
+        ttl: Duration,
+    ) -> std::result::Result<Option<Presigned>, BlobError> {
+        presign_op(&self.op, key, ttl).await
+    }
+
     pub(super) async fn overwrite_for_probe(
         &self,
         key: &str,

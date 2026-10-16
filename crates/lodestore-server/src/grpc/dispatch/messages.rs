@@ -76,6 +76,9 @@ fn phase_name(phase: i32) -> Option<&'static str> {
         Ok(JobPhaseKind::Backup) => Some("backup"),
         Ok(JobPhaseKind::PostHook) => Some("post_hook"),
         Ok(JobPhaseKind::Snapshot) => Some("snapshot"),
+        Ok(JobPhaseKind::RestorePlan) => Some("restore_plan"),
+        Ok(JobPhaseKind::RestoreFiles) => Some("restore_files"),
+        Ok(JobPhaseKind::RestoreMetadata) => Some("restore_metadata"),
         _ => None,
     }
 }
@@ -239,6 +242,7 @@ pub async fn interrupt(state: &AppState, agent_id: &str, job_id: &str) -> anyhow
     .execute(&state.db.pool)
     .await?;
     state.registry.live.remove(job_id);
+    state.registry.clear_issued(job_id);
     Ok(())
 }
 
@@ -315,6 +319,7 @@ async fn handle(state: &AppState, agent_id: &str, body: AgentBody) -> anyhow::Re
                         bytes_done: m.bytes_done,
                         bytes_total: m.bytes_total,
                         bytes_uploaded: m.bytes_uploaded,
+                        bytes_downloaded: m.bytes_downloaded,
                         scan_done: m.scan_done,
                         speed_bps: m.speed_bps,
                         eta_s: m.eta_s,
@@ -482,18 +487,39 @@ async fn apply_finished(
     job_id: &str,
     f: &JobFinished,
 ) -> anyhow::Result<()> {
-    let stats = f.stats.as_ref().map(|s| {
-        serde_json::json!({
-            "files_new": s.files_new,
-            "files_changed": s.files_changed,
-            "files_unchanged": s.files_unchanged,
-            "dirs": s.dirs,
-            "bytes_total": s.bytes_total,
-            "bytes_read": s.bytes_read,
-            "bytes_added": s.bytes_added,
+    let is_restore = sqlx::query("SELECT kind FROM jobs WHERE id = $1 AND host_id = $2")
+        .bind(job_id)
+        .bind(agent_id)
+        .fetch_optional(&state.db.pool)
+        .await?
+        .map(|row| row.try_get::<String, _>("kind"))
+        .transpose()?
+        .is_some_and(|kind| kind == "restore");
+    let stats = if is_restore {
+        f.restore.as_ref().map(|r| {
+            serde_json::json!({
+                "created": r.created,
+                "overwritten": r.overwritten,
+                "skipped": r.skipped,
+                "files": r.files,
+                "bytes": r.bytes,
+            })
+            .to_string()
         })
-        .to_string()
-    });
+    } else {
+        f.stats.as_ref().map(|s| {
+            serde_json::json!({
+                "files_new": s.files_new,
+                "files_changed": s.files_changed,
+                "files_unchanged": s.files_unchanged,
+                "dirs": s.dirs,
+                "bytes_total": s.bytes_total,
+                "bytes_read": s.bytes_read,
+                "bytes_added": s.bytes_added,
+            })
+            .to_string()
+        })
+    };
     let detail = (!f.error_detail.is_empty())
         .then(|| serde_json::to_string(&f.error_detail))
         .transpose()?;
@@ -503,7 +529,8 @@ async fn apply_finished(
         .get(job_id)
         .map(|p| serde_json::to_string(&p))
         .transpose()?;
-    let snapshot_id = match non_empty(&f.snapshot_id) {
+    let reported = non_empty(&f.snapshot_id).filter(|_| !is_restore);
+    let snapshot_id = match reported {
         Some(reported) => ingest_before_finish(state, agent_id, job_id, &reported).await?,
         None => None,
     };
@@ -535,9 +562,19 @@ async fn apply_finished(
     .execute(&state.db.pool)
     .await?;
     if done.rows_affected() != 1 {
+        let own_final = sqlx::query("SELECT 1 FROM jobs WHERE id = $1 AND host_id = $2")
+            .bind(job_id)
+            .bind(agent_id)
+            .fetch_optional(&state.db.pool)
+            .await?
+            .is_some();
+        if own_final {
+            state.registry.clear_issued(job_id);
+        }
         return Ok(());
     }
     state.registry.live.remove(job_id);
+    state.registry.clear_issued(job_id);
     Ok(())
 }
 

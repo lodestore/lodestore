@@ -13,7 +13,7 @@ pub mod socket;
 pub mod tls;
 pub mod token;
 
-pub use enroll::{EnrollArgs, Enrolled, enroll};
+pub use enroll::{EnrollArgs, Enrolled, enroll, enroll_with_previous};
 pub use identity::Paths;
 pub use session::{RunArgs, run};
 

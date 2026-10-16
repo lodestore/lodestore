@@ -1,7 +1,10 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
+import { toast } from "sonner";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { getListCatalogStatusQueryKey } from "@/api/gen/endpoints";
+import type { CatalogStatus } from "@/api/gen/model";
 import { UnencryptedBanner } from "@/components/app-banners";
 import { isInsecureOrigin } from "@/lib/insecure";
 import { infoQuery, sessionQuery } from "@/lib/session";
@@ -37,10 +40,9 @@ describe("banners", () => {
 		);
 		expect(screen.queryByText(UNLOCK)).not.toBeInTheDocument();
 
+		server.use(http.get("/api/v1/restore/hosts", () => HttpResponse.json([])));
 		await router.navigate({ to: "/restore" });
-		await screen.findByRole("heading", {
-			name: "Restore any file from any snapshot",
-		});
+		await screen.findByRole("heading", { level: 1, name: "Restore" });
 		expect(screen.queryByText(UNLOCK)).not.toBeInTheDocument();
 	});
 
@@ -151,5 +153,156 @@ describe("sidebar footer", () => {
 		expect(router.state.location.search.expired).toBeUndefined();
 		expect(router.state.location.search.next).toBeUndefined();
 		expect(screen.queryByText(/Couldn't sign out/)).toBeNull();
+	});
+});
+
+const catalogStatus = (over: Partial<CatalogStatus> = {}): CatalogStatus => ({
+	repository_id: "repo-1",
+	repository_name: "main",
+	phase: "idle",
+	read: 0,
+	total: null,
+	added: 0,
+	skipped: [],
+	error: null,
+	started_at: null,
+	finished_at: null,
+	last_sync_at: null,
+	snapshots: 0,
+	...over,
+});
+
+describe("rebuild banner", () => {
+	it("shows progress and a link to the repository while rebuilding", async () => {
+		useSignedIn();
+		server.use(
+			http.get("/api/v1/catalog", () =>
+				HttpResponse.json([
+					catalogStatus({ phase: "reading", read: 3, total: 10 }),
+				]),
+			),
+		);
+		renderApp("/overview");
+		expect(
+			await screen.findByText(
+				"Rebuilding the catalog of main. 3 of 10 snapshots read.",
+			),
+		).toBeInTheDocument();
+		expect(screen.getByRole("link", { name: "View progress" })).toHaveAttribute(
+			"href",
+			"/settings/repositories/repo-1",
+		);
+		expect(
+			screen.queryByRole("button", { name: /Dismiss/ }),
+		).not.toBeInTheDocument();
+		expect(screen.queryByRole("status")).toBeNull();
+	});
+
+	it("leaves out View progress on that repository's page", async () => {
+		useSignedIn();
+		server.use(
+			http.get("/api/v1/catalog", () =>
+				HttpResponse.json([
+					catalogStatus({ phase: "reading", read: 3, total: 10 }),
+				]),
+			),
+		);
+		renderApp("/settings/repositories/repo-1");
+		expect(
+			await screen.findByText(
+				"Rebuilding the catalog of main. 3 of 10 snapshots read.",
+			),
+		).toBeInTheDocument();
+		expect(screen.queryByRole("link", { name: "View progress" })).toBeNull();
+	});
+
+	it("names the listing phase instead of a 0 of 0 counter", async () => {
+		useSignedIn();
+		server.use(
+			http.get("/api/v1/catalog", () =>
+				HttpResponse.json([catalogStatus({ phase: "listing" })]),
+			),
+		);
+		renderApp("/overview");
+		expect(
+			await screen.findByText(
+				"Rebuilding the catalog of main. Listing snapshots in storage.",
+			),
+		).toBeInTheDocument();
+	});
+
+	it("shows nothing when no catalog is rebuilding", async () => {
+		useSignedIn();
+		renderApp("/overview");
+		await screen.findByRole("heading", { level: 1 });
+		expect(
+			screen.queryByText(/Rebuilding the catalog/),
+		).not.toBeInTheDocument();
+	});
+
+	it("announces the end of a rebuild and offers the report when snapshots were skipped", async () => {
+		const success = vi.spyOn(toast, "success").mockReturnValue(1);
+		useSignedIn();
+		let current = [catalogStatus({ phase: "reading", read: 1, total: 2 })];
+		server.use(http.get("/api/v1/catalog", () => HttpResponse.json(current)));
+		const { queryClient } = renderApp("/overview");
+		await screen.findByText(/Rebuilding the catalog of main/);
+
+		current = [
+			catalogStatus({
+				phase: "done",
+				snapshots: 2,
+				skipped: [{ key: "snapshots/aa", reason: "unreadable" }],
+			}),
+		];
+		await queryClient.invalidateQueries({
+			queryKey: getListCatalogStatusQueryKey(),
+		});
+
+		await waitFor(() =>
+			expect(success).toHaveBeenCalledWith(
+				"Catalog rebuilt: 2 snapshots.",
+				expect.objectContaining({
+					duration: 8000,
+					action: expect.objectContaining({ label: "View report" }),
+				}),
+			),
+		);
+		expect(
+			screen.queryByText(/Rebuilding the catalog/),
+		).not.toBeInTheDocument();
+	});
+
+	it("uses a short toast without skipped snapshots", async () => {
+		const success = vi.spyOn(toast, "success").mockReturnValue(1);
+		useSignedIn();
+		let current = [catalogStatus({ phase: "listing" })];
+		server.use(http.get("/api/v1/catalog", () => HttpResponse.json(current)));
+		const { queryClient } = renderApp("/overview");
+		await screen.findByText(/Rebuilding the catalog of main/);
+
+		current = [catalogStatus({ phase: "done", snapshots: 1 })];
+		await queryClient.invalidateQueries({
+			queryKey: getListCatalogStatusQueryKey(),
+		});
+
+		await waitFor(() =>
+			expect(success).toHaveBeenCalledWith("Catalog rebuilt: 1 snapshot.", {
+				duration: 4000,
+			}),
+		);
+	});
+
+	it("does not toast for a rebuild that was already finished on load", async () => {
+		const success = vi.spyOn(toast, "success").mockReturnValue(1);
+		useSignedIn();
+		server.use(
+			http.get("/api/v1/catalog", () =>
+				HttpResponse.json([catalogStatus({ phase: "done", snapshots: 4 })]),
+			),
+		);
+		renderApp("/overview");
+		await screen.findByRole("heading", { level: 1 });
+		expect(success).not.toHaveBeenCalled();
 	});
 });

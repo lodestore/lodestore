@@ -5,8 +5,10 @@ use lodestore_proto::agent::v1::agent_message::Body as AgentBody;
 use lodestore_proto::agent::v1::agent_server::Agent;
 use lodestore_proto::agent::v1::server_message::Body as ServerBody;
 use lodestore_proto::agent::v1::{
-    AgentMessage, Disconnect, DisconnectReason, Heartbeat, HelloAck, RenewRequest, RenewResponse,
-    S3Credentials, ServerMessage, UpdateS3Credentials,
+    AgentMessage, Disconnect, DisconnectReason, Heartbeat, HelloAck, PackBytes,
+    ReadPackRangeRequest, RefreshPackAccessRequest, RefreshPackAccessResponse, RenewRequest,
+    RenewResponse, RestorePlanBatch, RestorePlanRequest, S3Credentials, ServerMessage,
+    UpdateS3Credentials,
 };
 use lodestore_proto::{ERROR_REVOKED, ERROR_VERSION_UNSUPPORTED};
 use sqlx::Row;
@@ -15,11 +17,13 @@ use tokio_stream::{Stream, StreamExt};
 use tonic::{Code, Request, Response, Status, Streaming};
 
 use crate::db::now_ms;
-use crate::grpc::{internal, peer_agent_id, select_version, status_with};
+use crate::grpc::{internal, peer_agent_id, restore, select_version, status_with};
 use crate::repos::db::writer_material;
 use crate::state::AppState;
 
 const SEEN_WRITE_INTERVAL: Duration = Duration::from_secs(30);
+const MAX_CAPABILITIES: usize = 16;
+const MAX_CAPABILITY_LEN: usize = 32;
 
 pub struct AgentService {
     pub state: AppState,
@@ -70,6 +74,8 @@ fn clip(text: &str) -> String {
 }
 
 type SessionStream = Pin<Box<dyn Stream<Item = Result<ServerMessage, Status>> + Send>>;
+type RestorePlanStream = Pin<Box<dyn Stream<Item = Result<RestorePlanBatch, Status>> + Send>>;
+type ReadPackRangeStream = Pin<Box<dyn Stream<Item = Result<PackBytes, Status>> + Send>>;
 
 async fn write_seen(state: &AppState, agent_id: &str, heartbeat: Option<&Heartbeat>) {
     let now = now_ms();
@@ -123,6 +129,8 @@ async fn write_seen(state: &AppState, agent_id: &str, heartbeat: Option<&Heartbe
 #[tonic::async_trait]
 impl Agent for AgentService {
     type SessionStream = SessionStream;
+    type RestorePlanStream = RestorePlanStream;
+    type ReadPackRangeStream = ReadPackRangeStream;
 
     async fn session(
         &self,
@@ -153,6 +161,15 @@ impl Agent for AgentService {
 
         let mut guard = state.registry.register(&agent_id, &repository_id);
         let rx = guard.take_rx();
+        state.registry.set_capabilities(
+            &agent_id,
+            hello
+                .capabilities
+                .iter()
+                .take(MAX_CAPABILITIES)
+                .map(|c| c.chars().take(MAX_CAPABILITY_LEN).collect())
+                .collect(),
+        );
         let cancel = guard.cancel.clone();
         if state.registry.is_revoked(&agent_id) {
             return Err(revoked());
@@ -226,6 +243,35 @@ impl Agent for AgentService {
         });
 
         Ok(Response::new(Box::pin(ReceiverStream::new(rx).map(Ok))))
+    }
+
+    async fn restore_plan(
+        &self,
+        request: Request<RestorePlanRequest>,
+    ) -> Result<Response<Self::RestorePlanStream>, Status> {
+        let agent_id = peer_agent_id(&request)?;
+        let job_id = request.into_inner().job_id;
+        let stream = restore::restore_plan(&self.state, &agent_id, &job_id).await?;
+        Ok(Response::new(Box::pin(stream)))
+    }
+
+    async fn refresh_pack_access(
+        &self,
+        request: Request<RefreshPackAccessRequest>,
+    ) -> Result<Response<RefreshPackAccessResponse>, Status> {
+        let agent_id = peer_agent_id(&request)?;
+        let response =
+            restore::refresh_pack_access(&self.state, &agent_id, request.into_inner()).await?;
+        Ok(Response::new(response))
+    }
+
+    async fn read_pack_range(
+        &self,
+        request: Request<ReadPackRangeRequest>,
+    ) -> Result<Response<Self::ReadPackRangeStream>, Status> {
+        let agent_id = peer_agent_id(&request)?;
+        let stream = restore::read_pack_range(&self.state, &agent_id, request.into_inner()).await?;
+        Ok(Response::new(Box::pin(stream)))
     }
 
     async fn renew(

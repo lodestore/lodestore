@@ -21,7 +21,9 @@ use utoipa_axum::router::OpenApiRouter;
 
 use crate::error::ErrorBody;
 use crate::state::AppState;
-use crate::{assets, auth, catalog, hosts, install, jobs, policies, repos, system};
+use crate::{
+    assets, auth, browse, catalog, download, hosts, install, jobs, policies, repos, system,
+};
 
 mod docs;
 
@@ -36,6 +38,7 @@ mod docs;
         (name = "Policies", description = "Backup policies: which hosts, which paths, which repository."),
         (name = "Jobs", description = "Backup jobs: history, live progress, log, cancel and rerun."),
         (name = "Snapshots", description = "Snapshots recorded in the server catalog."),
+        (name = "Restore", description = "Hosts and snapshots to restore from, newest first."),
         (name = "Repositories", description = "Storage repositories and the credentials agents write with."),
         (name = "Server", description = "Server version and health."),
         (name = "Setup", description = "First start: create the administrator from the setup link."),
@@ -74,6 +77,8 @@ fn api_router() -> OpenApiRouter<AppState> {
         .merge(hosts::routes())
         .merge(repos::routes())
         .merge(catalog::routes())
+        .merge(browse::routes())
+        .merge(download::routes())
         .merge(policies::routes())
         .merge(jobs::api::routes())
 }
@@ -82,8 +87,19 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
     api_router().split_for_parts().1
 }
 
-const CSP: &str = "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; \
-    object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'";
+macro_rules! csp {
+    ($frame_ancestors:literal) => {
+        concat!(
+            "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; ",
+            "object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors ",
+            $frame_ancestors
+        )
+    };
+}
+
+const CSP: &str = csp!("'none'");
+/// For responses the app itself loads in a hidden frame; other sites still cannot frame them.
+pub(crate) const CSP_SAME_ORIGIN_FRAME: &str = csp!("'self'");
 
 fn header(
     name: axum::http::HeaderName,

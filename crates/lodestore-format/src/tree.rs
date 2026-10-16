@@ -6,10 +6,12 @@ use std::collections::{HashMap, VecDeque};
 
 use prost::Message;
 
+use crate::crypto::BlobId;
 use crate::error::{Error, Result};
 use crate::fs::filter::PathMatcher;
 use crate::pb;
-use crate::reader::Reader;
+use crate::reader::{Reader, SelectionTotals};
+use crate::selection::{Selection, Verdict};
 use crate::store::BlobStore;
 
 /// Directories nested deeper than this make a snapshot unreadable.
@@ -189,11 +191,48 @@ impl TreeCursor {
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum Action {
     /// A directory to create or enter; everything until the matching
-    /// [`Action::Leave`] belongs to it.
-    Enter(pb::Node),
+    /// [`Action::Leave`] belongs to it. `ancestor` marks a directory that is
+    /// only on the way to something selected.
+    Enter {
+        node: pb::Node,
+        ancestor: bool,
+    },
     Leave,
     /// A node that is not a directory.
     Entry(pb::Node),
+}
+
+/// What a [`SelectedWalk`] asks of whoever decides what is selected.
+pub(crate) trait Selector {
+    /// Everything is selected, whatever the path.
+    fn all(&self) -> bool;
+    fn verdict(&self, path: &[u8], is_dir: bool) -> Verdict;
+}
+
+/// `--include` patterns: a match brings its subtree, and every directory is
+/// looked into for further matches.
+impl Selector for Option<&PathMatcher> {
+    fn all(&self) -> bool {
+        self.is_none()
+    }
+
+    fn verdict(&self, path: &[u8], is_dir: bool) -> Verdict {
+        if self.is_some_and(|m| m.is_match(path, is_dir)) {
+            Verdict::TakeAll
+        } else {
+            Verdict::Enter
+        }
+    }
+}
+
+impl Selector for &Selection {
+    fn all(&self) -> bool {
+        self.is_all()
+    }
+
+    fn verdict(&self, path: &[u8], _: bool) -> Verdict {
+        Selection::verdict(self, path)
+    }
 }
 
 struct Frame {
@@ -204,23 +243,23 @@ struct Frame {
     all: bool,
 }
 
-/// A [`TreeCursor`] that keeps only what a restore asked for. Without a
-/// matcher that is everything. With one, a node is selected when its path
-/// matches (a directory then brings its whole subtree) and the directories
-/// above a selected node are entered on the way; directories with no match
-/// below are never handed out.
-pub(crate) struct SelectedWalk<'m> {
+/// A [`TreeCursor`] that keeps only what a restore asked for. A node is
+/// selected when its path is (a directory then brings its whole subtree) and
+/// the directories above a selected node are entered on the way; directories
+/// with nothing selected below are never handed out. Directories the selector
+/// rules out are not read from the store.
+pub(crate) struct SelectedWalk<X: Selector> {
     cursor: TreeCursor,
-    matcher: Option<&'m PathMatcher>,
+    selector: X,
     frames: Vec<Frame>,
     queue: VecDeque<Action>,
 }
 
-impl<'m> SelectedWalk<'m> {
-    pub(crate) fn new(cursor: TreeCursor, matcher: Option<&'m PathMatcher>) -> Self {
+impl<X: Selector> SelectedWalk<X> {
+    pub(crate) fn new(cursor: TreeCursor, selector: X) -> Self {
         SelectedWalk {
             cursor,
-            matcher,
+            selector,
             frames: Vec::new(),
             queue: VecDeque::new(),
         }
@@ -237,7 +276,10 @@ impl<'m> SelectedWalk<'m> {
         for frame in &mut self.frames {
             if !frame.entered {
                 frame.entered = true;
-                self.queue.push_back(Action::Enter(frame.node.clone()));
+                self.queue.push_back(Action::Enter {
+                    node: frame.node.clone(),
+                    ancestor: true,
+                });
             }
         }
     }
@@ -263,11 +305,17 @@ impl<'m> SelectedWalk<'m> {
                 Step::Node(node) => node,
             };
             let is_dir = node.r#type == pb::NodeType::Dir as i32;
-            let inherited = self.frames.last().map_or(self.matcher.is_none(), |f| f.all);
-            let selected = inherited
-                || self
-                    .matcher
-                    .is_some_and(|m| m.is_match(&self.cursor.path_of(&node.name), is_dir));
+            let inherited = self
+                .frames
+                .last()
+                .map_or_else(|| self.selector.all(), |f| f.all);
+            let verdict = if inherited {
+                Verdict::TakeAll
+            } else {
+                self.selector
+                    .verdict(&self.cursor.path_of(&node.name), is_dir)
+            };
+            let selected = verdict == Verdict::TakeAll;
             if !is_dir {
                 if selected {
                     self.enter_ancestors();
@@ -275,9 +323,15 @@ impl<'m> SelectedWalk<'m> {
                 }
                 continue;
             }
+            if verdict == Verdict::Skip {
+                continue;
+            }
             if selected {
                 self.enter_ancestors();
-                self.queue.push_back(Action::Enter(node.clone()));
+                self.queue.push_back(Action::Enter {
+                    node: node.clone(),
+                    ancestor: false,
+                });
             }
             self.cursor.descend(reader, &node).await?;
             self.frames.push(Frame {
@@ -289,13 +343,84 @@ impl<'m> SelectedWalk<'m> {
     }
 }
 
+/// One step of a restore plan: the entries of a [`Selection`] in tree order.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum PlanStep {
+    /// A directory to enter; everything until the matching [`PlanStep::Leave`]
+    /// belongs to it. An `ancestor` is only on the way to something selected,
+    /// and a restore in place must leave its metadata and contents alone.
+    Enter {
+        node: pb::Node,
+        ancestor: bool,
+    },
+    /// A node that is not a directory.
+    Entry(pb::Node),
+    Leave,
+}
+
+/// Walks the selected part of a snapshot. Only selected directories and the
+/// ones leading to them are read; the trees of their unselected siblings are
+/// never fetched.
+pub struct SelectionWalk<'s> {
+    walk: SelectedWalk<&'s Selection>,
+}
+
+impl<'s> SelectionWalk<'s> {
+    pub async fn start<S: BlobStore>(
+        reader: &mut Reader<S>,
+        snapshot_id: &BlobId,
+        selection: &'s Selection,
+    ) -> Result<Self> {
+        let (_, top) = reader.open_root(snapshot_id).await?;
+        Ok(SelectionWalk {
+            walk: SelectedWalk::new(TreeCursor::new(top, Vec::new()), selection),
+        })
+    }
+
+    pub async fn next<S: BlobStore>(&mut self, reader: &mut Reader<S>) -> Result<Option<PlanStep>> {
+        Ok(self.walk.next(reader).await?.map(|action| match action {
+            Action::Enter { node, ancestor } => PlanStep::Enter { node, ancestor },
+            Action::Entry(node) => PlanStep::Entry(node),
+            Action::Leave => PlanStep::Leave,
+        }))
+    }
+
+    /// Absolute path of an entry of the directory last handed out.
+    pub fn path_of(&self, name: &[u8]) -> Vec<u8> {
+        self.walk.path_of(name)
+    }
+}
+
+/// Checks one node of a restore the way [`validate_subtree`] does: the chunks
+/// of a file add up to its size, and the members of a hardlink group agree.
+async fn check_node<S: BlobStore>(
+    reader: &mut Reader<S>,
+    groups: &mut HashMap<u64, (u64, [u8; 32])>,
+    node: &pb::Node,
+) -> Result<()> {
+    if node.r#type != pb::NodeType::File as i32 {
+        return Ok(());
+    }
+    reader.check_file(node).await?;
+    if node.hardlink_group == 0 {
+        return Ok(());
+    }
+    let member = (node.size, *blake3::hash(&node.content.concat()).as_bytes());
+    if *groups.entry(node.hardlink_group).or_insert(member) != member {
+        return Err(Error::corrupt(
+            String::from_utf8_lossy(&node.name),
+            "members of one hardlink group differ in size or content",
+        ));
+    }
+    Ok(())
+}
+
 /// Reads every tree of the selected part of a snapshot, before anything is
 /// written, and checks what a single tree cannot show: the depth, that the
 /// chunks of each file add up to its size, and that the members of a
 /// hardlink group agree. Name rules and ordering (also across the pieces of a
 /// split directory) are checked as each tree is decoded.
-// ponytail: the trees are read once here and again by the restore itself;
-// an LRU cache of decoded trees would halve that if it ever shows in a profile.
 pub(crate) async fn validate_subtree<S: BlobStore>(
     reader: &mut Reader<S>,
     nodes: Vec<pb::Node>,
@@ -303,27 +428,40 @@ pub(crate) async fn validate_subtree<S: BlobStore>(
     matcher: Option<&PathMatcher>,
 ) -> Result<()> {
     let mut walk = SelectedWalk::new(TreeCursor::new(nodes, base), matcher);
-    let mut groups: HashMap<u64, (u64, [u8; 32])> = HashMap::new();
+    let mut groups = HashMap::new();
     while let Some(action) = walk.next(reader).await? {
-        let (Action::Enter(node) | Action::Entry(node)) = action else {
+        let (Action::Enter { node, .. } | Action::Entry(node)) = action else {
             continue;
         };
-        if node.r#type != pb::NodeType::File as i32 {
-            continue;
-        }
-        reader.check_file(&node).await?;
-        if node.hardlink_group == 0 {
-            continue;
-        }
-        let member = (node.size, *blake3::hash(&node.content.concat()).as_bytes());
-        if *groups.entry(node.hardlink_group).or_insert(member) != member {
-            return Err(Error::corrupt(
-                String::from_utf8_lossy(&node.name),
-                "members of one hardlink group differ in size or content",
-            ));
-        }
+        check_node(reader, &mut groups, &node).await?;
     }
     Ok(())
+}
+
+/// What a [`Selection`] would restore, with every tree and file it touches
+/// checked as [`validate_subtree`] does.
+pub(crate) async fn selection_totals<S: BlobStore>(
+    reader: &mut Reader<S>,
+    snapshot_id: &BlobId,
+    selection: &Selection,
+) -> Result<SelectionTotals> {
+    let mut walk = SelectionWalk::start(reader, snapshot_id, selection).await?;
+    let mut groups = HashMap::new();
+    let mut totals = SelectionTotals::default();
+    while let Some(step) = walk.next(reader).await? {
+        match step {
+            PlanStep::Enter { ancestor: true, .. } | PlanStep::Leave => {}
+            PlanStep::Enter { .. } => totals.dirs += 1,
+            PlanStep::Entry(node) => {
+                check_node(reader, &mut groups, &node).await?;
+                if node.r#type == pb::NodeType::File as i32 {
+                    totals.files += 1;
+                    totals.bytes = totals.bytes.saturating_add(node.size);
+                }
+            }
+        }
+    }
+    Ok(totals)
 }
 
 #[cfg(test)]

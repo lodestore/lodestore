@@ -21,7 +21,7 @@ rand_core = "0.10.1"
 zeroize = { version = "1.9.1", features = ["derive"] }
 subtle = "2.6.1"
 thiserror = "2.0.21"
-tokio = { version = "1.53.2", features = ["rt", "rt-multi-thread"] }
+tokio = { version = "1.53.2", features = ["rt", "rt-multi-thread", "sync"] }
 data-encoding = "2.11.1"
 ignore = "0.4.33"
 serde_json = "1.0.154"

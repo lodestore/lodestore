@@ -132,7 +132,7 @@ describe("login", () => {
 		await fillAndSubmit("correct-password");
 
 		expect(
-			await screen.findByText(/Couldn't sign in\. try later/),
+			await screen.findByText(/Couldn't sign in\. Try later/),
 		).toBeInTheDocument();
 		expect(router.state.location.pathname).toBe("/login");
 		expect(screen.getByRole("button", { name: "Sign in" })).toBeEnabled();

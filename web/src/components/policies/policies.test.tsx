@@ -1088,6 +1088,7 @@ describe("Recent jobs", () => {
 		const seen: string[] = [];
 		const job = (n: number): JobSummary => ({
 			id: `job-${n}`,
+			kind: "backup",
 			host_id: `host-${n}`,
 			hostname: `web-${n}`,
 			host_online: true,

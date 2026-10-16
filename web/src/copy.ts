@@ -1,10 +1,15 @@
+import { catalog } from "@/copy.catalog";
 import { hostBackup, snapshots } from "@/copy.host";
 import { jobs } from "@/copy.jobs";
 import { policies } from "@/copy.policies";
+import { restore } from "@/copy.restore";
+import { sentence } from "@/lib/sentence";
 
 export const copy = {
+	catalog,
 	jobs,
 	policies,
+	restore,
 	hostBackup,
 	snapshots,
 	nav: {
@@ -82,15 +87,6 @@ export const copy = {
 				"Live progress for each host",
 				"Clear errors with a next step",
 				"History you can filter by host or policy",
-			],
-		},
-		restore: {
-			title: "Restore any file from any snapshot",
-			lead: "Browse a snapshot, pick what you need and restore it to the original host or a new one.",
-			bullets: [
-				"Browse files in any snapshot",
-				"Restore to the same host or a different one",
-				"Works with only the bucket and your password or recovery key",
 			],
 		},
 		hostSnapshots: {
@@ -510,7 +506,7 @@ export const copy = {
 			`Couldn't load ${what}. Check that the server is reachable, then retry.`,
 		retry: "Retry loading",
 		submit: (action: string, serverMessage?: string) =>
-			`Couldn't ${action}. ${serverMessage ? `${serverMessage}. ` : ""}Try again.`,
+			`Couldn't ${action}. ${sentence(serverMessage)}Try again.`,
 	},
 	common: {
 		copy: (object: string) => `Copy ${object}`,
