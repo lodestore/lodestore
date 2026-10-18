@@ -33,3 +33,15 @@ export const itemCount = (n: number) =>
 
 export const matchCount = (n: number) =>
 	`${count.format(n)} ${noun(n, "match", "matches")}`;
+
+export const errorCount = (n: number) =>
+	`${count.format(n)} ${noun(n, "error", "errors")}`;
+
+export const tokenCount = (n: number) =>
+	`${count.format(n)} ${noun(n, "token", "tokens")}`;
+
+export const scopeCount = (n: number) =>
+	`${count.format(n)} ${noun(n, "scope", "scopes")}`;
+
+export const dayCount = (n: number) =>
+	`${count.format(n)} ${noun(n, "day", "days")}`;

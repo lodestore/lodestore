@@ -1,9 +1,15 @@
-import { TriangleAlert } from "lucide-react";
-import { useEffect, useState } from "react";
+import { Gauge, TriangleAlert } from "lucide-react";
+import { type ReactNode, useEffect, useState } from "react";
 import type { JobDetail } from "@/api/gen/model";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
+import {
+	Tooltip,
+	TooltipContent,
+	TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { copy } from "@/copy";
 import {
 	formatBytes,
@@ -20,8 +26,16 @@ const TICK_MS = 1_000;
 export const formatClock = (at: number) =>
 	new Date(at).toLocaleTimeString("en", { timeStyle: "medium" });
 
-export function phaseLabel(job: Pick<JobDetail, "state" | "phase" | "kind">) {
+const THROTTLED_AT = 0.9;
+
+export const retentionRunning = (job: Pick<JobDetail, "retention">) =>
+	job.retention?.state === "running";
+
+export function phaseLabel(
+	job: Pick<JobDetail, "state" | "phase" | "kind" | "retention">,
+) {
 	const p = copy.jobs.phases;
+	if (job.kind === "backup" && retentionRunning(job)) return p.retention;
 	if (job.kind === "download") {
 		return job.state === "queued" ? p.download_queued : p.download_stream;
 	}
@@ -73,16 +87,21 @@ function Metric({
 	label,
 	value,
 	sub,
+	badge,
 }: {
 	label: string;
 	value: string;
 	sub?: string;
+	badge?: ReactNode;
 }) {
 	return (
 		<Card size="sm" className="gap-1 px-4">
 			<dt className="text-sm text-muted-foreground">{label}</dt>
 			<dd className="flex flex-col">
-				<span className="text-2xl font-semibold tabular-nums">{value}</span>
+				<span className="flex flex-wrap items-center gap-x-2">
+					<span className="text-2xl font-semibold tabular-nums">{value}</span>
+					{badge}
+				</span>
 				<span className="min-h-6 text-sm text-muted-foreground">{sub}</span>
 			</dd>
 		</Card>
@@ -105,6 +124,8 @@ export function JobProgress({
 	const scanned = running && (restore || progress?.scan_done === true);
 	const pct = scanned ? percent(progress ?? {}) : null;
 	const sent = progress?.bytes_done || job.download?.bytes_sent || 0;
+	const limit = restore ? 0 : (job.limits?.upload_rate_bps ?? 0);
+	const uploadSpeed = progress?.upload_speed_bps ?? 0;
 	const stale =
 		running &&
 		job.host_online &&
@@ -223,11 +244,34 @@ export function JobProgress({
 									sub={copy.jobs.metrics.uploadedSub}
 								/>
 							)}
-							<Metric
-								label={copy.jobs.metrics.speed}
-								value={formatRate(progress?.speed_bps ?? 0)}
-								sub={copy.jobs.metrics.speedSub}
-							/>
+							{limit ? (
+								<Metric
+									label={copy.jobs.metrics.speed}
+									value={formatRate(uploadSpeed)}
+									sub={copy.jobs.metrics.speedLimit(formatRate(limit))}
+									badge={
+										uploadSpeed >= THROTTLED_AT * limit && (
+											<Tooltip>
+												<TooltipTrigger asChild>
+													<Badge variant="outline" tabIndex={0}>
+														<Gauge aria-hidden />
+														{copy.jobs.metrics.throttled}
+													</Badge>
+												</TooltipTrigger>
+												<TooltipContent>
+													{copy.jobs.metrics.throttledHint}
+												</TooltipContent>
+											</Tooltip>
+										)
+									}
+								/>
+							) : (
+								<Metric
+									label={copy.jobs.metrics.speed}
+									value={formatRate(progress?.speed_bps ?? 0)}
+									sub={copy.jobs.metrics.speedSub}
+								/>
+							)}
 							<Metric
 								label={copy.jobs.metrics.timeLeft}
 								value={

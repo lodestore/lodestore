@@ -17,11 +17,13 @@ import { copy } from "@/copy";
 
 export function DeletePolicyDialog({
 	name,
+	managedBy,
 	onClose,
 	onDeleted,
 	onCloseAutoFocus,
 }: {
 	name?: string;
+	managedBy?: string | null;
 	onClose: () => void;
 	onDeleted?: () => void;
 	onCloseAutoFocus?: (event: Event) => void;
@@ -65,6 +67,9 @@ export function DeletePolicyDialog({
 					</AlertDialogTitle>
 					<AlertDialogDescription>
 						{copy.policies.remove.body}
+						{managedBy && (
+							<span className="mt-2 block">{copy.policies.remove.managed}</span>
+						)}
 					</AlertDialogDescription>
 				</AlertDialogHeader>
 				{remove.isError && (

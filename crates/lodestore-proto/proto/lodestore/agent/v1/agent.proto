@@ -167,6 +167,20 @@ message JobSpec {
   repeated Hook after = 7;
   repeated string tags = 8;
   string stdin_name = 9;
+  Limits limits = 10;
+}
+
+enum IoniceClass {
+  IONICE_CLASS_UNSPECIFIED = 0;
+  IONICE_CLASS_BEST_EFFORT = 1;
+  IONICE_CLASS_IDLE = 2;
+}
+
+message Limits {
+  uint64 upload_rate_bps = 1;
+  uint32 nice = 2;
+  IoniceClass ionice_class = 3;
+  uint32 ionice_level = 4;
 }
 
 message JobAssign {
@@ -231,6 +245,7 @@ message JobProgress {
   uint64 speed_bps = 8;
   optional uint64 eta_s = 9;
   uint64 bytes_downloaded = 10;
+  uint64 upload_speed_bps = 11;
 }
 
 enum JobEventLevel {

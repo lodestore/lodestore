@@ -3,6 +3,9 @@ import { useListRepositories } from "@/api/gen/endpoints";
 import { PolicyEditor } from "@/components/policies/policy-editor";
 import {
 	BLANK_LABEL,
+	BLANK_LIMITS,
+	BLANK_RETENTION,
+	BLANK_SCHEDULE,
 	type PolicyDraft,
 } from "@/components/policies/policy-form";
 import {
@@ -31,6 +34,9 @@ function quickstart(repository: string): PolicyDraft {
 		exclude: "**/.cache\n**/node_modules",
 		oneFileSystem: false,
 		excludeCaches: false,
+		schedule: BLANK_SCHEDULE,
+		retention: BLANK_RETENTION,
+		limits: BLANK_LIMITS,
 		before: [],
 		after: [],
 	};

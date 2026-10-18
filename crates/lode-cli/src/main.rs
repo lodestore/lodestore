@@ -1,4 +1,5 @@
 mod cli;
+mod client;
 mod cmd;
 mod open;
 mod output;
@@ -11,12 +12,15 @@ use clap::Parser;
 use lodestore_format::Error;
 
 use crate::cli::{UnlockError, UsageError};
+use crate::client::TokenRefused;
 
 const EXIT_ERROR: u8 = 1;
 const EXIT_USAGE: u8 = 2;
 const EXIT_REPO_NOT_FOUND: u8 = 10;
 const EXIT_REPO_EXISTS: u8 = 11;
 const EXIT_UNLOCK: u8 = 12;
+const EXIT_DRIFT: u8 = 4;
+const EXIT_TOKEN: u8 = 13;
 const EXIT_INTERRUPTED: u8 = 130;
 
 fn main() -> ExitCode {
@@ -54,6 +58,9 @@ fn exit_code_for(err: &anyhow::Error) -> u8 {
     for cause in err.chain() {
         if cause.is::<UsageError>() {
             return EXIT_USAGE;
+        }
+        if cause.is::<TokenRefused>() {
+            return EXIT_TOKEN;
         }
         if cause.is::<UnlockError>() {
             return EXIT_UNLOCK;

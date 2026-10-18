@@ -2,6 +2,7 @@ import { Link, useNavigate } from "@tanstack/react-router";
 import { MoreHorizontal } from "lucide-react";
 import type { PolicySummary } from "@/api/gen/model";
 import { Illustration } from "@/components/brand/illustration";
+import { ManagedBadge } from "@/components/policies/managed";
 import { RelativeTime } from "@/components/relative-time";
 import { StatusBadge } from "@/components/status-badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -39,6 +40,7 @@ import { copy } from "@/copy";
 import { cn } from "@/lib/utils";
 
 const SHOW_SELECTOR = "hidden @min-[1280px]:table-cell";
+const SHOW_SCHEDULE = "hidden @min-[1024px]:table-cell";
 const SHOW_LAST_RUN = "hidden @min-[1024px]:table-cell";
 const SHOWN_CHIPS = 2;
 
@@ -84,6 +86,36 @@ function SelectorCell({ policy }: { policy: PolicySummary }) {
 	);
 }
 
+function ScheduleCell({ policy }: { policy: PolicySummary }) {
+	const info = policy.schedule;
+	if (!info) {
+		return (
+			<span className="text-muted-foreground">{copy.policies.manualOnly}</span>
+		);
+	}
+	const next = info.next_runs[0];
+	return (
+		<div className="flex max-w-56 flex-col">
+			<Tooltip>
+				<TooltipTrigger asChild>
+					<span tabIndex={0} className="truncate rounded-sm">
+						{info.summary}
+					</span>
+				</TooltipTrigger>
+				<TooltipContent>
+					{copy.policies.scheduleHint(info.summary, info.timezone)}
+				</TooltipContent>
+			</Tooltip>
+			{next !== undefined && (
+				<span className="text-sm text-muted-foreground">
+					{copy.policies.next}{" "}
+					<RelativeTime value={new Date(next)} numeric="always" />
+				</span>
+			)}
+		</div>
+	);
+}
+
 function LastRun({ policy }: { policy: PolicySummary }) {
 	const job = policy.last_job;
 	if (!job) {
@@ -110,6 +142,10 @@ function SkeletonRows() {
 			</TableCell>
 			<TableCell className={cn("px-4", SHOW_SELECTOR)}>
 				<Skeleton className="h-5 w-32" />
+			</TableCell>
+			<TableCell className={cn("px-4", SHOW_SCHEDULE)}>
+				<Skeleton className="h-4 w-32" />
+				<Skeleton className="mt-2 h-3 w-20" />
 			</TableCell>
 			<TableCell className="px-4">
 				<Skeleton className="h-4 w-12" />
@@ -177,9 +213,9 @@ export function PoliciesTable({
 
 	const error = isError && (
 		<Alert variant="destructive" role="alert">
-			<AlertDescription>
-				{copy.policies.loadFailed}{" "}
-				<Button variant="link" className="h-auto p-0" onClick={onRetry}>
+			<AlertDescription className="flex flex-wrap items-center justify-between gap-2">
+				{copy.policies.loadFailed}
+				<Button type="button" variant="outline" size="sm" onClick={onRetry}>
 					{copy.errors.retry}
 				</Button>
 			</AlertDescription>
@@ -208,6 +244,9 @@ export function PoliciesTable({
 							<TableHead className={cn("px-4", SHOW_SELECTOR)}>
 								{copy.policies.columns.selector}
 							</TableHead>
+							<TableHead className={cn("px-4", SHOW_SCHEDULE)}>
+								{copy.policies.columns.schedule}
+							</TableHead>
 							<TableHead className="px-4">
 								{copy.policies.columns.hosts}
 							</TableHead>
@@ -234,20 +273,28 @@ export function PoliciesTable({
 										}}
 									>
 										<TableCell className="px-4">
-											<Link
-												to="/policies/$name"
-												params={{ name: policy.name }}
-												aria-label={copy.policies.openRow(policy.name)}
-												className="block max-w-64 truncate rounded-sm text-base font-semibold"
-											>
-												{policy.name}
-											</Link>
+											<div className="flex max-w-64 items-center gap-2">
+												<Link
+													to="/policies/$name"
+													params={{ name: policy.name }}
+													aria-label={copy.policies.openRow(policy.name)}
+													className="min-w-0 truncate rounded-sm text-base font-semibold"
+												>
+													{policy.name}
+												</Link>
+												{policy.managed_by && (
+													<ManagedBadge manager={policy.managed_by} />
+												)}
+											</div>
 											<div className="max-w-64 truncate text-sm text-muted-foreground">
 												{policy.repository_name}
 											</div>
 										</TableCell>
 										<TableCell className={cn("px-4", SHOW_SELECTOR)}>
 											<SelectorCell policy={policy} />
+										</TableCell>
+										<TableCell className={cn("px-4", SHOW_SCHEDULE)}>
+											<ScheduleCell policy={policy} />
 										</TableCell>
 										<TableCell className="px-4">
 											<div>{policy.hosts}</div>

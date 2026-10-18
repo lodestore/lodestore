@@ -52,7 +52,7 @@ describe("style rules", () => {
 	const offScale: [string, RegExp][] = [
 		["no gap-3 or gap-5", /(?<![\w-])gap-[35](?![\w.-])/],
 		["no gap-x-3 or gap-y-3", /(?<![\w-])gap-[xy]-3(?![\w.-])/],
-		["no px-3 or py-3", /(?<![\w-])p[xy]-3(?![\w.-])/],
+		["no 12 px padding", /(?<![\w-])p[xylrtb]?-3(?![\w.-])/],
 		[
 			"no half-step gap, padding or margin",
 			/(?<![\w-])(?:gap(?:-[xy])?|[pm][xylrtb]?)-\d+\.5(?![\w-])/,

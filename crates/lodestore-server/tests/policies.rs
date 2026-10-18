@@ -622,3 +622,175 @@ async fn policies_host_list_selects_only_listed_hosts() {
     assert_eq!(list[0]["hosts"], 1);
     ts.stop().await;
 }
+
+const KYIV_SCHEDULE: &str = "  schedule:\n    cron: \"30 3 * * *\"\n    timezone: Europe/Kyiv\n";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn policies_schedule_info_in_validate() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let http = Http::login(&ts).await;
+        ts.create_local_repository("main").await;
+
+        let (_, checked) = http
+            .post(
+                "/api/v1/policies/validate",
+                &json!({ "yaml": policy_yaml("p", "main", KYIV_SCHEDULE) }),
+            )
+            .await;
+        assert_eq!(checked["valid"], true, "[{}] {checked}", backend.name());
+        let schedule = &checked["schedule"];
+        assert!(!schedule["summary"].as_str().unwrap().is_empty());
+        assert_eq!(schedule["timezone"], "Europe/Kyiv");
+        assert_eq!(schedule["jitter_secs"], 900);
+        assert_eq!(schedule["catch_up_secs"], 86400);
+        let runs: Vec<i64> = schedule["next_runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r.as_i64().unwrap())
+            .collect();
+        assert_eq!(runs.len(), 3);
+        assert!(runs.windows(2).all(|w| w[0] < w[1]));
+        let kinds: Vec<&str> = schedule["dst_notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["kind"].as_str().unwrap())
+            .collect();
+        assert!(kinds.contains(&"skipped"), "{kinds:?}");
+        assert!(kinds.contains(&"repeated"), "{kinds:?}");
+
+        let (status, created) = http
+            .post(
+                "/api/v1/policies",
+                &json!({ "yaml": policy_yaml("p", "main", KYIV_SCHEDULE) }),
+            )
+            .await;
+        assert_eq!(status, 201);
+        assert_eq!(created["schedule"]["timezone"], "Europe/Kyiv");
+        let (_, list) = http.get("/api/v1/policies").await;
+        assert_eq!(
+            list[0]["schedule"]["next_runs"].as_array().unwrap().len(),
+            3
+        );
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn policies_schedule_absent_is_null() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let http = Http::login(&ts).await;
+        ts.create_local_repository("main").await;
+
+        let (_, checked) = http
+            .post(
+                "/api/v1/policies/validate",
+                &json!({ "yaml": policy_yaml("p", "main", "") }),
+            )
+            .await;
+        assert_eq!(checked["valid"], true);
+        assert!(checked["schedule"].is_null(), "[{}]", backend.name());
+        let (_, invalid) = http
+            .post(
+                "/api/v1/policies/validate",
+                &json!({ "yaml": policy_yaml("p", "nowhere", "") }),
+            )
+            .await;
+        assert!(invalid["schedule"].is_null());
+
+        let (_, created) = create(&http, "p", "main").await;
+        assert!(created["schedule"].is_null());
+        let (_, list) = http.get("/api/v1/policies").await;
+        assert!(list[0]["schedule"].is_null());
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn policies_managed_by_in_list_and_detail() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let http = Http::login(&ts).await;
+        ts.create_local_repository("main").await;
+        let (status, _) = create(&http, "ui-made", "main").await;
+        assert_eq!(status, 201);
+
+        let token = ts.issue_token(&["policies:write"]).await;
+        let applied = common::bearer_client(&token)
+            .post(format!("{}/api/v1/policies/apply", ts.rest_url()))
+            .json(&json!({ "documents": [{
+                "source": "a.yaml",
+                "yaml": policy_yaml("catalog-made", "main", ""),
+            }] }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(applied.status(), 200, "[{}]", backend.name());
+
+        let (_, list) = http.get("/api/v1/policies").await;
+        let managed = |name: &str| {
+            list.as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["name"] == name)
+                .map(|p| p["managed_by"].clone())
+                .unwrap()
+        };
+        assert_eq!(managed("catalog-made"), "lode-apply");
+        assert!(managed("ui-made").is_null());
+        let (_, detail) = http.get("/api/v1/policies/catalog-made").await;
+        assert_eq!(detail["managed_by"], "lode-apply");
+
+        let edited_yaml = policy_yaml("catalog-made", "main", "  exclude:\n    - '*.tmp'\n");
+        let (status, edited) = http
+            .put(
+                "/api/v1/policies/catalog-made",
+                &json!({ "base_revision": detail["revision"], "yaml": edited_yaml }),
+            )
+            .await;
+        assert_eq!(status, 200, "{edited}");
+        assert_eq!(edited["managed_by"], "lode-apply");
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn policies_host_next_run() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let http = Http::login(&ts).await;
+        let repo = ts.create_local_repository("main").await;
+        let host = enroll(&ts, &http, &repo, "host-a", prod()).await;
+        let (status, _) = http
+            .post(
+                "/api/v1/policies",
+                &json!({ "yaml": policy_yaml("timed", "main", KYIV_SCHEDULE) }),
+            )
+            .await;
+        assert_eq!(status, 201, "[{}]", backend.name());
+        let (status, _) = create(&http, "manual", "main").await;
+        assert_eq!(status, 201);
+
+        let (status, policies) = http.get(&format!("/api/v1/hosts/{host}/policies")).await;
+        assert_eq!(status, 200);
+        let next = |name: &str| {
+            policies
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["name"] == name)
+                .map(|p| p["next_run"].clone())
+                .unwrap()
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        assert!(next("timed").as_i64().unwrap() > now - 5000);
+        assert!(next("manual").is_null());
+        ts.stop().await;
+    }
+}

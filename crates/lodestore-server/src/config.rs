@@ -58,6 +58,7 @@ pub struct Config {
     pub agent_dir: PathBuf,
     pub join_token_ttl_secs: i64,
     pub agent_cert_lifetime_secs: i64,
+    pub schedule_tick_secs: u64,
     #[serde(skip)]
     pub grpc_public_address_defaulted: bool,
 }
@@ -111,6 +112,7 @@ impl Default for Config {
             agent_dir: PathBuf::from("/usr/share/lodestore/agents"),
             join_token_ttl_secs: 3600,
             agent_cert_lifetime_secs: 7_776_000,
+            schedule_tick_secs: crate::schedule::SCHEDULE_TICK.as_secs(),
             grpc_public_address_defaulted: true,
         }
     }

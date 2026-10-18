@@ -3,8 +3,10 @@ pub mod restore;
 
 use std::collections::{BTreeMap, HashSet};
 
-use lodestore_policy::{BackupPolicy, Hook};
-use lodestore_proto::agent::v1::{ConflictPolicy, Hook as ProtoHook, JobSpec};
+use lodestore_policy::{BackupPolicy, Hook, IoniceClass, Limits, parse_rate};
+use lodestore_proto::agent::v1::{
+    ConflictPolicy, Hook as ProtoHook, IoniceClass as ProtoIonice, JobSpec, Limits as ProtoLimits,
+};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
@@ -67,6 +69,69 @@ impl JobState {
 pub enum JobSource {
     Manual,
     Cli,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum JobOrigin {
+    Manual,
+    Schedule,
+    Catchup,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RetentionState {
+    Running,
+    Done,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct BlockedForget {
+    pub id: String,
+    pub reason: String,
+    #[serde(default)]
+    pub kept_in_catalog: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct RetentionResultDto {
+    pub state: RetentionState,
+    #[serde(default)]
+    pub forgot: u64,
+    #[serde(default)]
+    pub kept: u64,
+    #[serde(default)]
+    pub blocked: Vec<BlockedForget>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub struct LimitsDto {
+    pub upload_rate_bps: Option<u64>,
+    pub nice: Option<u32>,
+    /// `best-effort` or `idle`.
+    pub ionice_class: Option<String>,
+    pub ionice_level: Option<u32>,
+}
+
+impl LimitsDto {
+    fn from_spec(limits: &ProtoLimits) -> Option<LimitsDto> {
+        let class = match ProtoIonice::try_from(limits.ionice_class) {
+            Ok(ProtoIonice::BestEffort) => Some("best-effort"),
+            Ok(ProtoIonice::Idle) => Some("idle"),
+            _ => None,
+        };
+        let positive = |n: u32| (n > 0).then_some(n);
+        let dto = LimitsDto {
+            upload_rate_bps: (limits.upload_rate_bps > 0).then_some(limits.upload_rate_bps),
+            nice: positive(limits.nice),
+            ionice_level: (class == Some("best-effort")).then_some(limits.ionice_level),
+            ionice_class: class.map(str::to_string),
+        };
+        (dto.upload_rate_bps.is_some() || dto.nice.is_some() || dto.ionice_class.is_some())
+            .then_some(dto)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
@@ -144,6 +209,7 @@ pub struct JobProgressDto {
     pub bytes_downloaded: u64,
     pub scan_done: bool,
     pub speed_bps: u64,
+    pub upload_speed_bps: u64,
     pub eta_s: Option<i64>,
     pub updated_at: i64,
 }
@@ -225,6 +291,8 @@ pub struct JobSummary {
     pub policy_name: Option<String>,
     pub policy_exists: bool,
     pub source: JobSource,
+    pub origin: JobOrigin,
+    pub missed_runs: Option<u64>,
     pub stdin_name: Option<String>,
     pub state: JobState,
     pub phase: Option<JobPhaseName>,
@@ -235,6 +303,7 @@ pub struct JobSummary {
     pub host_online: bool,
     pub progress: Option<JobProgressDto>,
     pub snapshot_id: Option<String>,
+    pub snapshot_suspicious: bool,
     pub stats: Option<JobStatsDto>,
     pub restore: Option<RestoreInfo>,
     pub restore_result: Option<RestoreResultDto>,
@@ -259,19 +328,23 @@ pub struct JobDetail {
     pub log_seq: u64,
     pub log_lines: u64,
     pub logs_purged: bool,
+    pub retention: Option<RetentionResultDto>,
+    pub limits: Option<LimitsDto>,
 }
 
 pub(crate) const DOWNLOAD_COLUMNS: &str = "id, repository_id, host_id, hostname, snapshot_id, \
     items_json, format, started_by, state, created_at, started_at, finished_at, bytes_sent, error_code";
 
-pub(crate) const JOB_FROM: &str = "FROM jobs j JOIN agents a ON a.id = j.host_id";
+pub(crate) const JOB_FROM: &str = "FROM jobs j JOIN agents a ON a.id = j.host_id \
+    LEFT JOIN snapshots s ON s.id = j.snapshot_id";
 
 pub(crate) const JOB_COLUMNS: &str = "j.id, j.host_id, a.hostname, a.repository_id, j.policy_id, \
     j.policy_name, j.stdin_name, j.source, j.state, j.phase, j.cancel_requested, j.queued_at, \
     j.started_at, j.finished_at, j.snapshot_id, j.parent_id, j.incomplete, j.errors_total, \
     j.warnings_total, j.stats_json, j.progress_json, j.error_code, j.error_message, \
     j.error_detail_json, j.log_seq, j.log_lines, j.logs_purged, j.caller_uid, j.caller_gid, \
-    j.kind, j.restore_json";
+    j.kind, j.restore_json, j.origin, j.missed_runs, j.retention_json, \
+    COALESCE(s.suspicious, 0) AS snapshot_suspicious";
 
 fn hook_spec(hook: &Hook) -> ProtoHook {
     ProtoHook {
@@ -294,6 +367,31 @@ pub fn job_spec(policy: &BackupPolicy) -> JobSpec {
         after: spec.hooks.after.iter().map(hook_spec).collect(),
         tags: vec![format!("policy={}", policy.metadata.name)],
         stdin_name: String::new(),
+        limits: spec
+            .limits
+            .as_ref()
+            .filter(|l| *l != &Limits::default())
+            .map(limits_spec),
+    }
+}
+
+fn limits_spec(limits: &Limits) -> ProtoLimits {
+    ProtoLimits {
+        upload_rate_bps: limits
+            .upload_rate
+            .as_deref()
+            .and_then(parse_rate)
+            .unwrap_or(0),
+        nice: limits.nice.and_then(|n| u32::try_from(n).ok()).unwrap_or(0),
+        ionice_class: match limits.ionice_class {
+            None => ProtoIonice::Unspecified,
+            Some(IoniceClass::BestEffort) => ProtoIonice::BestEffort,
+            Some(IoniceClass::Idle) => ProtoIonice::Idle,
+        } as i32,
+        ionice_level: limits
+            .ionice_level
+            .and_then(|n| u32::try_from(n).ok())
+            .unwrap_or(0),
     }
 }
 
@@ -398,6 +496,7 @@ pub(crate) fn summary_from_row(
     let host_id: String = row.try_get("host_id")?;
     let db_state: String = row.try_get("state")?;
     let source: String = row.try_get("source")?;
+    let origin: String = row.try_get("origin")?;
     let host_online = state.registry.is_online(&host_id);
     let queue_reason = (db_state == "queued").then(|| {
         if !host_online {
@@ -449,6 +548,16 @@ pub(crate) fn summary_from_row(
             "cli" => JobSource::Cli,
             other => return Err(unknown("source", other)),
         },
+        origin: match origin.as_str() {
+            "manual" => JobOrigin::Manual,
+            "schedule" => JobOrigin::Schedule,
+            "catchup" => JobOrigin::Catchup,
+            other => return Err(unknown("origin", other)),
+        },
+        missed_runs: row
+            .try_get::<Option<i64>, _>("missed_runs")?
+            .map(|n| n.max(0) as u64),
+        snapshot_suspicious: row.try_get::<i64, _>("snapshot_suspicious")? != 0,
         state: JobState::parse(&db_state).ok_or_else(|| unknown("state", &db_state))?,
         phase,
         queue_reason: queue_reason.flatten(),
@@ -519,6 +628,9 @@ pub(crate) fn download_summary(
         policy_name: None,
         policy_exists: false,
         source: JobSource::Manual,
+        origin: JobOrigin::Manual,
+        missed_runs: None,
+        snapshot_suspicious: false,
         stdin_name: None,
         state: job_state,
         phase: None,
@@ -569,6 +681,8 @@ pub async fn load_download(state: &AppState, id: &str) -> Result<Option<JobDetai
         log_seq: 0,
         log_lines: 0,
         logs_purged: false,
+        retention: None,
+        limits: None,
     }))
 }
 
@@ -606,24 +720,47 @@ fn detail_from_row(
         log_seq: count(row, "log_seq")?,
         log_lines: count(row, "log_lines")?,
         logs_purged: row.try_get::<i64, _>("logs_purged")? != 0,
+        retention: json_column(row, "retention_json")?,
+        limits: limits_of(row)?,
     })
+}
+
+fn limits_of(row: &AnyRow) -> Result<Option<LimitsDto>, ApiError> {
+    if row.try_get::<String, _>("kind")? != "backup" {
+        return Ok(None);
+    }
+    let raw: Vec<u8> = row.try_get("spec")?;
+    Ok(JobSpec::decode(raw.as_slice())
+        .ok()
+        .and_then(|spec| spec.limits)
+        .and_then(|limits| LimitsDto::from_spec(&limits)))
+}
+
+async fn mark_catalog_presence(state: &AppState, job: &mut JobDetail) -> Result<(), ApiError> {
+    let Some(retention) = job.retention.as_mut() else {
+        return Ok(());
+    };
+    for blocked in &mut retention.blocked {
+        blocked.kept_in_catalog = sqlx::query("SELECT 1 FROM snapshots WHERE id = $1")
+            .bind(&blocked.id)
+            .fetch_optional(&state.db.pool)
+            .await?
+            .is_some();
+    }
+    Ok(())
 }
 
 pub async fn load_job(state: &AppState, id: &str) -> Result<Option<JobDetail>, ApiError> {
     let row = sqlx::query(sqlx::AssertSqlSafe(format!(
-        "SELECT {JOB_COLUMNS} {JOB_FROM} WHERE j.id = $1"
+        "SELECT {JOB_COLUMNS}, j.spec {JOB_FROM} WHERE j.id = $1"
     )))
     .bind(id)
     .fetch_optional(&state.db.pool)
     .await?;
-    match row {
-        Some(row) => Ok(Some(detail_from_row(
-            state,
-            &row,
-            &busy_hosts(state).await?,
-        )?)),
-        None => Ok(None),
-    }
+    let Some(row) = row else { return Ok(None) };
+    let mut job = detail_from_row(state, &row, &busy_hosts(state).await?)?;
+    mark_catalog_presence(state, &mut job).await?;
+    Ok(Some(job))
 }
 
 pub async fn last_job(

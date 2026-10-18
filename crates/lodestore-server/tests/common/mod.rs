@@ -176,6 +176,20 @@ impl TestServer {
         Api::login(&self.rest_url(), "admin", ADMIN_PASSWORD).await
     }
 
+    pub async fn issue_token(&self, scopes: &[&str]) -> String {
+        let response = self
+            .api()
+            .await
+            .post(
+                "/api/v1/tokens",
+                &json!({ "name": "test", "scopes": scopes, "expires_in_days": null }),
+            )
+            .await;
+        assert_eq!(response.status(), 201, "issuing a token");
+        let body: Value = response.json().await.expect("token body");
+        body["token"].as_str().expect("a token").to_string()
+    }
+
     pub fn agent_paths(&self, name: &str) -> Paths {
         let root = self.dir.path().join(format!("agent-{name}"));
         Paths {
@@ -230,6 +244,19 @@ impl TestServer {
     }
 }
 
+pub fn bearer_client(token: &str) -> reqwest::Client {
+    let mut value =
+        reqwest::header::HeaderValue::from_str(&format!("Bearer {token}")).expect("a header value");
+    value.set_sensitive(true);
+    reqwest::Client::builder()
+        .default_headers(reqwest::header::HeaderMap::from_iter([(
+            reqwest::header::AUTHORIZATION,
+            value,
+        )]))
+        .build()
+        .expect("a client")
+}
+
 pub struct Api {
     client: reqwest::Client,
     base: String,
@@ -273,6 +300,10 @@ impl Api {
                 .expect("a csrf token")
                 .to_string(),
         }
+    }
+
+    pub fn cookie(&self) -> &str {
+        &self.cookie
     }
 
     pub async fn get(&self, path: &str) -> reqwest::Response {

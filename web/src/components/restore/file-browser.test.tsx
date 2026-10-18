@@ -83,6 +83,8 @@ function snapshot(id: string, time: number): RestoreSnapshot {
 		incomplete: false,
 		paths: ["/etc"],
 		policy_name: "etc-and-home",
+		policy_deleted: false,
+		received_at: time,
 		tags: [],
 		warnings_total: 0,
 		errors_total: 0,

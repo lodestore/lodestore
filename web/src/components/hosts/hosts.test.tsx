@@ -505,7 +505,11 @@ describe("Edit labels", () => {
 		expect(
 			within(dialog).getAllByRole("textbox", { name: "Key" }),
 		).toHaveLength(1);
-		expect(within(dialog).getByRole("textbox", { name: "Key" })).toHaveFocus();
+		await waitFor(() =>
+			expect(
+				within(dialog).getByRole("textbox", { name: "Key" }),
+			).toHaveFocus(),
+		);
 
 		await user.click(
 			within(dialog).getByRole("button", { name: "Save labels" }),

@@ -19,17 +19,30 @@ import type {
 	PolicyDetail,
 	PolicyInput,
 	RepositorySummary,
+	RetentionPreview as RetentionPreviewData,
 	ValidateResponse,
 } from "@/api/gen/model";
+import { EditorFooter } from "@/components/policies/editor-footer";
+import { problemsByPath } from "@/components/policies/form-field";
+import { ManagedAlert } from "@/components/policies/managed";
 import { MatchingHosts } from "@/components/policies/matching-hosts";
 import {
 	draftFromPolicy,
 	type PolicyDraft,
 	PolicyForm,
 	policyFromDraft,
-	problemsByPath,
+	retentionFromDraft,
 } from "@/components/policies/policy-form";
-import { PolicyYamlEditor } from "@/components/policies/policy-yaml";
+import {
+	PolicyYamlEditor,
+	type SyncState,
+} from "@/components/policies/policy-yaml";
+import { hasRetention } from "@/components/policies/retention-panel";
+import {
+	RetentionPreview,
+	useRetentionPreviewState,
+} from "@/components/policies/retention-preview";
+import { SaveRetentionDialog } from "@/components/policies/save-retention-dialog";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
 	AlertDialog,
@@ -42,8 +55,7 @@ import {
 	AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
-import { Spinner } from "@/components/ui/spinner";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { copy } from "@/copy";
 import { cn } from "@/lib/utils";
 
@@ -66,6 +78,7 @@ function initialState(
 			yaml: detail.yaml,
 			matching: detail.matching,
 			warnings: detail.warnings,
+			schedule: detail.schedule,
 		};
 		return {
 			draft,
@@ -112,6 +125,7 @@ export function PolicyEditor({
 	const [blocked, setBlocked] = useState(false);
 	const [formRefused, setFormRefused] = useState(false);
 	const [checkFailed, setCheckFailed] = useState(false);
+	const [confirming, setConfirming] = useState<RetentionPreviewData>();
 	const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
 	const latest = useRef(0);
 	const ownBypass = useRef(false);
@@ -228,6 +242,21 @@ export function PolicyEditor({
 		if (detail && behind && !changed) rebase(detail);
 	}, [behind, changed]);
 
+	const rules = retentionFromDraft(draft.retention);
+	const rulesChanged =
+		JSON.stringify(rules) !==
+		JSON.stringify(retentionFromDraft(initial.draft.retention));
+	const retentionFailing = (result?.errors ?? []).some((problem) =>
+		problem.path?.startsWith("spec.retention"),
+	);
+	const preview = useRetentionPreviewState({
+		name: detail?.name,
+		retention: rules,
+		timezone: draft.schedule.timezone || "UTC",
+		enabled: !isNew && !retentionFailing,
+	});
+	const previewPending = !isNew && rulesChanged && rules && !preview.fresh;
+
 	const nameTaken = isNew && result?.name_taken === true;
 	const noHostsPicked =
 		source === "form" && draft.hostMode === "list" && draft.hosts.length === 0;
@@ -238,13 +267,19 @@ export function PolicyEditor({
 		result?.valid === true &&
 		!nameTaken &&
 		!behind &&
+		!previewPending &&
 		!saving;
 
 	function save() {
 		const data: PolicyInput =
 			source === "yaml" ? { yaml } : { policy: policyFromDraft(draft) };
 		const done = (saved: PolicyDetail) => {
-			toast.success(copy.policies.editor.saved(saved.name));
+			toast.success(
+				saved.managed_by
+					? copy.policies.editor.savedManaged(saved.name, saved.managed_by)
+					: copy.policies.editor.saved(saved.name),
+				saved.managed_by ? { duration: 4000 } : undefined,
+			);
 			queryClient.setQueryData(getGetPolicyQueryKey(saved.name), saved);
 			void queryClient.invalidateQueries({
 				queryKey: getListPoliciesQueryKey(),
@@ -276,6 +311,13 @@ export function PolicyEditor({
 		} else create.mutate({ data }, { onSuccess: done });
 	}
 
+	function requestSave() {
+		if (rulesChanged && preview.fresh && preview.data) {
+			if (preview.data.forget >= 1) return setConfirming(preview.data);
+		}
+		save();
+	}
+
 	function discard() {
 		clearTimeout(timer.current);
 		latest.current += 1;
@@ -285,6 +327,8 @@ export function PolicyEditor({
 		setYaml(initial.yaml);
 		setSource("form");
 		setBlocked(false);
+		setFormRefused(false);
+		setCheckFailed(false);
 		setResult(initial.result);
 		setSettled(!isNew);
 		if (isNew) check({ policy: policyFromDraft(initial.draft) });
@@ -299,29 +343,52 @@ export function PolicyEditor({
 	const text = copy.policies;
 	const failure = settled && result && !result.valid ? result : undefined;
 	const yamlProblems = source === "yaml" ? (failure?.errors ?? []) : [];
+	const sync: SyncState = checkFailed
+		? { kind: "failed" }
+		: !settled
+			? { kind: "updating" }
+			: failure
+				? { kind: "errors", count: failure.errors.length }
+				: { kind: "sync" };
+	const formLocked = source === "yaml" && result?.valid === false;
 	const hasLabels = draft.labels.some((label) => label.key !== "");
 
 	return (
-		<div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
-			<div className="flex min-w-0 flex-col gap-6 xl:col-start-1 xl:row-start-1">
-				{(behind || conflict) && changed && detail && (
-					<Alert>
-						<AlertDescription className="flex items-center justify-between gap-4">
-							{text.editor.changedElsewhere}
-							<Button
-								type="button"
-								variant="secondary"
-								size="sm"
-								disabled={!behind}
-								onClick={() => rebase(detail)}
-							>
-								{text.editor.reload}
-							</Button>
-						</AlertDescription>
-					</Alert>
-				)}
-				<Tabs value={tab} onValueChange={changeTab}>
-					<TabsList variant="line">
+		<div className="flex min-w-0 flex-col gap-6">
+			{detail?.managed_by && <ManagedAlert manager={detail.managed_by} />}
+			{(behind || conflict) && changed && detail && (
+				<Alert>
+					<AlertDescription className="flex items-center justify-between gap-4">
+						{text.editor.changedElsewhere}
+						<Button
+							type="button"
+							variant="secondary"
+							size="sm"
+							disabled={!behind}
+							onClick={() => rebase(detail)}
+						>
+							{text.editor.reload}
+						</Button>
+					</AlertDescription>
+				</Alert>
+			)}
+			<MatchingHosts
+				matching={result?.valid ? (result.matching ?? undefined) : undefined}
+				warnings={result?.valid ? result.warnings : []}
+				selectorEmpty={draft.hostMode === "labels" && !hasLabels}
+				notice={noHostsPicked ? text.form.pickAtLeastOne : undefined}
+				invalid={failure !== undefined}
+				refreshing={!settled && !checkFailed}
+				failed={checkFailed}
+				onRetry={() =>
+					check(
+						source === "yaml" ? { yaml } : { policy: policyFromDraft(draft) },
+					)
+				}
+			/>
+			<div className="@container flex flex-col gap-6">
+				<Tabs value={tab} onValueChange={changeTab} className="gap-4">
+					<TabsList variant="line" className="@min-[960px]:hidden">
 						<TabsTrigger value="form" className="after:bg-primary-strong">
 							{text.editor.tabForm}
 						</TabsTrigger>
@@ -329,25 +396,62 @@ export function PolicyEditor({
 							{text.editor.tabYaml}
 						</TabsTrigger>
 					</TabsList>
-					<TabsContent value="form" className="pt-4">
-						<PolicyForm
-							draft={draft}
-							onChange={editForm}
-							problems={problemsByPath(failure?.errors ?? [])}
-							repositories={repositories}
-							nameLocked={!isNew}
-							nameTaken={nameTaken}
-						/>
-					</TabsContent>
-					<TabsContent value="yaml" className="pt-4">
+					<div className="grid items-start gap-6 @min-[960px]:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+						<div
+							role="group"
+							aria-label={text.panes.formAria}
+							className={cn(
+								"min-w-0 @min-[960px]:block",
+								tab === "form" ? "block" : "hidden",
+							)}
+						>
+							<div className="flex flex-col gap-4">
+								{formLocked && (
+									<Alert variant="destructive" role="alert">
+										<AlertDescription>
+											{text.editor.yamlInvalid}
+										</AlertDescription>
+									</Alert>
+								)}
+								<fieldset
+									disabled={formLocked}
+									className={cn("min-w-0", formLocked && "opacity-60")}
+								>
+									<PolicyForm
+										draft={draft}
+										onChange={editForm}
+										problems={problemsByPath(failure?.errors ?? [])}
+										repositories={repositories}
+										nameLocked={!isNew}
+										nameTaken={nameTaken}
+										schedule={result?.valid ? result.schedule : undefined}
+										schedulePending={!settled && !checkFailed}
+										retentionPreview={
+											<RetentionPreview
+												state={preview}
+												isNew={isNew}
+												hasRules={hasRetention(draft.retention)}
+												changed={rulesChanged}
+											/>
+										}
+									/>
+								</fieldset>
+							</div>
+						</div>
 						<PolicyYamlEditor
+							className={cn(
+								"@min-[960px]:flex",
+								tab === "yaml" ? "flex" : "hidden",
+							)}
 							value={yaml}
 							onChange={editYaml}
 							problems={yamlProblems}
 							blocked={blocked}
+							stale={source === "form" && failure !== undefined}
+							sync={sync}
 							textareaRef={yamlField}
 						/>
-					</TabsContent>
+					</div>
 				</Tabs>
 
 				{formRefused && (
@@ -367,51 +471,25 @@ export function PolicyEditor({
 						{text.editor.cannotSave(failure.errors[0]?.message ?? "")}
 					</p>
 				)}
-				<div className="flex gap-2">
-					<Button
-						type="button"
-						variant={isNew || changed ? "default" : "outline"}
-						disabled={!canSave}
-						onClick={save}
-					>
-						{saving && <Spinner />}
-						{text.save}
-					</Button>
-					{changed && (
-						<Button
-							type="button"
-							variant="outline"
-							disabled={saving}
-							onClick={discard}
-						>
-							{text.discard}
-						</Button>
-					)}
-				</div>
 			</div>
+			{children}
+			<EditorFooter
+				dirty={isNew || changed}
+				canSave={canSave}
+				canDiscard={changed}
+				saving={saving}
+				onSave={requestSave}
+				onDiscard={discard}
+			/>
 
-			<div
-				className={cn(
-					"grid min-w-0 items-start gap-6 xl:col-start-2 xl:row-start-1 xl:self-start",
-					children ? "md:grid-cols-2 xl:grid-cols-1" : "xl:sticky xl:top-6",
-				)}
-			>
-				<MatchingHosts
-					matching={result?.valid ? (result.matching ?? undefined) : undefined}
-					warnings={result?.valid ? result.warnings : []}
-					selectorEmpty={draft.hostMode === "labels" && !hasLabels}
-					notice={noHostsPicked ? text.form.pickAtLeastOne : undefined}
-					invalid={failure !== undefined}
-					refreshing={!settled && !checkFailed}
-					failed={checkFailed}
-					onRetry={() =>
-						check(
-							source === "yaml" ? { yaml } : { policy: policyFromDraft(draft) },
-						)
-					}
-				/>
-				{children}
-			</div>
+			<SaveRetentionDialog
+				preview={confirming}
+				onCancel={() => setConfirming(undefined)}
+				onConfirm={() => {
+					setConfirming(undefined);
+					save();
+				}}
+			/>
 
 			<AlertDialog open={blocker.status === "blocked"}>
 				<AlertDialogContent>

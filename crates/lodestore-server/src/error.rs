@@ -10,6 +10,10 @@ pub enum ApiError {
     Unauthorized,
     #[error("forbidden")]
     Forbidden,
+    #[error("The token needs the {0} scope.")]
+    MissingScope(&'static str),
+    #[error("The token needs the {0} scope to {1}.")]
+    MissingScopeFor(&'static str, &'static str),
     #[error("CSRF check failed")]
     Csrf,
     #[error("setup required")]
@@ -44,6 +48,9 @@ impl ApiError {
         match self {
             ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
             ApiError::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
+            ApiError::MissingScope(_) | ApiError::MissingScopeFor(..) => {
+                (StatusCode::FORBIDDEN, "forbidden")
+            }
             ApiError::Csrf => (StatusCode::FORBIDDEN, "csrf"),
             ApiError::SetupRequired => (StatusCode::CONFLICT, "setup_required"),
             ApiError::NotFound(_) => (StatusCode::NOT_FOUND, "not_found"),

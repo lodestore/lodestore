@@ -155,16 +155,17 @@ fn error_reply(code: &str, message: &str) -> Value {
 }
 
 async fn backup(ctx: &JobCtx, stream: &UnixStream, spec: &JobSpec) -> (JobFinished, Value) {
-    let mut writer = match open_writer(ctx.paths()).await {
-        Ok(writer) => writer,
-        Err(e) => {
-            ctx.event(JobEventLevel::Error, "repository_unavailable", b"", "", &e);
-            return (
-                failed("repository_unavailable", &e),
-                error_reply("backup_failed", &e),
-            );
-        }
-    };
+    let mut writer =
+        match open_writer(ctx.paths(), Arc::clone(&ctx.progress_cell().bytes_stored)).await {
+            Ok(writer) => writer,
+            Err(e) => {
+                ctx.event(JobEventLevel::Error, "repository_unavailable", b"", "", &e);
+                return (
+                    failed("repository_unavailable", &e),
+                    error_reply("backup_failed", &e),
+                );
+            }
+        };
     let Ok(inner) = stream.try_clone() else {
         let text = "cannot use the socket";
         return (

@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use serde::Serialize;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -122,6 +123,232 @@ pub enum Command {
         target: PathBuf,
         #[command(flatten)]
         flags: RestoreFlags,
+    },
+    /// Manage a Lodestore server with an API token (LODESTORE_SERVER, LODESTORE_TOKEN)
+    Server {
+        #[command(flatten)]
+        args: ServerArgs,
+        #[command(subcommand)]
+        command: ServerCommand,
+    },
+    /// Apply policy YAML files to a Lodestore server; exits 4 when --dry-run finds changes
+    Apply(ApplyArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ApplyArgs {
+    #[command(flatten)]
+    pub server: ServerArgs,
+    /// A policy file, or a folder searched for *.yaml and *.yml files
+    #[arg(short = 'f', long = "filename", value_name = "PATH")]
+    pub filename: PathBuf,
+    /// Show what would change and change nothing; exits 4 when something would
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Also delete the policies of this manager that the input no longer contains
+    #[arg(long)]
+    pub prune: bool,
+    /// Take over a policy of the same name that was created in the web interface
+    #[arg(long)]
+    pub adopt: bool,
+    /// Name under which the applied policies are tracked
+    #[arg(long, value_name = "NAME", default_value = "lode-apply")]
+    pub manager: String,
+    /// Delete with --prune without asking on a terminal
+    #[arg(long)]
+    pub yes: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ServerArgs {
+    /// Server address, for example https://lodestore.example.com. Falls back to
+    /// LODESTORE_SERVER, then to the server of --profile. The API token is read from
+    /// LODESTORE_TOKEN, then from the token of --profile
+    #[arg(long, global = true, value_name = "URL")]
+    pub server: Option<String>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ServerCommand {
+    /// List hosts, show one, or set its labels
+    Hosts {
+        #[command(subcommand)]
+        command: HostsCommand,
+    },
+    /// List, show, delete and run backup policies
+    Policies {
+        #[command(subcommand)]
+        command: PoliciesCommand,
+    },
+    /// List jobs, read their logs, run, cancel and repeat them
+    Jobs {
+        #[command(subcommand)]
+        command: JobsCommand,
+    },
+    /// List the snapshots the server knows
+    Snapshots {
+        #[command(subcommand)]
+        command: ServerSnapshotsCommand,
+    },
+    /// Restore a snapshot to a host through the server
+    Restore(ServerRestoreArgs),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ServerSnapshotsCommand {
+    /// List the snapshots of a host, newest first
+    List {
+        /// Host id or hostname
+        #[arg(long, value_name = "HOST")]
+        host: String,
+        /// Stop after this many snapshots
+        #[arg(long, value_name = "N")]
+        limit: Option<usize>,
+    },
+    /// Mark a snapshot as suspicious; retention then neither counts nor forgets it
+    Mark {
+        /// Full snapshot id
+        id: String,
+        /// Why the snapshot looks suspicious (up to 200 characters)
+        #[arg(long, value_name = "TEXT")]
+        reason: String,
+    },
+    /// Clear the suspicious mark of a snapshot
+    Clear {
+        /// Full snapshot id
+        id: String,
+        /// Why the snapshot is fine (up to 200 characters)
+        #[arg(long, value_name = "TEXT")]
+        reason: String,
+    },
+    /// Delete a snapshot from the repository and the catalog; needs the snapshots:delete scope
+    Delete {
+        /// Full snapshot id
+        id: String,
+        /// Delete without asking
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConflictArg {
+    OverwriteChanged,
+    SkipExisting,
+    StopIfNotEmpty,
+}
+
+#[derive(Debug, Args)]
+pub struct ServerRestoreArgs {
+    /// Full snapshot id
+    pub snapshot: String,
+    /// Host id or hostname to restore to
+    #[arg(long, value_name = "HOST")]
+    pub host: String,
+    /// Restore only this absolute path of the snapshot; may be repeated
+    #[arg(long, value_name = "PATH")]
+    pub path: Vec<String>,
+    /// Folder on the host to restore into (default /var/lodestore/restore/<date>-<id>)
+    #[arg(long, value_name = "DIR", conflicts_with = "in_place")]
+    pub target: Option<String>,
+    /// Restore over the original files; needs --yes
+    #[arg(long)]
+    pub in_place: bool,
+    /// Confirm --in-place
+    #[arg(long)]
+    pub yes: bool,
+    /// What to do with a file that already exists
+    #[arg(long, value_enum, default_value = "overwrite-changed")]
+    pub conflict: ConflictArg,
+    /// Do not restore file owners
+    #[arg(long)]
+    pub no_owners: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PoliciesCommand {
+    /// List all policies
+    List,
+    /// Print the YAML of a policy
+    Get { name: String },
+    /// Delete a policy; its snapshots stay in the repository
+    Delete {
+        name: String,
+        /// Delete without asking
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Queue a job on every host the policy selects
+    Run { name: String },
+    /// Show which snapshots the saved retention rules would forget; deletes nothing
+    Retention { name: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum JobsCommand {
+    /// List jobs, active ones first
+    List {
+        /// queued, running, succeeded, warnings, failed, cancelled, interrupted or not_started
+        #[arg(long, value_name = "STATE")]
+        state: Option<String>,
+        /// Only jobs of this policy
+        #[arg(long, value_name = "NAME")]
+        policy: Option<String>,
+        /// Only jobs of this host, by id or hostname
+        #[arg(long, value_name = "HOST")]
+        host: Option<String>,
+        /// backup, restore or download
+        #[arg(long, value_name = "KIND")]
+        kind: Option<String>,
+        /// One-based page number
+        #[arg(long, value_name = "N")]
+        page: Option<u64>,
+    },
+    /// Show one job
+    Show { id: String },
+    /// Print the log events of a job
+    Logs {
+        id: String,
+        /// Keep printing new events until the job finishes
+        #[arg(long)]
+        follow: bool,
+    },
+    /// Queue policies on one host; all policies that apply when none is named
+    Run {
+        /// Host id or hostname
+        #[arg(long, value_name = "HOST")]
+        host: String,
+        /// Policy to run; may be repeated
+        #[arg(long, value_name = "NAME")]
+        policy: Vec<String>,
+    },
+    /// Cancel a queued or running job
+    Cancel { id: String },
+    /// Queue the same policy on the same host again
+    Rerun { id: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum HostsCommand {
+    /// List all hosts
+    List,
+    /// Show one host
+    Show {
+        /// Host id or hostname
+        #[arg(value_name = "HOST")]
+        id: String,
+    },
+    /// Replace all labels of a host
+    Label {
+        /// Host id or hostname
+        #[arg(value_name = "HOST")]
+        id: String,
+        #[arg(value_name = "KEY=VALUE", required_unless_present = "clear")]
+        labels: Vec<String>,
+        /// Remove all labels
+        #[arg(long, conflicts_with = "labels")]
+        clear: bool,
     },
 }
 

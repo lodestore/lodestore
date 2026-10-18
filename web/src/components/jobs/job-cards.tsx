@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import { Copy } from "lucide-react";
+import { Copy, ShieldAlert, TriangleAlert } from "lucide-react";
 import type { ReactNode } from "react";
 import { toast } from "sonner";
 import type { JobDetail } from "@/api/gen/model";
@@ -8,9 +8,19 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+	Tooltip,
+	TooltipContent,
+	TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { copy } from "@/copy";
 import { copyText } from "@/lib/clipboard";
-import { formatBytes, formatCount, formatDuration } from "@/lib/format";
+import {
+	formatBytes,
+	formatCount,
+	formatDuration,
+	formatRate,
+} from "@/lib/format";
 import { itemCount } from "@/lib/plural";
 import { shortId } from "@/lib/snapshot";
 
@@ -117,10 +127,80 @@ function SnapshotLink({ host, id }: { host: string; id: string }) {
 	);
 }
 
-const sourceText = (job: JobDetail) =>
-	job.source === "cli"
-		? copy.jobs.cards.sourceCli(job.caller_uid ?? 0)
-		: copy.jobs.cards.sourceRunNow;
+function sourceText(job: JobDetail) {
+	const c = copy.jobs.cards;
+	if (job.source === "cli") return c.sourceCli(job.caller_uid ?? 0);
+	switch (job.origin) {
+		case "schedule":
+			return c.sourceSchedule;
+		case "catchup":
+			return c.sourceCatchup;
+		default:
+			return c.sourceRunNow;
+	}
+}
+
+function limitsText(job: JobDetail) {
+	const c = copy.jobs.cards;
+	const limits = job.limits;
+	if (!limits) return null;
+	const parts = [
+		limits.upload_rate_bps
+			? c.limitUpload(formatRate(limits.upload_rate_bps))
+			: "",
+		limits.nice != null ? c.limitNice(limits.nice) : "",
+		limits.ionice_class
+			? c.limitIo(
+					c.ioClass[limits.ionice_class as keyof typeof c.ioClass] ??
+						limits.ionice_class,
+				)
+			: "",
+	].filter(Boolean);
+	return parts.length > 0 ? parts.join(" · ") : null;
+}
+
+function SuspiciousChip() {
+	return (
+		<Badge variant="outline" className="text-warning" data-status="suspicious">
+			<ShieldAlert aria-hidden />
+			{copy.jobs.cards.suspiciousBadge}
+		</Badge>
+	);
+}
+
+function retentionValue(job: JobDetail) {
+	const c = copy.jobs.cards;
+	const r = job.retention;
+	if (!r || r.state !== "done") return null;
+	const forgot = r.forgot ?? 0;
+	const blocked = r.blocked ?? [];
+	if (blocked.length > 0) {
+		const reasons = [...new Set(blocked.map((b) => b.reason))];
+		return (
+			<Tooltip>
+				<TooltipTrigger asChild>
+					<span tabIndex={0} className="inline-flex items-center gap-2">
+						<TriangleAlert
+							aria-hidden
+							className="size-4 shrink-0 text-warning"
+						/>
+						{c.retentionBlocked(forgot, blocked.length)}
+					</span>
+				</TooltipTrigger>
+				<TooltipContent className="flex flex-col gap-1">
+					{reasons.map((reason) => (
+						<span key={reason}>
+							<TextWithPaths text={reason} />
+						</span>
+					))}
+				</TooltipContent>
+			</Tooltip>
+		);
+	}
+	return forgot === 0
+		? c.retentionNothing
+		: c.retentionForgot(forgot, r.kept ?? 0);
+}
 
 function policyValue(job: JobDetail) {
 	if (job.source === "cli" || !job.policy_name) return null;
@@ -226,6 +306,7 @@ function JobCard({ job }: { job: JobDetail }) {
 	if (job.kind === "download") return <DownloadJobCard job={job} />;
 	const c = copy.jobs.cards;
 	const took = tookText(job);
+	const limits = limitsText(job);
 	return (
 		<Facts
 			title={c.job}
@@ -243,6 +324,7 @@ function JobCard({ job }: { job: JobDetail }) {
 				],
 				[c.policy, policyValue(job)],
 				[c.source, sourceText(job)],
+				...(limits ? [[c.limits, limits] as Fact] : []),
 				[c.queued, dateTime(job.queued_at)],
 				[c.started, dateTime(job.started_at)],
 				[c.finished, dateTime(job.finished_at)],
@@ -260,6 +342,7 @@ function ResultCard({ job }: { job: JobDetail }) {
 			(stats.files_changed ?? 0) +
 			(stats.files_unchanged ?? 0)
 		: null;
+	const retention = retentionValue(job);
 	return (
 		<Facts
 			title={c.result}
@@ -274,6 +357,7 @@ function ResultCard({ job }: { job: JobDetail }) {
 									{c.incompleteBadge}
 								</Badge>
 							)}
+							{job.snapshot_suspicious && <SuspiciousChip />}
 							<Link
 								to="/hosts/$id"
 								params={{ id: job.host_id }}
@@ -305,6 +389,7 @@ function ResultCard({ job }: { job: JobDetail }) {
 						)
 					) : null,
 				],
+				...(retention ? [[c.retention, retention] as Fact] : []),
 			]}
 		/>
 	);
@@ -454,6 +539,20 @@ export function JobCards({ job }: { job: JobDetail }) {
 							{copy.jobs.cards.incomplete}
 						</p>
 					)}
+					{job.kind === "backup" &&
+						job.snapshot_suspicious &&
+						job.snapshot_id && (
+							<p className="text-sm text-muted-foreground">
+								{copy.jobs.cards.suspiciousNote}{" "}
+								<Link
+									to="/restore"
+									search={{ host: job.host_id, snapshot: job.snapshot_id }}
+									className="rounded-sm text-primary-strong"
+								>
+									{copy.jobs.cards.reviewSnapshot}
+								</Link>
+							</p>
+						)}
 				</div>
 			)}
 			{text !== null && (

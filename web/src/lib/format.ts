@@ -118,3 +118,61 @@ export function percent(progress: {
 	if (total <= 0) return 0;
 	return Math.min(100, Math.max(0, Math.round((done / total) * 100)));
 }
+
+export function formatDurationShort(seconds: number) {
+	for (const [unit, size] of [
+		["d", 86_400],
+		["h", 3_600],
+		["m", 60],
+	] as const) {
+		if (seconds >= size && seconds % size === 0)
+			return `${seconds / size}${unit}`;
+	}
+	return `${seconds}s`;
+}
+
+const slotFormats = new Map<string, Intl.DateTimeFormat>();
+
+function slotFormat(timeZone: string) {
+	let format = slotFormats.get(timeZone);
+	if (!format) {
+		const options: Intl.DateTimeFormatOptions = {
+			weekday: "short",
+			day: "numeric",
+			month: "short",
+			hour: "2-digit",
+			minute: "2-digit",
+			hourCycle: "h23",
+		};
+		try {
+			format = new Intl.DateTimeFormat("en", { ...options, timeZone });
+		} catch {
+			format = new Intl.DateTimeFormat("en", { ...options, timeZone: "UTC" });
+		}
+		slotFormats.set(timeZone, format);
+	}
+	return format;
+}
+
+const partOf = (parts: Intl.DateTimeFormatPart[], type: string) =>
+	parts.find((p) => p.type === type)?.value ?? "";
+
+/** `Mon 20 Oct, 02:30` in the given zone. */
+export function formatSlot(ms: number, timeZone: string) {
+	const parts = slotFormat(timeZone).formatToParts(ms);
+	const [weekday, day, month, hour, minute] = [
+		"weekday",
+		"day",
+		"month",
+		"hour",
+		"minute",
+	].map((type) => partOf(parts, type));
+	return `${weekday} ${day} ${month}, ${hour}:${minute}`;
+}
+
+/** `Sun 25 Oct` for a calendar date such as `2026-10-25`. */
+export function formatCalendarDay(isoDate: string) {
+	const [year, month, day] = isoDate.split("-").map(Number);
+	const parts = slotFormat("UTC").formatToParts(Date.UTC(year, month - 1, day));
+	return `${partOf(parts, "weekday")} ${partOf(parts, "day")} ${partOf(parts, "month")}`;
+}

@@ -14,6 +14,7 @@ pub struct LiveProgress {
     pub bytes_downloaded: u64,
     pub scan_done: bool,
     pub speed_bps: u64,
+    pub upload_speed_bps: u64,
     pub eta_s: Option<u64>,
     pub updated_at: i64,
 }

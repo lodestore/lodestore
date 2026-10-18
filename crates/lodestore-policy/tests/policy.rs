@@ -1,4 +1,6 @@
-use lodestore_policy::{BackupPolicy, Problem, Selector, parse_yaml, to_yaml, validate};
+use lodestore_policy::{
+    BackupPolicy, IoniceClass, Problem, Selector, parse_yaml, to_yaml, validate,
+};
 
 const QUICKSTART: &str = r#"apiVersion: lodestore.io/v1alpha1
 kind: BackupPolicy
@@ -20,6 +22,214 @@ fn doc(spec: &str) -> String {
     format!(
         "apiVersion: lodestore.io/v1alpha1\nkind: BackupPolicy\nmetadata:\n  name: p\nspec:\n  repository: main\n{spec}"
     )
+}
+
+const FULL: &str = "  paths: [/etc]
+  schedule:
+    cron: 30 2 * * *
+    timezone: Europe/Kyiv
+    jitter: 10m
+    catchUpWindow: 12h
+  retention:
+    keepLast: 3
+    keepWithin: 7d
+    keepDaily: 7
+    keepWeekly: 4
+    keepMonthly: 6
+  limits:
+    uploadRate: 50MiB/s
+    nice: 10
+    ioniceClass: best-effort
+    ioniceLevel: 4
+";
+
+fn with_paths(tail: &str) -> String {
+    doc(&format!("  paths: [/etc]\n{tail}"))
+}
+
+fn check(tail: &str, path: &str, message: &str) {
+    let found = parse_yaml(&with_paths(tail)).expect_err(tail);
+    assert_eq!(found.len(), 1, "{tail}: {found:?}");
+    assert_eq!(found[0].path.as_deref(), Some(path), "{tail}");
+    assert_eq!(found[0].message, message, "{tail}");
+}
+
+fn accepted(tail: &str) {
+    if let Err(found) = parse_yaml(&with_paths(tail)) {
+        panic!("{tail}: {found:?}");
+    }
+}
+
+#[test]
+fn policy_schedule_roundtrip() {
+    let policy = parse_yaml(&doc(FULL)).expect("parses");
+    let schedule = policy.spec.schedule.as_ref().unwrap();
+    assert_eq!(schedule.cron, "30 2 * * *");
+    assert_eq!(schedule.timezone.as_deref(), Some("Europe/Kyiv"));
+    assert_eq!(
+        policy.spec.retention.as_ref().unwrap().keep_monthly,
+        Some(6)
+    );
+    assert_eq!(
+        policy.spec.limits.as_ref().unwrap().ionice_class,
+        Some(IoniceClass::BestEffort)
+    );
+    let text = to_yaml(&policy);
+    assert!(text.contains("ioniceClass: best-effort"), "{text}");
+    let again = parse_yaml(&text).expect("canonical text parses");
+    assert_eq!(again, policy);
+    assert_eq!(to_yaml(&again), text);
+}
+
+#[test]
+fn policy_legacy_yaml_unchanged() {
+    let policy = parse_yaml(QUICKSTART).unwrap();
+    assert!(policy.spec.schedule.is_none());
+    assert!(policy.spec.retention.is_none());
+    assert!(policy.spec.limits.is_none());
+    assert_eq!(to_yaml(&policy), QUICKSTART);
+    let minimal = parse_yaml(&with_paths("  schedule:\n    cron: '@daily'\n")).unwrap();
+    let schedule = minimal.spec.schedule.unwrap().compile().unwrap();
+    assert_eq!(schedule.timezone_name(), "UTC");
+    assert_eq!(schedule.jitter().as_secs(), 15 * 60);
+    assert_eq!(schedule.catch_up_window().as_secs(), 24 * 3600);
+}
+
+#[test]
+fn policy_schedule_validation() {
+    const FIVE: &str =
+        "Use five fields (minute hour day month weekday) or @hourly, @daily, @weekly, @monthly.";
+    const DURATION: &str = "Use a duration such as 15m, 24h, 30d or 1y.";
+    let sched = |lines: &str| format!("  schedule:\n{lines}");
+    check(
+        &sched("    cron: 0 30 2 * * *\n"),
+        "spec.schedule.cron",
+        FIVE,
+    );
+    check(
+        &sched("    cron: 0 0 30 2 * * 2026\n"),
+        "spec.schedule.cron",
+        FIVE,
+    );
+    check(&sched("    cron: '@never'\n"), "spec.schedule.cron", FIVE);
+    check(&sched("    cron: ''\n"), "spec.schedule.cron", FIVE);
+    check(
+        &sched("    cron: '@daily'\n    timezone: Mars/Olympus\n"),
+        "spec.schedule.timezone",
+        "Unknown time zone \"Mars/Olympus\". Use a name such as Europe/Kyiv.",
+    );
+    for (field, value) in [
+        ("jitter", "15x"),
+        ("jitter", "25h"),
+        ("jitter", "-5m"),
+        ("catchUpWindow", "31d"),
+        ("catchUpWindow", "30s"),
+        ("catchUpWindow", "0m"),
+    ] {
+        check(
+            &sched(&format!("    cron: '@daily'\n    {field}: {value}\n")),
+            &format!("spec.schedule.{field}"),
+            DURATION,
+        );
+    }
+    for ok in [
+        "jitter: 0s",
+        "jitter: 24h",
+        "catchUpWindow: 1m",
+        "catchUpWindow: 30d",
+    ] {
+        accepted(&sched(&format!("    cron: '@daily'\n    {ok}\n")));
+    }
+    for alias in ["@hourly", "@daily", "@weekly", "@monthly"] {
+        accepted(&sched(&format!("    cron: '{alias}'\n")));
+    }
+}
+
+#[test]
+fn policy_limits_bounds() {
+    const NICE: &str = "Enter a whole number from 0 to 19.";
+    const LEVEL: &str = "Enter a whole number from 0 to 7.";
+    const CLASS: &str = "Set ioniceClass to best-effort to use a level.";
+    const RATE: &str = "Use a rate such as 50MiB/s or 800KiB/s.";
+    let limits = |lines: &str| format!("  limits:\n{lines}");
+    for ok in ["0", "19"] {
+        accepted(&limits(&format!("    nice: {ok}\n")));
+    }
+    for bad in ["20", "-1"] {
+        check(
+            &limits(&format!("    nice: {bad}\n")),
+            "spec.limits.nice",
+            NICE,
+        );
+    }
+    for ok in [0, 7] {
+        accepted(&limits(&format!(
+            "    ioniceClass: best-effort\n    ioniceLevel: {ok}\n"
+        )));
+    }
+    check(
+        &limits("    ioniceClass: best-effort\n    ioniceLevel: 8\n"),
+        "spec.limits.ioniceLevel",
+        LEVEL,
+    );
+    check(
+        &limits("    ioniceLevel: 3\n"),
+        "spec.limits.ioniceLevel",
+        CLASS,
+    );
+    check(
+        &limits("    ioniceClass: idle\n    ioniceLevel: 3\n"),
+        "spec.limits.ioniceLevel",
+        CLASS,
+    );
+    accepted(&limits("    ioniceClass: idle\n"));
+    for bad in [
+        "1023B/s", "0B/s", "50MB/s", "50MiB", "MiB/s", "-1KiB/s", "1.5MiB/s", "",
+    ] {
+        check(
+            &limits(&format!("    uploadRate: '{bad}'\n")),
+            "spec.limits.uploadRate",
+            RATE,
+        );
+    }
+    for ok in ["1KiB/s", "800KiB/s", "50MiB/s", "1GiB/s", "1024B/s"] {
+        accepted(&limits(&format!("    uploadRate: {ok}\n")));
+    }
+    assert!(parse_yaml(&with_paths("  limits:\n    ioniceClass: realtime\n")).is_err());
+}
+
+#[test]
+fn policy_retention_counts() {
+    const COUNT: &str = "Enter a whole number of 1 or more.";
+    const DURATION: &str = "Use a duration such as 15m, 24h, 30d or 1y.";
+    let ret = |lines: &str| format!("  retention:\n{lines}");
+    for field in ["keepLast", "keepDaily", "keepWeekly", "keepMonthly"] {
+        for bad in ["0", "-3"] {
+            check(
+                &ret(&format!("    {field}: {bad}\n")),
+                &format!("spec.retention.{field}"),
+                COUNT,
+            );
+        }
+        accepted(&ret(&format!("    {field}: 1\n")));
+    }
+    for bad in ["0s", "59s", "1x", "abc"] {
+        check(
+            &ret(&format!("    keepWithin: {bad}\n")),
+            "spec.retention.keepWithin",
+            DURATION,
+        );
+    }
+    for ok in ["1m", "30d", "2y", "4w"] {
+        accepted(&ret(&format!("    keepWithin: {ok}\n")));
+    }
+}
+
+#[test]
+fn policy_unknown_field_in_schedule() {
+    let p = first_problem(&with_paths("  schedule:\n    crn: '@daily'\n"));
+    assert_eq!(p.line, Some(9));
+    assert!(p.message.contains("unknown field `crn`"), "{}", p.message);
 }
 
 fn first_problem(text: &str) -> Problem {
@@ -50,12 +260,12 @@ fn policy_quickstart_roundtrip() {
 
 #[test]
 fn policy_unknown_field_has_location() {
-    let p = first_problem(&doc("  paths: [/etc]\n  schedule: daily\n"));
+    let p = first_problem(&doc("  paths: [/etc]\n  retries: 3\n"));
     assert_eq!(p.line, Some(8));
     assert!(p.column.is_some());
     assert_eq!(p.path.as_deref(), Some("spec"));
     assert!(
-        p.message.contains("unknown field `schedule`"),
+        p.message.contains("unknown field `retries`"),
         "{}",
         p.message
     );

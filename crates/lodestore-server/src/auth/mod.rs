@@ -1,5 +1,6 @@
 pub mod limits;
 pub mod setup;
+pub mod tokens;
 
 use std::net::SocketAddr;
 use std::sync::LazyLock;
@@ -163,6 +164,11 @@ pub async fn bootstrap_admin(state: &AppState) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub(crate) fn bearer_secret(headers: &HeaderMap) -> Option<&str> {
+    let (scheme, secret) = headers.get(AUTHORIZATION)?.to_str().ok()?.split_once(' ')?;
+    scheme.eq_ignore_ascii_case("Bearer").then_some(secret)
+}
+
 async fn unauthenticated(state: &AppState) -> ApiError {
     match admin_count(state).await {
         Ok(0) => ApiError::SetupRequired,
@@ -175,12 +181,7 @@ impl FromRequestParts<AppState> for AuthUser {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
-        let bearer = parts
-            .headers
-            .get(AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| v.starts_with("Bearer "));
-        if bearer {
+        if bearer_secret(&parts.headers).is_some() {
             return Err(unauthenticated(state).await);
         }
         let jar = CookieJar::from_headers(&parts.headers);
@@ -402,6 +403,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(logout))
         .routes(routes!(session))
         .merge(setup::routes())
+        .merge(tokens::routes())
 }
 
 #[cfg(test)]

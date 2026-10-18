@@ -181,6 +181,29 @@ describe("JobsTable", () => {
 		expect(bad.queryByText(/second line/)).toBeNull();
 	});
 
+	it("jobs table origin suffix and suspicious icon", async () => {
+		renderTable({
+			jobs: [
+				job({ id: "sch", origin: "schedule" }),
+				job({ id: "cu", origin: "catchup" }),
+				job({ id: "man", origin: "manual" }),
+				job({ id: "sus", snapshot_suspicious: true }),
+			],
+		});
+		expect(
+			within(await rowOf("sch")).getByText("Policy etc-and-home · Scheduled"),
+		).toBeInTheDocument();
+		expect(
+			within(await rowOf("cu")).getByText("Policy etc-and-home · Catch-up"),
+		).toBeInTheDocument();
+		const man = within(await rowOf("man"));
+		expect(man.getByText("Policy etc-and-home")).toBeInTheDocument();
+		expect(man.queryByText("Suspicious snapshot")).toBeNull();
+		const sus = within(await rowOf("sus"));
+		expect(sus.getByText("Suspicious snapshot")).toHaveClass("sr-only");
+		expect(sus.getByText("2 MiB · 1,250 files")).toBeInTheDocument();
+	});
+
 	it("shows a CLI badge instead of a policy line for command-line jobs", async () => {
 		renderTable({
 			jobs: [job({ id: "cli", source: "cli", policy_name: null })],

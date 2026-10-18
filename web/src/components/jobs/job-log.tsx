@@ -64,6 +64,11 @@ const KIND_LABEL: Record<string, string> = {
 	restore_integrity: copy.jobs.log.warningKind.restore_integrity,
 	plan_restarted: copy.jobs.log.warningKind.plan_restarted,
 	restore_entry_failed: copy.jobs.log.warningKind.restore_entry_failed,
+	snapshot_forgotten: copy.jobs.log.warningKind.snapshot_forgotten,
+	forget_blocked: copy.jobs.log.warningKind.forget_blocked,
+	suspicious_snapshot: copy.jobs.log.warningKind.suspicious_snapshot,
+	catch_up: copy.jobs.log.warningKind.catch_up,
+	limits_ignored: copy.jobs.log.warningKind.limits_ignored,
 };
 
 type Row =
@@ -73,7 +78,9 @@ type Row =
 function mergeEvents(known: JobEventDto[], incoming: JobEventDto[]) {
 	const seen = new Set(known.map((e) => e.seq));
 	const fresh = incoming.filter((e) => !seen.has(e.seq));
-	return fresh.length === 0 ? known : [...known, ...fresh];
+	return fresh.length === 0
+		? known
+		: [...known, ...fresh].sort((a, b) => a.seq - b.seq);
 }
 
 function toRows(events: JobEventDto[]) {

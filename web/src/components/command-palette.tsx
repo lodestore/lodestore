@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { type NavigateOptions, useNavigate } from "@tanstack/react-router";
 import {
+	KeyRound,
 	LogOut,
 	Monitor,
 	Moon,
@@ -29,6 +30,15 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { copy } from "@/copy";
 import { repositoriesQuery } from "@/lib/session";
 import { useSignOut } from "@/lib/sign-out";
+
+const EXTRA_PAGES: typeof NAV_ITEMS = [
+	{
+		label: copy.tokens.title,
+		to: "/settings/tokens",
+		icon: KeyRound,
+		group: copy.shell.groups.system,
+	},
+];
 
 const normalize = (value: string) => value.trim().toLocaleLowerCase();
 
@@ -171,7 +181,7 @@ function PaletteBody({
 			void navigate(options);
 		});
 
-	const pages = NAV_ITEMS.filter(({ label, pageLabel }) =>
+	const pages = [...NAV_ITEMS, ...EXTRA_PAGES].filter(({ label, pageLabel }) =>
 		[label, pageLabel].some((name) => normalize(name ?? "").includes(query)),
 	);
 	const hosts = matchHosts(hostsResult.data ?? [], query);
@@ -201,6 +211,11 @@ function PaletteBody({
 			label: copy.palette.createPolicy,
 			icon: ShieldCheck,
 			run: go({ to: "/policies/new" }),
+		},
+		{
+			label: copy.palette.createApiToken,
+			icon: KeyRound,
+			run: go({ to: "/settings/tokens", search: { create: true } }),
 		},
 		{
 			label: copy.palette.lightTheme,

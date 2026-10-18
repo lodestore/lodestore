@@ -10,6 +10,8 @@ use lodestore_format::store::{LocalFsStore, put_named};
 use lodestore_format::writer::{BackupOptions, Writer};
 use lodestore_server::catalog::{JobLink, ingest_snapshot};
 use serde_json::{Value, json};
+use sqlx::Row;
+use std::time::{Duration, UNIX_EPOCH};
 
 const PASSWORD: &[u8] = b"test-password";
 
@@ -361,6 +363,317 @@ async fn catalog_skips_unreadable_objects() {
         assert_eq!(report["added"], 1, "[{}]", backend.name());
         assert_eq!(report["skipped"], 2);
         assert_eq!(host_snapshots(&api, &host).await.len(), 1);
+        ts.stop().await;
+    }
+}
+
+const PAST_MS: i64 = 1_767_323_045_000;
+
+fn set_mtime(ts: &TestServer, name: &str, id: &str, ms: i64) {
+    let path = ts.local_repo_root(name).join("snapshots").join(id);
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(UNIX_EPOCH + Duration::from_millis(u64::try_from(ms).unwrap()))
+        .unwrap();
+}
+
+async fn row_times(ts: &TestServer, id: &str) -> (i64, i64, i64) {
+    let row =
+        sqlx::query("SELECT time_ms, received_at, received_exact FROM snapshots WHERE id = $1")
+            .bind(id)
+            .fetch_one(&ts.state().db.pool)
+            .await
+            .unwrap();
+    (
+        row.try_get("time_ms").unwrap(),
+        row.try_get("received_at").unwrap(),
+        row.try_get("received_exact").unwrap(),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn catalog_received_from_mtime() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let id = write_snapshot(&ts, "main", "host-a", &[]).await;
+        set_mtime(&ts, "main", &id, PAST_MS);
+
+        sync(&api, &repo).await;
+
+        let (time_ms, received_at, exact) = row_times(&ts, &id).await;
+        assert_eq!(received_at, PAST_MS, "[{}]", backend.name());
+        assert_eq!(exact, 1);
+        assert_ne!(time_ms, PAST_MS);
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn catalog_received_ignores_manifest_time() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let original = write_snapshot(&ts, "main", "host-a", &[]).await;
+        let forged = forge_snapshot(&ts, "main", &original, |s| {
+            s.time = Some(lodestore_format::pb::Timestamp {
+                seconds: 4_102_444_800,
+                nanos: 0,
+            });
+        })
+        .await;
+        set_mtime(&ts, "main", &forged, PAST_MS);
+
+        sync(&api, &repo).await;
+
+        let (time_ms, received_at, exact) = row_times(&ts, &forged).await;
+        assert_eq!(time_ms, 4_102_444_800_000, "[{}]", backend.name());
+        assert_eq!(received_at, PAST_MS);
+        assert_eq!(exact, 1);
+        ts.stop().await;
+    }
+}
+
+async fn snapshot_count(ts: &TestServer) -> i64 {
+    sqlx::query("SELECT COUNT(*) AS n FROM snapshots")
+        .fetch_one(&ts.state().db.pool)
+        .await
+        .unwrap()
+        .try_get("n")
+        .unwrap()
+}
+
+async fn exec(ts: &TestServer, sql: &'static str, binds: &[&str]) {
+    let mut query = sqlx::query(sql);
+    for bind in binds {
+        query = query.bind(*bind);
+    }
+    query.execute(&ts.state().db.pool).await.unwrap();
+}
+
+fn remove_object(ts: &TestServer, name: &str, id: &str) {
+    std::fs::remove_file(ts.local_repo_root(name).join("snapshots").join(id)).unwrap();
+}
+
+async fn last_error(ts: &TestServer) -> Option<String> {
+    sqlx::query("SELECT last_error FROM catalog_state")
+        .fetch_one(&ts.state().db.pool)
+        .await
+        .unwrap()
+        .try_get("last_error")
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn catalog_received_inexact_fixed_by_sync() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let id = write_snapshot(&ts, "main", "host-a", &[]).await;
+        sync(&api, &repo).await;
+        exec(
+            &ts,
+            "UPDATE snapshots SET received_at = discovered_at, received_exact = 0",
+            &[],
+        )
+        .await;
+        set_mtime(&ts, "main", &id, PAST_MS);
+
+        sync(&api, &repo).await;
+
+        let (_, received_at, exact) = row_times(&ts, &id).await;
+        assert_eq!(received_at, PAST_MS, "[{}]", backend.name());
+        assert_eq!(exact, 1);
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn catalog_vanished_row_removed() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let id = write_snapshot(&ts, "main", "host-a", &[]).await;
+        write_snapshot(&ts, "main", "host-b", &[]).await;
+        sync(&api, &repo).await;
+        assert_eq!(snapshot_count(&ts).await, 2);
+        exec(&ts, "UPDATE snapshots SET received_at = 1000", &[]).await;
+        remove_object(&ts, "main", &id);
+
+        let report = sync(&api, &repo).await;
+
+        assert_eq!(snapshot_count(&ts).await, 1, "[{}]", backend.name());
+        assert_eq!(report["total"], 1);
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn catalog_vanished_guard_empty_listing() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let id = write_snapshot(&ts, "main", "host-a", &[]).await;
+        sync(&api, &repo).await;
+        exec(&ts, "UPDATE snapshots SET received_at = 1000", &[]).await;
+        remove_object(&ts, "main", &id);
+
+        sync(&api, &repo).await;
+
+        assert_eq!(snapshot_count(&ts).await, 1, "[{}]", backend.name());
+        let error = last_error(&ts).await.expect("the guard leaves an error");
+        assert!(error.contains("listing is empty"), "{error}");
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn catalog_vanished_keeps_suspicious_mark() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let id = write_snapshot(&ts, "main", "host-a", &[]).await;
+        write_snapshot(&ts, "main", "host-b", &[]).await;
+        sync(&api, &repo).await;
+        exec(&ts, "UPDATE snapshots SET received_at = 1000", &[]).await;
+        exec(
+            &ts,
+            "UPDATE snapshots SET suspicious = 1 WHERE id = $1",
+            &[&id],
+        )
+        .await;
+        remove_object(&ts, "main", &id);
+
+        sync(&api, &repo).await;
+
+        let kept: i64 = sqlx::query("SELECT COUNT(*) AS n FROM snapshots WHERE suspicious = 1")
+            .fetch_one(&ts.state().db.pool)
+            .await
+            .unwrap()
+            .try_get("n")
+            .unwrap();
+        assert_eq!(kept, 1, "[{}]", backend.name());
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn catalog_vanished_grace_keeps_new() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let id = write_snapshot(&ts, "main", "host-a", &[]).await;
+        sync(&api, &repo).await;
+        remove_object(&ts, "main", &id);
+
+        sync(&api, &repo).await;
+
+        assert_eq!(snapshot_count(&ts).await, 1, "[{}]", backend.name());
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn catalog_vanished_guard_mass() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let original = write_snapshot(&ts, "main", "host-a", &[]).await;
+        let mut ids = vec![original.clone()];
+        for n in 0..11 {
+            ids.push(
+                forge_snapshot(&ts, "main", &original, |s| s.tags = vec![format!("n={n}")]).await,
+            );
+        }
+        sync(&api, &repo).await;
+        assert_eq!(snapshot_count(&ts).await, 12, "[{}]", backend.name());
+        exec(&ts, "UPDATE snapshots SET received_at = 1000", &[]).await;
+        for id in &ids[..7] {
+            remove_object(&ts, "main", id);
+        }
+
+        sync(&api, &repo).await;
+
+        assert_eq!(snapshot_count(&ts).await, 12);
+        let error = last_error(&ts).await.expect("the guard leaves an error");
+        assert!(error.contains("missing 7 of 12"), "{error}");
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn catalog_tombstone_not_resurrected() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let id = write_snapshot(&ts, "main", "host-a", &[]).await;
+        sync(&api, &repo).await;
+        exec(&ts, "DELETE FROM snapshots", &[]).await;
+        exec(
+            &ts,
+            "INSERT INTO snapshot_tombstones (id, repository_id, forgotten_at, reason) \
+             VALUES ($1, $2, 9999999999999, 'denied')",
+            &[&id, &repo],
+        )
+        .await;
+
+        let report = sync(&api, &repo).await;
+        assert_eq!(report["added"], 0, "[{}]", backend.name());
+        assert_eq!(snapshot_count(&ts).await, 0);
+
+        remove_object(&ts, "main", &id);
+        sync(&api, &repo).await;
+        let left: i64 = sqlx::query("SELECT COUNT(*) AS n FROM snapshot_tombstones")
+            .fetch_one(&ts.state().db.pool)
+            .await
+            .unwrap()
+            .try_get("n")
+            .unwrap();
+        assert_eq!(left, 0);
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn catalog_tombstone_delete_retried() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let id = write_snapshot(&ts, "main", "host-a", &[]).await;
+        sync(&api, &repo).await;
+        exec(&ts, "DELETE FROM snapshots", &[]).await;
+        exec(
+            &ts,
+            "INSERT INTO snapshot_tombstones (id, repository_id, forgotten_at, reason) \
+             VALUES ($1, $2, 1000, 'denied')",
+            &[&id, &repo],
+        )
+        .await;
+
+        sync(&api, &repo).await;
+
+        let object = ts.local_repo_root("main").join("snapshots").join(&id);
+        assert!(!object.exists(), "[{}]", backend.name());
+        let left: i64 = sqlx::query("SELECT COUNT(*) AS n FROM snapshot_tombstones")
+            .fetch_one(&ts.state().db.pool)
+            .await
+            .unwrap()
+            .try_get("n")
+            .unwrap();
+        assert_eq!(left, 0);
+        assert_eq!(snapshot_count(&ts).await, 0);
         ts.stop().await;
     }
 }

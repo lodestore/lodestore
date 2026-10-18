@@ -6,7 +6,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use opendal::{ErrorKind, Operator};
 
-use super::s3::{check_key, layered, list_op, map_err, presign_op};
+use super::s3::{check_key, layered, list_op, map_err, modified_op, presign_op};
 use super::{BlobDelete, BlobError, BlobStore, ListEntry, Presigned};
 use crate::error::{Error, Result};
 
@@ -50,6 +50,13 @@ impl OpendalStore {
 }
 
 impl OpendalStore {
+    pub(super) async fn modified_ms(
+        &self,
+        key: &str,
+    ) -> std::result::Result<Option<i64>, BlobError> {
+        modified_op(&self.op, key).await
+    }
+
     pub async fn presign_read(
         &self,
         key: &str,

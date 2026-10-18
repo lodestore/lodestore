@@ -60,6 +60,9 @@ impl fmt::Debug for Presigned {
 pub struct ListEntry {
     pub key: String,
     pub size: u64,
+    /// When the store last wrote the object, in unix milliseconds; `None`
+    /// when the backend does not report it.
+    pub modified_ms: Option<i64>,
 }
 
 /// Create-only object storage. There is deliberately no unconditional write
@@ -179,6 +182,16 @@ impl Store {
             Store::Local(_) => Ok(None),
             Store::S3(s) => s.presign_read(key, ttl).await,
             Store::Opendal(s) => s.presign_read(key, ttl).await,
+        }
+    }
+
+    /// The store's own last-modified time for `key` in unix milliseconds;
+    /// `None` when the backend does not report one. Not part of [`BlobStore`].
+    pub async fn modified_ms(&self, key: &str) -> std::result::Result<Option<i64>, BlobError> {
+        match self {
+            Store::Local(s) => s.modified_ms(key).await,
+            Store::S3(s) => s.modified_ms(key).await,
+            Store::Opendal(s) => s.modified_ms(key).await,
         }
     }
 

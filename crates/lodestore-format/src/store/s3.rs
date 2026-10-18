@@ -170,6 +170,19 @@ pub(super) async fn presign_op(
     }))
 }
 
+pub(super) fn timestamp_ms(t: opendal::raw::Timestamp) -> i64 {
+    t.into_inner().as_millisecond()
+}
+
+pub(super) async fn modified_op(
+    op: &Operator,
+    key: &str,
+) -> std::result::Result<Option<i64>, BlobError> {
+    check_key(key)?;
+    let meta = op.stat(key).await.map_err(map_err)?;
+    Ok(meta.last_modified().map(timestamp_ms))
+}
+
 /// Lists by directory-like prefix; the rest of `prefix` is a plain string
 /// filter, which matches what the local store does.
 pub(super) async fn list_op(
@@ -194,6 +207,7 @@ pub(super) async fn list_op(
             out.push(ListEntry {
                 key: key.to_owned(),
                 size: meta.content_length(),
+                modified_ms: meta.last_modified().map(timestamp_ms),
             });
         }
     }
@@ -248,6 +262,13 @@ impl S3Store {
 }
 
 impl S3Store {
+    pub(super) async fn modified_ms(
+        &self,
+        key: &str,
+    ) -> std::result::Result<Option<i64>, BlobError> {
+        modified_op(&self.op, key).await
+    }
+
     pub async fn presign_read(
         &self,
         key: &str,

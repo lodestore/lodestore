@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -13,6 +14,8 @@ pub struct Profile {
     pub repository: Option<String>,
     pub password_file: Option<PathBuf>,
     pub password_command: Option<String>,
+    pub server: Option<String>,
+    pub token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -53,9 +56,22 @@ pub fn load_profile(name: &str) -> Result<Profile> {
     };
     let mut file: ConfigFile =
         toml::from_str(&text).map_err(|err| UsageError(format!("{}: {err}", path.display())))?;
-    file.profiles.remove(name).ok_or_else(|| {
-        UsageError(format!("profile {name:?} not found in {}", path.display())).into()
-    })
+    let profile = file
+        .profiles
+        .remove(name)
+        .ok_or_else(|| UsageError(format!("profile {name:?} not found in {}", path.display())))?;
+    if profile.token.is_some() && readable_by_others(&path) {
+        eprintln!(
+            "warning: {} holds a token and is readable by others. Run: chmod 600 {}",
+            path.display(),
+            path.display()
+        );
+    }
+    Ok(profile)
+}
+
+fn readable_by_others(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o077 != 0)
 }
 
 #[cfg(test)]
@@ -72,6 +88,28 @@ mod tests {
         assert_eq!(home.repository.as_deref(), Some("/srv/repo"));
         assert_eq!(home.password_file.as_deref(), Some("/etc/pw".as_ref()));
         assert!(home.password_command.is_none());
+    }
+
+    #[test]
+    fn parses_server_and_token() {
+        let file: ConfigFile = toml::from_str(
+            "[profiles.ci]\nserver = \"https://lode.example.com\"\ntoken = \"lsk_x\"\n",
+        )
+        .unwrap();
+        let ci = &file.profiles["ci"];
+        assert_eq!(ci.server.as_deref(), Some("https://lode.example.com"));
+        assert_eq!(ci.token.as_deref(), Some("lsk_x"));
+    }
+
+    #[test]
+    fn detects_files_open_to_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "").unwrap();
+        for (mode, open) in [(0o600, false), (0o400, false), (0o640, true), (0o604, true)] {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            assert_eq!(readable_by_others(&path), open, "{mode:o}");
+        }
     }
 
     #[test]

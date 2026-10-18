@@ -23,7 +23,7 @@ use utoipa::{IntoParams, ToSchema};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use crate::auth::AuthUser;
+use crate::auth::tokens::{Scoped, SnapshotsRead};
 use crate::catalog::open_repository;
 use crate::error::{ApiError, ErrorBody};
 use crate::state::AppState;
@@ -197,6 +197,7 @@ pub fn entry_item(node: &pb::Node) -> EntryItem {
     get,
     tag = "Restore",
     summary = "List a directory of a snapshot",
+    security(("session" = []), ("bearer" = ["snapshots:read"])),
     path = "/api/v1/snapshots/{id}/entries",
     params(("id" = String, Path, description = "Snapshot id"), EntriesQuery),
     responses(
@@ -208,7 +209,7 @@ pub fn entry_item(node: &pb::Node) -> EntryItem {
 )]
 async fn list_snapshot_entries(
     State(state): State<AppState>,
-    _user: AuthUser,
+    _auth: Scoped<SnapshotsRead>,
     Path(id): Path<String>,
     Query(query): Query<EntriesQuery>,
 ) -> Result<Json<EntryPage>, ApiError> {
@@ -356,6 +357,7 @@ async fn search_walk(
     tag = "Restore",
     summary = "Find names below a directory of a snapshot",
     description = "Streams one JSON object per line as the walk goes: `{\"match\": ...}` for each name that contains the text, then `{\"done\": {\"count\", \"truncated\"}}`, or `{\"error\": \"...\"}` if the walk fails midway.",
+    security(("session" = []), ("bearer" = ["snapshots:read"])),
     path = "/api/v1/snapshots/{id}/search",
     params(("id" = String, Path, description = "Snapshot id"), SearchQuery),
     responses(
@@ -367,7 +369,7 @@ async fn search_walk(
 )]
 async fn search_snapshot(
     State(state): State<AppState>,
-    _user: AuthUser,
+    _auth: Scoped<SnapshotsRead>,
     Path(id): Path<String>,
     Query(query): Query<SearchQuery>,
 ) -> Result<Response, ApiError> {
@@ -470,7 +472,7 @@ pub async fn require_items_exist(
     post,
     tag = "Restore",
     summary = "Count what a selection of a snapshot holds",
-    security(("session" = [], "csrf" = [])),
+    security(("session" = [], "csrf" = []), ("bearer" = ["snapshots:read"])),
     path = "/api/v1/snapshots/{id}/summary",
     params(("id" = String, Path, description = "Snapshot id")),
     request_body = SelectionBody,
@@ -483,7 +485,7 @@ pub async fn require_items_exist(
 )]
 async fn summarize_selection(
     State(state): State<AppState>,
-    _user: AuthUser,
+    _auth: Scoped<SnapshotsRead>,
     Path(id): Path<String>,
     Json(body): Json<SelectionBody>,
 ) -> Result<Json<SelectionSummary>, ApiError> {

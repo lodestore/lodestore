@@ -1,6 +1,12 @@
 import { useIsMutating, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
-import { ChevronDown, CircleAlert, Info, TriangleAlert } from "lucide-react";
+import {
+	ChevronDown,
+	CircleAlert,
+	Info,
+	ShieldAlert,
+	TriangleAlert,
+} from "lucide-react";
 import { useId, useState } from "react";
 import { toast } from "sonner";
 import {
@@ -176,6 +182,12 @@ function RestoreForm({
 		<form onSubmit={start} className="flex min-h-0 flex-col gap-6">
 			<div className="-mx-6 -my-1 flex min-h-0 flex-col gap-6 overflow-y-auto px-6 py-1">
 				<div className="flex flex-col gap-4">
+					{snapshot.suspicious && (
+						<Alert role="status">
+							<ShieldAlert aria-hidden className="text-warning" />
+							<AlertDescription>{text.suspiciousWarning}</AlertDescription>
+						</Alert>
+					)}
 					<div className="flex flex-col gap-2">
 						<Label>{text.from}</Label>
 						<p className="truncate text-sm">

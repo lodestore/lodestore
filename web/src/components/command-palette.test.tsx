@@ -284,6 +284,29 @@ describe("command palette hosts and repositories", () => {
 		expect(palette()).toBeNull();
 	});
 
+	it("palette offers api tokens", async () => {
+		mockHosts([]);
+		server.use(http.get("/api/v1/tokens", () => HttpResponse.json([])));
+		const { user, dialog, router } = await openPalette();
+		await user.keyboard("token");
+		expect(
+			within(dialog)
+				.getAllByRole("option")
+				.map((o) => o.textContent),
+		).toEqual(["API tokens", "Create API token"]);
+
+		await user.click(screen.getByRole("option", { name: "Create API token" }));
+		await waitFor(() =>
+			expect(router.state.location.pathname).toBe("/settings/tokens"),
+		);
+		expect(
+			await screen.findByRole("dialog", { name: "Create API token" }),
+		).toBeInTheDocument();
+		await waitFor(() =>
+			expect(router.state.location.search).not.toHaveProperty("create"),
+		);
+	});
+
 	it("sends Add host to the welcome page when there are no repositories", async () => {
 		mockHosts([]);
 		const { user, router, queryClient } = await openPalette();

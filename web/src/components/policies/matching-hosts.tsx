@@ -1,12 +1,17 @@
 import { Link } from "@tanstack/react-router";
-import { TriangleAlert } from "lucide-react";
+import { ChevronDown, ChevronUp, TriangleAlert, Users } from "lucide-react";
 import { useState } from "react";
 import type { HookWarning, MatchHost, Matching } from "@/api/gen/model";
 import { StatusBadge } from "@/components/status-badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card } from "@/components/ui/card";
+import {
+	Collapsible,
+	CollapsibleContent,
+	CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import { Spinner } from "@/components/ui/spinner";
 import {
 	Tooltip,
@@ -30,10 +35,10 @@ export function warningText(warning: HookWarning) {
 }
 
 function Warnings({ warnings }: { warnings: HookWarning[] }) {
-	return warnings.map((warning) => {
+	return warnings.map((warning, index) => {
 		const text = warningText(warning);
 		return (
-			<Tooltip key={`${warning.kind}-${warning.script ?? ""}`}>
+			<Tooltip key={`${index}-${warning.kind}-${warning.script ?? ""}`}>
 				<TooltipTrigger asChild>
 					<span
 						role="img"
@@ -147,62 +152,93 @@ export function MatchingHosts({
 	onRetry: () => void;
 }) {
 	const text = copy.policies.matching;
+	const [open, setOpen] = useState(false);
 	const own = matching?.hosts ?? [];
 	const other = matching?.other_repository ?? [];
+	const expandable =
+		!failed && !notice && !invalid && own.length + other.length > 0;
 
-	let body: React.ReactNode = null;
+	let line: React.ReactNode = null;
 	if (failed) {
-		body = (
+		line = (
 			<Alert variant="destructive" role="alert">
-				<AlertDescription>
-					{text.loadFailed}{" "}
-					<Button variant="link" className="h-auto p-0" onClick={onRetry}>
+				<AlertDescription className="flex flex-wrap items-center justify-between gap-2">
+					{text.loadFailed}
+					<Button type="button" variant="outline" size="sm" onClick={onRetry}>
 						{copy.errors.retry}
 					</Button>
 				</AlertDescription>
 			</Alert>
 		);
 	} else if (notice) {
-		body = <p className="text-sm text-muted-foreground">{notice}</p>;
+		line = <p className="text-sm text-muted-foreground">{notice}</p>;
 	} else if (invalid) {
-		body = <p className="text-sm text-muted-foreground">{text.invalid}</p>;
+		line = <p className="text-sm text-muted-foreground">{text.invalid}</p>;
+	} else if (matching && !expandable) {
+		line = <p className="text-sm text-muted-foreground">{text.zero}</p>;
 	} else if (matching) {
-		body = (
-			<>
-				<div className="flex flex-col gap-1 text-sm">
-					<p className="font-semibold">{text.summary(own.length)}</p>
-					{other.length > 0 && (
-						<p className="text-muted-foreground">
-							{text.skipped(other.length)}
-						</p>
-					)}
-					{selectorEmpty && (
-						<p className="text-muted-foreground">{text.emptySelector}</p>
-					)}
-				</div>
-				{own.length === 0 && other.length === 0 && (
-					<p className="text-sm text-muted-foreground">{text.zero}</p>
-				)}
-				{own.length > 0 && <HostList hosts={own} warnings={warnings} />}
-				{other.length > 0 && (
-					<section className="flex flex-col gap-1">
-						<h3 className="text-sm font-semibold">{text.otherRepo}</h3>
-						<HostList muted hosts={other} warnings={[]} />
-					</section>
-				)}
-			</>
+		line = (
+			<p className="min-w-0 text-sm font-semibold">
+				{[
+					text.summary(own.length),
+					other.length > 0 ? text.skipped(other.length) : null,
+				]
+					.filter(Boolean)
+					.join(text.separator)}
+			</p>
 		);
 	}
 
 	return (
-		<Card className="@container">
-			<CardHeader className="flex items-center justify-between">
-				<CardTitle>
-					<h2>{text.title}</h2>
-				</CardTitle>
-				{refreshing && <Spinner className="size-4" />}
-			</CardHeader>
-			<CardContent className="flex flex-col gap-4">{body}</CardContent>
+		<Card size="sm" className="@container">
+			<h2 className="sr-only">{text.title}</h2>
+			<Collapsible open={open && expandable} onOpenChange={setOpen}>
+				<div className="flex items-center gap-2 px-(--card-spacing)">
+					{refreshing ? (
+						<Spinner />
+					) : (
+						<Users
+							aria-hidden
+							className="size-4 shrink-0 text-muted-foreground"
+						/>
+					)}
+					<div className="min-w-0 flex-1">{line}</div>
+					{expandable && warnings.length > 0 && (
+						<span className="flex shrink-0 items-center gap-1 text-sm text-warning">
+							<TriangleAlert aria-hidden className="size-4" />
+							{text.hookWarnings(warnings.length)}
+						</span>
+					)}
+					{expandable && (
+						<CollapsibleTrigger asChild>
+							<Button
+								type="button"
+								variant="ghost"
+								size="icon-sm"
+								aria-label={open ? text.hide : text.show}
+							>
+								{open ? <ChevronUp aria-hidden /> : <ChevronDown aria-hidden />}
+							</Button>
+						</CollapsibleTrigger>
+					)}
+				</div>
+				<CollapsibleContent className="grid gap-6 px-(--card-spacing) pt-4 @min-[960px]:grid-cols-2">
+					<div className="flex min-w-0 flex-col gap-4">
+						{selectorEmpty && (
+							<p className="text-sm text-muted-foreground">
+								{text.emptySelector}
+							</p>
+						)}
+						{own.length > 0 && <HostList hosts={own} warnings={warnings} />}
+					</div>
+					{other.length > 0 && (
+						<section className="flex min-w-0 flex-col gap-1">
+							<h3 className="text-sm font-semibold">{text.otherRepo}</h3>
+							<HostList muted hosts={other} warnings={[]} />
+						</section>
+					)}
+				</CollapsibleContent>
+			</Collapsible>
 		</Card>
 	);
 }

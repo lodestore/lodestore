@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use data_encoding::HEXLOWER;
@@ -26,6 +26,8 @@ use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
+use super::priority;
+use super::throttle::Throttled;
 use super::{JobCtx, failed};
 use crate::Paths;
 use crate::config::AgentSettings;
@@ -54,9 +56,12 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &std::path::Path) -> Result<T, 
 
 /// Opens the repository with the agent's own S3 key and writer keys. The
 /// writer can only add objects, so nothing here can delete or replace data.
-pub async fn open_writer(paths: &Paths) -> Result<Writer<Store>, String> {
+pub async fn open_writer(
+    paths: &Paths,
+    uploaded: Arc<AtomicU64>,
+) -> Result<Writer<Throttled<Store>>, String> {
     let keys = read_write_keys(paths)?;
-    open_writer_with(paths, keys).await
+    open_writer_with(paths, keys, None, uploaded).await
 }
 
 fn read_write_keys(paths: &Paths) -> Result<WriteKeys, String> {
@@ -67,7 +72,12 @@ fn read_write_keys(paths: &Paths) -> Result<WriteKeys, String> {
     WriteKeys::from_file_text(&text).map_err(|e| format!("writer keys: {e}"))
 }
 
-async fn open_writer_with(paths: &Paths, keys: WriteKeys) -> Result<Writer<Store>, String> {
+async fn open_writer_with(
+    paths: &Paths,
+    keys: WriteKeys,
+    rate: Option<u64>,
+    uploaded: Arc<AtomicU64>,
+) -> Result<Writer<Throttled<Store>>, String> {
     let repository: RepositoryFile = read_json(&paths.repository_json())?;
     let creds = match std::fs::read(paths.s3_credentials()) {
         Ok(bytes) => {
@@ -88,7 +98,7 @@ async fn open_writer_with(paths: &Paths, keys: WriteKeys) -> Result<Writer<Store
     let store = location
         .open(creds)
         .map_err(|e| format!("cannot open the repository: {e}"))?;
-    Writer::connect(store, keys)
+    Writer::connect(Throttled::new(store, rate, uploaded), keys)
         .await
         .map_err(|e| format!("cannot open the repository: {e}"))
 }
@@ -110,6 +120,11 @@ fn issue_kind(kind: IssueKind) -> &'static str {
 /// thread and a current-thread runtime of its own, apart from the gRPC session.
 pub fn run_file_job(ctx: JobCtx, spec: JobSpec) {
     ctx.event(JobEventLevel::Info, "started", b"", "", "backup started");
+    if let Some(limits) = &spec.limits {
+        for warning in priority::apply(limits) {
+            ctx.event(JobEventLevel::Warning, "priority_failed", b"", "", &warning);
+        }
+    }
     let finished = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -387,7 +402,12 @@ async fn backup(ctx: &JobCtx, spec: &JobSpec) -> JobFinished {
     let dir = cache_dir(ctx.paths(), &keys, spec);
     let parent = open_parent(&dir, &keys).await;
     let repo_id = keys.repo_id;
-    let mut writer = match open_writer_with(ctx.paths(), keys).await {
+    let rate = spec.limits.as_ref().map(|l| l.upload_rate_bps);
+    ctx.progress_cell()
+        .upload_limit
+        .store(rate.unwrap_or(0), Ordering::Relaxed);
+    let uploaded = Arc::clone(&ctx.progress_cell().bytes_stored);
+    let mut writer = match open_writer_with(ctx.paths(), keys, rate, uploaded).await {
         Ok(writer) => writer,
         Err(e) => return failed("repository_unavailable", &e),
     };

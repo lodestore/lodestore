@@ -32,6 +32,8 @@ function makeJob(id: string, over: Partial<JobSummary> = {}): JobSummary {
 		policy_name: "etc-and-home",
 		policy_exists: true,
 		source: "manual",
+		origin: "manual",
+		snapshot_suspicious: false,
 		state: "succeeded",
 		queued_at: NOW - 120_000,
 		started_at: NOW - 100_000,
@@ -280,9 +282,11 @@ describe("Jobs list", () => {
 			await screen.findByRole("menuitem", { name: "Cancel job" }),
 		);
 		const dialog = await screen.findByRole("alertdialog");
-		expect(
-			within(dialog).getByRole("button", { name: "Keep running" }),
-		).toHaveFocus();
+		await waitFor(() =>
+			expect(
+				within(dialog).getByRole("button", { name: "Keep running" }),
+			).toHaveFocus(),
+		);
 		await userEvent.click(
 			within(dialog).getByRole("button", { name: "Cancel job" }),
 		);
@@ -473,7 +477,10 @@ describe("Job page progress", () => {
 	});
 
 	it("flags progress that stopped changing, whatever the agent clock says", async () => {
-		vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
+		vi.useFakeTimers({
+			toFake: ["Date", "setInterval", "clearInterval"],
+			shouldAdvanceTime: true,
+		});
 		try {
 			mockJob(
 				makeDetail({
@@ -614,6 +621,7 @@ describe("Job page live updates", () => {
 				expect(screen.getByRole("status")).toHaveTextContent("Job succeeded"),
 			{ timeout: 4000 },
 		);
+		await waitFor(() => expect(requests).toBe(3));
 		await new Promise((resolve) => setTimeout(resolve, 2500));
 		expect(requests).toBe(3);
 	}, 15_000);
@@ -1177,5 +1185,254 @@ describe("Backup job page link to Restore", () => {
 		expect(
 			screen.getByRole("link", { name: "View host snapshots" }),
 		).toBeVisible();
+	});
+});
+
+const retained = (
+	over: Partial<NonNullable<JobDetail["retention"]>> = {},
+): NonNullable<JobDetail["retention"]> => ({
+	state: "done",
+	forgot: 0,
+	kept: 0,
+	blocked: [],
+	...over,
+});
+
+describe("Job page phase 5 additions", () => {
+	it("speed tile shows limit and throttled", async () => {
+		const MIB = 1024 * 1024;
+		mockJob(
+			makeDetail({
+				state: "running",
+				finished_at: null,
+				limits: { upload_rate_bps: 50 * MIB },
+				progress: progress({
+					speed_bps: 80 * MIB,
+					upload_speed_bps: 48 * MIB,
+				}),
+			}),
+		);
+		await openJob();
+
+		const tile = (await screen.findByText("Speed")).closest(
+			"[data-slot=card]",
+		) as HTMLElement;
+		expect(within(tile).getByText("48 MiB/s")).toBeInTheDocument();
+		expect(within(tile).getByText("of 50 MiB/s limit")).toBeInTheDocument();
+		const badge = within(tile).getByText("Throttled");
+		expect(badge).toHaveAttribute("tabindex", "0");
+		await userEvent.hover(badge);
+		expect(await screen.findByRole("tooltip")).toHaveTextContent(
+			"The upload is held at the limit set in the policy.",
+		);
+	});
+
+	it("speed tile below the limit has no throttled badge", async () => {
+		const MIB = 1024 * 1024;
+		mockJob(
+			makeDetail({
+				state: "running",
+				finished_at: null,
+				limits: { upload_rate_bps: 50 * MIB },
+				progress: progress({ upload_speed_bps: 10 * MIB }),
+			}),
+		);
+		await openJob();
+
+		expect(await screen.findByText("of 50 MiB/s limit")).toBeInTheDocument();
+		expect(screen.queryByText("Throttled")).toBeNull();
+	});
+
+	it("speed tile without limit unchanged", async () => {
+		mockJob(
+			makeDetail({
+				state: "running",
+				finished_at: null,
+				limits: null,
+				progress: progress({ upload_speed_bps: 5000 }),
+			}),
+		);
+		await openJob();
+
+		expect(await screen.findByText("1 KiB/s")).toBeInTheDocument();
+		expect(screen.getByText("average of the last 10 s")).toBeInTheDocument();
+		expect(screen.queryByText("Throttled")).toBeNull();
+	});
+
+	it("job card limits row", async () => {
+		mockJob(
+			makeDetail({
+				limits: {
+					upload_rate_bps: 50 * 1024 * 1024,
+					nice: 10,
+					ionice_class: "idle",
+				},
+			}),
+		);
+		await openJob();
+
+		const card = (await screen.findByRole("heading", { name: "Job" })).closest(
+			"[data-slot=card]",
+		) as HTMLElement;
+		expect(within(card).getByText("Limits")).toBeInTheDocument();
+		expect(
+			within(card).getByText("Upload 50 MiB/s · nice 10 · I/O idle"),
+		).toBeInTheDocument();
+	});
+
+	it("job card has no limits row without limits", async () => {
+		mockJob(makeDetail({ limits: { upload_rate_bps: null, nice: null } }));
+		await openJob();
+
+		const card = (await screen.findByRole("heading", { name: "Job" })).closest(
+			"[data-slot=card]",
+		) as HTMLElement;
+		expect(within(card).queryByText("Limits")).toBeNull();
+	});
+
+	it.each([
+		["schedule", "Schedule"],
+		["catchup", "Catch-up after a missed run"],
+		["manual", "Run now"],
+	] as const)("job source labels: %s", async (origin, label) => {
+		mockJob(makeDetail({ origin }));
+		await openJob();
+		const card = (await screen.findByRole("heading", { name: "Job" })).closest(
+			"[data-slot=card]",
+		) as HTMLElement;
+		expect(within(card).getByText(label)).toBeInTheDocument();
+	});
+
+	it.each<[string, JobDetail["retention"], string | null]>([
+		["done", retained({ forgot: 2, kept: 5 }), "Forgot 2, kept 5"],
+		["nothing", retained(), "Nothing to forget"],
+		[
+			"blocked",
+			retained({
+				forgot: 3,
+				blocked: [{ id: "a", reason: "Object Lock is on" }],
+			}),
+			"Forgot 3. 1 could not be deleted.",
+		],
+		["skipped", { state: "skipped" }, null],
+		["none", null, null],
+	])("retention row states: %s", async (_name, retention, text) => {
+		mockJob(makeDetail({ retention }));
+		await openJob();
+		const result = (
+			await screen.findByRole("heading", { name: "Result" })
+		).closest("[data-slot=card]") as HTMLElement;
+		if (text === null) {
+			expect(within(result).queryByText("Retention")).toBeNull();
+		} else {
+			expect(within(result).getByText("Retention")).toBeInTheDocument();
+			expect(within(result).getByText(text)).toBeInTheDocument();
+		}
+		expect(screen.getByText("Succeeded")).toBeInTheDocument();
+	});
+
+	it("retention blocked reason in tooltip", async () => {
+		mockJob(
+			makeDetail({
+				retention: retained({
+					forgot: 1,
+					blocked: [{ id: "a", reason: "Object Lock is on" }],
+				}),
+			}),
+		);
+		await openJob();
+
+		await userEvent.hover(
+			await screen.findByText("Forgot 1. 1 could not be deleted."),
+		);
+		expect(
+			(await screen.findAllByText("Object Lock is on")).length,
+		).toBeGreaterThan(0);
+	});
+
+	it("applying retention phase", async () => {
+		mockJob(makeDetail({ retention: { state: "running" } }));
+		await openJob();
+
+		expect(
+			await screen.findByRole("heading", { name: "Applying retention" }),
+		).toBeInTheDocument();
+		expect(screen.getByText("Succeeded")).toBeInTheDocument();
+		const result = screen.getByRole("heading", { name: "Result" });
+		expect(
+			within(result.closest("[data-slot=card]") as HTMLElement).queryByText(
+				"Retention",
+			),
+		).toBeNull();
+	});
+
+	it("suspicious snapshot in result", async () => {
+		mockJob(makeDetail({ snapshot_suspicious: true }));
+		await openJob();
+
+		const result = (
+			await screen.findByRole("heading", { name: "Result" })
+		).closest("[data-slot=card]") as HTMLElement;
+		const badge = within(result).getByText("Suspicious");
+		expect(badge).toHaveAttribute("data-status", "suspicious");
+		expect(
+			screen.getByText("Retention does not count this snapshot."),
+		).toBeInTheDocument();
+		expect(
+			screen.getByRole("link", { name: "Review snapshot" }),
+		).toHaveAttribute(
+			"href",
+			"/restore?host=host-1&snapshot=0123456789abcdef0123456789abcdef",
+		);
+		expect(screen.getByText("Succeeded")).toBeInTheDocument();
+	});
+
+	it("log shows server records", async () => {
+		mockJob(runningJob(), {
+			events: [
+				makeEvent(-1, {
+					level: "warning",
+					kind: "limits_ignored",
+					message: "The agent does not support limits.",
+				}),
+				makeEvent(0, {
+					kind: "catch_up",
+					message: "Running one catch-up backup for 3 missed runs",
+				}),
+				makeEvent(1),
+				makeEvent(2, {
+					kind: "snapshot_forgotten",
+					message: "Forgot snapshot 01234567: not kept by any rule",
+				}),
+				makeEvent(3, {
+					level: "warning",
+					kind: "forget_blocked",
+					message: "Could not delete snapshot 01234567: Object Lock",
+				}),
+				makeEvent(4, {
+					level: "warning",
+					kind: "suspicious_snapshot",
+					message: "Snapshot looks unusual: size dropped",
+				}),
+			],
+			last_seq: 4,
+		});
+		await openJob();
+
+		const log = await screen.findByRole("log");
+		await within(log).findByText("Limits not applied");
+		for (const label of [
+			"Catch-up",
+			"Snapshot forgotten",
+			"Forget blocked",
+			"Suspicious snapshot",
+		]) {
+			expect(within(log).getByText(label)).toBeInTheDocument();
+		}
+		const text = log.textContent ?? "";
+		expect(text.indexOf("Limits not applied")).toBeLessThan(
+			text.indexOf("Catch-up"),
+		);
+		expect(text.indexOf("Catch-up")).toBeLessThan(text.indexOf("event 1"));
 	});
 });

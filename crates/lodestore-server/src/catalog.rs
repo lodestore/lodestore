@@ -10,7 +10,7 @@ use lodestore_format::index::{hex32, parse_hex32};
 use lodestore_format::keys::{MasterKey, ReadKeys};
 use lodestore_format::pb;
 use lodestore_format::snapshot::{open_snapshot, snapshot_object_key};
-use lodestore_format::store::{BlobError, BlobStore, Store};
+use lodestore_format::store::{BlobDelete, BlobError, BlobStore, Store};
 use lodestore_format::{Error as FormatError, Result as FormatResult};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
@@ -22,20 +22,34 @@ use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 use crate::auth::AuthUser;
+use crate::auth::tokens::{Scoped, SnapshotsRead};
 use crate::db::now_ms;
 use crate::error::{ApiError, ErrorBody};
+use crate::grpc::dispatch::messages::clip;
 use crate::repos::checks::open_store;
 use crate::repos::db::{get_repository, list_repositories, server_access};
 use crate::state::AppState;
 
+pub mod actions;
+pub mod anomaly;
+pub mod retention;
+
+use self::actions::{SuspicionDto, suspicion_from_row};
+
 const SYNC_INTERVAL: Duration = Duration::from_secs(300);
 const PAGE_SIZE: i64 = 50;
-const SNAPSHOT_PREFIX: &str = "snapshots/";
+pub(crate) const SNAPSHOT_PREFIX: &str = "snapshots/";
+const VANISH_GRACE_MS: i64 = 3_600_000;
+const TOMBSTONE_RETRY_MS: i64 = 86_400_000;
+const VANISH_GUARD_MIN: usize = 10;
 const CONFIG_OBJECT: &str = "config";
 const READ_CONCURRENCY: usize = 8;
 pub(crate) const SNAPSHOT_COLUMNS: &str = "id, time_ms, hostname, paths_json, tags_json, \
      policy_name, stdin_name, job_id, parent_id, incomplete, errors_total, warnings_total, \
-     stats_json";
+     stats_json, received_at, suspicious, suspicious_by, suspicious_reason, suspicious_at, \
+     anomaly_json, CAST(CASE WHEN policy_name IS NOT NULL AND NOT EXISTS \
+     (SELECT 1 FROM policies p WHERE p.name = snapshots.policy_name) THEN 1 ELSE 0 END AS BIGINT) \
+     AS policy_deleted";
 
 pub struct JobLink<'a> {
     pub job_id: &'a str,
@@ -140,7 +154,9 @@ async fn insert_snapshot(
     id: &[u8; 32],
     snapshot: &pb::Snapshot,
     link: Option<&JobLink<'_>>,
+    received: Option<i64>,
 ) -> anyhow::Result<bool> {
+    let discovered = now_ms();
     let claim = std::str::from_utf8(&snapshot.agent_id)
         .ok()
         .filter(|c| !c.is_empty());
@@ -157,8 +173,9 @@ async fn insert_snapshot(
     let result = sqlx::query(
         "INSERT INTO snapshots (id, repository_id, host_id, hostname, time_ms, paths_json, \
          tags_json, policy_name, stdin_name, job_id, parent_id, incomplete, errors_total, \
-         warnings_total, stats_json, agent_id_claim, discovered_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) \
+         warnings_total, stats_json, agent_id_claim, discovered_at, received_at, received_exact) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, \
+         $18, $19) \
          ON CONFLICT (id) DO NOTHING",
     )
     .bind(hex32(id))
@@ -181,7 +198,9 @@ async fn insert_snapshot(
     .bind(clamp(snapshot.warnings_total))
     .bind(serde_json::to_string(&stats)?)
     .bind(claim)
-    .bind(now_ms())
+    .bind(discovered)
+    .bind(received.unwrap_or(discovered))
+    .bind(i64::from(received.is_some() || link.is_some()))
     .execute(&state.db.pool)
     .await?;
     Ok(result.rows_affected() == 1)
@@ -214,7 +233,23 @@ pub async fn ingest_snapshot(
     {
         return Err(LinkRefused.into());
     }
-    let inserted = insert_snapshot(state, repository_id, &id, &snapshot, link.as_ref()).await?;
+    let received = source
+        .store
+        .modified_ms(&snapshot_object_key(&id))
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "reading the snapshot object time failed");
+            None
+        });
+    let inserted = insert_snapshot(
+        state,
+        repository_id,
+        &id,
+        &snapshot,
+        link.as_ref(),
+        received,
+    )
+    .await?;
     if !inserted && let Some(link) = &link {
         link_snapshot(state, repository_id, &id, link).await?;
     }
@@ -333,12 +368,24 @@ struct Job {
     shown: Option<CatalogStatus>,
 }
 
+type PairLocks = HashMap<(String, String), Arc<tokio::sync::Mutex<()>>>;
+
 #[derive(Clone, Default)]
 pub struct CatalogJobs {
     inner: Arc<Mutex<HashMap<String, Job>>>,
+    pairs: Arc<Mutex<PairLocks>>,
 }
 
 impl CatalogJobs {
+    pub(crate) fn pair_lock(&self, policy: &str, host_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.pairs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .entry((policy.to_string(), host_id.to_string()))
+            .or_default()
+            .clone()
+    }
+
     fn lock(&self) -> MutexGuard<'_, HashMap<String, Job>> {
         self.inner.lock().unwrap_or_else(|p| p.into_inner())
     }
@@ -471,10 +518,12 @@ async fn read_one(
     source: &OpenRepository,
     key: String,
     id: [u8; 32],
+    received: Option<i64>,
 ) -> anyhow::Result<()> {
     match read_snapshot(source, &id).await {
         Ok(snapshot) => {
-            let inserted = insert_snapshot(state, repository_id, &id, &snapshot, None).await?;
+            let inserted =
+                insert_snapshot(state, repository_id, &id, &snapshot, None, received).await?;
             state.catalog.update(repository_id, |s| {
                 s.read += 1;
                 s.added += u64::from(inserted);
@@ -496,18 +545,174 @@ async fn read_one(
     Ok(())
 }
 
+struct KnownRow {
+    received_at: i64,
+    exact: bool,
+    suspicious: bool,
+}
+
+async fn known_rows(
+    state: &AppState,
+    repository_id: &str,
+) -> anyhow::Result<HashMap<String, KnownRow>> {
+    sqlx::query(
+        "SELECT id, received_at, received_exact, suspicious FROM snapshots \
+         WHERE repository_id = $1",
+    )
+    .bind(repository_id)
+    .fetch_all(&state.db.pool)
+    .await?
+    .iter()
+    .map(|r| {
+        Ok((
+            r.try_get("id")?,
+            KnownRow {
+                received_at: r.try_get("received_at")?,
+                exact: r.try_get::<i64, _>("received_exact")? != 0,
+                suspicious: r.try_get::<i64, _>("suspicious")? != 0,
+            },
+        ))
+    })
+    .collect()
+}
+
+async fn tombstone_ids(state: &AppState, repository_id: &str) -> anyhow::Result<HashSet<String>> {
+    Ok(
+        sqlx::query("SELECT id FROM snapshot_tombstones WHERE repository_id = $1")
+            .bind(repository_id)
+            .fetch_all(&state.db.pool)
+            .await?
+            .iter()
+            .map(|r| r.try_get("id"))
+            .collect::<Result<_, _>>()?,
+    )
+}
+
+async fn store_exact_times(
+    state: &AppState,
+    repository_id: &str,
+    times: &[(String, i64)],
+) -> anyhow::Result<()> {
+    for (id, ms) in times {
+        sqlx::query(
+            "UPDATE snapshots SET received_at = $1, received_exact = 1 \
+             WHERE id = $2 AND repository_id = $3 AND received_exact = 0",
+        )
+        .bind(ms)
+        .bind(id)
+        .bind(repository_id)
+        .execute(&state.db.pool)
+        .await?;
+    }
+    Ok(())
+}
+
+async fn drop_stale_tombstones(
+    state: &AppState,
+    repository_id: &str,
+    tombstones: &HashSet<String>,
+    listed: &HashSet<String>,
+) -> anyhow::Result<()> {
+    for id in tombstones.difference(listed) {
+        sqlx::query("DELETE FROM snapshot_tombstones WHERE id = $1 AND repository_id = $2")
+            .bind(id)
+            .bind(repository_id)
+            .execute(&state.db.pool)
+            .await?;
+    }
+    Ok(())
+}
+
+async fn retry_tombstones(
+    state: &AppState,
+    repository_id: &str,
+    source: &OpenRepository,
+    listed: &HashSet<String>,
+) -> anyhow::Result<()> {
+    let cutoff = now_ms().saturating_sub(TOMBSTONE_RETRY_MS);
+    let due = sqlx::query(
+        "SELECT id FROM snapshot_tombstones WHERE repository_id = $1 AND forgotten_at < $2",
+    )
+    .bind(repository_id)
+    .bind(cutoff)
+    .fetch_all(&state.db.pool)
+    .await?;
+    for row in due {
+        let hex: String = row.try_get("id")?;
+        let Some(id) = parse_hex32(&hex).filter(|_| listed.contains(&hex)) else {
+            continue;
+        };
+        match source.store.delete(&snapshot_object_key(&id)).await {
+            Ok(()) | Err(BlobError::NotFound) => {
+                sqlx::query("DELETE FROM snapshot_tombstones WHERE id = $1 AND repository_id = $2")
+                    .bind(&hex)
+                    .bind(repository_id)
+                    .execute(&state.db.pool)
+                    .await?;
+            }
+            Err(BlobError::Denied { message }) => {
+                sqlx::query(
+                    "UPDATE snapshot_tombstones SET forgotten_at = $1, reason = $2 \
+                     WHERE id = $3 AND repository_id = $4",
+                )
+                .bind(now_ms())
+                .bind(clip(&message))
+                .bind(&hex)
+                .bind(repository_id)
+                .execute(&state.db.pool)
+                .await?;
+            }
+            Err(error) => {
+                tracing::warn!(snapshot = %hex, %error, "retrying a denied snapshot delete failed");
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn remove_vanished(
+    state: &AppState,
+    repository_id: &str,
+    known: &HashMap<String, KnownRow>,
+    listed: &HashSet<String>,
+) -> anyhow::Result<Option<String>> {
+    let cutoff = now_ms().saturating_sub(VANISH_GRACE_MS);
+    let gone: Vec<&String> = known
+        .iter()
+        .filter(|(id, row)| !listed.contains(*id) && row.received_at < cutoff && !row.suspicious)
+        .map(|(id, _)| id)
+        .collect();
+    if listed.is_empty() && !known.is_empty() {
+        return Ok(Some(
+            "The bucket listing is empty. Nothing was removed from the catalog.".into(),
+        ));
+    }
+    if gone.len() * 2 > known.len() && known.len() > VANISH_GUARD_MIN {
+        return Ok(Some(format!(
+            "The bucket listing is missing {} of {} snapshots. Nothing was removed from the catalog.",
+            gone.len(),
+            known.len()
+        )));
+    }
+    for id in gone {
+        sqlx::query("DELETE FROM snapshots WHERE id = $1 AND repository_id = $2")
+            .bind(id)
+            .bind(repository_id)
+            .execute(&state.db.pool)
+            .await?;
+    }
+    Ok(None)
+}
+
 async fn rebuild(state: &AppState, repository_id: &str) -> anyhow::Result<SyncReport> {
     let source = Arc::new(open_repository(state, repository_id).await?);
     let listed = source.store.list(SNAPSHOT_PREFIX).await?;
-    let known: HashSet<String> = sqlx::query("SELECT id FROM snapshots WHERE repository_id = $1")
-        .bind(repository_id)
-        .fetch_all(&state.db.pool)
-        .await?
-        .iter()
-        .map(|r| r.try_get("id"))
-        .collect::<Result<_, _>>()?;
+    let known = known_rows(state, repository_id).await?;
+    let tombstones = tombstone_ids(state, repository_id).await?;
+    let mut listed_ids = HashSet::new();
     let mut unreadable = Vec::new();
     let mut candidates = Vec::new();
+    let mut exact_times = Vec::new();
     for entry in listed {
         match entry
             .key
@@ -518,10 +723,27 @@ async fn rebuild(state: &AppState, repository_id: &str) -> anyhow::Result<SyncRe
                 key: entry.key,
                 reason: "not a snapshot name".into(),
             }),
-            Some(id) if known.contains(&hex32(&id)) => {}
-            Some(id) => candidates.push((entry.key, id)),
+            Some(id) => {
+                let hex = hex32(&id);
+                listed_ids.insert(hex.clone());
+                match known.get(&hex) {
+                    _ if tombstones.contains(&hex) => {}
+                    Some(row) => {
+                        if !row.exact
+                            && let Some(ms) = entry.modified_ms
+                        {
+                            exact_times.push((hex, ms));
+                        }
+                    }
+                    None => candidates.push((entry.key, id, entry.modified_ms)),
+                }
+            }
         }
     }
+    store_exact_times(state, repository_id, &exact_times).await?;
+    drop_stale_tombstones(state, repository_id, &tombstones, &listed_ids).await?;
+    retry_tombstones(state, repository_id, &source, &listed_ids).await?;
+    let vanish_note = remove_vanished(state, repository_id, &known, &listed_ids).await?;
     state.catalog.update(repository_id, |s| {
         s.phase = CatalogPhase::Reading;
         s.total = Some(candidates.len() as u64);
@@ -530,7 +752,7 @@ async fn rebuild(state: &AppState, repository_id: &str) -> anyhow::Result<SyncRe
 
     let permits = Arc::new(Semaphore::new(READ_CONCURRENCY));
     let mut tasks = JoinSet::new();
-    for (key, id) in candidates {
+    for (key, id, received) in candidates {
         let permit = permits.clone().acquire_owned().await?;
         while let Some(done) = tasks.try_join_next() {
             done??;
@@ -539,7 +761,7 @@ async fn rebuild(state: &AppState, repository_id: &str) -> anyhow::Result<SyncRe
             (state.clone(), source.clone(), repository_id.to_string());
         tasks.spawn(async move {
             let _permit = permit;
-            read_one(&state, &repository_id, &source, key, id).await
+            read_one(&state, &repository_id, &source, key, id, received).await
         });
     }
     while let Some(done) = tasks.join_next().await {
@@ -554,6 +776,13 @@ async fn rebuild(state: &AppState, repository_id: &str) -> anyhow::Result<SyncRe
         .status(repository_id)
         .context("the rebuild state vanished")?;
     record_state(state, repository_id, None, &status.skipped).await?;
+    if let Some(note) = &vanish_note {
+        sqlx::query("UPDATE catalog_state SET last_error = $1 WHERE repository_id = $2")
+            .bind(note)
+            .bind(repository_id)
+            .execute(&state.db.pool)
+            .await?;
+    }
     let total: i64 = sqlx::query("SELECT COUNT(*) AS n FROM snapshots WHERE repository_id = $1")
         .bind(repository_id)
         .fetch_one(&state.db.pool)
@@ -673,6 +902,9 @@ pub struct SnapshotItem {
     pub errors_total: u64,
     pub warnings_total: u64,
     pub stats: SnapshotStatsDto,
+    pub received_at: i64,
+    pub suspicious: Option<SuspicionDto>,
+    pub policy_deleted: bool,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -746,6 +978,9 @@ pub(crate) fn item_from_row(row: &sqlx::any::AnyRow) -> Result<SnapshotItem, Api
         errors_total: row.try_get::<i64, _>("errors_total")?.max(0) as u64,
         warnings_total: row.try_get::<i64, _>("warnings_total")?.max(0) as u64,
         stats: serde_json::from_str(&row.try_get::<String, _>("stats_json")?).map_err(parse)?,
+        received_at: row.try_get("received_at")?,
+        suspicious: suspicion_from_row(row)?,
+        policy_deleted: row.try_get::<i64, _>("policy_deleted")? != 0,
     })
 }
 
@@ -753,6 +988,7 @@ pub(crate) fn item_from_row(row: &sqlx::any::AnyRow) -> Result<SnapshotItem, Api
     get,
     tag = "Snapshots",
     summary = "List snapshots of a host",
+    security(("session" = []), ("bearer" = ["snapshots:read"])),
     path = "/api/v1/hosts/{id}/snapshots",
     params(("id" = String, Path, description = "Host id"), PageQuery),
     responses(
@@ -762,7 +998,7 @@ pub(crate) fn item_from_row(row: &sqlx::any::AnyRow) -> Result<SnapshotItem, Api
 )]
 async fn list_host_snapshots(
     State(state): State<AppState>,
-    _user: AuthUser,
+    _auth: Scoped<SnapshotsRead>,
     Path(id): Path<String>,
     Query(query): Query<PageQuery>,
 ) -> Result<Json<SnapshotPage>, ApiError> {
@@ -777,11 +1013,10 @@ async fn list_host_snapshots(
         .fetch_one(&state.db.pool)
         .await?
         .try_get("n")?;
-    let rows = sqlx::query(
-        "SELECT id, time_ms, hostname, paths_json, tags_json, policy_name, stdin_name, job_id, \
-         parent_id, incomplete, errors_total, warnings_total, stats_json FROM snapshots \
-         WHERE host_id = $1 ORDER BY time_ms DESC, id LIMIT $2 OFFSET $3",
-    )
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SELECT {SNAPSHOT_COLUMNS} FROM snapshots \
+         WHERE host_id = $1 ORDER BY time_ms DESC, id LIMIT $2 OFFSET $3"
+    )))
     .bind(&id)
     .bind(PAGE_SIZE)
     .bind(clamp(page - 1).saturating_mul(PAGE_SIZE))
@@ -918,4 +1153,5 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(list_catalog_status))
         .routes(routes!(rebuild_catalog))
         .routes(routes!(list_host_snapshots))
+        .merge(actions::routes())
 }

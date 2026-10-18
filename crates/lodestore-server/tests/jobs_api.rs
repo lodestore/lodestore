@@ -817,3 +817,319 @@ async fn jobs_api_agentless_download_host() {
         ts.stop().await;
     }
 }
+
+struct Seed<'a> {
+    id: &'a str,
+    origin: &'a str,
+    missed_runs: Option<i64>,
+    retention: Option<&'a str>,
+    snapshot: Option<&'a str>,
+    spec: Vec<u8>,
+}
+
+impl<'a> Seed<'a> {
+    fn new(id: &'a str) -> Seed<'a> {
+        Seed {
+            id,
+            origin: "manual",
+            missed_runs: None,
+            retention: None,
+            snapshot: None,
+            spec: Vec::new(),
+        }
+    }
+}
+
+async fn seed_job(ts: &TestServer, host: &str, seed: Seed<'_>) {
+    sqlx::query(
+        "INSERT INTO jobs (id, host_id, policy_name, source, state, spec, queued_at, finished_at, \
+         origin, missed_runs, retention_json, snapshot_id) \
+         VALUES ($1, $2, 'p', 'manual', 'succeeded', $3, 100, 101, $4, $5, $6, $7)",
+    )
+    .bind(seed.id)
+    .bind(host)
+    .bind(seed.spec)
+    .bind(seed.origin)
+    .bind(seed.missed_runs)
+    .bind(seed.retention)
+    .bind(seed.snapshot)
+    .execute(&ts.state().db.pool)
+    .await
+    .unwrap();
+}
+
+async fn seed_snapshot(ts: &TestServer, id: &str, suspicious: i64) {
+    sqlx::query(
+        "INSERT INTO snapshots (id, repository_id, hostname, time_ms, paths_json, tags_json, \
+         incomplete, errors_total, warnings_total, stats_json, discovered_at, suspicious) \
+         SELECT $1, id, 'h', 0, '[]', '[]', 0, 0, 0, '{}', 0, $2 FROM repositories",
+    )
+    .bind(id)
+    .bind(suspicious)
+    .execute(&ts.state().db.pool)
+    .await
+    .unwrap();
+}
+
+async fn job_detail(api: &Api, id: &str) -> Value {
+    let (status, body) = get_json(api, &format!("/api/v1/jobs/{id}")).await;
+    assert_eq!(status, 200, "{body}");
+    body
+}
+
+async fn single_host(ts: &TestServer) -> (Api, String) {
+    let api = ts.api().await;
+    let repo = ts.create_local_repository("main").await;
+    let host = enroll(ts, &api, &repo, "host-a").await;
+    (api, host)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn jobs_api_origin_and_missed_runs() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let (api, host) = single_host(&ts).await;
+        seed_job(
+            &ts,
+            &host,
+            Seed {
+                origin: "catchup",
+                missed_runs: Some(3),
+                ..Seed::new("catch")
+            },
+        )
+        .await;
+        seed_job(&ts, &host, Seed::new("hand")).await;
+        seed_job(
+            &ts,
+            &host,
+            Seed {
+                origin: "schedule",
+                ..Seed::new("slot")
+            },
+        )
+        .await;
+
+        let (_, page) = get_json(&api, "/api/v1/jobs").await;
+        let find = |id: &str| {
+            page["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|j| j["id"] == id)
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(find("catch")["origin"], "catchup", "{}", backend.name());
+        assert_eq!(find("catch")["missed_runs"], 3);
+        assert_eq!(find("hand")["origin"], "manual");
+        assert_eq!(find("hand")["missed_runs"], Value::Null);
+        assert_eq!(find("slot")["origin"], "schedule");
+        let detail = job_detail(&api, "catch").await;
+        assert_eq!(detail["origin"], "catchup");
+        assert_eq!(detail["missed_runs"], 3);
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn jobs_api_retention_result() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let (api, host) = single_host(&ts).await;
+        let kept = "a".repeat(64);
+        let gone = "b".repeat(64);
+        seed_snapshot(&ts, &kept, 0).await;
+        let done = format!(
+            r#"{{"state":"done","forgot":2,"kept":3,"blocked":[{{"id":"{kept}","reason":"object locked"}},{{"id":"{gone}","reason":"denied"}}]}}"#
+        );
+        seed_job(
+            &ts,
+            &host,
+            Seed {
+                retention: Some(&done),
+                ..Seed::new("done")
+            },
+        )
+        .await;
+        seed_job(
+            &ts,
+            &host,
+            Seed {
+                retention: Some(r#"{"state":"skipped"}"#),
+                ..Seed::new("skipped")
+            },
+        )
+        .await;
+        seed_job(&ts, &host, Seed::new("none")).await;
+
+        let retention = &job_detail(&api, "done").await["retention"];
+        assert_eq!(retention["state"], "done", "{}", backend.name());
+        assert_eq!(retention["forgot"], 2);
+        assert_eq!(retention["kept"], 3);
+        assert_eq!(retention["blocked"][0]["id"], kept.as_str());
+        assert_eq!(retention["blocked"][0]["reason"], "object locked");
+        assert_eq!(retention["blocked"][0]["kept_in_catalog"], true);
+        assert_eq!(retention["blocked"][1]["kept_in_catalog"], false);
+        let skipped = job_detail(&api, "skipped").await;
+        assert_eq!(skipped["retention"]["state"], "skipped");
+        assert_eq!(skipped["retention"]["blocked"], json!([]));
+        assert_eq!(job_detail(&api, "none").await["retention"], Value::Null);
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn jobs_api_limits_in_detail() {
+    use lodestore_proto::agent::v1::{IoniceClass, JobSpec, Limits};
+    use prost::Message;
+
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let (api, host) = single_host(&ts).await;
+        let limited = JobSpec {
+            limits: Some(Limits {
+                upload_rate_bps: 52_428_800,
+                nice: 10,
+                ionice_class: IoniceClass::Idle as i32,
+                ionice_level: 0,
+            }),
+            ..Default::default()
+        };
+        let best_effort = JobSpec {
+            limits: Some(Limits {
+                ionice_class: IoniceClass::BestEffort as i32,
+                ionice_level: 5,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        for (id, spec) in [
+            ("limited", limited.encode_to_vec()),
+            ("effort", best_effort.encode_to_vec()),
+            ("free", JobSpec::default().encode_to_vec()),
+            ("empty", Vec::new()),
+        ] {
+            seed_job(
+                &ts,
+                &host,
+                Seed {
+                    spec,
+                    ..Seed::new(id)
+                },
+            )
+            .await;
+        }
+
+        assert_eq!(
+            job_detail(&api, "limited").await["limits"],
+            json!({
+                "upload_rate_bps": 52_428_800,
+                "nice": 10,
+                "ionice_class": "idle",
+                "ionice_level": null,
+            }),
+            "{}",
+            backend.name()
+        );
+        assert_eq!(
+            job_detail(&api, "effort").await["limits"],
+            json!({
+                "upload_rate_bps": null,
+                "nice": null,
+                "ionice_class": "best-effort",
+                "ionice_level": 5,
+            })
+        );
+        assert_eq!(job_detail(&api, "free").await["limits"], Value::Null);
+        assert_eq!(job_detail(&api, "empty").await["limits"], Value::Null);
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn jobs_api_upload_speed_in_progress() {
+    use lodestore_server::grpc::dispatch::live::LiveProgress;
+
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let (api, host) = single_host(&ts).await;
+        let id = insert_job(
+            &ts,
+            NewJob {
+                host: &host,
+                policy_name: Some("p"),
+                source: "manual",
+                state: "running",
+                queued_at: 10,
+            },
+        )
+        .await;
+        ts.state().registry.live.set(
+            &id,
+            LiveProgress {
+                files_done: 4,
+                speed_bps: 2_097_152,
+                upload_speed_bps: 1_048_576,
+                updated_at: 20,
+                ..Default::default()
+            },
+        );
+
+        let detail = job_detail(&api, &id).await;
+        assert_eq!(
+            detail["progress"]["upload_speed_bps"],
+            1_048_576,
+            "{}",
+            backend.name()
+        );
+        assert_eq!(detail["progress"]["speed_bps"], 2_097_152);
+        let (_, page) = get_json(&api, "/api/v1/jobs").await;
+        assert_eq!(page["items"][0]["progress"]["upload_speed_bps"], 1_048_576);
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn jobs_api_snapshot_suspicious_flag() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let (api, host) = single_host(&ts).await;
+        let odd = "c".repeat(64);
+        let fine = "d".repeat(64);
+        seed_snapshot(&ts, &odd, 1).await;
+        seed_snapshot(&ts, &fine, 0).await;
+        for (id, snapshot) in [
+            ("odd", Some(odd.as_str())),
+            ("fine", Some(fine.as_str())),
+            ("bare", None),
+        ] {
+            seed_job(
+                &ts,
+                &host,
+                Seed {
+                    snapshot,
+                    ..Seed::new(id)
+                },
+            )
+            .await;
+        }
+
+        let (_, page) = get_json(&api, "/api/v1/jobs").await;
+        let flag = |id: &str| {
+            page["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|j| j["id"] == id)
+                .unwrap()["snapshot_suspicious"]
+                .clone()
+        };
+        assert_eq!(flag("odd"), true, "{}", backend.name());
+        assert_eq!(flag("fine"), false);
+        assert_eq!(flag("bare"), false);
+        assert_eq!(page["total"], 3);
+        assert_eq!(job_detail(&api, "odd").await["snapshot_suspicious"], true);
+        ts.stop().await;
+    }
+}

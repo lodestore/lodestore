@@ -1,6 +1,6 @@
 mod common;
 
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use common::{Api, TestServer, backends};
 use lodestore_format::crypto::Entropy;
@@ -10,6 +10,7 @@ use lodestore_format::snapshot::{open_snapshot, seal_snapshot, snapshot_object_k
 use lodestore_format::store::{LocalFsStore, put_named};
 use lodestore_format::writer::{BackupOptions, Writer};
 use serde_json::{Value, json};
+use sqlx::Row;
 
 const PASSWORD: &[u8] = b"test-password";
 
@@ -123,6 +124,52 @@ async fn rebuild_into_empty_db_reports_progress() {
         assert!(finished["last_sync_at"].is_i64());
         assert!(finished["finished_at"].is_i64());
         assert_eq!(most_read, 20);
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rebuild_received_keeps_history() {
+    const FIRST_MS: u64 = 1_767_225_600_000;
+    const FOUR_DAYS_MS: u64 = 4 * 86_400_000;
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let original = write_snapshot(&ts, "main", "host-a").await;
+        forge_variants(&ts, "main", &original, 2).await;
+
+        let dir = ts.local_repo_root("main").join("snapshots");
+        let mut names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        names.sort();
+        assert_eq!(names.len(), 3);
+        let mut expected = Vec::new();
+        for (n, name) in names.iter().enumerate() {
+            let ms = FIRST_MS + n as u64 * FOUR_DAYS_MS;
+            std::fs::File::options()
+                .write(true)
+                .open(dir.join(name))
+                .unwrap()
+                .set_modified(UNIX_EPOCH + Duration::from_millis(ms))
+                .unwrap();
+            expected.push(ms as i64);
+        }
+
+        assert_eq!(rebuild(&api, &repo).await.status(), 202);
+        wait_finished(&api, &repo).await;
+
+        let mut received: Vec<i64> = sqlx::query("SELECT received_at FROM snapshots")
+            .fetch_all(&ts.state().db.pool)
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.try_get("received_at").unwrap())
+            .collect();
+        received.sort_unstable();
+        assert_eq!(received, expected, "[{}]", backend.name());
         ts.stop().await;
     }
 }

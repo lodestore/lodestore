@@ -141,6 +141,14 @@ describe("route guards", () => {
 		await waitFor(() => expect(router.state.location.pathname).toBe("/hosts"));
 	});
 
+	it("sends /settings to the repositories page", async () => {
+		useSignedIn();
+		const { router } = renderApp("/settings");
+		await waitFor(() =>
+			expect(router.state.location.pathname).toBe("/settings/repositories"),
+		);
+	});
+
 	it("keeps credentials and the CSRF token out of browser storage", async () => {
 		useSignedOut();
 		server.use(

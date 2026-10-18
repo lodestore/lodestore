@@ -9,7 +9,8 @@ use utoipa::{IntoParams, ToSchema};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use crate::auth::AuthUser;
+use crate::auth::tokens::{Scoped, SnapshotsDelete, SnapshotsRead};
+use crate::catalog::retention::{ForgetOutcome, forget_snapshot};
 use crate::catalog::{SNAPSHOT_COLUMNS, SnapshotItem, item_from_row};
 use crate::error::{ApiError, ErrorBody};
 use crate::hosts::HostStatus;
@@ -78,12 +79,13 @@ fn count(row: &sqlx::any::AnyRow, column: &str) -> Result<u64, ApiError> {
     get,
     tag = "Restore",
     summary = "List hosts to restore from",
+    security(("session" = []), ("bearer" = ["snapshots:read"])),
     path = "/api/v1/restore/hosts",
     responses((status = 200, description = "Hosts with an agent, then hosts known only from snapshots", body = Vec<RestoreHost>))
 )]
 async fn list_restore_hosts(
     State(state): State<AppState>,
-    _user: AuthUser,
+    _auth: Scoped<SnapshotsRead>,
 ) -> Result<Json<Vec<RestoreHost>>, ApiError> {
     let names: HashMap<String, String> = list_repositories(&state)
         .await?
@@ -214,6 +216,7 @@ fn restore_snapshot(row: &sqlx::any::AnyRow) -> Result<RestoreSnapshot, ApiError
     get,
     tag = "Restore",
     summary = "List the snapshots of a host, newest first",
+    security(("session" = []), ("bearer" = ["snapshots:read"])),
     path = "/api/v1/restore/snapshots",
     params(RestoreQuery),
     responses(
@@ -224,7 +227,7 @@ fn restore_snapshot(row: &sqlx::any::AnyRow) -> Result<RestoreSnapshot, ApiError
 )]
 async fn list_restore_snapshots(
     State(state): State<AppState>,
-    _user: AuthUser,
+    _auth: Scoped<SnapshotsRead>,
     Query(query): Query<RestoreQuery>,
 ) -> Result<Json<RestoreSnapshotPage>, ApiError> {
     let limit = query.limit.unwrap_or(DEFAULT_LIMIT);
@@ -294,6 +297,7 @@ async fn list_restore_snapshots(
     get,
     tag = "Restore",
     summary = "Get one snapshot",
+    security(("session" = []), ("bearer" = ["snapshots:read"])),
     path = "/api/v1/snapshots/{id}",
     params(("id" = String, Path, description = "Snapshot id")),
     responses(
@@ -303,7 +307,7 @@ async fn list_restore_snapshots(
 )]
 async fn get_snapshot(
     State(state): State<AppState>,
-    _user: AuthUser,
+    _auth: Scoped<SnapshotsRead>,
     Path(id): Path<String>,
 ) -> Result<Json<RestoreSnapshot>, ApiError> {
     let unknown = || ApiError::NotFound("snapshot not found".into());
@@ -318,10 +322,63 @@ async fn get_snapshot(
     Ok(Json(restore_snapshot(&row)?))
 }
 
+#[derive(Serialize, ToSchema)]
+pub struct DeletedSnapshot {
+    pub id: String,
+    pub storage_kept: bool,
+    pub reason: Option<String>,
+}
+
+#[utoipa::path(
+    delete,
+    tag = "Restore",
+    summary = "Delete a snapshot",
+    security(("session" = [], "csrf" = []), ("bearer" = ["snapshots:delete"])),
+    path = "/api/v1/snapshots/{id}",
+    params(("id" = String, Path, description = "Snapshot id")),
+    responses(
+        (status = 200, description = "The snapshot left the catalog; storage_kept tells whether the manifest is still in the bucket", body = DeletedSnapshot),
+        (status = 403, description = "The token needs the snapshots:delete scope", body = ErrorBody),
+        (status = 404, description = "Unknown snapshot", body = ErrorBody),
+        (status = 502, description = "The repository storage is unavailable", body = ErrorBody),
+    )
+)]
+async fn delete_snapshot(
+    State(state): State<AppState>,
+    auth: Scoped<SnapshotsDelete>,
+    Path(id): Path<String>,
+) -> Result<Json<DeletedSnapshot>, ApiError> {
+    let unknown = || ApiError::NotFound("snapshot not found".into());
+    let id = hex32(&parse_hex32(&id).ok_or_else(unknown)?);
+    let repository_id: String = sqlx::query("SELECT repository_id FROM snapshots WHERE id = $1")
+        .bind(&id)
+        .fetch_optional(&state.db.pool)
+        .await?
+        .ok_or_else(unknown)?
+        .try_get("repository_id")?;
+    let outcome = forget_snapshot(&state, &repository_id, &id).await?;
+    tracing::info!(snapshot = %id, actor = %auth.actor(), "snapshot delete requested");
+    match outcome {
+        ForgetOutcome::Deleted => Ok(Json(DeletedSnapshot {
+            id,
+            storage_kept: false,
+            reason: None,
+        })),
+        ForgetOutcome::Blocked { reason } => Ok(Json(DeletedSnapshot {
+            id,
+            storage_kept: true,
+            reason: Some(reason),
+        })),
+        ForgetOutcome::Failed { reason } => Err(ApiError::Backend(format!(
+            "the repository storage failed: {reason}"
+        ))),
+    }
+}
+
 pub fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(list_restore_hosts))
         .routes(routes!(list_restore_snapshots))
-        .routes(routes!(get_snapshot))
+        .routes(routes!(get_snapshot, delete_snapshot))
         .merge(tree::routes())
 }

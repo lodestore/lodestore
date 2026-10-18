@@ -1,13 +1,17 @@
 import { describe, expect, it } from "vitest";
+import { formatRelative } from "@/components/relative-time";
 import {
 	formatBytes,
+	formatCalendarDay,
 	formatClock,
 	formatCount,
 	formatDateTime,
 	formatDay,
 	formatDuration,
+	formatDurationShort,
 	formatMode,
 	formatRate,
+	formatSlot,
 	formatTimeLeft,
 	percent,
 } from "@/lib/format";
@@ -84,5 +88,45 @@ describe("formatMode", () => {
 		[0, "---------"],
 	])("%o -> %s", (mode, expected) => {
 		expect(formatMode(mode)).toBe(expected);
+	});
+});
+
+describe("schedule formatters", () => {
+	it("prints durations in the largest whole unit", () => {
+		expect(formatDurationShort(900)).toBe("15m");
+		expect(formatDurationShort(86_400)).toBe("1d");
+		expect(formatDurationShort(5_400)).toBe("90m");
+		expect(formatDurationShort(7_200)).toBe("2h");
+		expect(formatDurationShort(45)).toBe("45s");
+		expect(formatDurationShort(0)).toBe("0s");
+	});
+
+	it("prints a slot in the zone of the policy", () => {
+		const at = Date.UTC(2026, 9, 20, 0, 30);
+		expect(formatSlot(at, "UTC")).toBe("Tue 20 Oct, 00:30");
+		expect(formatSlot(at, "Europe/Kyiv")).toBe("Tue 20 Oct, 03:30");
+		expect(formatSlot(at, "Australia/Lord_Howe")).toBe("Tue 20 Oct, 11:30");
+		expect(formatSlot(at, "Not/AZone")).toBe("Tue 20 Oct, 00:30");
+	});
+
+	it("names a calendar day without shifting it by the local zone", () => {
+		expect(formatCalendarDay("2026-10-25")).toBe("Sun 25 Oct");
+		expect(formatCalendarDay("2027-03-01")).toBe("Mon 1 Mar");
+	});
+});
+
+describe("formatRelative", () => {
+	const now = new Date(Date.UTC(2026, 9, 17, 12));
+	const later = (seconds: number) => new Date(now.getTime() + seconds * 1000);
+
+	it("reads the past and the future", () => {
+		expect(formatRelative(later(-7_200), now)).toBe("2 hours ago");
+		expect(formatRelative(later(3 * 3_600), now)).toBe("in 3 hours");
+		expect(formatRelative(later(2 * 86_400), now)).toBe("in 2 days");
+	});
+
+	it("keeps numbers when asked, so a label can follow it", () => {
+		expect(formatRelative(later(86_400), now)).toBe("tomorrow");
+		expect(formatRelative(later(86_400), now, "always")).toBe("in 1 day");
 	});
 });

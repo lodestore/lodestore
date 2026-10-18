@@ -53,6 +53,11 @@ export const restore = {
 		copyId: "Copy snapshot ID",
 		incomplete: "Incomplete",
 		incompleteBody: "Some files could not be read when this snapshot was made.",
+		suspiciousTitle: "This snapshot looks unusual.",
+		suspiciousBody:
+			"Retention does not count it and does not forget it. Review it, then clear the mark or delete the snapshot.",
+		clearMark: "Clear mark…",
+		deleteSnapshot: "Delete snapshot…",
 	},
 	snapshot: {
 		openFailed: (message?: string) =>
@@ -124,6 +129,8 @@ export const restore = {
 	viewJob: "View job",
 	restoreDialog: {
 		title: (n: number) => `Restore ${itemCount(n)}`,
+		suspiciousWarning:
+			"This snapshot is marked suspicious. Files in it may be encrypted or damaged.",
 		from: "From",
 		fromValue: (host: string, id: string, when: string) =>
 			`${isolate(host)} · snapshot ${id} · ${when}`,

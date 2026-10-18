@@ -14,7 +14,7 @@ use super::{
     JobProgressDto, JobSource, JobState, JobSummary, RunJob, busy_hosts, download_summary, enqueue,
     job_spec, load_download, load_job, summary_from_row,
 };
-use crate::auth::AuthUser;
+use crate::auth::tokens::{JobsRead, JobsRun, RestoreScope, Scoped};
 use crate::browse::AGENTLESS;
 use crate::browse::tree::decode_b64;
 use crate::db::now_ms;
@@ -37,6 +37,7 @@ fn overlay_live(state: &AppState, job: &mut JobSummary) {
             bytes_downloaded: live.bytes_downloaded,
             scan_done: live.scan_done,
             speed_bps: live.speed_bps,
+            upload_speed_bps: live.upload_speed_bps,
             eta_s: live.eta_s.map(|s| s as i64),
             updated_at: live.updated_at,
         });
@@ -86,6 +87,7 @@ fn like_pattern(part: &str) -> String {
     get,
     tag = "Jobs",
     summary = "List jobs",
+    security(("session" = []), ("bearer" = ["jobs:read"])),
     path = "/api/v1/jobs",
     params(JobsQuery),
     responses(
@@ -95,7 +97,7 @@ fn like_pattern(part: &str) -> String {
 )]
 pub async fn list_jobs(
     State(state): State<AppState>,
-    _user: AuthUser,
+    _auth: Scoped<JobsRead>,
     Query(query): Query<JobsQuery>,
 ) -> Result<Json<JobPage>, ApiError> {
     let kind = match &query.kind {
@@ -363,6 +365,7 @@ async fn fetch_downloads(
     get,
     tag = "Jobs",
     summary = "Get a job",
+    security(("session" = []), ("bearer" = ["jobs:read"])),
     path = "/api/v1/jobs/{id}",
     params(("id" = String, Path, description = "Job id")),
     responses(
@@ -372,16 +375,20 @@ async fn fetch_downloads(
 )]
 pub async fn get_job(
     State(state): State<AppState>,
-    _user: AuthUser,
+    _auth: Scoped<JobsRead>,
     Path(id): Path<String>,
 ) -> Result<Json<JobDetail>, ApiError> {
-    let mut job = match load_job(&state, &id).await? {
+    job_detail(&state, &id).await
+}
+
+async fn job_detail(state: &AppState, id: &str) -> Result<Json<JobDetail>, ApiError> {
+    let mut job = match load_job(state, id).await? {
         Some(job) => job,
-        None => load_download(&state, &id)
+        None => load_download(state, id)
             .await?
             .ok_or_else(|| ApiError::NotFound("job not found".into()))?,
     };
-    overlay_live(&state, &mut job.summary);
+    overlay_live(state, &mut job.summary);
     Ok(Json(job))
 }
 
@@ -415,6 +422,7 @@ pub struct EventsQuery {
     get,
     tag = "Jobs",
     summary = "List job log events",
+    security(("session" = []), ("bearer" = ["jobs:read"])),
     path = "/api/v1/jobs/{id}/events",
     params(("id" = String, Path, description = "Job id"), EventsQuery),
     responses(
@@ -425,7 +433,7 @@ pub struct EventsQuery {
 )]
 pub async fn list_job_events(
     State(state): State<AppState>,
-    _user: AuthUser,
+    _auth: Scoped<JobsRead>,
     Path(id): Path<String>,
     Query(query): Query<EventsQuery>,
 ) -> Result<Json<JobEventPage>, ApiError> {
@@ -439,7 +447,7 @@ pub async fn list_job_events(
         .fetch_optional(&state.db.pool)
         .await?
         .ok_or_else(|| ApiError::NotFound("job not found".into()))?;
-    let after = query.after.unwrap_or(0);
+    let after = query.after.unwrap_or(i64::MIN);
     let level_clause = if query.level.is_some() {
         " AND level = $3"
     } else {
@@ -472,7 +480,7 @@ pub async fn list_job_events(
         })
         .collect::<Result<Vec<_>, sqlx::Error>>()?;
     Ok(Json(JobEventPage {
-        last_seq: events.last().map_or(after, |e| e.seq),
+        last_seq: events.last().map_or(query.after.unwrap_or(0), |e| e.seq),
         events,
     }))
 }
@@ -481,7 +489,7 @@ pub async fn list_job_events(
     post,
     tag = "Jobs",
     summary = "Cancel a job",
-    security(("session" = [], "csrf" = [])),
+    security(("session" = [], "csrf" = []), ("bearer" = ["jobs:run"])),
     path = "/api/v1/jobs/{id}/cancel",
     params(("id" = String, Path, description = "Job id")),
     responses(
@@ -492,7 +500,7 @@ pub async fn list_job_events(
 )]
 pub async fn cancel_job(
     State(state): State<AppState>,
-    _user: AuthUser,
+    _auth: Scoped<JobsRun>,
     Path(id): Path<String>,
 ) -> Result<Json<JobDetail>, ApiError> {
     let cancelled = sqlx::query(
@@ -522,14 +530,14 @@ pub async fn cancel_job(
             });
         }
     }
-    get_job(State(state), _user, Path(id)).await
+    job_detail(&state, &id).await
 }
 
 #[utoipa::path(
     post,
     tag = "Jobs",
     summary = "Run a job again",
-    security(("session" = [], "csrf" = [])),
+    security(("session" = [], "csrf" = []), ("bearer" = ["jobs:run"])),
     path = "/api/v1/jobs/{id}/rerun",
     params(("id" = String, Path, description = "Job id")),
     responses(
@@ -540,7 +548,7 @@ pub async fn cancel_job(
 )]
 pub async fn rerun_job(
     State(state): State<AppState>,
-    _user: AuthUser,
+    _auth: Scoped<JobsRun>,
     Path(id): Path<String>,
 ) -> Result<Json<RunJob>, ApiError> {
     let Some(job) = load_job(&state, &id).await? else {
@@ -614,7 +622,7 @@ pub struct RestoreCreated {
     post,
     tag = "Restore",
     summary = "Restore selected paths of a snapshot to a host",
-    security(("session" = [], "csrf" = [])),
+    security(("session" = [], "csrf" = []), ("bearer" = ["restore"])),
     path = "/api/v1/restores",
     request_body = RestoreBody,
     responses(
@@ -627,7 +635,7 @@ pub struct RestoreCreated {
 )]
 pub async fn create_restore(
     State(state): State<AppState>,
-    user: AuthUser,
+    auth: Scoped<RestoreScope>,
     Json(body): Json<RestoreBody>,
 ) -> Result<(StatusCode, Json<RestoreCreated>), ApiError> {
     let items = body
@@ -646,7 +654,7 @@ pub async fn create_restore(
             conflict: body.conflict.to_proto(),
             restore_owners: body.restore_owners,
         },
-        &user.username,
+        &auth.actor(),
     )
     .await?;
     Ok((StatusCode::CREATED, Json(RestoreCreated { job_id })))

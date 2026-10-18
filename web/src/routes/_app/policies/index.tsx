@@ -63,6 +63,9 @@ function PoliciesPage() {
 			/>
 			<DeletePolicyDialog
 				name={deleting}
+				managedBy={
+					policies.data?.find((policy) => policy.name === deleting)?.managed_by
+				}
 				onClose={() => setDeleting(undefined)}
 				onCloseAutoFocus={restoreFocus}
 			/>

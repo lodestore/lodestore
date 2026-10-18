@@ -12,6 +12,7 @@ import { Illustration } from "@/components/brand/illustration";
 import { PathText } from "@/components/path-text";
 import { RelativeTime } from "@/components/relative-time";
 import { AgentKeyBadge } from "@/components/repos/agent-key-badge";
+import { SettingsNav } from "@/components/settings/settings-nav";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -147,6 +148,8 @@ function RepositoriesPage() {
 				</h1>
 				<AddRepositoryButton />
 			</header>
+
+			<SettingsNav />
 
 			{query.isError && (
 				<Alert variant="destructive">

@@ -14,8 +14,8 @@ use lodestore_proto::agent::v1::agent_message::Body as AgentBody;
 use lodestore_proto::agent::v1::enrollment_client::EnrollmentClient;
 use lodestore_proto::agent::v1::server_message::Body as ServerBody;
 use lodestore_proto::agent::v1::{
-    AgentMessage, GetTrustAnchorRequest, Heartbeat, Hello, HookFacts, HookScript, JobAccepted,
-    JobCreated, JobEvent, JobEventLevel, JobEvents, JobFinished, JobOutcome, JobPhase,
+    AgentMessage, GetTrustAnchorRequest, Heartbeat, Hello, HookFacts, HookScript, IoniceClass,
+    JobAccepted, JobCreated, JobEvent, JobEventLevel, JobEvents, JobFinished, JobOutcome, JobPhase,
     JobPhaseKind, JobProgress, JobRejected, JobReport, JobReportState, JobSpec, JobStats,
     ServerMessage, Versions,
 };
@@ -93,12 +93,28 @@ impl Fake {
         Fake::open(ts, host, tx, rx, jobs).await
     }
 
+    async fn connect_with(ts: &TestServer, host: &Host, capabilities: &[&str]) -> Fake {
+        let (tx, rx) = mpsc::channel(64);
+        Fake::open_with(ts, host, tx, rx, vec![], capabilities).await
+    }
+
     async fn open(
         ts: &TestServer,
         host: &Host,
         tx: mpsc::Sender<AgentMessage>,
         rx: mpsc::Receiver<AgentMessage>,
         jobs: Vec<JobReport>,
+    ) -> Fake {
+        Fake::open_with(ts, host, tx, rx, jobs, &[]).await
+    }
+
+    async fn open_with(
+        ts: &TestServer,
+        host: &Host,
+        tx: mpsc::Sender<AgentMessage>,
+        rx: mpsc::Receiver<AgentMessage>,
+        jobs: Vec<JobReport>,
+        capabilities: &[&str],
     ) -> Fake {
         tx.send(AgentMessage {
             body: Some(AgentBody::Hello(Hello {
@@ -108,7 +124,7 @@ impl Fake {
                 }),
                 agent_version: "test".to_string(),
                 jobs,
-                capabilities: Vec::new(),
+                capabilities: capabilities.iter().map(|c| (*c).to_string()).collect(),
             })),
         })
         .await
@@ -678,6 +694,7 @@ async fn dispatch_progress_live_and_flushed() {
                 bytes_done: 2048,
                 scan_done: true,
                 eta_s: Some(30),
+                upload_speed_bps: 1_048_576,
                 ..Default::default()
             }))
             .await;
@@ -687,6 +704,7 @@ async fn dispatch_progress_live_and_flushed() {
         .await;
         assert!(seen, "[{}]", backend.name());
         assert_eq!(live.get("job-1").unwrap().eta_s, Some(30));
+        assert_eq!(live.get("job-1").unwrap().upload_speed_bps, 1_048_576);
 
         let flushed = wait_until(Duration::from_secs(12), || async {
             text(
@@ -1514,6 +1532,193 @@ async fn dispatch_reject_text_is_bounded() {
         .await;
         assert_eq!(code.unwrap().len(), 4096, "[{}]", backend.name());
         assert_eq!(message.unwrap().len(), 4096);
+        drop(agent);
+        ts.stop().await;
+    }
+}
+
+fn assigned_spec(body: ServerBody) -> Option<JobSpec> {
+    match body {
+        ServerBody::JobAssign(a) => a.spec,
+        _ => None,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dispatch_limits_in_spec() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let host = enroll(&ts, &api, &repo, "host-a").await;
+        let yaml = format!(
+            "apiVersion: lodestore.io/v1alpha1\nkind: BackupPolicy\nmetadata:\n  name: capped\n\
+             spec:\n  repository: main\n  selector:\n    hosts:\n      - {}\n  paths:\n    - /etc\n  \
+             limits:\n    uploadRate: 2MiB/s\n    nice: 10\n    ioniceClass: best-effort\n    ioniceLevel: 5\n",
+            host.id
+        );
+        let created = api
+            .post("/api/v1/policies", &serde_json::json!({ "yaml": yaml }))
+            .await;
+        assert_eq!(created.status(), 201, "[{}]", backend.name());
+        let run = api
+            .post("/api/v1/policies/capped/run", &serde_json::json!({}))
+            .await;
+        assert_eq!(run.status(), 200, "[{}]", backend.name());
+
+        let mut agent = Fake::connect(&ts, &host, vec![]).await;
+        let spec = agent.recv(assigned_spec).await;
+        let limits = spec.limits.expect("limits in the spec");
+        assert_eq!(limits.upload_rate_bps, 2 << 20);
+        assert_eq!(limits.nice, 10);
+        assert_eq!(limits.ionice_class, IoniceClass::BestEffort as i32);
+        assert_eq!(limits.ionice_level, 5);
+        drop(agent);
+        ts.stop().await;
+    }
+}
+
+const LIMITS_WARNINGS: &str = "SELECT COUNT(*) FROM job_events e JOIN jobs j ON j.id = e.job_id \
+     WHERE j.host_id = $1 AND e.kind = 'limits_ignored' AND e.seq = -1 AND e.level = 'warning'";
+const LIMITS_LOG_LINES: &str = "SELECT log_lines FROM jobs WHERE host_id = $1";
+
+async fn run_policy(api: &Api, host: &Host, limits: &str) {
+    let yaml = format!(
+        "apiVersion: lodestore.io/v1alpha1\nkind: BackupPolicy\nmetadata:\n  name: capped\n\
+         spec:\n  repository: main\n  selector:\n    hosts:\n      - {}\n  paths:\n    - /etc\n{limits}",
+        host.id
+    );
+    let created = api
+        .post("/api/v1/policies", &serde_json::json!({ "yaml": yaml }))
+        .await;
+    assert_eq!(created.status(), 201);
+    let run = api
+        .post("/api/v1/policies/capped/run", &serde_json::json!({}))
+        .await;
+    assert_eq!(run.status(), 200);
+}
+
+const WITH_LIMITS: &str = "  limits:\n    nice: 10\n";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dispatch_limits_old_agent_warned() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let host = enroll(&ts, &api, &repo, "host-a").await;
+        run_policy(&api, &host, WITH_LIMITS).await;
+
+        let mut agent = Fake::connect(&ts, &host, vec![]).await;
+        assert!(agent.recv(assigned_spec).await.limits.is_some());
+        let pool = &ts.state().db.pool;
+        assert_eq!(
+            number(pool, LIMITS_WARNINGS, &host.id).await,
+            1,
+            "[{}]",
+            backend.name()
+        );
+        assert_eq!(
+            number(pool, LIMITS_LOG_LINES, &host.id).await,
+            1,
+            "[{}]",
+            backend.name()
+        );
+        drop(agent);
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dispatch_limits_new_agent_silent() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let host = enroll(&ts, &api, &repo, "host-a").await;
+        run_policy(&api, &host, WITH_LIMITS).await;
+
+        let mut agent = Fake::connect_with(&ts, &host, &["limits_v1"]).await;
+        assert!(agent.recv(assigned_spec).await.limits.is_some());
+        let pool = &ts.state().db.pool;
+        assert_eq!(
+            number(pool, LIMITS_WARNINGS, &host.id).await,
+            0,
+            "[{}]",
+            backend.name()
+        );
+        assert_eq!(
+            number(pool, LIMITS_LOG_LINES, &host.id).await,
+            0,
+            "[{}]",
+            backend.name()
+        );
+        drop(agent);
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dispatch_no_limits_old_agent_silent() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let host = enroll(&ts, &api, &repo, "host-a").await;
+        run_policy(&api, &host, "").await;
+
+        let mut agent = Fake::connect(&ts, &host, vec![]).await;
+        assert!(agent.recv(assigned_spec).await.limits.is_none());
+        let pool = &ts.state().db.pool;
+        assert_eq!(
+            number(pool, LIMITS_WARNINGS, &host.id).await,
+            0,
+            "[{}]",
+            backend.name()
+        );
+        drop(agent);
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dispatch_foreign_finish_does_not_trigger_retention() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let host_a = enroll(&ts, &api, &repo, "host-a").await;
+        let host_b = enroll(&ts, &api, &repo, "host-b").await;
+        let pool = &ts.state().db.pool;
+        insert_job(pool, "job-b", &host_b.id, "manual", "succeeded", now_ms()).await;
+        sqlx::query("UPDATE jobs SET snapshot_id = $1 WHERE id = 'job-b'")
+            .bind("a".repeat(64))
+            .execute(pool)
+            .await
+            .unwrap();
+
+        let mut agent = Fake::connect(&ts, &host_a, vec![]).await;
+        agent
+            .send(AgentBody::JobFinished(finished(
+                "job-b",
+                JobOutcome::Succeeded,
+                "",
+            )))
+            .await;
+        assert_eq!(agent.recv(is_ack).await, "job-b");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        assert_eq!(
+            text(
+                pool,
+                "SELECT retention_json FROM jobs WHERE id = $1",
+                "job-b"
+            )
+            .await,
+            None,
+            "[{}]",
+            backend.name()
+        );
         drop(agent);
         ts.stop().await;
     }

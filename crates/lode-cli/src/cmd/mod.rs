@@ -1,3 +1,4 @@
+mod apply;
 mod backup;
 mod backup_agent;
 mod dump;
@@ -5,6 +6,7 @@ mod key;
 mod ls;
 mod repo;
 mod restore;
+mod server;
 mod snapshots;
 
 use std::fs::OpenOptions;
@@ -45,6 +47,15 @@ pub fn run(cli: Cli) -> Result<u8> {
             .clone_from(&profile.password_command);
     }
     let out = Output { json };
+    let command = match command {
+        Command::Server { args, command } => {
+            return rt.block_on(server::run(args.server, profile.as_ref(), out, command));
+        }
+        Command::Apply(args) => {
+            return rt.block_on(apply::run(args, profile.as_ref(), out));
+        }
+        other => other,
+    };
     if let Command::Backup { flags, .. } = &command
         && flags.stdin
     {
@@ -81,6 +92,9 @@ pub fn run(cli: Cli) -> Result<u8> {
                 target,
                 flags,
             } => restore::run(&url, &secret, out, &snapshot, &target, flags).await,
+            Command::Server { .. } | Command::Apply(_) => {
+                unreachable!("server commands return before this point")
+            }
         }
     })
 }

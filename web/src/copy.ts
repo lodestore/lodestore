@@ -3,6 +3,7 @@ import { hostBackup, snapshots } from "@/copy.host";
 import { jobs } from "@/copy.jobs";
 import { policies } from "@/copy.policies";
 import { restore } from "@/copy.restore";
+import { tokens } from "@/copy.tokens";
 import { sentence } from "@/lib/sentence";
 
 export const copy = {
@@ -10,6 +11,7 @@ export const copy = {
 	jobs,
 	policies,
 	restore,
+	tokens,
 	hostBackup,
 	snapshots,
 	nav: {
@@ -19,6 +21,11 @@ export const copy = {
 		jobs: "Jobs",
 		restore: "Restore",
 		settings: "Settings",
+	},
+	settingsNav: {
+		label: "Settings sections",
+		repositories: "Repositories",
+		tokens: "API tokens",
 	},
 	soon: "Soon",
 	brand: "Lodestore",
@@ -46,6 +53,7 @@ export const copy = {
 		addHost: "Add host",
 		addRepository: "Add repository",
 		createPolicy: "Create policy",
+		createApiToken: "Create API token",
 		lightTheme: "Switch to light theme",
 		darkTheme: "Switch to dark theme",
 		systemTheme: "Use system theme",

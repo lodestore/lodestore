@@ -108,3 +108,40 @@ A backup policy can run a script on the host before and after a backup. The serv
 - Hooks inherit the agent's systemd sandbox: `NoNewPrivileges`, `PrivateTmp`, `ProtectKernelTunables`, `ProtectKernelModules`, `ProtectControlGroups`, `RestrictAddressFamilies`, `LockPersonality`, `RestrictRealtime`, `ProtectClock`, `ProtectHostname`, `ProtectKernelLogs` and `SystemCallArchitectures=native`. Namespace restrictions and a read-only file system are not applied, so mount and `unshare` based hooks still work.
 - `NoNewPrivileges` makes `sudo` fail. To run a step as another user, use `runuser -u <user> --` or `setpriv`.
 - `PrivateTmp` gives the agent and its hooks a private `/tmp` that is not the host's `/tmp`. A dump written there is invisible to the database process, and a policy path under `/tmp` backs up the private tree. Write dumps to `/var/lib/lodestore/staging` or `/var/backups`.
+
+## API tokens
+
+An API token lets a script or CI job reach the REST API without a browser session. It is the boundary between the CI environment and the server, and the token is the only credential that crosses it.
+
+- **Scopes.** A token carries a list of scopes chosen by the administrator. Each token-enabled route names one scope through the `Scoped<S>` extractor and rejects a token without it with `403`. A route that does not use the extractor accepts sessions only, so a new route is closed to tokens until someone opts it in. A test lists the session-only routes (token management, join tokens, repositories, catalog, server settings, the administrator account) and checks that a token holding every scope still gets `401` there.
+- **Storage.** Only the SHA-256 hash and the first characters of the token are stored. The secret is shown once, so the database and its backups do not hold a usable token.
+- **Revocation.** Every request looks the token up in the database, so a revoked or expired token stops working at once. There is no cache to wait out.
+- **No CSRF with Bearer.** The browser does not attach an `Authorization` header by itself, so a Bearer request cannot be forged from another site. Session requests keep their CSRF check. A request with a Bearer header is never mixed with the cookie: the token alone decides.
+- **Audit.** A restore or download started by a token records `token:<name>` as who started it.
+- **Plain HTTP.** A token sent over HTTP without TLS can be read on the network. Serving the API over TLS, or keeping CI and server on a trusted network, is the operator's job. `lode` warns when it sends a token to a non-loopback `http://` address.
+- **What a stolen token gives.** Everything its scopes allow and nothing else: a token with `restore` can read and download backed-up data, so give such a token to few jobs and use short expiry. A token cannot create other tokens, change the password or touch repositories.
+
+## Retention and forgetting snapshots
+
+After every backup that ends as succeeded or with warnings, the server applies the retention rules of the policy to one pair: the policy and the host. It deletes the `snapshots/<id>` object with its own credentials and removes the catalog row. Packs are never touched here; unreferenced data is the business of garbage collection.
+
+**What the boundary guarantees.**
+
+- Only the server forgets. The agent key is write-only and cannot delete, so a compromised agent cannot forget anything, its own snapshots included.
+- A pass looks only at snapshots that carry the tag of its policy, sit in the repository of the policy and were bound to their host by the server: the host is recorded when the agent reports a finished job on its own authenticated session. A snapshot that the catalog sync merely found in the bucket gets its host from fields the agent wrote into the manifest (`agent_id`, `hostname`), so it is kept in the catalog but never counts toward any rule or the floor and is never forgotten by retention. Snapshots of other policies, manual `lode` snapshots, stdin snapshots without `--policy` and snapshots of a deleted policy are never counted and never forgotten.
+- The object key comes from `snapshot_object_key` for a 64-character hex id that is already in the catalog. No path from a user or an agent is used.
+- A compromised agent can flood its own pair with fresh snapshots to push good ones out of the retention window. The damage is limited to that pair and host, because only snapshots linked to a finished job of that host count, so a compromised agent cannot plant manifests that claim another host and displace its history. A snapshot marked suspicious (by the anomaly detector or by an administrator) counts toward no rule and is never forgotten, and the two newest good complete snapshots of a pair are always kept, even with `keepLast: 1`.
+- Receive time, not the time written by the agent, orders the snapshots, so an agent cannot move a snapshot in or out of a window with a forged clock. If the receive time of any snapshot in a pair is not yet confirmed by the storage (a catalog rebuilt from a database that predates the receive-time column, or a backend that reports no modification time), the pass is postponed and a warning is written to the job log, because buckets computed from estimated times could collapse and drop history.
+- Incomplete snapshots take no slot in any rule, and no rule forgets them; they are neither counted nor deleted by retention.
+- Through an API token, creating a policy with `spec.retention` or changing it requires the `snapshots:delete` scope in addition to `policies:write`, since a tighter rule makes the next backup delete older snapshots. Sessions are not affected.
+
+**When the storage refuses the delete.**
+
+- With Object Lock or versioning, a plain delete succeeds by adding a delete marker; the earlier version stays in the bucket. The catalog and `lode` no longer see the snapshot, and no tombstone is needed.
+- If the storage answers "access denied" (a server key without `s3:DeleteObject`, a lock rule that forbids it), the server writes a tombstone, removes the row from the catalog and adds a warning, `Could not delete snapshot <id>: <reason>`, to the log of the backup job. The job stays succeeded. The tombstone stops later catalog syncs from bringing the row back while the object is still in the bucket; it is dropped when the object disappears. A catalog sync retries the delete at most once a day for a tombstoned object that is still listed, and drops the tombstone when the delete goes through.
+- A temporary backend error leaves the row in place and the next pass retries.
+
+**What the markers do not protect against.**
+
+- Suspicious marks and the anomaly details live in the database only. If the database is lost and the catalog is rebuilt from the bucket, the marks are gone; the rebuilt snapshots are not bound to a job, so retention neither counts nor forgets them, and old history simply stops being rotated.
+- A forgotten snapshot cannot be brought back without bucket versioning. The interface shows a preview of what a rule change would forget and asks for confirmation before it saves a tighter rule, to guard against an accidental change.

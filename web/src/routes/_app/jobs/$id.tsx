@@ -9,7 +9,11 @@ import {
 } from "@/components/jobs/cancel-job-dialog";
 import { JobCards } from "@/components/jobs/job-cards";
 import { JobLog, LOG_ANCHOR, type LogFilter } from "@/components/jobs/job-log";
-import { JobProgress, phaseLabel } from "@/components/jobs/job-progress";
+import {
+	JobProgress,
+	phaseLabel,
+	retentionRunning,
+} from "@/components/jobs/job-progress";
 import { waitReason } from "@/components/jobs/jobs-table";
 import { StatusBadge } from "@/components/status-badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -146,7 +150,11 @@ function JobPage() {
 	const { id } = Route.useParams();
 	const query = useGetJob(id, {
 		query: {
-			refetchInterval: (q) => (isActive(q.state.data?.state) ? POLL_MS : false),
+			refetchInterval: (q) =>
+				isActive(q.state.data?.state) ||
+				(q.state.data && retentionRunning(q.state.data))
+					? POLL_MS
+					: false,
 			refetchIntervalInBackground: false,
 		},
 	});
@@ -264,7 +272,7 @@ function JobPage() {
 					</div>
 
 					<JobNotices job={job} />
-					{isActive(job.state) && (
+					{(isActive(job.state) || retentionRunning(job)) && (
 						<JobProgress job={job} onShowWarnings={showWarnings} />
 					)}
 					<JobCards job={job} />

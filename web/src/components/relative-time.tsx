@@ -15,21 +15,30 @@ const UNITS: [Intl.RelativeTimeFormatUnit, number][] = [
 	["second", 1],
 ];
 
-const rtf = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
+const formats = {
+	auto: new Intl.RelativeTimeFormat("en", { numeric: "auto" }),
+	always: new Intl.RelativeTimeFormat("en", { numeric: "always" }),
+};
 
-export function formatRelative(date: Date, now: Date): string {
+export function formatRelative(
+	date: Date,
+	now: Date,
+	numeric: "auto" | "always" = "auto",
+): string {
 	const seconds = Math.round((date.getTime() - now.getTime()) / 1000);
 	const [unit, size] =
 		UNITS.find(([, s]) => Math.abs(seconds) >= s) ?? UNITS[UNITS.length - 1];
-	return rtf.format(Math.round(seconds / size), unit);
+	return formats[numeric].format(Math.round(seconds / size), unit);
 }
 
 export function RelativeTime({
 	value,
 	now = new Date(),
+	numeric,
 }: {
 	value: string | Date;
 	now?: Date;
+	numeric?: "auto" | "always";
 }) {
 	const date = new Date(value);
 	if (Number.isNaN(date.getTime())) return <span>{copy.common.dash}</span>;
@@ -42,7 +51,7 @@ export function RelativeTime({
 			<Tooltip>
 				<TooltipTrigger asChild>
 					<time dateTime={date.toISOString()} tabIndex={0}>
-						{formatRelative(date, now)}
+						{formatRelative(date, now, numeric)}
 					</time>
 				</TooltipTrigger>
 				<TooltipContent>{absolute}</TooltipContent>

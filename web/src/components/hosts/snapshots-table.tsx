@@ -1,6 +1,6 @@
 import { keepPreviousData, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { RefreshCw } from "lucide-react";
+import { FolderOpen, RefreshCw } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import {
@@ -12,6 +12,15 @@ import type { HostDetail, SnapshotItem } from "@/api/gen/model";
 import { Illustration } from "@/components/brand/illustration";
 import { TextWithPaths } from "@/components/path-text";
 import { RelativeTime } from "@/components/relative-time";
+import { SnapshotActionsMenu } from "@/components/snapshots/snapshot-actions-menu";
+import {
+	type SnapshotAction,
+	SnapshotDialogs,
+} from "@/components/snapshots/snapshot-dialogs";
+import {
+	PolicyDeletedBadge,
+	SuspiciousBadge,
+} from "@/components/snapshots/suspicious-badge";
 import { StatusBadge } from "@/components/status-badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -85,7 +94,7 @@ function SkeletonRows() {
 			<TableCell className={cn("px-4", SHOW_CONTENTS)}>
 				<Skeleton className="h-4 w-40" />
 			</TableCell>
-			<TableCell className="px-4">
+			<TableCell className={cn("px-4", SHOW_CONTENTS)}>
 				<Skeleton className="h-4 w-14" />
 			</TableCell>
 			<TableCell className={cn("px-4", SHOW_FILES)}>
@@ -95,7 +104,7 @@ function SkeletonRows() {
 				<Skeleton className="h-4 w-16" />
 			</TableCell>
 			<TableCell className="px-4">
-				<Skeleton className="h-8 w-28" />
+				<Skeleton className="h-8 w-36" />
 			</TableCell>
 		</TableRow>
 	));
@@ -104,6 +113,10 @@ function SkeletonRows() {
 export function SnapshotsTable({ host }: { host: HostDetail }) {
 	const queryClient = useQueryClient();
 	const [page, setPage] = useState(1);
+	const [action, setAction] = useState<{
+		snapshot: SnapshotItem;
+		action: SnapshotAction;
+	}>();
 	const query = useListHostSnapshots(
 		host.id,
 		{ page },
@@ -208,7 +221,7 @@ export function SnapshotsTable({ host }: { host: HostDetail }) {
 								<TableHead className={cn("px-4", SHOW_CONTENTS)}>
 									{copy.snapshots.columns.contents}
 								</TableHead>
-								<TableHead className="px-4 text-right">
+								<TableHead className={cn("px-4 text-right", SHOW_CONTENTS)}>
 									{copy.snapshots.columns.size}
 								</TableHead>
 								<TableHead className={cn("px-4 text-right", SHOW_FILES)}>
@@ -240,7 +253,13 @@ export function SnapshotsTable({ host }: { host: HostDetail }) {
 											{snapshot.id.slice(0, SHORT_ID)}
 										</TableCell>
 										<TableCell className="px-4 text-sm font-semibold">
-											<Truncated text={source(snapshot)} className="max-w-48" />
+											<div className="flex flex-col items-start gap-1 py-1">
+												<Truncated
+													text={source(snapshot)}
+													className="max-w-36 @min-[840px]:max-w-48"
+												/>
+												{snapshot.policy_deleted && <PolicyDeletedBadge />}
+											</div>
 										</TableCell>
 										<TableCell className={cn("px-4 text-sm", SHOW_CONTENTS)}>
 											<Truncated
@@ -248,7 +267,12 @@ export function SnapshotsTable({ host }: { host: HostDetail }) {
 												className="max-w-80 font-mono"
 											/>
 										</TableCell>
-										<TableCell className="px-4 text-right text-sm tabular-nums">
+										<TableCell
+											className={cn(
+												"px-4 text-right text-sm tabular-nums",
+												SHOW_CONTENTS,
+											)}
+										>
 											{formatBytes(snapshot.stats.bytes_total)}
 										</TableCell>
 										<TableCell
@@ -260,28 +284,47 @@ export function SnapshotsTable({ host }: { host: HostDetail }) {
 											{formatCount(fileTotal(snapshot))}
 										</TableCell>
 										<TableCell className="px-4">
-											{snapshot.incomplete ? (
-												<StatusBadge status="warning">
-													{copy.snapshots.incomplete}
-												</StatusBadge>
-											) : (
-												<StatusBadge status="success">
-													{copy.snapshots.complete}
-												</StatusBadge>
-											)}
+											<div className="flex flex-wrap items-center gap-1">
+												{snapshot.suspicious && (
+													<SuspiciousBadge snapshot={snapshot} />
+												)}
+												{snapshot.incomplete ? (
+													<StatusBadge status="warning">
+														{copy.snapshots.incomplete}
+													</StatusBadge>
+												) : (
+													<StatusBadge status="success">
+														{copy.snapshots.complete}
+													</StatusBadge>
+												)}
+											</div>
 										</TableCell>
-										<TableCell className="px-4 text-right">
-											<Button asChild variant="outline" size="sm">
-												<Link
-													to="/restore"
-													search={{ host: host.id, snapshot: snapshot.id }}
-													aria-label={copy.snapshots.browseFilesFor(
-														snapshot.id.slice(0, SHORT_ID),
-													)}
-												>
-													{copy.snapshots.browseFiles}
-												</Link>
-											</Button>
+										<TableCell className="px-4">
+											<div className="flex items-center justify-end gap-1">
+												<Button asChild variant="outline" size="sm">
+													<Link
+														to="/restore"
+														search={{ host: host.id, snapshot: snapshot.id }}
+														aria-label={copy.snapshots.browseFilesFor(
+															snapshot.id.slice(0, SHORT_ID),
+														)}
+													>
+														<FolderOpen
+															aria-hidden
+															className="@min-[840px]:hidden"
+														/>
+														<span className="sr-only @min-[840px]:not-sr-only">
+															{copy.snapshots.browseFiles}
+														</span>
+													</Link>
+												</Button>
+												<SnapshotActionsMenu
+													snapshot={snapshot}
+													onAction={(next) =>
+														setAction({ snapshot, action: next })
+													}
+												/>
+											</div>
 										</TableCell>
 									</TableRow>
 								))
@@ -290,6 +333,8 @@ export function SnapshotsTable({ host }: { host: HostDetail }) {
 					</Table>
 				</div>
 			)}
+
+			<SnapshotDialogs target={action} onClose={() => setAction(undefined)} />
 
 			{data !== undefined && data.total > 0 && (
 				<>

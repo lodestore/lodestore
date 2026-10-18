@@ -35,6 +35,7 @@ mod docs;
     tags(
         (name = "Auth", description = "Sign in and out, read the session and its CSRF token."),
         (name = "Hosts", description = "Enrolled hosts, their labels, join tokens and manual backups."),
+        (name = "Tokens", description = "API tokens for CI and the CLI, limited to the scopes they are issued with."),
         (name = "Policies", description = "Backup policies: which hosts, which paths, which repository."),
         (name = "Jobs", description = "Backup jobs: history, live progress, log, cancel and rerun."),
         (name = "Snapshots", description = "Snapshots recorded in the server catalog."),
@@ -50,7 +51,9 @@ struct Security;
 
 impl utoipa::Modify for Security {
     fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
-        use utoipa::openapi::security::{ApiKey, ApiKeyValue, SecurityScheme};
+        use utoipa::openapi::security::{
+            ApiKey, ApiKeyValue, HttpAuthScheme, HttpBuilder, SecurityScheme,
+        };
         let components = openapi.components.get_or_insert_with(Default::default);
         components.add_security_scheme(
             "session",
@@ -66,6 +69,17 @@ impl utoipa::Modify for Security {
                 "Required on every request that changes data. \
                  Read the token from `GET /api/v1/auth/session`.",
             ))),
+        );
+        components.add_security_scheme(
+            "bearer",
+            SecurityScheme::Http(
+                HttpBuilder::new()
+                    .scheme(HttpAuthScheme::Bearer)
+                    .description(Some(
+                        "API token from Settings → API tokens. Scopes limit what the token can do.",
+                    ))
+                    .build(),
+            ),
         );
     }
 }

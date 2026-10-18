@@ -15,14 +15,14 @@ use crate::catalog::{self, JobLink};
 use crate::db::now_ms;
 use crate::state::AppState;
 
-const LOG_LIMIT: i64 = 5000;
-const LOG_LIMIT_MESSAGE: &str = "Log limit reached. Later events are not kept.";
+pub(crate) const LOG_LIMIT: i64 = 5000;
+pub(crate) const LOG_LIMIT_MESSAGE: &str = "Log limit reached. Later events are not kept.";
 const MAX_TEXT: usize = 4096;
 const MAX_JOB_ID: usize = 64;
 const MAX_REPORTS: usize = 256;
 const INGEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
-fn clip(text: &str) -> String {
+pub(crate) fn clip(text: &str) -> String {
     let mut end = text.len().min(MAX_TEXT);
     while !text.is_char_boundary(end) {
         end -= 1;
@@ -322,6 +322,7 @@ async fn handle(state: &AppState, agent_id: &str, body: AgentBody) -> anyhow::Re
                         bytes_downloaded: m.bytes_downloaded,
                         scan_done: m.scan_done,
                         speed_bps: m.speed_bps,
+                        upload_speed_bps: m.upload_speed_bps,
                         eta_s: m.eta_s,
                         updated_at: now_ms(),
                     },
@@ -414,9 +415,22 @@ async fn store_events(
 }
 
 async fn finish(state: &AppState, agent_id: &str, job_id: &str, finished: &JobFinished) {
-    if let Err(error) = apply_finished(state, agent_id, job_id, finished).await {
-        tracing::warn!(%error, agent_id, job_id, "recording a finished job failed");
-        return;
+    match apply_finished(state, agent_id, job_id, finished).await {
+        Err(error) => {
+            tracing::warn!(%error, agent_id, job_id, "recording a finished job failed");
+            return;
+        }
+        Ok(true) => {
+            let (retention_state, retention_job) = (state.clone(), job_id.to_string());
+            tokio::spawn(async move {
+                if let Err(error) =
+                    catalog::retention::after_backup(&retention_state, &retention_job).await
+                {
+                    tracing::warn!(%error, job_id = %retention_job, "applying retention failed");
+                }
+            });
+        }
+        Ok(false) => {}
     }
     send(
         state,
@@ -486,7 +500,7 @@ async fn apply_finished(
     agent_id: &str,
     job_id: &str,
     f: &JobFinished,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     let is_restore = sqlx::query("SELECT kind FROM jobs WHERE id = $1 AND host_id = $2")
         .bind(job_id)
         .bind(agent_id)
@@ -571,11 +585,11 @@ async fn apply_finished(
         if own_final {
             state.registry.clear_issued(job_id);
         }
-        return Ok(());
+        return Ok(own_final);
     }
     state.registry.live.remove(job_id);
     state.registry.clear_issued(job_id);
-    Ok(())
+    Ok(true)
 }
 
 async fn insert_cli_job(

@@ -2,6 +2,7 @@ use std::fs::File;
 use std::io::Write;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 use bytes::Bytes;
 use rustix::fs::{AtFlags, CWD, Mode, OFlags};
@@ -25,6 +26,14 @@ impl LocalFsStore {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    pub(super) async fn modified_ms(&self, key: &str) -> Result<Option<i64>, BlobError> {
+        let path = self.path_of(key)?;
+        tokio::task::spawn_blocking(move || std::fs::metadata(path).map(|m| mtime_ms(&m)))
+            .await
+            .map_err(io_err)?
+            .map_err(map_read_err)
     }
 
     fn path_of(&self, key: &str) -> Result<PathBuf, BlobError> {
@@ -134,6 +143,11 @@ fn hex(bytes: &[u8]) -> String {
     })
 }
 
+fn mtime_ms(meta: &std::fs::Metadata) -> Option<i64> {
+    let since = meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
+    i64::try_from(since.as_millis()).ok()
+}
+
 fn collect(dir: &Path, key_prefix: &str, out: &mut Vec<ListEntry>) -> std::io::Result<()> {
     let rd = match std::fs::read_dir(dir) {
         Ok(rd) => rd,
@@ -153,9 +167,11 @@ fn collect(dir: &Path, key_prefix: &str, out: &mut Vec<ListEntry>) -> std::io::R
         if ty.is_dir() {
             collect(&entry.path(), &format!("{key}/"), out)?;
         } else if ty.is_file() {
+            let meta = entry.metadata()?;
             out.push(ListEntry {
                 key,
-                size: entry.metadata()?.len(),
+                size: meta.len(),
+                modified_ms: mtime_ms(&meta),
             });
         }
     }
@@ -323,19 +339,8 @@ mod tests {
         std::fs::write(dir.path().join("repo/packs/ab/.lode-tmp-deadbeef"), b"x").unwrap();
 
         let packs = store.list("packs/").await.unwrap();
-        assert_eq!(
-            packs,
-            vec![
-                ListEntry {
-                    key: "packs/ab/one".into(),
-                    size: 1
-                },
-                ListEntry {
-                    key: "packs/cd/two".into(),
-                    size: 2
-                },
-            ]
-        );
+        let shape: Vec<_> = packs.iter().map(|e| (e.key.as_str(), e.size)).collect();
+        assert_eq!(shape, vec![("packs/ab/one", 1), ("packs/cd/two", 2)]);
         assert_eq!(store.list("").await.unwrap().len(), 3);
         assert!(store.list("keys/").await.unwrap().is_empty());
         assert!(
@@ -344,5 +349,33 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn store_modified_ms_local() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalFsStore::new(dir.path().join("repo"));
+        store
+            .put_if_absent("snapshots/one", Bytes::from_static(b"1"))
+            .await
+            .unwrap();
+        let when = UNIX_EPOCH + std::time::Duration::from_millis(1_767_323_045_000);
+        File::options()
+            .write(true)
+            .open(dir.path().join("repo/snapshots/one"))
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+
+        let listed = store.list("snapshots/").await.unwrap();
+        assert_eq!(listed[0].modified_ms, Some(1_767_323_045_000));
+        assert_eq!(
+            store.modified_ms("snapshots/one").await.unwrap(),
+            Some(1_767_323_045_000)
+        );
+        assert!(matches!(
+            store.modified_ms("snapshots/none").await,
+            Err(BlobError::NotFound)
+        ));
     }
 }

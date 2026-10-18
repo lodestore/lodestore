@@ -11,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 use crate::grpc::dispatch::live::Live;
 
 pub const CAP_RESTORE: &str = "restore_v1";
+pub const CAP_LIMITS: &str = "limits_v1";
 pub const ONLINE_WINDOW: Duration = Duration::from_secs(45);
 const CHANNEL_DEPTH: usize = 16;
 

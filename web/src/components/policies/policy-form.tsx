@@ -1,21 +1,22 @@
-import {
-	ArrowDown,
-	ArrowUp,
-	ChevronDown,
-	CircleAlert,
-	Plus,
-	Search,
-	X,
-} from "lucide-react";
-import { useId, useState } from "react";
+import { ArrowDown, ArrowUp, ChevronDown, Plus, Search, X } from "lucide-react";
+import { type ReactNode, useId, useState } from "react";
 import { useListHosts } from "@/api/gen/endpoints";
 import type {
 	BackupPolicy,
 	Hook,
-	Problem,
 	RepositorySummary,
+	Retention,
+	ScheduleInfo,
 } from "@/api/gen/model";
 import { LabelsEditor } from "@/components/labels-editor";
+import {
+	ErrorText,
+	type FieldProblems,
+	RowField,
+} from "@/components/policies/form-field";
+import { LimitsPanel } from "@/components/policies/limits-panel";
+import { RetentionPanel } from "@/components/policies/retention-panel";
+import { SchedulePanel } from "@/components/policies/schedule-panel";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -48,6 +49,7 @@ import type { LabelRow } from "@/lib/labels";
 
 const API_VERSION = "lodestore.io/v1alpha1";
 const KIND = "BackupPolicy";
+const HOSTS_LISTED = 10;
 export const BLANK_LABEL: LabelRow = { key: "", value: "" };
 
 export type HookDraft = {
@@ -56,6 +58,51 @@ export type HookDraft = {
 	args: string;
 	timeout: string;
 	command: string | null;
+	rawArgs?: string[];
+};
+
+export type ScheduleDraft = {
+	cron: string;
+	timezone: string;
+	jitter: string;
+	catchUpWindow: string;
+};
+
+export type LimitsDraft = {
+	uploadRate: string;
+	nice: string;
+	ioniceClass: "" | "best-effort" | "idle";
+	ioniceLevel: string;
+};
+
+export type RetentionDraft = {
+	keepLast: string;
+	keepWithin: string;
+	keepDaily: string;
+	keepWeekly: string;
+	keepMonthly: string;
+};
+
+export const BLANK_RETENTION: RetentionDraft = {
+	keepLast: "",
+	keepWithin: "",
+	keepDaily: "",
+	keepWeekly: "",
+	keepMonthly: "",
+};
+
+export const BLANK_SCHEDULE: ScheduleDraft = {
+	cron: "",
+	timezone: "UTC",
+	jitter: "",
+	catchUpWindow: "",
+};
+
+export const BLANK_LIMITS: LimitsDraft = {
+	uploadRate: "",
+	nice: "",
+	ioniceClass: "",
+	ioniceLevel: "",
 };
 
 export type PolicyDraft = {
@@ -68,6 +115,9 @@ export type PolicyDraft = {
 	exclude: string;
 	oneFileSystem: boolean;
 	excludeCaches: boolean;
+	schedule: ScheduleDraft;
+	retention: RetentionDraft;
+	limits: LimitsDraft;
 	before: HookDraft[];
 	after: HookDraft[];
 };
@@ -82,13 +132,19 @@ const blankHook = (): HookDraft => ({
 	command: null,
 });
 
+const lossyArg = (arg: string) => arg.trim() === "" || /[\r\n]/.test(arg);
+
 const hookToDraft = (hook: Hook): HookDraft => ({
 	key: ++hookKeys,
 	script: hook.script ?? "",
 	args: (hook.args ?? []).join("\n"),
 	timeout: hook.timeout ?? "",
 	command: hook.command ?? null,
+	...(hook.args?.some(lossyArg) && { rawArgs: hook.args }),
 });
+
+const countToDraft = (value?: number | null) =>
+	value == null ? "" : String(value);
 
 export function draftFromPolicy(policy: BackupPolicy): PolicyDraft {
 	const { spec } = policy;
@@ -106,6 +162,26 @@ export function draftFromPolicy(policy: BackupPolicy): PolicyDraft {
 		exclude: (spec.exclude ?? []).join("\n"),
 		oneFileSystem: spec.oneFileSystem ?? false,
 		excludeCaches: spec.excludeCaches ?? false,
+		schedule: {
+			cron: spec.schedule?.cron ?? "",
+			timezone: spec.schedule?.timezone || "UTC",
+			jitter: spec.schedule?.jitter ?? "",
+			catchUpWindow: spec.schedule?.catchUpWindow ?? "",
+		},
+		retention: {
+			keepLast: countToDraft(spec.retention?.keepLast),
+			keepWithin: spec.retention?.keepWithin ?? "",
+			keepDaily: countToDraft(spec.retention?.keepDaily),
+			keepWeekly: countToDraft(spec.retention?.keepWeekly),
+			keepMonthly: countToDraft(spec.retention?.keepMonthly),
+		},
+		limits: {
+			uploadRate: spec.limits?.uploadRate ?? "",
+			nice: spec.limits?.nice == null ? "" : String(spec.limits.nice),
+			ioniceClass: spec.limits?.ioniceClass ?? "",
+			ioniceLevel:
+				spec.limits?.ioniceLevel == null ? "" : String(spec.limits.ioniceLevel),
+		},
 		before: (spec.hooks?.before ?? []).map(hookToDraft),
 		after: (spec.hooks?.after ?? []).map(hookToDraft),
 	};
@@ -115,7 +191,7 @@ const lines = (text: string) =>
 	text.split(/\r?\n/).filter((line) => line.trim() !== "");
 
 function hookFromDraft(hook: HookDraft): Hook {
-	const args = lines(hook.args);
+	const args = hook.rawArgs ?? lines(hook.args);
 	const timeout = hook.timeout.trim();
 	return {
 		...(hook.command === null
@@ -124,6 +200,52 @@ function hookFromDraft(hook: HookDraft): Hook {
 		...(args.length > 0 && { args }),
 		...(timeout !== "" && { timeout }),
 	};
+}
+
+function scheduleFromDraft({
+	cron,
+	timezone,
+	jitter,
+	catchUpWindow,
+}: ScheduleDraft): BackupPolicy["spec"]["schedule"] {
+	if (cron.trim() === "") return undefined;
+	return {
+		cron: cron.trim(),
+		...(timezone.trim() !== "" &&
+			timezone !== "UTC" && { timezone: timezone.trim() }),
+		...(jitter.trim() !== "" && { jitter: jitter.trim() }),
+		...(catchUpWindow.trim() !== "" && {
+			catchUpWindow: catchUpWindow.trim(),
+		}),
+	};
+}
+
+export function retentionFromDraft(
+	draft: RetentionDraft,
+): Retention | undefined {
+	const within = draft.keepWithin.trim();
+	const count = (value: string) => (value === "" ? undefined : Number(value));
+	const retention = {
+		...(draft.keepLast !== "" && { keepLast: count(draft.keepLast) }),
+		...(within !== "" && { keepWithin: within }),
+		...(draft.keepDaily !== "" && { keepDaily: count(draft.keepDaily) }),
+		...(draft.keepWeekly !== "" && { keepWeekly: count(draft.keepWeekly) }),
+		...(draft.keepMonthly !== "" && { keepMonthly: count(draft.keepMonthly) }),
+	};
+	return Object.keys(retention).length > 0 ? retention : undefined;
+}
+
+function limitsFromDraft(draft: LimitsDraft): BackupPolicy["spec"]["limits"] {
+	const uploadRate = draft.uploadRate.trim();
+	const bestEffort = draft.ioniceClass === "best-effort";
+	const limits = {
+		...(uploadRate !== "" && { uploadRate }),
+		...(draft.nice !== "" && { nice: Number(draft.nice) }),
+		...(draft.ioniceClass !== "" && { ioniceClass: draft.ioniceClass }),
+		...(bestEffort &&
+			draft.ioniceLevel !== "" && { ioniceLevel: Number(draft.ioniceLevel) }),
+	};
+	return Object.keys(limits).length > 0 ? limits : undefined;
 }
 
 export function policyFromDraft(draft: PolicyDraft): BackupPolicy {
@@ -147,67 +269,15 @@ export function policyFromDraft(draft: PolicyDraft): BackupPolicy {
 			exclude: lines(draft.exclude),
 			oneFileSystem: draft.oneFileSystem,
 			excludeCaches: draft.excludeCaches,
+			schedule: scheduleFromDraft(draft.schedule),
+			retention: retentionFromDraft(draft.retention),
+			limits: limitsFromDraft(draft.limits),
 			hooks: {
 				before: draft.before.map(hookFromDraft),
 				after: draft.after.map(hookFromDraft),
 			},
 		},
 	};
-}
-
-export type FieldProblems = ReadonlyMap<string, string>;
-
-export function problemsByPath(problems: Problem[]): FieldProblems {
-	const out = new Map<string, string>();
-	for (const { path, message } of problems) {
-		if (path != null && !out.has(path)) out.set(path, message);
-	}
-	return out;
-}
-
-function ErrorText({ id, message }: { id: string; message?: string }) {
-	if (!message) return null;
-	return (
-		<p id={id} className="flex items-start gap-1 text-xs text-destructive">
-			<CircleAlert aria-hidden className="mt-1 size-3 shrink-0" />
-			{message}
-		</p>
-	);
-}
-
-function RowField({
-	label,
-	error,
-	helper,
-	children,
-}: {
-	label: string;
-	error?: string;
-	helper?: string;
-	children: (props: {
-		id: string;
-		"aria-invalid": boolean | undefined;
-		"aria-describedby": string | undefined;
-	}) => React.ReactNode;
-}) {
-	const id = useId();
-	const describedBy = [error && `${id}-error`, helper && `${id}-help`]
-		.filter(Boolean)
-		.join(" ");
-	return (
-		<Field data-invalid={error ? true : undefined}>
-			<FieldLabel htmlFor={id}>{label}</FieldLabel>
-			{children({
-				id,
-				"aria-invalid": error ? true : undefined,
-				"aria-describedby": describedBy || undefined,
-			})}
-			{helper && (
-				<FieldDescription id={`${id}-help`}>{helper}</FieldDescription>
-			)}
-			<ErrorText id={`${id}-error`} message={error} />
-		</Field>
-	);
 }
 
 function HookRow({
@@ -346,7 +416,13 @@ function HookRow({
 			)}
 			<RowField
 				label={form.arguments}
-				helper={isCommand ? form.commandArgsHelper : undefined}
+				helper={
+					hook.rawArgs
+						? form.argsInYaml
+						: isCommand
+							? form.commandArgsHelper
+							: undefined
+				}
 				error={problems.get(`${at}.args`)}
 			>
 				{(a11y) => (
@@ -357,6 +433,7 @@ function HookRow({
 						spellCheck={false}
 						autoCapitalize="off"
 						value={hook.args}
+						disabled={hook.rawArgs !== undefined}
 						onChange={(e) => set({ args: e.target.value })}
 					/>
 				)}
@@ -462,6 +539,7 @@ function HostPicker({
 	const form = copy.policies.form;
 	const hosts = useListHosts();
 	const [query, setQuery] = useState("");
+	const [all, setAll] = useState(false);
 	const inRepo = (hosts.data ?? []).filter(
 		(h) => h.status !== "revoked" && h.repository_id === repositoryId,
 	);
@@ -482,6 +560,7 @@ function HostPicker({
 				`${l.key}=${l.value}`.toLowerCase().includes(needle),
 			),
 	);
+	const listed = all || needle !== "" ? shown : shown.slice(0, HOSTS_LISTED);
 	const picked = new Set(value);
 	const toggle = (id: string, on: boolean) =>
 		onChange(on ? [...value, id] : value.filter((v) => v !== id));
@@ -494,8 +573,9 @@ function HostPicker({
 				{form.hostsFailed}{" "}
 				<Button
 					type="button"
-					variant="link"
-					className="h-auto p-0"
+					variant="outline"
+					size="sm"
+					className="ml-2"
 					onClick={() => void hosts.refetch()}
 				>
 					{copy.errors.retry}
@@ -556,8 +636,8 @@ function HostPicker({
 					</Button>
 				</div>
 			</div>
-			<ul className="max-h-80 divide-y overflow-y-auto rounded-lg border">
-				{shown.map((host) => {
+			<ul className="divide-y rounded-lg border">
+				{listed.map((host) => {
 					const id = `pick-${host.id}`;
 					return (
 						<li key={host.id} className="flex items-center gap-4 px-4 py-2">
@@ -614,6 +694,17 @@ function HostPicker({
 					</li>
 				)}
 			</ul>
+			{listed.length < shown.length && (
+				<Button
+					type="button"
+					variant="outline"
+					size="sm"
+					className="self-start"
+					onClick={() => setAll(true)}
+				>
+					{form.showAllHosts(shown.length)}
+				</Button>
+			)}
 		</div>
 	);
 }
@@ -674,6 +765,9 @@ export function PolicyForm({
 	repositories,
 	nameLocked,
 	nameTaken,
+	schedule,
+	schedulePending,
+	retentionPreview,
 }: {
 	draft: PolicyDraft;
 	onChange: (draft: PolicyDraft) => void;
@@ -681,6 +775,9 @@ export function PolicyForm({
 	repositories: RepositorySummary[];
 	nameLocked: boolean;
 	nameTaken: boolean;
+	schedule?: ScheduleInfo | null;
+	schedulePending?: boolean;
+	retentionPreview?: ReactNode;
 }) {
 	const form = copy.policies.form;
 	const set = (patch: Partial<PolicyDraft>) => onChange({ ...draft, ...patch });
@@ -874,6 +971,22 @@ export function PolicyForm({
 					)}
 				</RowField>
 
+				<SchedulePanel
+					draft={draft.schedule}
+					onChange={(next) => set({ schedule: next })}
+					problems={problems}
+					info={schedule}
+					pending={schedulePending}
+				/>
+
+				<RetentionPanel
+					draft={draft.retention}
+					onChange={(next) => set({ retention: next })}
+					problems={problems}
+				>
+					{retentionPreview}
+				</RetentionPanel>
+
 				<FieldSet className="gap-4">
 					<FieldLegend variant="label" className="mb-0">
 						{form.options}
@@ -906,12 +1019,19 @@ export function PolicyForm({
 					</Field>
 				</FieldSet>
 
+				<LimitsPanel
+					draft={draft.limits}
+					onChange={(next) => set({ limits: next })}
+					problems={problems}
+				/>
+
 				<Collapsible defaultOpen={hasHooks} className="flex flex-col gap-4">
 					<CollapsibleTrigger asChild>
 						<Button
 							type="button"
-							variant="ghost"
-							className="group/hooks self-start px-0"
+							variant="outline"
+							size="sm"
+							className="group/hooks self-start"
 						>
 							<ChevronDown
 								aria-hidden

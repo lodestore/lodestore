@@ -37,6 +37,8 @@ function snapshot(
 		incomplete: false,
 		paths: ["/etc"],
 		policy_name: "etc-and-home",
+		policy_deleted: false,
+		received_at: time,
 		tags: [],
 		warnings_total: 0,
 		errors_total: 0,
@@ -248,14 +250,14 @@ describe("Restore timeline", () => {
 
 		first.focus();
 		await user.keyboard("{ArrowDown}");
-		expect(second).toHaveFocus();
+		await waitFor(() => expect(second).toHaveFocus());
 		expect(router.state.location.search.snapshot).toBe(id(1));
 		await user.keyboard("{End}");
-		expect(stops().at(-1)).toHaveFocus();
+		await waitFor(() => expect(stops().at(-1)).toHaveFocus());
 		await user.keyboard("{Home}");
-		expect(first).toHaveFocus();
+		await waitFor(() => expect(first).toHaveFocus());
 		await user.keyboard("{ArrowDown}{ArrowDown}");
-		expect(third).toHaveFocus();
+		await waitFor(() => expect(third).toHaveFocus());
 
 		await user.keyboard("{Enter}");
 		await waitFor(() =>
@@ -331,7 +333,7 @@ describe("HostPicker", () => {
 
 		await user.keyboard("{Escape}");
 		await waitFor(() => expect(screen.queryByRole("listbox")).toBeNull());
-		expect(trigger).toHaveFocus();
+		await waitFor(() => expect(trigger).toHaveFocus());
 	});
 
 	it("switches to a host without an agent and explains the limits", async () => {

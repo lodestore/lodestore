@@ -152,11 +152,12 @@ function RecentJobs({ name }: { name: string }) {
 			<CardContent className="flex flex-col gap-4">
 				{jobs.isError && (
 					<Alert variant="destructive" role="alert">
-						<AlertDescription>
-							{copy.jobs.loadFailed}{" "}
+						<AlertDescription className="flex flex-wrap items-center justify-between gap-2">
+							{copy.jobs.loadFailed}
 							<Button
-								variant="link"
-								className="h-auto p-0"
+								type="button"
+								variant="outline"
+								size="sm"
 								onClick={() => void jobs.refetch()}
 							>
 								{copy.errors.retry}
@@ -306,6 +307,7 @@ function PolicyPage() {
 					<RunNowDialog name={running} onClose={() => setRunning(undefined)} />
 					<DeletePolicyDialog
 						name={deleting}
+						managedBy={detail.managed_by}
 						onClose={() => setDeleting(undefined)}
 						onDeleted={() => {
 							leaving.current = true;

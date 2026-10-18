@@ -13,6 +13,7 @@ use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 use crate::auth::AuthUser;
+use crate::auth::tokens::{HostsRead, HostsWrite, Scoped};
 use crate::db::now_ms;
 use crate::error::{ApiError, ErrorBody};
 use crate::hosts::labels::Label;
@@ -196,12 +197,13 @@ async fn load_detail(state: &AppState, id: &str) -> Result<HostDetail, ApiError>
     get,
     tag = "Hosts",
     summary = "List hosts",
+    security(("session" = []), ("bearer" = ["hosts:read"])),
     path = "/api/v1/hosts",
     responses((status = 200, description = "All hosts", body = Vec<Host>))
 )]
 async fn list_hosts(
     State(state): State<AppState>,
-    _user: AuthUser,
+    _auth: Scoped<HostsRead>,
 ) -> Result<Json<Vec<Host>>, ApiError> {
     let sql = format!("SELECT {HOST_COLUMNS} FROM agents a ORDER BY a.enrolled_at, a.id");
     let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
@@ -218,6 +220,7 @@ async fn list_hosts(
     get,
     tag = "Hosts",
     summary = "Get a host",
+    security(("session" = []), ("bearer" = ["hosts:read"])),
     path = "/api/v1/hosts/{id}",
     params(("id" = String, Path, description = "Host id")),
     responses(
@@ -227,7 +230,7 @@ async fn list_hosts(
 )]
 async fn get_host(
     State(state): State<AppState>,
-    _user: AuthUser,
+    _auth: Scoped<HostsRead>,
     Path(id): Path<String>,
 ) -> Result<Json<HostDetail>, ApiError> {
     Ok(Json(load_detail(&state, &id).await?))
@@ -242,7 +245,7 @@ pub struct SetLabels {
     put,
     tag = "Hosts",
     summary = "Replace host labels",
-    security(("session" = [], "csrf" = [])),
+    security(("session" = [], "csrf" = []), ("bearer" = ["hosts:write"])),
     path = "/api/v1/hosts/{id}/labels",
     params(("id" = String, Path, description = "Host id")),
     request_body = SetLabels,
@@ -255,7 +258,7 @@ pub struct SetLabels {
 )]
 async fn set_labels(
     State(state): State<AppState>,
-    _user: AuthUser,
+    _auth: Scoped<HostsWrite>,
     Path(id): Path<String>,
     Json(req): Json<SetLabels>,
 ) -> Result<Json<HostDetail>, ApiError> {
@@ -276,7 +279,7 @@ async fn set_labels(
     post,
     tag = "Hosts",
     summary = "Revoke a host",
-    security(("session" = [], "csrf" = [])),
+    security(("session" = [], "csrf" = []), ("bearer" = ["hosts:write"])),
     path = "/api/v1/hosts/{id}/revoke",
     params(("id" = String, Path, description = "Host id")),
     responses(
@@ -286,7 +289,7 @@ async fn set_labels(
 )]
 async fn revoke_host(
     State(state): State<AppState>,
-    _user: AuthUser,
+    _auth: Scoped<HostsWrite>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     sqlx::query("UPDATE agents SET status = 'revoked', revoked_at = $1 WHERE id = $2 AND status <> 'revoked'")

@@ -6,6 +6,13 @@ use std::collections::BTreeMap;
 use lodestore_format::fs::filter::PathMatcher;
 use serde::{Deserialize, Serialize};
 
+mod duration;
+pub mod retention;
+pub mod schedule;
+
+pub use duration::{parse_duration, parse_rate};
+pub use jiff;
+
 pub const API_VERSION: &str = "lodestore.io/v1alpha1";
 pub const KIND: &str = "BackupPolicy";
 
@@ -20,6 +27,21 @@ const PATH_RULE: &str = "Enter an absolute path that starts with \"/\".";
 const SCRIPT_RULE: &str = "Enter a file name from /etc/lodestore/hooks.d, without \"/\".";
 const TIMEOUT_RULE: &str = "Use a duration such as 90s, 30m or 2h.";
 const LABEL_RULE: &str = "Keys and values: up to 63 characters, letters, digits, \"-\", \"_\" and \".\"; key is required.";
+pub(crate) const CRON_RULE: &str =
+    "Use five fields (minute hour day month weekday) or @hourly, @daily, @weekly, @monthly.";
+pub(crate) const DURATION_RULE: &str = "Use a duration such as 15m, 24h, 30d or 1y.";
+const COUNT_RULE: &str = "Enter a whole number of 1 or more.";
+const RATE_RULE: &str = "Use a rate such as 50MiB/s or 800KiB/s.";
+const NICE_RULE: &str = "Enter a whole number from 0 to 19.";
+const LEVEL_RULE: &str = "Enter a whole number from 0 to 7.";
+const LEVEL_CLASS_RULE: &str = "Set ioniceClass to best-effort to use a level.";
+const MAX_NICE: i64 = 19;
+const MAX_IONICE_LEVEL: i64 = 7;
+const MAX_COUNT: i64 = u32::MAX as i64;
+
+pub(crate) fn zone_rule(value: &str) -> String {
+    format!("Unknown time zone \"{value}\". Use a name such as Europe/Kyiv.")
+}
 
 fn is_false(value: &bool) -> bool {
     !*value
@@ -58,6 +80,73 @@ pub struct PolicySpec {
     pub exclude_caches: bool,
     #[serde(default, skip_serializing_if = "Hooks::is_empty")]
     pub hooks: Hooks,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<Schedule>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention: Option<Retention>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<Limits>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct Schedule {
+    pub cron: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jitter: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catch_up_window: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct Retention {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_last: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_within: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_daily: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_weekly: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_monthly: Option<i64>,
+}
+
+impl Retention {
+    pub fn is_empty(&self) -> bool {
+        self.keep_last.is_none()
+            && self.keep_within.is_none()
+            && self.keep_daily.is_none()
+            && self.keep_weekly.is_none()
+            && self.keep_monthly.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct Limits {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload_rate: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nice: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ionice_class: Option<IoniceClass>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ionice_level: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub enum IoniceClass {
+    BestEffort,
+    Idle,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -140,7 +229,7 @@ pub struct Problem {
 }
 
 impl Problem {
-    fn at(path: impl Into<String>, message: impl Into<String>) -> Self {
+    pub(crate) fn at(path: impl Into<String>, message: impl Into<String>) -> Self {
         Problem {
             line: None,
             column: None,
@@ -164,7 +253,7 @@ pub fn to_yaml(policy: &BackupPolicy) -> String {
     yaml_serde::to_string(policy).expect("BackupPolicy always serializes")
 }
 
-fn yaml_problem(error: &yaml_serde::Error) -> Problem {
+pub fn yaml_problem(error: &yaml_serde::Error) -> Problem {
     let (line, column) = match error.location() {
         Some(l) => (Some(l.line()), Some(l.column())),
         None => (None, None),
@@ -247,10 +336,60 @@ pub fn validate(policy: &BackupPolicy) -> Vec<Problem> {
             validate_hook(&format!("spec.hooks.{kind}[{i}]"), hook, &mut out);
         }
     }
+    if let Some(schedule) = &spec.schedule {
+        schedule.compile_into(&mut out);
+    }
+    if let Some(retention) = &spec.retention {
+        validate_retention(retention, &mut out);
+    }
+    if let Some(limits) = &spec.limits {
+        validate_limits(limits, &mut out);
+    }
     out
 }
 
-fn name_ok(name: &str) -> bool {
+fn validate_retention(retention: &Retention, out: &mut Vec<Problem>) {
+    let counts = [
+        ("keepLast", retention.keep_last),
+        ("keepDaily", retention.keep_daily),
+        ("keepWeekly", retention.keep_weekly),
+        ("keepMonthly", retention.keep_monthly),
+    ];
+    for (name, value) in counts {
+        if let Some(n) = value
+            && !(1..=MAX_COUNT).contains(&n)
+        {
+            out.push(Problem::at(format!("spec.retention.{name}"), COUNT_RULE));
+        }
+    }
+    if let Some(within) = &retention.keep_within
+        && !parse_duration(within).is_some_and(|d| d.as_secs() >= 60)
+    {
+        out.push(Problem::at("spec.retention.keepWithin", DURATION_RULE));
+    }
+}
+
+fn validate_limits(limits: &Limits, out: &mut Vec<Problem>) {
+    if let Some(rate) = &limits.upload_rate
+        && parse_rate(rate).is_none()
+    {
+        out.push(Problem::at("spec.limits.uploadRate", RATE_RULE));
+    }
+    if let Some(nice) = limits.nice
+        && !(0..=MAX_NICE).contains(&nice)
+    {
+        out.push(Problem::at("spec.limits.nice", NICE_RULE));
+    }
+    if let Some(level) = limits.ionice_level {
+        if !(0..=MAX_IONICE_LEVEL).contains(&level) {
+            out.push(Problem::at("spec.limits.ioniceLevel", LEVEL_RULE));
+        } else if limits.ionice_class != Some(IoniceClass::BestEffort) {
+            out.push(Problem::at("spec.limits.ioniceLevel", LEVEL_CLASS_RULE));
+        }
+    }
+}
+
+pub fn name_ok(name: &str) -> bool {
     let edge = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit();
     (1..=MAX_NAME_LEN).contains(&name.len())
         && name.starts_with(edge)

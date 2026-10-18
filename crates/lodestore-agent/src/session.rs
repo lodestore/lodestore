@@ -26,6 +26,7 @@ const RENEW_RETRY: Duration = Duration::from_secs(60);
 const MAX_SKEW_SECS: i64 = 300;
 const JOBS_DRAIN: Duration = Duration::from_secs(30);
 const CAP_RESTORE: &str = "restore_v1";
+const CAP_LIMITS: &str = "limits_v1";
 
 pub struct RunArgs {
     pub paths: Paths,
@@ -211,7 +212,7 @@ async fn session_once(
             }),
             agent_version: env!("CARGO_PKG_VERSION").to_string(),
             jobs,
-            capabilities: vec![CAP_RESTORE.into()],
+            capabilities: vec![CAP_RESTORE.into(), CAP_LIMITS.into()],
         })),
     })
     .await

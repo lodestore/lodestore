@@ -62,7 +62,7 @@ export function HostPolicies({ host }: { host: HostDetail }) {
 				)}
 				{policies && policies.length > 0 && (
 					<ul className="flex flex-col gap-2">
-						{policies.map(({ name, last_job }) => (
+						{policies.map(({ name, last_job, next_run }) => (
 							<li
 								key={name}
 								className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm"
@@ -86,6 +86,12 @@ export function HostPolicies({ host }: { host: HostDetail }) {
 								) : (
 									<span className="text-muted-foreground">
 										{copy.policies.neverRun}
+									</span>
+								)}
+								{next_run != null && (
+									<span className="text-muted-foreground">
+										{copy.policies.next}{" "}
+										<RelativeTime value={new Date(next_run)} numeric="always" />
 									</span>
 								)}
 							</li>

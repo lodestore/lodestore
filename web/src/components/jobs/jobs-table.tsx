@@ -1,5 +1,5 @@
 import { Link, useNavigate } from "@tanstack/react-router";
-import { MoreHorizontal } from "lucide-react";
+import { MoreHorizontal, ShieldAlert } from "lucide-react";
 import type { JobKind, JobSummary } from "@/api/gen/model";
 import { restoreFailureText } from "@/components/jobs/job-cards";
 import { TextWithPaths } from "@/components/path-text";
@@ -60,6 +60,8 @@ export type JobRow = {
 	policy_name?: string | null;
 	policy_exists: boolean;
 	source: "manual" | "cli";
+	origin?: "manual" | "schedule" | "catchup";
+	snapshot_suspicious?: boolean;
 	stdin_name?: string | null;
 	state: JobState;
 	phase?: string | null;
@@ -259,6 +261,20 @@ function Truncated({
 	);
 }
 
+function SuspiciousMark() {
+	return (
+		<Tooltip>
+			<TooltipTrigger asChild>
+				<span tabIndex={0} className="inline-flex text-warning">
+					<ShieldAlert aria-hidden className="size-4" />
+					<span className="sr-only">{copy.jobs.suspiciousSnapshot}</span>
+				</span>
+			</TooltipTrigger>
+			<TooltipContent>{copy.jobs.suspiciousSnapshotHint}</TooltipContent>
+		</Tooltip>
+	);
+}
+
 export function JobResult({ job }: { job: JobRow }) {
 	if (job.kind === "restore" || job.kind === "download") {
 		return <OtherJobResult job={job} />;
@@ -298,13 +314,14 @@ export function JobResult({ job }: { job: JobRow }) {
 		case "succeeded":
 			if (!stats) return <span>{copy.common.dash}</span>;
 			return (
-				<span className="text-sm">
+				<span className="inline-flex items-center gap-2 text-sm">
 					{copy.jobs.result.succeeded(
 						formatBytes(stats.bytes_total),
 						formatCount(
 							stats.files_new + stats.files_changed + stats.files_unchanged,
 						),
 					)}
+					{job.snapshot_suspicious && <SuspiciousMark />}
 				</span>
 			);
 		case "warnings":
@@ -391,9 +408,15 @@ function PolicyLine({ job }: { job: JobRow }) {
 		);
 	}
 	if (!job.policy_name) return null;
+	const line =
+		job.origin === "schedule"
+			? copy.jobs.policyLineScheduled
+			: job.origin === "catchup"
+				? copy.jobs.policyLineCatchup
+				: copy.jobs.policyLine;
 	return (
-		<div className="max-w-48 truncate text-sm text-muted-foreground">
-			{copy.jobs.policyLine(job.policy_name)}
+		<div className="max-w-56 truncate text-sm text-muted-foreground">
+			{line(job.policy_name)}
 		</div>
 	);
 }

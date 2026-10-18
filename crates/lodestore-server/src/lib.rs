@@ -16,6 +16,7 @@ pub mod jobs;
 pub mod pki;
 pub mod policies;
 pub mod repos;
+pub mod schedule;
 pub mod secrets;
 pub mod state;
 pub mod system;
@@ -114,6 +115,10 @@ pub async fn serve(config: Config, listeners: Listeners) -> anyhow::Result<Serve
     let grpc = tokio::spawn(grpc::serve(state.clone(), listeners.grpc, stop.clone()));
     let janitor = tokio::spawn(auth::session_janitor(state.clone(), stop.clone()));
     let catalog = tokio::spawn(catalog::sync_loop(state.clone(), stop.clone()));
+    let mut tasks = vec![rest, grpc, janitor, catalog];
+    if state.config.schedule_tick_secs > 0 {
+        tasks.push(tokio::spawn(schedule::run(state.clone(), stop.clone())));
+    }
 
     tracing::info!(%rest_addr, %grpc_addr, "lodestore server started");
     Ok(ServerHandle {
@@ -121,6 +126,6 @@ pub async fn serve(config: Config, listeners: Listeners) -> anyhow::Result<Serve
         grpc_addr,
         state,
         stop,
-        tasks: vec![rest, grpc, janitor, catalog],
+        tasks,
     })
 }

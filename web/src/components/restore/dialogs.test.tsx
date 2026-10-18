@@ -40,6 +40,8 @@ const snapshot: RestoreSnapshot = {
 	incomplete: false,
 	paths: ["/etc"],
 	policy_name: "etc",
+	policy_deleted: false,
+	received_at: Date.UTC(2026, 9, 14, 23, 31),
 	tags: [],
 	warnings_total: 0,
 	errors_total: 0,

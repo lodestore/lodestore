@@ -10,6 +10,7 @@ import {
 	isRebuilding,
 	useCatalogStatus,
 } from "@/components/repos/catalog-card";
+import { SuspiciousBadge } from "@/components/snapshots/suspicious-badge";
 import { StatusBadge } from "@/components/status-badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -97,6 +98,7 @@ function Stop({
 }) {
 	const id = useId();
 	const described = [
+		snapshot.suspicious && `${id}-suspicious`,
 		snapshot.incomplete && `${id}-incomplete`,
 		selected && `${id}-selected`,
 	]
@@ -117,7 +119,7 @@ function Stop({
 			onFocus={onFocus}
 			onKeyDown={moveFocus}
 			className={cn(
-				"relative flex h-16 w-full items-center gap-4 px-4 text-left outline-none transition-colors before:absolute before:inset-y-0 before:left-6 before:w-0.5 before:-translate-x-1/2 before:bg-border hover:bg-muted focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+				"relative flex min-h-16 w-full items-center gap-4 px-4 py-2 text-left outline-none transition-colors before:absolute before:inset-y-0 before:left-6 before:w-0.5 before:-translate-x-1/2 before:bg-border hover:bg-muted focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
 				selected && "bg-primary-subtle hover:bg-primary-subtle",
 			)}
 		>
@@ -131,10 +133,15 @@ function Stop({
 				)}
 			/>
 			<span className="flex min-w-0 flex-col">
-				<span className="flex items-center gap-2">
+				<span className="flex flex-wrap items-center gap-x-2 gap-y-1">
 					<span className="font-semibold tabular-nums">
 						{formatClock(snapshot.time)}
 					</span>
+					{snapshot.suspicious && (
+						<span id={`${id}-suspicious`} className="flex">
+							<SuspiciousBadge snapshot={snapshot} plain />
+						</span>
+					)}
 					{snapshot.incomplete && (
 						<span id={`${id}-incomplete`} className="flex">
 							<StatusBadge status="warning">
@@ -148,9 +155,16 @@ function Stop({
 						</span>
 					)}
 				</span>
-				<span className="truncate text-sm text-muted-foreground">
-					{snapshotSource(snapshot)} ·{" "}
-					<span className="font-mono">{shortId(snapshot.id)}</span> ·{" "}
+				<span
+					className={cn(
+						"text-sm text-muted-foreground",
+						snapshot.policy_deleted ? "wrap-anywhere" : "truncate",
+					)}
+				>
+					{snapshotSource(snapshot)}
+					{snapshot.policy_deleted &&
+						` · ${copy.snapshots.policyDeletedInline}`}{" "}
+					· <span className="font-mono">{shortId(snapshot.id)}</span> ·{" "}
 					<span className="tabular-nums">
 						{formatBytes(snapshot.stats.bytes_total)}
 					</span>
@@ -277,7 +291,14 @@ export const SnapshotTimeline = memo(function SnapshotTimeline({
 					</p>
 				)}
 			</div>
-			<ScrollArea className={scrollClassName}>{body}</ScrollArea>
+			<ScrollArea
+				className={cn(
+					"[&_[data-slot=scroll-area-viewport]>div]:block!",
+					scrollClassName,
+				)}
+			>
+				{body}
+			</ScrollArea>
 		</div>
 	);
 });

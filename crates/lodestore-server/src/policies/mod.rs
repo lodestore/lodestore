@@ -1,9 +1,12 @@
+pub mod apply;
 pub mod matching;
 
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use lodestore_policy::{BackupPolicy, Problem, parse_yaml, to_yaml, validate};
+use lodestore_policy::jiff::Timestamp;
+use lodestore_policy::schedule::DstNote;
+use lodestore_policy::{BackupPolicy, Problem, Retention, parse_yaml, to_yaml, validate};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use sqlx::any::AnyRow;
@@ -12,14 +15,22 @@ use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 use self::matching::{AgentRow, HookWarning, Matching, hook_warnings, load_agents, matching};
-use crate::auth::AuthUser;
+use crate::auth::tokens::{JobsRun, PoliciesRead, PoliciesWrite, Principal, Scope, Scoped};
 use crate::db::now_ms;
 use crate::error::{ApiError, ErrorBody};
 use crate::hosts::labels::Label;
 use crate::jobs::{ACTIVE_STATES, JobBrief, RunResult, enqueue, job_spec, last_job};
 use crate::state::AppState;
 
-const RESERVED_NAME: &str = "validate";
+pub(crate) const RETENTION_PURPOSE: &str = "set or change retention";
+
+pub(crate) fn retention_of(policy: &BackupPolicy) -> Option<&Retention> {
+    policy.spec.retention.as_ref().filter(|r| !r.is_empty())
+}
+
+const RESERVED_NAMES: [&str; 2] = ["validate", "apply"];
+const NEXT_RUNS: usize = 3;
+const DST_HORIZON_DAYS: u32 = 366;
 
 #[derive(Deserialize, ToSchema)]
 pub struct ValidateRequest {
@@ -37,6 +48,17 @@ pub struct ValidateResponse {
     pub name_taken: bool,
     pub matching: Option<Matching>,
     pub warnings: Vec<HookWarning>,
+    pub schedule: Option<ScheduleInfo>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct ScheduleInfo {
+    pub summary: String,
+    pub timezone: String,
+    pub jitter_secs: u64,
+    pub catch_up_secs: u64,
+    pub next_runs: Vec<i64>,
+    pub dst_notes: Vec<DstNote>,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -62,6 +84,8 @@ pub struct PolicySummary {
     pub hosts: i64,
     pub other_repository_hosts: i64,
     pub last_job: Option<JobBrief>,
+    pub managed_by: Option<String>,
+    pub schedule: Option<ScheduleInfo>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -76,6 +100,8 @@ pub struct PolicyDetail {
     pub repository_name: String,
     pub matching: Matching,
     pub warnings: Vec<HookWarning>,
+    pub managed_by: Option<String>,
+    pub schedule: Option<ScheduleInfo>,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -87,6 +113,7 @@ pub struct HostRunRequest {
 pub struct HostPolicy {
     pub name: String,
     pub last_job: Option<JobBrief>,
+    pub next_run: Option<i64>,
 }
 
 enum Failure {
@@ -170,11 +197,15 @@ async fn check(
             }]));
         }
     };
+    resolve(state, policy, yaml).await
+}
+
+async fn resolve(state: &AppState, policy: BackupPolicy, yaml: String) -> Result<Checked, Failure> {
     let mut problems = Vec::new();
-    if policy.metadata.name == RESERVED_NAME {
+    if RESERVED_NAMES.contains(&policy.metadata.name.as_str()) {
         problems.push(problem(
             "metadata.name",
-            format!("The name \"{RESERVED_NAME}\" is reserved."),
+            format!("The name \"{}\" is reserved.", policy.metadata.name),
         ));
     }
     let repository = sqlx::query("SELECT id FROM repositories WHERE name = $1")
@@ -207,10 +238,11 @@ struct PolicyRow {
     updated_at: i64,
     repository_id: String,
     repository_name: String,
+    managed_by: Option<String>,
 }
 
 const POLICY_SELECT: &str = "SELECT p.id, p.repository_id, p.yaml, p.spec_json, p.revision, \
-    p.created_at, p.updated_at, r.name AS repository_name \
+    p.created_at, p.updated_at, p.managed_by, r.name AS repository_name \
     FROM policies p JOIN repositories r ON r.id = p.repository_id";
 
 fn policy_from_row(row: &AnyRow) -> Result<PolicyRow, ApiError> {
@@ -224,6 +256,7 @@ fn policy_from_row(row: &AnyRow) -> Result<PolicyRow, ApiError> {
         updated_at: row.try_get("updated_at")?,
         repository_id: row.try_get("repository_id")?,
         repository_name: row.try_get("repository_name")?,
+        managed_by: row.try_get("managed_by")?,
     })
 }
 
@@ -284,6 +317,8 @@ async fn detail(state: &AppState, row: PolicyRow) -> Result<PolicyDetail, ApiErr
         name: row.policy.metadata.name.clone(),
         matching: matching(state, &agents, &row.repository_id, selector),
         warnings: hook_warnings(&row.policy, &own),
+        schedule: schedule_info(&row.policy, now_ms()),
+        managed_by: row.managed_by,
         yaml: row.yaml,
         revision: row.revision,
         created_at: row.created_at,
@@ -291,6 +326,23 @@ async fn detail(state: &AppState, row: PolicyRow) -> Result<PolicyDetail, ApiErr
         repository_id: row.repository_id,
         repository_name: row.repository_name,
         policy: row.policy,
+    })
+}
+
+fn schedule_info(policy: &BackupPolicy, now: i64) -> Option<ScheduleInfo> {
+    let compiled = policy.spec.schedule.as_ref()?.compile().ok()?;
+    let from = Timestamp::from_millisecond(now).ok()?;
+    Some(ScheduleInfo {
+        summary: compiled.describe(),
+        timezone: compiled.timezone_name().to_string(),
+        jitter_secs: compiled.jitter().as_secs(),
+        catch_up_secs: compiled.catch_up_window().as_secs(),
+        next_runs: compiled
+            .next_slots(from, NEXT_RUNS)
+            .into_iter()
+            .map(|slot| slot.as_millisecond())
+            .collect(),
+        dst_notes: compiled.dst_notes(from, DST_HORIZON_DAYS),
     })
 }
 
@@ -306,14 +358,14 @@ async fn policy_exists(state: &AppState, name: &str) -> Result<bool, ApiError> {
     post,
     tag = "Policies",
     summary = "Validate a policy",
-    security(("session" = [], "csrf" = [])),
+    security(("session" = [], "csrf" = []), ("bearer" = ["policies:read"])),
     path = "/api/v1/policies/validate",
     request_body = ValidateRequest,
     responses((status = 200, description = "Validation result with the hosts the policy would take", body = ValidateResponse))
 )]
 pub async fn validate_policy(
     State(state): State<AppState>,
-    _user: AuthUser,
+    _auth: Scoped<PoliciesRead>,
     Json(req): Json<ValidateRequest>,
 ) -> Result<Json<ValidateResponse>, ApiError> {
     let checked = match check(&state, req.yaml, req.policy).await {
@@ -327,6 +379,7 @@ pub async fn validate_policy(
                 name_taken: false,
                 matching: None,
                 warnings: Vec::new(),
+                schedule: None,
             }));
         }
         Err(Failure::Api(e)) => return Err(e),
@@ -346,6 +399,7 @@ pub async fn validate_policy(
         name_taken,
         matching: Some(matching(&state, &agents, &checked.repository_id, selector)),
         warnings: hook_warnings(&checked.policy, &own),
+        schedule: schedule_info(&checked.policy, now_ms()),
         yaml: Some(checked.yaml),
         policy: Some(checked.policy),
     }))
@@ -355,12 +409,13 @@ pub async fn validate_policy(
     get,
     tag = "Policies",
     summary = "List policies",
+    security(("session" = []), ("bearer" = ["policies:read"])),
     path = "/api/v1/policies",
     responses((status = 200, description = "All policies by name", body = Vec<PolicySummary>))
 )]
 pub async fn list_policies(
     State(state): State<AppState>,
-    _user: AuthUser,
+    _auth: Scoped<PoliciesRead>,
 ) -> Result<Json<Vec<PolicySummary>>, ApiError> {
     let agents = load_agents(&state).await?;
     let mut out = Vec::new();
@@ -385,6 +440,8 @@ pub async fn list_policies(
             hosts: hosts as i64,
             other_repository_hosts: (selected.count() - hosts) as i64,
             last_job: last_job(&state, &row.id, None).await?,
+            managed_by: row.managed_by.clone(),
+            schedule: schedule_info(&row.policy, now_ms()),
             repository_id: row.repository_id,
             repository_name: row.repository_name,
         });
@@ -396,7 +453,7 @@ pub async fn list_policies(
     post,
     tag = "Policies",
     summary = "Create a policy",
-    security(("session" = [], "csrf" = [])),
+    security(("session" = [], "csrf" = []), ("bearer" = ["policies:write"])),
     path = "/api/v1/policies",
     request_body = PolicyInput,
     responses(
@@ -407,10 +464,13 @@ pub async fn list_policies(
 )]
 pub async fn create_policy(
     State(state): State<AppState>,
-    _user: AuthUser,
+    auth: Scoped<PoliciesWrite>,
     Json(input): Json<PolicyInput>,
 ) -> Result<(StatusCode, Json<PolicyDetail>), ApiError> {
     let checked = check(&state, input.yaml, input.policy).await?;
+    if retention_of(&checked.policy).is_some() {
+        auth.require_also(Scope::SnapshotsDelete, RETENTION_PURPOSE)?;
+    }
     let name = checked.policy.metadata.name.clone();
     let now = now_ms();
     let inserted = sqlx::query(
@@ -440,6 +500,7 @@ pub async fn create_policy(
     get,
     tag = "Policies",
     summary = "Get a policy",
+    security(("session" = []), ("bearer" = ["policies:read"])),
     path = "/api/v1/policies/{name}",
     params(("name" = String, Path, description = "Policy name")),
     responses(
@@ -449,7 +510,7 @@ pub async fn create_policy(
 )]
 pub async fn get_policy(
     State(state): State<AppState>,
-    _user: AuthUser,
+    _auth: Scoped<PoliciesRead>,
     Path(name): Path<String>,
 ) -> Result<Json<PolicyDetail>, ApiError> {
     let row = find_policy(&state, &name).await?;
@@ -460,7 +521,7 @@ pub async fn get_policy(
     put,
     tag = "Policies",
     summary = "Update a policy",
-    security(("session" = [], "csrf" = [])),
+    security(("session" = [], "csrf" = []), ("bearer" = ["policies:write"])),
     path = "/api/v1/policies/{name}",
     params(("name" = String, Path, description = "Policy name")),
     request_body = PolicyUpdate,
@@ -473,13 +534,19 @@ pub async fn get_policy(
 )]
 pub async fn update_policy(
     State(state): State<AppState>,
-    _user: AuthUser,
+    auth: Scoped<PoliciesWrite>,
     Path(name): Path<String>,
     Json(input): Json<PolicyUpdate>,
 ) -> Result<Json<PolicyDetail>, ApiError> {
     let checked = check(&state, input.yaml, input.policy).await?;
     if checked.policy.metadata.name != name {
         return Err(ApiError::Validation("The name cannot be changed.".into()));
+    }
+    if matches!(auth.principal(), Principal::Token { .. }) {
+        let current = find_policy(&state, &name).await?;
+        if retention_of(&current.policy) != retention_of(&checked.policy) {
+            auth.require_also(Scope::SnapshotsDelete, RETENTION_PURPOSE)?;
+        }
     }
     let updated = sqlx::query(
         "UPDATE policies SET repository_id = $1, yaml = $2, spec_json = $3, \
@@ -511,7 +578,7 @@ pub async fn update_policy(
     delete,
     tag = "Policies",
     summary = "Delete a policy",
-    security(("session" = [], "csrf" = [])),
+    security(("session" = [], "csrf" = []), ("bearer" = ["policies:write"])),
     path = "/api/v1/policies/{name}",
     params(("name" = String, Path, description = "Policy name")),
     responses(
@@ -522,7 +589,7 @@ pub async fn update_policy(
 )]
 pub async fn delete_policy(
     State(state): State<AppState>,
-    _user: AuthUser,
+    _auth: Scoped<PoliciesWrite>,
     Path(name): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let deleted = sqlx::query(sqlx::AssertSqlSafe(format!(
@@ -561,7 +628,7 @@ fn hosts_of(agents: &[AgentRow], row: &PolicyRow) -> Vec<(String, String)> {
     post,
     tag = "Policies",
     summary = "Run a policy now",
-    security(("session" = [], "csrf" = [])),
+    security(("session" = [], "csrf" = []), ("bearer" = ["jobs:run"])),
     path = "/api/v1/policies/{name}/run",
     params(("name" = String, Path, description = "Policy name")),
     responses(
@@ -571,7 +638,7 @@ fn hosts_of(agents: &[AgentRow], row: &PolicyRow) -> Vec<(String, String)> {
 )]
 pub async fn run_policy(
     State(state): State<AppState>,
-    _user: AuthUser,
+    _auth: Scoped<JobsRun>,
     Path(name): Path<String>,
 ) -> Result<Json<RunResult>, ApiError> {
     let row = find_policy(&state, &name).await?;
@@ -603,7 +670,7 @@ fn policies_of_host<'a>(host: &AgentRow, rows: &'a [PolicyRow]) -> Vec<&'a Polic
     post,
     tag = "Hosts",
     summary = "Run a backup on a host",
-    security(("session" = [], "csrf" = [])),
+    security(("session" = [], "csrf" = []), ("bearer" = ["jobs:run"])),
     path = "/api/v1/hosts/{id}/run",
     params(("id" = String, Path, description = "Host id")),
     request_body(content = Option<HostRunRequest>, description = "Policy names; all policies of the host when omitted"),
@@ -616,7 +683,7 @@ fn policies_of_host<'a>(host: &AgentRow, rows: &'a [PolicyRow]) -> Vec<&'a Polic
 )]
 pub async fn run_host(
     State(state): State<AppState>,
-    _user: AuthUser,
+    _auth: Scoped<JobsRun>,
     Path(id): Path<String>,
     request: Option<Json<HostRunRequest>>,
 ) -> Result<Json<RunResult>, ApiError> {
@@ -657,6 +724,7 @@ pub async fn run_host(
     get,
     tag = "Hosts",
     summary = "List policies that apply to a host",
+    security(("session" = []), ("bearer" = ["policies:read"])),
     path = "/api/v1/hosts/{id}/policies",
     params(("id" = String, Path, description = "Host id")),
     responses(
@@ -667,7 +735,7 @@ pub async fn run_host(
 )]
 pub async fn list_host_policies(
     State(state): State<AppState>,
-    _user: AuthUser,
+    _auth: Scoped<PoliciesRead>,
     Path(id): Path<String>,
 ) -> Result<Json<Vec<HostPolicy>>, ApiError> {
     let host = host_agent(&state, &id).await?;
@@ -677,6 +745,8 @@ pub async fn list_host_policies(
         out.push(HostPolicy {
             name: row.policy.metadata.name.clone(),
             last_job: last_job(&state, &row.id, Some(&host.id)).await?,
+            next_run: schedule_info(&row.policy, now_ms())
+                .and_then(|s| s.next_runs.first().copied()),
         });
     }
     Ok(Json(out))
@@ -685,6 +755,7 @@ pub async fn list_host_policies(
 pub fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(validate_policy))
+        .routes(routes!(apply::apply_policies))
         .routes(routes!(list_policies, create_policy))
         .routes(routes!(get_policy, update_policy, delete_policy))
         .routes(routes!(run_policy))

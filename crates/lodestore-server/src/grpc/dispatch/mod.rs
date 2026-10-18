@@ -6,18 +6,23 @@ use std::time::Duration;
 
 use lodestore_format::keys::{MasterKey, ReadKeys};
 use lodestore_proto::agent::v1::server_message::Body as ServerBody;
-use lodestore_proto::agent::v1::{JobAssign, JobCancel, JobSpec, RestoreSpec, ServerMessage};
+use lodestore_proto::agent::v1::{
+    JobAssign, JobCancel, JobSpec, Limits, RestoreSpec, ServerMessage,
+};
 use prost::Message;
 use sqlx::Row;
 use tokio_util::sync::CancellationToken;
 
 use crate::db::now_ms;
-use crate::grpc::registry::CAP_RESTORE;
+use crate::grpc::registry::{CAP_LIMITS, CAP_RESTORE};
 use crate::jobs::restore::RestoreRecord;
 use crate::repos::db::server_access;
 use crate::state::AppState;
 
 const KIND_RESTORE: &str = "restore";
+const LIMITS_IGNORED_SEQ: i64 = -1;
+const LIMITS_IGNORED_MESSAGE: &str =
+    "The agent on this host is too old to apply the policy limits. Update the agent.";
 const TICK: Duration = Duration::from_secs(1);
 const JANITOR_EVERY: Duration = Duration::from_secs(60);
 const PROGRESS_FLUSH: Duration = Duration::from_secs(10);
@@ -132,6 +137,16 @@ pub async fn assign_queued(state: &AppState, only_agent: Option<&str>) -> anyhow
             Err(sqlx::Error::Database(db)) if db.is_unique_violation() => continue,
             Err(error) => return Err(error.into()),
         }
+        let has_limits = spec
+            .as_ref()
+            .and_then(|s| s.limits.as_ref())
+            .is_some_and(|l| *l != Limits::default());
+        if has_limits
+            && !state.registry.supports(&host_id, CAP_LIMITS)
+            && let Err(error) = log_limits_ignored(state, &job_id).await
+        {
+            tracing::warn!(%error, job_id, "writing the limits warning failed");
+        }
         let restore = match restore {
             Some(spec) => {
                 let record: Option<String> = row.try_get("restore_json")?;
@@ -222,6 +237,29 @@ async fn fail_job(state: &AppState, job_id: &str, code: &str, message: &str) -> 
     .bind(job_id)
     .execute(&state.db.pool)
     .await?;
+    Ok(())
+}
+
+async fn log_limits_ignored(state: &AppState, job_id: &str) -> anyhow::Result<()> {
+    let mut tx = state.db.pool.begin().await?;
+    let logged = sqlx::query(
+        "INSERT INTO job_events (job_id, seq, at, level, kind, message) \
+         VALUES ($1, $2, $3, 'warning', 'limits_ignored', $4) ON CONFLICT DO NOTHING",
+    )
+    .bind(job_id)
+    .bind(LIMITS_IGNORED_SEQ)
+    .bind(now_ms())
+    .bind(LIMITS_IGNORED_MESSAGE)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if logged == 1 {
+        sqlx::query("UPDATE jobs SET log_lines = log_lines + 1 WHERE id = $1")
+            .bind(job_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
     Ok(())
 }
 

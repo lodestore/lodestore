@@ -24,16 +24,19 @@ use crate::socket::StdinHeader;
 use crate::{AgentError, NetOptions, Paths};
 
 pub mod fetch;
+pub mod priority;
 pub mod restore;
 pub mod runner;
 mod store;
 pub(crate) mod stream;
+pub mod throttle;
 
 use store::{ACCEPTED, FINISHED, JobRecord, JobStore, RUNNING};
 
 pub const EVENT_CAP: u64 = 5000;
 const EVENT_BATCH: usize = 256;
 const SPEED_WINDOW: usize = 10;
+const ETA_WINDOW: usize = 60;
 const SAMPLE_TICK: Duration = Duration::from_secs(1);
 const KIND_FILE: &str = "file";
 const KIND_STDIN: &str = "stdin";
@@ -74,6 +77,9 @@ pub struct ProgressCell {
     pub bytes_total: AtomicU64,
     pub scan_done: AtomicBool,
     pub bytes_downloaded: AtomicU64,
+    pub bytes_stored: Arc<AtomicU64>,
+    /// The upload limit of the job in bytes per second, 0 without one.
+    pub upload_limit: AtomicU64,
 }
 
 #[derive(Debug, Default)]
@@ -802,7 +808,7 @@ impl JobHub {
         e.record.set_finished(&finished);
         self.persist(&e.record);
         e.finished = Some(finished.clone());
-        let last = progress_of(id, &e.shared.progress, 0, None);
+        let last = progress_of(id, &e.shared.progress, 0, 0, None);
         st.out.push_back(message(AgentBody::JobProgress(last)));
         st.out.push_back(message(AgentBody::JobFinished(finished)));
         drop(st);
@@ -821,27 +827,61 @@ pub(crate) fn failed(code: &str, text: &str) -> JobFinished {
 
 fn sample_loop(ctx: &JobCtx, stopped: &mpsc::Receiver<()>, tick: Duration) {
     let cell = ctx.progress_cell();
-    let mut ring: VecDeque<(Instant, u64)> = VecDeque::with_capacity(SPEED_WINDOW);
-    ring.push_back((Instant::now(), cell.bytes_processed.load(Ordering::Relaxed)));
+    let mut ring: VecDeque<(Instant, u64, u64)> = VecDeque::with_capacity(ETA_WINDOW + 1);
+    ring.push_back((
+        Instant::now(),
+        cell.bytes_processed.load(Ordering::Relaxed),
+        cell.bytes_stored.load(Ordering::Relaxed),
+    ));
     while let Err(RecvTimeoutError::Timeout) = stopped.recv_timeout(tick) {
         let processed = cell.bytes_processed.load(Ordering::Relaxed);
-        ring.push_back((Instant::now(), processed));
-        if ring.len() > SPEED_WINDOW {
+        ring.push_back((
+            Instant::now(),
+            processed,
+            cell.bytes_stored.load(Ordering::Relaxed),
+        ));
+        if ring.len() > ETA_WINDOW {
             ring.pop_front();
         }
-        let (first, last) = (ring[0], ring[ring.len() - 1]);
-        let secs = last.0.duration_since(first.0).as_secs_f64();
-        let speed = if secs > 0.0 {
-            (last.1.saturating_sub(first.1) as f64 / secs) as u64
-        } else {
-            0
+        let last = ring[ring.len() - 1];
+        let per_sec = |first: (Instant, u64, u64), pick: fn(&(Instant, u64, u64)) -> u64| {
+            let secs = last.0.duration_since(first.0).as_secs_f64();
+            if secs > 0.0 {
+                (pick(&last).saturating_sub(pick(&first)) as f64 / secs) as u64
+            } else {
+                0
+            }
         };
+        let recent = ring[ring.len().saturating_sub(SPEED_WINDOW + 1)];
+        let speed = per_sec(recent, |s| s.1);
+        let upload_speed = per_sec(recent, |s| s.2);
+        // A throttled backup reads a pack, then waits for its upload slot, so
+        // the read speed over a few seconds is often zero; the estimate looks
+        // at the last minute. Deduplicated data reads far faster than the
+        // limit allows new data to go out, so a limited job never estimates
+        // above its limit.
+        let steady = eta_speed(
+            per_sec(ring[0], |s| s.1),
+            cell.upload_limit.load(Ordering::Relaxed),
+        );
         let scan_done = cell.scan_done.load(Ordering::Relaxed);
         let bytes_total = cell.bytes_total.load(Ordering::Relaxed);
-        let eta_s =
-            (scan_done && speed > 0).then(|| bytes_total.saturating_sub(processed).div_ceil(speed));
-        ctx.hub
-            .set_progress(ctx.job_id(), progress_of(ctx.job_id(), &cell, speed, eta_s));
+        let eta_s = (scan_done && steady > 0)
+            .then(|| bytes_total.saturating_sub(processed).div_ceil(steady));
+        ctx.hub.set_progress(
+            ctx.job_id(),
+            progress_of(ctx.job_id(), &cell, speed, upload_speed, eta_s),
+        );
+    }
+}
+
+/// The read speed the time left is estimated from, capped by the upload
+/// limit (0 when there is none or nothing was read).
+fn eta_speed(read: u64, limit: u64) -> u64 {
+    match (read, limit) {
+        (0, limit) => limit,
+        (read, 0) => read,
+        (read, limit) => read.min(limit),
     }
 }
 
@@ -851,6 +891,7 @@ fn progress_of(
     job_id: &str,
     cell: &ProgressCell,
     speed_bps: u64,
+    upload_speed_bps: u64,
     eta_s: Option<u64>,
 ) -> JobProgress {
     JobProgress {
@@ -864,5 +905,20 @@ fn progress_of(
         speed_bps,
         eta_s,
         bytes_downloaded: cell.bytes_downloaded.load(Ordering::Relaxed),
+        upload_speed_bps,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::eta_speed;
+
+    #[test]
+    fn eta_speed_never_exceeds_the_limit() {
+        assert_eq!(eta_speed(500 << 20, 2 << 20), 2 << 20);
+        assert_eq!(eta_speed(1 << 20, 2 << 20), 1 << 20);
+        assert_eq!(eta_speed(0, 2 << 20), 2 << 20);
+        assert_eq!(eta_speed(7, 0), 7);
+        assert_eq!(eta_speed(0, 0), 0);
     }
 }
