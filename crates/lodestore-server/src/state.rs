@@ -6,6 +6,7 @@ use crate::catalog::CatalogJobs;
 use crate::config::Config;
 use crate::db::Db;
 use crate::grpc::registry::Registry;
+use crate::maintenance::gc::GcRuns;
 use crate::pki::Pki;
 use crate::repos::ReposState;
 use crate::secrets::Sealer;
@@ -21,4 +22,5 @@ pub struct AppState {
     pub repos: ReposState,
     pub catalog: CatalogJobs,
     pub readers: RepoReaders,
+    pub gc: GcRuns,
 }

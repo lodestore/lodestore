@@ -126,6 +126,19 @@ async fn write_seen(state: &AppState, agent_id: &str, heartbeat: Option<&Heartbe
     }
 }
 
+async fn store_capabilities(
+    state: &AppState,
+    agent_id: &str,
+    capabilities: &[String],
+) -> anyhow::Result<()> {
+    sqlx::query("UPDATE agents SET capabilities_json = $1 WHERE id = $2")
+        .bind(serde_json::to_string(capabilities)?)
+        .bind(agent_id)
+        .execute(&state.db.pool)
+        .await?;
+    Ok(())
+}
+
 #[tonic::async_trait]
 impl Agent for AgentService {
     type SessionStream = SessionStream;
@@ -159,17 +172,21 @@ impl Agent for AgentService {
             return Err(revoked());
         }
 
+        let capabilities: Vec<String> = hello
+            .capabilities
+            .iter()
+            .take(MAX_CAPABILITIES)
+            .map(|c| c.chars().take(MAX_CAPABILITY_LEN).collect())
+            .collect();
+        if let Err(error) = store_capabilities(&state, &agent_id, &capabilities).await {
+            tracing::warn!(%error, agent_id, "could not store agent capabilities");
+            return Err(Status::unavailable(
+                "the server could not record what this agent supports; reconnect later",
+            ));
+        }
         let mut guard = state.registry.register(&agent_id, &repository_id);
         let rx = guard.take_rx();
-        state.registry.set_capabilities(
-            &agent_id,
-            hello
-                .capabilities
-                .iter()
-                .take(MAX_CAPABILITIES)
-                .map(|c| c.chars().take(MAX_CAPABILITY_LEN).collect())
-                .collect(),
-        );
+        state.registry.set_capabilities(&agent_id, capabilities);
         let cancel = guard.cancel.clone();
         if state.registry.is_revoked(&agent_id) {
             return Err(revoked());

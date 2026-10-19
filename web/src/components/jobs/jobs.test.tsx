@@ -548,6 +548,26 @@ describe("Job page result", () => {
 		expect(screen.queryByRole("heading", { name: "Result" })).toBeNull();
 	});
 
+	it("tells to update an agent that is too old for a running cleanup", async () => {
+		mockJob(
+			makeDetail({
+				state: "failed",
+				error_code: "gc_agent_outdated",
+				error_message:
+					"Update the agent on this host: a cleanup cycle is running in its repository.",
+				snapshot_id: null,
+				stats: null,
+			}),
+		);
+		await openJob();
+
+		const alert = await screen.findByRole("alert");
+		expect(alert).toHaveTextContent(
+			"The agent on web-1 is too old for cleanup.",
+		);
+		expect(alert).not.toHaveTextContent("Check the log");
+	});
+
 	it("falls back to the server message for other failures", async () => {
 		mockJob(
 			makeDetail({

@@ -13,11 +13,12 @@ use lodestore_format::fs::filter::PathMatcher;
 use lodestore_format::fs::walk::WalkOptions;
 use lodestore_format::index::hex32;
 use lodestore_format::keys::WriteKeys;
+use lodestore_format::locks::DEFAULT_MAX_RUNTIME;
 use lodestore_format::pb::IssueKind;
 use lodestore_format::store::s3::StaticCredentials;
 use lodestore_format::store::{RepoLocation, Store};
 use lodestore_format::tree_cache::{CacheWriter, open_parent};
-use lodestore_format::writer::{BackupOptions, BackupProgress, IssueEvent, Writer};
+use lodestore_format::writer::{BackupOptions, BackupProgress, Deadline, IssueEvent, Writer};
 use lodestore_proto::agent::v1::{
     Hook, JobEventLevel, JobFinished, JobOutcome, JobPhaseKind, JobSpec, JobStats,
 };
@@ -101,6 +102,38 @@ async fn open_writer_with(
     Writer::connect(Throttled::new(store, rate, uploaded), keys)
         .await
         .map_err(|e| format!("cannot open the repository: {e}"))
+}
+
+/// The job's time limit, counted from now; a spec without one gets the default.
+pub(super) fn job_deadline(spec: &JobSpec) -> Deadline {
+    Deadline::starting_now(match spec.max_runtime_s {
+        0 => DEFAULT_MAX_RUNTIME,
+        secs => Duration::from_secs(secs),
+    })
+}
+
+pub(super) fn time_limit(limit_secs: u64) -> JobFinished {
+    let limit = if limit_secs >= 3600 && limit_secs.is_multiple_of(3600) {
+        format!("{}h", limit_secs / 3600)
+    } else {
+        format!("{limit_secs}s")
+    };
+    failed(
+        "time_limit",
+        &format!(
+            "The backup ran longer than its time limit of {limit} and was stopped. No snapshot was written."
+        ),
+    )
+}
+
+/// Refuses a backup that cannot see `locks/` when the server needs it to.
+pub(super) fn gc_locks_gate(denied: bool, required: bool) -> Option<JobFinished> {
+    (denied && required).then(|| {
+        failed(
+            "gc_locks_unreadable",
+            "The agent key cannot read locks/ in the repository, so this backup could reuse data a cleanup cycle is about to delete. Replace the agent key policy.",
+        )
+    })
 }
 
 fn issue_kind(kind: IssueKind) -> &'static str {
@@ -316,6 +349,7 @@ fn missing_path(paths: &[String]) -> Option<JobFinished> {
 }
 
 async fn execute(ctx: &JobCtx, spec: &JobSpec) -> JobFinished {
+    let deadline = job_deadline(spec);
     let settings = AgentSettings::load(ctx.paths());
     let hooks = Hooks {
         ctx,
@@ -339,7 +373,7 @@ async fn execute(ctx: &JobCtx, spec: &JobSpec) -> JobFinished {
         Some(finished) => finished,
         None => {
             ctx.phase(JobPhaseKind::Backup, "");
-            backup(ctx, spec).await
+            backup(ctx, spec, deadline).await
         }
     };
     watcher.abort();
@@ -394,7 +428,7 @@ fn cache_dir(paths: &Paths, keys: &WriteKeys, spec: &JobSpec) -> PathBuf {
         .join(format!("{policy}-{}", &HEXLOWER.encode(&digest)[..16]))
 }
 
-async fn backup(ctx: &JobCtx, spec: &JobSpec) -> JobFinished {
+async fn backup(ctx: &JobCtx, spec: &JobSpec, deadline: Deadline) -> JobFinished {
     let keys = match read_write_keys(ctx.paths()) {
         Ok(keys) => keys,
         Err(e) => return failed("repository_unavailable", &e),
@@ -411,6 +445,9 @@ async fn backup(ctx: &JobCtx, spec: &JobSpec) -> JobFinished {
         Ok(writer) => writer,
         Err(e) => return failed("repository_unavailable", &e),
     };
+    if let Some(refused) = gc_locks_gate(writer.gc_locks_denied(), spec.gc_locks_required) {
+        return refused;
+    }
     let exclude = if spec.exclude.is_empty() {
         None
     } else {
@@ -481,6 +518,7 @@ async fn backup(ctx: &JobCtx, spec: &JobSpec) -> JobFinished {
                 tree_sink: Some(Box::new(tree_sink)),
                 agent_id: Some(ctx.agent_id().as_bytes().to_vec()),
                 cancel: ctx.cancel_flag(),
+                deadline: Some(deadline),
                 ..Default::default()
             },
             &progress,
@@ -531,6 +569,20 @@ async fn backup(ctx: &JobCtx, spec: &JobSpec) -> JobFinished {
             }
         }
         Err(Error::Interrupted) => interrupted(ctx),
+        Err(Error::DeadlineExceeded { limit_secs }) => time_limit(limit_secs),
         Err(e) => failed("backup_failed", &e.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deadline_gc_locks_gate() {
+        assert!(gc_locks_gate(true, true).is_some_and(|f| f.error_code == "gc_locks_unreadable"));
+        assert!(gc_locks_gate(true, false).is_none());
+        assert!(gc_locks_gate(false, true).is_none());
+        assert!(gc_locks_gate(false, false).is_none());
     }
 }

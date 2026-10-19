@@ -70,6 +70,7 @@ export type ScheduleDraft = {
 
 export type LimitsDraft = {
 	uploadRate: string;
+	maxRuntime: string;
 	nice: string;
 	ioniceClass: "" | "best-effort" | "idle";
 	ioniceLevel: string;
@@ -100,6 +101,7 @@ export const BLANK_SCHEDULE: ScheduleDraft = {
 
 export const BLANK_LIMITS: LimitsDraft = {
 	uploadRate: "",
+	maxRuntime: "",
 	nice: "",
 	ioniceClass: "",
 	ioniceLevel: "",
@@ -177,6 +179,7 @@ export function draftFromPolicy(policy: BackupPolicy): PolicyDraft {
 		},
 		limits: {
 			uploadRate: spec.limits?.uploadRate ?? "",
+			maxRuntime: spec.limits?.maxRuntime ?? "",
 			nice: spec.limits?.nice == null ? "" : String(spec.limits.nice),
 			ioniceClass: spec.limits?.ioniceClass ?? "",
 			ioniceLevel:
@@ -237,9 +240,11 @@ export function retentionFromDraft(
 
 function limitsFromDraft(draft: LimitsDraft): BackupPolicy["spec"]["limits"] {
 	const uploadRate = draft.uploadRate.trim();
+	const maxRuntime = draft.maxRuntime.trim();
 	const bestEffort = draft.ioniceClass === "best-effort";
 	const limits = {
 		...(uploadRate !== "" && { uploadRate }),
+		...(maxRuntime !== "" && { maxRuntime }),
 		...(draft.nice !== "" && { nice: Number(draft.nice) }),
 		...(draft.ioniceClass !== "" && { ioniceClass: draft.ioniceClass }),
 		...(bestEffort &&

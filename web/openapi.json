@@ -337,6 +337,16 @@
               }
             }
           },
+          "409": {
+            "description": "Cleanup is deleting packs in the repository; the link stays valid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "502": {
             "description": "The repository storage is unavailable",
             "content": {
@@ -804,7 +814,7 @@
           {
             "name": "status",
             "in": "query",
-            "description": "One of queued, running, succeeded, warnings, failed, cancelled, interrupted, not_started.",
+            "description": "One of queued, running, waiting, succeeded, warnings, failed, cancelled, interrupted,\nnot_started. `running` also lists cleanup cycles that are waiting.",
             "required": false,
             "schema": {
               "type": "string"
@@ -849,7 +859,7 @@
           {
             "name": "kind",
             "in": "query",
-            "description": "`backup`, `restore` or `download`.",
+            "description": "`backup`, `restore`, `download` or `gc`.",
             "required": false,
             "schema": {
               "type": "string"
@@ -2365,6 +2375,523 @@
         ]
       }
     },
+    "/api/v1/repositories/{id}/gc": {
+      "get": {
+        "tags": [
+          "Cleanup"
+        ],
+        "summary": "Get the cleanup status of a repository",
+        "operationId": "get_status",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Repository id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Settings, safety checks, the running cycle and the last reports",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GcStatus"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown repository",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "bearer": [
+              "jobs:read"
+            ]
+          }
+        ]
+      }
+    },
+    "/api/v1/repositories/{id}/gc/abort": {
+      "post": {
+        "tags": [
+          "Cleanup"
+        ],
+        "summary": "Abort the running cleanup",
+        "description": "Works until the first object is deleted. The cleanup marker is removed and nothing is lost.",
+        "operationId": "abort",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Repository id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Aborted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GcStatus"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown repository",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Nothing is running, or deleting has started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          },
+          {
+            "bearer": [
+              "jobs:run"
+            ]
+          }
+        ]
+      }
+    },
+    "/api/v1/repositories/{id}/gc/cycles/{cycle_id}/report": {
+      "get": {
+        "tags": [
+          "Cleanup"
+        ],
+        "summary": "Get the full report of a finished cycle",
+        "description": "Lists every pack the cycle deletes or repacks.",
+        "operationId": "get_report",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Repository id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cycle_id",
+            "in": "path",
+            "description": "Cycle id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The report",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GcFullReport"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown cycle, or one without a report",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "bearer": [
+              "jobs:read"
+            ]
+          }
+        ]
+      }
+    },
+    "/api/v1/repositories/{id}/gc/dry-run": {
+      "post": {
+        "tags": [
+          "Cleanup"
+        ],
+        "summary": "Start a dry run",
+        "description": "Reports how much space a cleanup would free without changing the repository. Works while cleanup is turned off.",
+        "operationId": "start_dry_run",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Repository id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "The dry run started; follow it in the cleanup status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GcStarted"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown repository",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A cleanup cycle is already running in this repository",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          },
+          {
+            "bearer": [
+              "jobs:run"
+            ]
+          }
+        ]
+      }
+    },
+    "/api/v1/repositories/{id}/gc/run": {
+      "post": {
+        "tags": [
+          "Cleanup"
+        ],
+        "summary": "Start a cleanup now",
+        "description": "Marks packs nothing needs, waits out the pause and deletes them. A cleanup that stopped while deleting is continued instead of starting a new one.",
+        "operationId": "start_run",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Repository id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "The cleanup started; follow it in the cleanup status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GcStarted"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown repository",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Cleanup is off, a cycle is running, or a safety check failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GcPreflightError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          },
+          {
+            "bearer": [
+              "snapshots:delete"
+            ]
+          }
+        ]
+      }
+    },
+    "/api/v1/repositories/{id}/gc/settings": {
+      "put": {
+        "tags": [
+          "Cleanup"
+        ],
+        "summary": "Save the cleanup settings of a repository",
+        "description": "Turning cleanup on is refused while the safety checks report a problem. Turning it off with the pause unchanged always works, even when the pause floor has risen above the saved pause since.",
+        "operationId": "put_settings",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Repository id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GcSettingsInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Saved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GcStatus"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown repository",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Cleanup can't be turned on yet; nothing was saved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GcPreflightError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A field is not valid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GcSettingsErrors"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          },
+          {
+            "bearer": [
+              "snapshots:delete"
+            ]
+          }
+        ]
+      }
+    },
+    "/api/v1/repositories/{id}/gc/settings/validate": {
+      "post": {
+        "tags": [
+          "Cleanup"
+        ],
+        "summary": "Check cleanup settings without saving them",
+        "operationId": "validate",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Repository id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GcSettingsInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The next runs of the schedule and the fields that are not valid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GcSettingsCheck"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown repository",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          },
+          {
+            "bearer": [
+              "jobs:read"
+            ]
+          }
+        ]
+      }
+    },
+    "/api/v1/repositories/{id}/gc/unlock": {
+      "post": {
+        "tags": [
+          "Cleanup"
+        ],
+        "summary": "Close the backup markers that hold deletion back",
+        "description": "A backup that started before the cleanup marked its packs and never finished keeps deletion waiting. This closes those markers so the cleanup can go on. Do it only when the backup is known to be dead.",
+        "operationId": "unlock",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Repository id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The markers were closed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GcUnlocked"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown repository",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "No cleanup is waiting on markers",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          },
+          {
+            "bearer": [
+              "snapshots:delete"
+            ]
+          }
+        ]
+      }
+    },
     "/api/v1/restore/hosts": {
       "get": {
         "tags": [
@@ -3809,6 +4336,38 @@
           }
         }
       },
+      "CleanupState": {
+        "type": "string",
+        "description": "Where cleanup of a repository stands, read from the catalog only.",
+        "enum": [
+          "off",
+          "idle",
+          "running",
+          "waiting",
+          "postponed",
+          "stopped",
+          "unknown"
+        ]
+      },
+      "CleanupSummary": {
+        "type": "object",
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "`waiting`: when deletion may start. `idle`: the next scheduled run."
+          },
+          "state": {
+            "$ref": "#/components/schemas/CleanupState"
+          }
+        }
+      },
       "CommitRequest": {
         "type": "object",
         "required": [
@@ -4175,6 +4734,737 @@
           "to": {}
         }
       },
+      "FieldError": {
+        "type": "object",
+        "required": [
+          "path",
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string",
+            "description": "The policy-style path of the field, such as `spec.pause`."
+          }
+        }
+      },
+      "GcCycleDto": {
+        "type": "object",
+        "required": [
+          "id",
+          "state",
+          "dry_run",
+          "origin",
+          "marked_packs",
+          "marked_bytes",
+          "blocked_by_writers",
+          "waiting_for_restores",
+          "error_after_delete"
+        ],
+        "properties": {
+          "blocked_by_writers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WriterMarkerDto"
+            }
+          },
+          "delete_after": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "dry_run": {
+            "type": "boolean"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "error_after_delete": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "marked_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "marked_packs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "origin": {
+            "$ref": "#/components/schemas/GcOrigin"
+          },
+          "progress": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/GcProgress"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "started_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "state": {
+            "$ref": "#/components/schemas/GcState"
+          },
+          "waiting_for_restores": {
+            "type": "boolean"
+          }
+        }
+      },
+      "GcEventDto": {
+        "type": "object",
+        "required": [
+          "seq",
+          "at",
+          "level",
+          "kind",
+          "message"
+        ],
+        "properties": {
+          "at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "level": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "GcFailureDto": {
+        "type": "object",
+        "required": [
+          "cycle_id",
+          "origin",
+          "error",
+          "after_delete"
+        ],
+        "properties": {
+          "after_delete": {
+            "type": "boolean",
+            "description": "Deleting had started: some marked packs may be gone already. The\ncycle keeps its marker and continues where it stopped, on the next\nrun or when the server retries it."
+          },
+          "cycle_id": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          },
+          "failed_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "origin": {
+            "$ref": "#/components/schemas/GcOrigin"
+          }
+        }
+      },
+      "GcFullReport": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/GcReport"
+          },
+          {
+            "type": "object",
+            "required": [
+              "delete",
+              "repack",
+              "ignored",
+              "unindexed",
+              "locked"
+            ],
+            "properties": {
+              "delete": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/GcPackItem"
+                }
+              },
+              "ignored": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/GcObjectNote"
+                }
+              },
+              "locked": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/GcLockedItem"
+                }
+              },
+              "repack": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/GcPackItem"
+                }
+              },
+              "unindexed": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/GcObjectNote"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "GcJobInfo": {
+        "type": "object",
+        "required": [
+          "repository_id",
+          "repository_name",
+          "dry_run",
+          "origin",
+          "phase",
+          "postponed",
+          "stopped_while_deleting"
+        ],
+        "properties": {
+          "bytes_freed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "delete_after": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "dry_run": {
+            "type": "boolean"
+          },
+          "locked_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "locked_until": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "origin": {
+            "$ref": "#/components/schemas/GcOrigin"
+          },
+          "phase": {
+            "$ref": "#/components/schemas/GcState"
+          },
+          "postponed": {
+            "type": "boolean",
+            "description": "Deletion is held back by a running backup or restore."
+          },
+          "progress": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/GcProgress"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "repository_id": {
+            "type": "string"
+          },
+          "repository_name": {
+            "type": "string"
+          },
+          "stopped_while_deleting": {
+            "type": "boolean"
+          }
+        }
+      },
+      "GcLockedItem": {
+        "type": "object",
+        "required": [
+          "key",
+          "size"
+        ],
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "modified_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "until": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          }
+        }
+      },
+      "GcObjectNote": {
+        "type": "object",
+        "required": [
+          "key",
+          "reason"
+        ],
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      },
+      "GcOrigin": {
+        "type": "string",
+        "enum": [
+          "manual",
+          "schedule"
+        ]
+      },
+      "GcPackItem": {
+        "type": "object",
+        "required": [
+          "id",
+          "size",
+          "live_bytes"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "live_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "GcPreflightError": {
+        "type": "object",
+        "required": [
+          "message",
+          "problems"
+        ],
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "problems": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PreflightProblem"
+            }
+          }
+        }
+      },
+      "GcProgress": {
+        "type": "object",
+        "required": [
+          "done",
+          "total",
+          "bytes"
+        ],
+        "properties": {
+          "bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "done": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "GcReport": {
+        "type": "object",
+        "required": [
+          "cycle_id",
+          "dry_run",
+          "finished_at",
+          "duration_ms",
+          "bytes_freed",
+          "packs_deleted",
+          "packs_repacked",
+          "repack_transfer_bytes",
+          "locked_bytes",
+          "locked_until_unknown"
+        ],
+        "properties": {
+          "bytes_freed": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "cycle_id": {
+            "type": "string"
+          },
+          "dry_run": {
+            "type": "boolean"
+          },
+          "duration_ms": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "finished_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "locked_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "locked_until": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "locked_until_unknown": {
+            "type": "boolean"
+          },
+          "packs_deleted": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "packs_repacked": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "repack_transfer_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "GcSettingsCheck": {
+        "type": "object",
+        "required": [
+          "problems",
+          "pause_floor"
+        ],
+        "properties": {
+          "pause_floor": {
+            "type": "string"
+          },
+          "problems": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FieldError"
+            }
+          },
+          "schedule": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ScheduleInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "GcSettingsDto": {
+        "type": "object",
+        "required": [
+          "cron",
+          "timezone",
+          "pause",
+          "repack_below_pct",
+          "max_repack"
+        ],
+        "properties": {
+          "cron": {
+            "type": "string"
+          },
+          "max_repack": {
+            "type": "string",
+            "description": "A size such as `10GiB`."
+          },
+          "pause": {
+            "type": "string",
+            "description": "A duration such as `24h` or `2d`."
+          },
+          "repack_below_pct": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "timezone": {
+            "type": "string"
+          }
+        }
+      },
+      "GcSettingsErrors": {
+        "type": "object",
+        "required": [
+          "errors"
+        ],
+        "properties": {
+          "errors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FieldError"
+            }
+          }
+        }
+      },
+      "GcSettingsInput": {
+        "type": "object",
+        "required": [
+          "enabled",
+          "cron",
+          "timezone",
+          "pause",
+          "repack_below_pct",
+          "max_repack"
+        ],
+        "properties": {
+          "cron": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "max_repack": {
+            "type": "string",
+            "description": "A size such as `10GiB`."
+          },
+          "pause": {
+            "type": "string",
+            "description": "A duration such as `24h` or `2d`, not below the pause floor."
+          },
+          "repack_below_pct": {
+            "type": "integer",
+            "format": "int64",
+            "description": "A whole number from 1 to 99."
+          },
+          "timezone": {
+            "type": "string"
+          }
+        }
+      },
+      "GcStarted": {
+        "type": "object",
+        "required": [
+          "cycle_id"
+        ],
+        "properties": {
+          "cycle_id": {
+            "type": "string"
+          }
+        }
+      },
+      "GcState": {
+        "type": "string",
+        "enum": [
+          "marking",
+          "repacking",
+          "waiting",
+          "verifying",
+          "sweeping",
+          "done",
+          "failed",
+          "aborted"
+        ]
+      },
+      "GcStatus": {
+        "type": "object",
+        "required": [
+          "repository_id",
+          "enabled",
+          "settings",
+          "pause_floor",
+          "pause_effective",
+          "preflight",
+          "has_object_lock",
+          "events",
+          "events_total"
+        ],
+        "properties": {
+          "active_dry_run": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/GcCycleDto",
+                "description": "A dry run in progress, also while a real cycle runs or waits."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cycle": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/GcCycleDto",
+                "description": "The unfinished cycle: the real one when there is one, otherwise a dry\nrun. `events` belong to it."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GcEventDto"
+            }
+          },
+          "events_total": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "has_object_lock": {
+            "type": "boolean"
+          },
+          "last_aborted_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "last_cleanup": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/GcReport"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_dry_run": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/GcReport"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_failure": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/GcFailureDto",
+                "description": "The newest cleanup that was not a dry run, when it failed. `None`\nonce a later one is running or has finished."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "pause_effective": {
+            "type": "string",
+            "description": "The pause the next cycle uses: the setting, raised to `pause_floor`."
+          },
+          "pause_floor": {
+            "type": "string"
+          },
+          "preflight": {
+            "$ref": "#/components/schemas/Preflight"
+          },
+          "repository_id": {
+            "type": "string"
+          },
+          "schedule": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ScheduleInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "settings": {
+            "$ref": "#/components/schemas/GcSettingsDto"
+          }
+        }
+      },
+      "GcUnlocked": {
+        "type": "object",
+        "required": [
+          "unlocked"
+        ],
+        "properties": {
+          "unlocked": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
       "Hook": {
         "type": "object",
         "properties": {
@@ -4424,6 +5714,21 @@
           }
         }
       },
+      "HostRef": {
+        "type": "object",
+        "required": [
+          "id",
+          "hostname"
+        ],
+        "properties": {
+          "hostname": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          }
+        }
+      },
       "HostRetentionPreview": {
         "type": "object",
         "required": [
@@ -4667,7 +5972,8 @@
         "enum": [
           "backup",
           "restore",
-          "download"
+          "download",
+          "gc"
         ]
       },
       "JobOrigin": {
@@ -4804,6 +6110,7 @@
         "enum": [
           "queued",
           "running",
+          "waiting",
           "succeeded",
           "warnings",
           "failed",
@@ -4911,6 +6218,16 @@
               "null"
             ],
             "format": "int64"
+          },
+          "gc": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/GcJobInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "host_id": {
             "type": "string"
@@ -5181,6 +6498,12 @@
               "null"
             ],
             "format": "int64"
+          },
+          "maxRuntime": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "nice": {
             "type": [
@@ -5645,6 +6968,60 @@
           }
         }
       },
+      "Preflight": {
+        "type": "object",
+        "required": [
+          "problems",
+          "dry_run_allowed",
+          "checked_at"
+        ],
+        "properties": {
+          "checked_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "dry_run_allowed": {
+            "type": "boolean"
+          },
+          "problems": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PreflightProblem"
+            }
+          }
+        }
+      },
+      "PreflightKind": {
+        "type": "string",
+        "enum": [
+          "old_agents",
+          "server_key",
+          "agent_key",
+          "foreign_cycle",
+          "unreadable"
+        ]
+      },
+      "PreflightProblem": {
+        "type": "object",
+        "required": [
+          "kind",
+          "message"
+        ],
+        "properties": {
+          "hosts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HostRef"
+            }
+          },
+          "kind": {
+            "$ref": "#/components/schemas/PreflightKind"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
       "PreviewSnapshot": {
         "type": "object",
         "required": [
@@ -5773,7 +7150,8 @@
           "experimental",
           "location_display",
           "hosts_count",
-          "agent_key_state"
+          "agent_key_state",
+          "cleanup"
         ],
         "properties": {
           "agent_key_state": {
@@ -5788,6 +7166,9 @@
               "null"
             ],
             "format": "int64"
+          },
+          "cleanup": {
+            "$ref": "#/components/schemas/CleanupSummary"
           },
           "experimental": {
             "type": "boolean"
@@ -6952,6 +8333,32 @@
             "type": "string"
           }
         }
+      },
+      "WriterMarkerDto": {
+        "type": "object",
+        "required": [
+          "key"
+        ],
+        "properties": {
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`None` when the marker can't be read."
+          },
+          "key": {
+            "type": "string"
+          },
+          "started_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When the bucket stored the marker; `None` when it doesn't say."
+          }
+        }
       }
     },
     "securitySchemes": {
@@ -7011,6 +8418,10 @@
     {
       "name": "Repositories",
       "description": "Storage repositories and the credentials agents write with."
+    },
+    {
+      "name": "Cleanup",
+      "description": "Free up space: dry runs, cleanup cycles and their settings."
     },
     {
       "name": "Server",

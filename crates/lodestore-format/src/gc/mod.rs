@@ -1,0 +1,84 @@
+//! Garbage collection: finding what the bucket no longer needs.
+//!
+//! [`survey`] only reads. The live set comes from the snapshots found by
+//! listing `snapshots/`, never from a catalog, so a snapshot that retention
+//! could not delete keeps its data.
+
+use std::collections::HashSet;
+
+use crate::crypto::BlobId;
+use crate::error::Result;
+use crate::index::{Index, PACKS_PREFIX};
+use crate::keys::ReadKeys;
+use crate::pb;
+use crate::store::BlobStore;
+
+pub mod compact;
+pub mod mark;
+pub mod plan;
+pub mod repack;
+pub mod sweep;
+pub mod verify;
+
+use mark::{LiveSet, MarkOutcome, ShardSet, load_shards, mark};
+use plan::{GcPlan, PlanOptions, plan};
+use repack::RepackOutcome;
+
+/// The packs a collection means to delete: those with nothing alive in them
+/// and those the repack replaced.
+pub fn candidates(plan: &GcPlan, repack: &RepackOutcome) -> Vec<BlobId> {
+    let mut out: Vec<BlobId> = plan
+        .delete
+        .iter()
+        .map(|p| p.pack_id)
+        .chain(repack.replaced.iter().copied())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurveyProgress {
+    Snapshots { done: u64, total: u64 },
+}
+
+pub struct Survey {
+    pub shards: ShardSet,
+    pub index: Index,
+    pub live: LiveSet,
+    pub snapshots: Vec<BlobId>,
+    pub ignored: Vec<(String, String)>,
+    pub plan: GcPlan,
+}
+
+/// Marks the live blobs of every snapshot in the bucket and plans which packs
+/// can be deleted or repacked. Writes nothing.
+pub async fn survey<S: BlobStore>(
+    store: &S,
+    keys: &ReadKeys,
+    config: &pb::Config,
+    opts: &PlanOptions,
+    progress: &(dyn Fn(SurveyProgress) + Sync),
+) -> Result<Survey> {
+    let shards = load_shards(store, keys).await?;
+    let index = shards.index(&HashSet::new())?;
+    let MarkOutcome {
+        live,
+        snapshots,
+        ignored,
+    } = mark(store, keys, config, &index, &|done, total| {
+        progress(SurveyProgress::Snapshots { done, total });
+    })
+    .await?;
+    let listing = store.list(PACKS_PREFIX).await?;
+    let plan = plan(&shards, &index, &live, &listing, opts)?;
+    Ok(Survey {
+        shards,
+        index,
+        live,
+        snapshots,
+        ignored,
+        plan,
+    })
+}

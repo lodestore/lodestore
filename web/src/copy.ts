@@ -1,4 +1,5 @@
 import { catalog } from "@/copy.catalog";
+import { gc } from "@/copy.gc";
 import { hostBackup, snapshots } from "@/copy.host";
 import { jobs } from "@/copy.jobs";
 import { policies } from "@/copy.policies";
@@ -8,6 +9,7 @@ import { sentence } from "@/lib/sentence";
 
 export const copy = {
 	catalog,
+	gc,
 	jobs,
 	policies,
 	restore,
@@ -54,6 +56,9 @@ export const copy = {
 		addRepository: "Add repository",
 		createPolicy: "Create policy",
 		createApiToken: "Create API token",
+		freeUpSpace: "Free up space",
+		freeUpSpaceIn: (name: string) => `Free up space in ${name}`,
+		cleanupKeywords: "cleanup clean gc garbage reclaim",
 		lightTheme: "Switch to light theme",
 		darkTheme: "Switch to dark theme",
 		systemTheme: "Use system theme",
@@ -485,6 +490,18 @@ export const copy = {
 			hosts: "Hosts",
 			agentKey: "Agent key",
 			lastChecked: "Last checked",
+			cleanup: "Cleanup",
+		},
+		cleanup: {
+			off: "Off",
+			manualOnly: "Manual only",
+			next: "Next ",
+			running: "Running",
+			waiting: "Waiting",
+			deletes: "deletes ",
+			postponed: "Postponed",
+			stopped: "Stopped",
+			open: (name: string) => `Cleanup of ${name}:`,
 		},
 		actionsColumn: "Actions",
 		actionsFor: (name: string) => `Actions for ${name}`,
@@ -517,6 +534,7 @@ export const copy = {
 			`Couldn't ${action}. ${sentence(serverMessage)}Try again.`,
 	},
 	common: {
+		justNow: "just now",
 		copy: (object: string) => `Copy ${object}`,
 		copied: "Copied",
 		copyButton: "Copy",

@@ -50,6 +50,7 @@ An `http://` address that is not on the loopback interface works, but the token 
 | `lode server snapshots mark <id> --reason TEXT` and `clear <id> --reason TEXT` | `snapshots:delete` |
 | `lode server snapshots delete <id> [--yes]` | `snapshots:delete` |
 | `lode apply -f <file or folder> [--dry-run] [--prune] [--adopt] [--manager NAME] [--yes]` | `policies:read` and `policies:write`, plus `snapshots:delete` when the files set or change `retention` |
+| `lode gc [--dry-run] <repo>`, `lode gc status <repo>`, `lode gc unlock <repo>` (also `lode server gc ...`) | See [Cleanup](#cleanup) |
 | `lode server restore <snapshot> --host <host> [options]` | `restore`, and `snapshots:read` when `--target` and `--in-place` are not given |
 
 A `<host>` is a host id or a hostname. A hostname is looked up in the host list, which needs `hosts:read`; a token without that scope must pass the id, which `lode server hosts list` shows in the `ID` column. When several hosts share a name, `lode` asks for the id.
@@ -114,6 +115,45 @@ These commands need the `snapshots:delete` scope, which is separate from reading
 
 `lode server policies retention <name>` takes the retention rules saved in the policy and prints which snapshots they would forget now, per host. Suspicious snapshots are counted separately and are never forgotten. Nothing is deleted.
 
+### Cleanup
+
+Retention only forgets snapshots; cleanup frees the space they used. See [Cleanup](gc.md) for how it works and how to turn it on.
+
+```sh
+lode gc --dry-run main
+lode gc main
+lode gc status main
+lode gc unlock main
+```
+
+`lode gc` and `lode server gc` are the same command. `<repo>` is a repository id, or the name of a repository that has at least one policy: a name is looked up in the policy list, which needs `policies:read`. A repository without a policy must be given by its id. A repository named `status` or `unlock` must be given by its id too.
+
+| Command | What it does | Scope |
+|---------|--------------|-------|
+| `lode gc --dry-run <repo>` | Starts a dry run, waits for it and prints what a cleanup would free. Works while cleanup is off. Changes nothing in the bucket | `jobs:run` and `jobs:read` |
+| `lode gc <repo>` | Starts a cleanup and waits until it has marked its packs, then prints when deletion happens. The deletion itself follows after the pause; it does not wait for it | `snapshots:delete` and `jobs:read` |
+| `lode gc status <repo>` | Prints the state of the running cycle and the last cleanup and dry run | `jobs:read` |
+| `lode gc unlock <repo> [--yes]` | Closes the markers of backups that never finished | `snapshots:delete` and `jobs:read` |
+
+A dry run prints the same facts as the web interface:
+
+```
+Dry run for repository main
+  Would free           12.4 GiB
+  To delete            318 packs
+  To repack            41 packs
+  Repack transfer      8.4 GiB
+  Held by Object Lock  3.2 GiB, frees after 24 Oct 2026
+```
+
+`Repack transfer` is printed only when packs are repacked, and `Held by Object Lock` only when something is held. Times are in UTC. With `--json` the command prints the full report as one line, with the lists of packs to delete and to repack (`delete`, `repack`), unreadable and unindexed objects, and locked versions.
+
+A cleanup that cannot start prints the reason, one line for each failed safety check, and exits with code 1. `lode gc status` names the phase in words: `Checking snapshots`, `Rewriting packs`, `Marked for deletion`, `Deletion is postponed`, `Checking again before deleting` or `Deleting unused data`. `Deletion is postponed` means unfinished backups hold the deletion back; the hosts are listed under it.
+
+`lode gc unlock` prints the hosts cleanup is waiting for and asks for confirmation on a terminal. Without a terminal it needs `--yes`, or it exits with code 2 and sends nothing. If there is nothing to unlock it says so and exits with code 0.
+
+There is no command to abort a cycle; use **Abort cycle** in the repository card.
+
 ### Restore through the server
 
 `lode server restore <snapshot> --host <host>` asks the agent on that host to restore. The snapshot is the full id from `lode server snapshots list`.
@@ -136,6 +176,6 @@ Lists print a table with the same columns and status words as the web interface.
 |------|---------|
 | 0 | Done |
 | 1 | The server or the network failed; the message is the server's |
-| 2 | Wrong flags, the server address or token is not set, or `lode apply` found an invalid file |
+| 2 | Wrong flags, the server address or token is not set, `lode apply` found an invalid file, `lode gc` got an unknown repository, or `lode gc unlock` has no terminal and no `--yes` |
 | 4 | `lode apply --dry-run` found changes |
 | 13 | The token was refused: unknown, expired or revoked, or it lacks the scope named in the message |

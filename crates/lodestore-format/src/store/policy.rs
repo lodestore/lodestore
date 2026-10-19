@@ -26,8 +26,9 @@ fn join(prefix: &str, path: &str) -> String {
 }
 
 /// The IAM policy a write-only agent key needs on AWS S3: add objects under
-/// `packs/`, `index/` and `snapshots/`, read `config` and `index/`, list
-/// `index/`, and nothing else, in particular no delete. A final statement
+/// `packs/`, `index/` and `snapshots/`, read `config`, `index/` and `locks/`,
+/// list `index/` and `locks/`, and nothing else, in particular no delete and
+/// no write under `locks/`. A final statement
 /// refuses any `PutObject` without `If-None-Match`, so a key holder cannot
 /// replace an existing object.
 pub fn agent_iam_policy_json(bucket: &str, prefix: &str) -> String {
@@ -72,13 +73,13 @@ fn policy_json(bucket: &str, prefix: &str, require_if_none_match: bool) -> Strin
     {{
       "Effect": "Allow",
       "Action": ["s3:GetObject"],
-      "Resource": [{config}, {index_all}]
+      "Resource": [{config}, {index_all}, {locks_all}]
     }},
     {{
       "Effect": "Allow",
       "Action": ["s3:ListBucket"],
       "Resource": [{bucket_arn}],
-      "Condition": {{"StringLike": {{"s3:prefix": [{list_all}, {list_dir}]}}}}
+      "Condition": {{"StringLike": {{"s3:prefix": [{list_all}, {list_dir}, {locks_list_all}, {locks_list_dir}]}}}}
     }}{deny_unconditional}
   ]
 }}
@@ -87,9 +88,12 @@ fn policy_json(bucket: &str, prefix: &str, require_if_none_match: bool) -> Strin
         index_all = arn("index/*"),
         snapshots = arn("snapshots/*"),
         config = arn("config"),
+        locks_all = arn("locks/*"),
         bucket_arn = json_string(&format!("arn:aws:s3:::{bucket}")),
         list_all = list("index/*"),
         list_dir = list("index/"),
+        locks_list_all = list("locks/*"),
+        locks_list_dir = list("locks/"),
     )
 }
 

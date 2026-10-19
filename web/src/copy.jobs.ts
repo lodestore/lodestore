@@ -43,6 +43,7 @@ export const jobs = {
 	status: {
 		queued: "Queued",
 		running: "Running",
+		waiting: "Waiting",
 		succeeded: "Succeeded",
 		warnings: "Completed with warnings",
 		failed: "Failed",
@@ -54,6 +55,7 @@ export const jobs = {
 		queued:
 			"Waiting for the host to connect or for another backup on the host to finish.",
 		running: "",
+		waiting: "",
 		succeeded: "",
 		warnings: "The snapshot was written. It may be incomplete.",
 		failed: "No snapshot was written.",
@@ -81,6 +83,33 @@ export const jobs = {
 		`Showing ${from}-${to} of ${total}`,
 	previous: "Previous",
 	next: "Next",
+	gc: {
+		repository: (name: string) => `Repository ${name}`,
+		kind: "Cleanup",
+		kindDryRun: "Cleanup · dry run",
+		kindScheduled: "Cleanup · scheduled",
+		progressLabel: "Cleanup progress",
+		phases: {
+			marking: "Checking snapshots",
+			repacking: "Rewriting packs",
+			waiting: "Waiting",
+			verifying: "Checking again before deleting",
+			sweeping: "Deleting unused data",
+			done: "Done",
+			failed: "Failed",
+			aborted: "Cancelled",
+		},
+		deletesAfter: (when: string) => `Deletes after ${when}`,
+		postponed: "Postponed by unfinished backups",
+		freed: (size: string) => `Freed ${size}`,
+		wouldFree: (size: string) => `Would free ${size}`,
+		nothingToFree: "Nothing to free",
+		stoppedNothingDeleted: "Stopped, nothing deleted",
+		stoppedWhileDeleting: "Stopped while deleting",
+		heldByLock: "Some data is held by Object Lock",
+		frees: (size: string, date: string) => `${size} frees after ${date}`,
+		freesUnknown: (size: string) => `${size}, release date unknown`,
+	},
 	otherStatusHint: {
 		queuedDownload: "Waiting for the browser to start the download.",
 		failedDownload: "The archive could not be built. Download it again.",
@@ -129,6 +158,7 @@ export const jobs = {
 		announce: {
 			queued: "Job queued",
 			running: "Job running",
+			waiting: "Job waiting",
 			succeeded: "Job succeeded",
 			warnings: "Job completed with warnings",
 			failed: "Job failed",
@@ -296,6 +326,8 @@ export const jobs = {
 			`Inline hook commands are turned off on ${host}. Set hooks.allow_inline: true in the agent config on that host, or use a named script, then run again.`,
 		hook_timeout: (script: string, timeout: string) =>
 			`A hook timed out. ${script} ran longer than ${timeout}. Raise the timeout in the policy or fix the script, then run again.`,
+		gc_agent_outdated: (host: string) =>
+			`The agent on ${host} is too old for cleanup. A cleanup cycle is running in this repository, and this agent can't see the data it marked for deletion. Update the agent on ${host}, then run again.`,
 		interrupted:
 			"The agent stopped while this job ran. Run it again; data already uploaded is not sent twice.",
 		restoreFailed: (message: string) =>

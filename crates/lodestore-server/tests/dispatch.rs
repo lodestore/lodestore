@@ -14,13 +14,17 @@ use lodestore_proto::agent::v1::agent_message::Body as AgentBody;
 use lodestore_proto::agent::v1::enrollment_client::EnrollmentClient;
 use lodestore_proto::agent::v1::server_message::Body as ServerBody;
 use lodestore_proto::agent::v1::{
-    AgentMessage, GetTrustAnchorRequest, Heartbeat, Hello, HookFacts, HookScript, IoniceClass,
-    JobAccepted, JobCreated, JobEvent, JobEventLevel, JobEvents, JobFinished, JobOutcome, JobPhase,
-    JobPhaseKind, JobProgress, JobRejected, JobReport, JobReportState, JobSpec, JobStats,
-    ServerMessage, Versions,
+    AgentMessage, ConflictPolicy, GetTrustAnchorRequest, Heartbeat, Hello, HookFacts, HookScript,
+    IoniceClass, JobAccepted, JobCreated, JobEvent, JobEventLevel, JobEvents, JobFinished,
+    JobOutcome, JobPhase, JobPhaseKind, JobProgress, JobRejected, JobReport, JobReportState,
+    JobSpec, JobStats, ServerMessage, Versions,
 };
+use lodestore_server::catalog::ingest_snapshot;
 use lodestore_server::db::now_ms;
 use lodestore_server::grpc::dispatch::janitor_once;
+use lodestore_server::jobs::job_spec;
+use lodestore_server::jobs::restore::{RestoreRequest, enqueue_restore};
+use lodestore_server::maintenance::gc::{GcOrigin, GcSettings, db as gc_db, start_cycle};
 use prost::Message;
 use sqlx::{AnyPool, Row};
 use tokio::sync::mpsc;
@@ -1381,6 +1385,269 @@ async fn dispatch_requeue_honours_a_pending_cancel() {
     }
 }
 
+fn policy_spec(limits: &str) -> JobSpec {
+    let yaml = format!(
+        "apiVersion: lodestore.io/v1alpha1\nkind: BackupPolicy\nmetadata:\n  name: etc\n\
+         spec:\n  repository: main\n  paths:\n    - /etc\n{limits}"
+    );
+    job_spec(&lodestore_policy::parse_yaml(&yaml).expect("policy"))
+}
+
+async fn set_spec(pool: &AnyPool, id: &str, spec: &JobSpec) {
+    sqlx::query("UPDATE jobs SET spec = $1 WHERE id = $2")
+        .bind(spec.encode_to_vec())
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn mark_seen(pool: &AnyPool, host: &str, at: i64) {
+    sqlx::query("UPDATE agents SET last_seen_at = $1 WHERE id = $2")
+        .bind(at)
+        .bind(host)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn set_times(pool: &AnyPool, id: &str, started: Option<i64>, assigned: i64) {
+    sqlx::query("UPDATE jobs SET started_at = $1, assigned_at = $2 WHERE id = $3")
+        .bind(started)
+        .bind(assigned)
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dispatch_spec_carries_max_runtime() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let pool = &ts.state().db.pool;
+        let cases = [
+            ("h-default", policy_spec(""), 43_200),
+            (
+                "h-two-hours",
+                policy_spec("  limits:\n    maxRuntime: 2h\n"),
+                7_200,
+            ),
+            ("h-specless", spec(), 43_200),
+        ];
+        for (hostname, spec, want) in cases {
+            let host = enroll(&ts, &api, &repo, hostname).await;
+            let id = format!("job-{hostname}");
+            insert_job(pool, &id, &host.id, "manual", "queued", now_ms()).await;
+            set_spec(pool, &id, &spec).await;
+            let mut agent = Fake::connect(&ts, &host, vec![]).await;
+            let assigned = agent
+                .recv(|b| match b {
+                    ServerBody::JobAssign(a) => a.spec,
+                    _ => None,
+                })
+                .await;
+            assert_eq!(
+                assigned.max_runtime_s,
+                want,
+                "[{}] {hostname}",
+                backend.name()
+            );
+            assert!(!assigned.gc_locks_required);
+            assert!(
+                assigned.limits.is_none(),
+                "maxRuntime alone must not create limits"
+            );
+        }
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dispatch_hello_persists_capabilities() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let host = enroll(&ts, &api, &repo, "host-a").await;
+        let pool = &ts.state().db.pool;
+        let stored = |pool: &AnyPool| {
+            let id = host.id.clone();
+            let pool = pool.clone();
+            async move {
+                let raw = text(
+                    &pool,
+                    "SELECT capabilities_json FROM agents WHERE id = $1",
+                    &id,
+                )
+                .await;
+                raw.map(|r| serde_json::from_str::<Vec<String>>(&r).unwrap())
+            }
+        };
+        assert_eq!(stored(pool).await, None, "[{}]", backend.name());
+
+        let agent = Fake::connect_with(&ts, &host, &["restore_v1", "gc_v1"]).await;
+        assert_eq!(
+            stored(pool).await,
+            Some(vec!["restore_v1".to_string(), "gc_v1".to_string()]),
+            "[{}]",
+            backend.name()
+        );
+        drop(agent);
+
+        let agent = Fake::connect_with(&ts, &host, &["restore_v1"]).await;
+        assert_eq!(
+            stored(pool).await,
+            Some(vec!["restore_v1".to_string()]),
+            "[{}]",
+            backend.name()
+        );
+        drop(agent);
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dispatch_janitor_time_limit_fails() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let host = enroll(&ts, &api, &repo, "host-a").await;
+        let pool = &ts.state().db.pool;
+        let now = now_ms();
+        let overdue = 2 * HOUR_MS + HOUR_MS + 1000;
+        let limited = policy_spec("  limits:\n    maxRuntime: 2h\n");
+        for (id, state) in [("running-late", "running"), ("unstamped-late", "running")] {
+            insert_job(pool, id, &host.id, "cli", state, now).await;
+            set_spec(pool, id, &limited).await;
+        }
+        set_times(pool, "running-late", Some(now - overdue), now - 5 * HOUR_MS).await;
+        set_times(pool, "unstamped-late", None, now - overdue).await;
+
+        mark_seen(pool, &host.id, now).await;
+        janitor_once(ts.state(), now).await.unwrap();
+        for id in ["running-late", "unstamped-late"] {
+            let tag = format!("[{}] {id}", backend.name());
+            assert_eq!(state_of(pool, id).await, "failed", "{tag}");
+            assert_eq!(
+                text(pool, "SELECT error_code FROM jobs WHERE id = $1", id)
+                    .await
+                    .as_deref(),
+                Some("time_limit"),
+                "{tag}"
+            );
+            let finished = sqlx::query("SELECT finished_at FROM jobs WHERE id = $1")
+                .bind(id)
+                .fetch_one(pool)
+                .await
+                .unwrap()
+                .try_get::<i64, _>("finished_at")
+                .unwrap();
+            assert_eq!(finished, now, "{tag}");
+        }
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dispatch_janitor_time_limit_margin() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let host = enroll(&ts, &api, &repo, "host-a").await;
+        let pool = &ts.state().db.pool;
+        let now = now_ms();
+        insert_job(pool, "inside", &host.id, "cli", "running", now).await;
+        set_spec(
+            pool,
+            "inside",
+            &policy_spec("  limits:\n    maxRuntime: 2h\n"),
+        )
+        .await;
+        set_times(pool, "inside", Some(now - (3 * HOUR_MS - 1000)), now).await;
+        mark_seen(pool, &host.id, now).await;
+
+        janitor_once(ts.state(), now).await.unwrap();
+        assert_eq!(
+            state_of(pool, "inside").await,
+            "running",
+            "[{}]",
+            backend.name()
+        );
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dispatch_janitor_time_limit_default() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let host = enroll(&ts, &api, &repo, "host-a").await;
+        let pool = &ts.state().db.pool;
+        let now = now_ms();
+        let limit = 13 * HOUR_MS;
+        insert_job(pool, "zero", &host.id, "cli", "running", now).await;
+        insert_job(pool, "garbage", &host.id, "cli", "running", now).await;
+        insert_job(pool, "inside", &host.id, "cli", "running", now).await;
+        sqlx::query("UPDATE jobs SET spec = $1 WHERE id = 'garbage'")
+            .bind(vec![0xffu8, 0xff, 0xff])
+            .execute(pool)
+            .await
+            .unwrap();
+        set_times(pool, "zero", Some(now - limit - 1000), now).await;
+        set_times(pool, "garbage", Some(now - limit - 1000), now).await;
+        set_times(pool, "inside", Some(now - limit + 1000), now).await;
+        mark_seen(pool, &host.id, now).await;
+
+        janitor_once(ts.state(), now).await.unwrap();
+        let tag = backend.name();
+        assert_eq!(state_of(pool, "zero").await, "failed", "[{tag}]");
+        assert_eq!(state_of(pool, "garbage").await, "failed", "[{tag}]");
+        assert_eq!(state_of(pool, "inside").await, "running", "[{tag}]");
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dispatch_janitor_skips_restore() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let host = enroll(&ts, &api, &repo, "host-a").await;
+        let pool = &ts.state().db.pool;
+        let now = now_ms();
+        insert_job(pool, "restore-old", &host.id, "manual", "running", now).await;
+        sqlx::query("UPDATE jobs SET kind = 'restore' WHERE id = 'restore-old'")
+            .execute(pool)
+            .await
+            .unwrap();
+        set_times(
+            pool,
+            "restore-old",
+            Some(now - 3 * DAY_MS),
+            now - 3 * DAY_MS,
+        )
+        .await;
+        mark_seen(pool, &host.id, now).await;
+
+        janitor_once(ts.state(), now).await.unwrap();
+        assert_eq!(
+            state_of(pool, "restore-old").await,
+            "running",
+            "[{}]",
+            backend.name()
+        );
+        ts.stop().await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn dispatch_janitor_recovers_stuck_active_jobs() {
     for backend in backends() {
@@ -1421,6 +1688,11 @@ async fn dispatch_janitor_recovers_stuck_active_jobs() {
             now - 2 * DAY_MS,
         )
         .await;
+        sqlx::query("UPDATE jobs SET started_at = $1 WHERE id = 'fresh-run'")
+            .bind(now - HOUR_MS)
+            .execute(pool)
+            .await
+            .unwrap();
         for (host, seen) in [(&away.id, now - 2 * DAY_MS), (&recent.id, now - HOUR_MS)] {
             sqlx::query("UPDATE agents SET last_seen_at = $1 WHERE id = $2")
                 .bind(seen)
@@ -1720,6 +1992,166 @@ async fn dispatch_foreign_finish_does_not_trigger_retention() {
             backend.name()
         );
         drop(agent);
+        ts.stop().await;
+    }
+}
+
+const GC: &str = "gc_v1";
+
+async fn gc_on(ts: &TestServer, repo: &str, enabled: bool) {
+    let settings = GcSettings {
+        enabled,
+        ..GcSettings::default()
+    };
+    gc_db::save_settings(ts.state(), repo, &settings)
+        .await
+        .unwrap();
+}
+
+async fn gc_cycle_running(ts: &TestServer, repo: &str) {
+    start_cycle(ts.state(), repo, false, GcOrigin::Manual, "admin")
+        .await
+        .unwrap();
+}
+
+async fn queue_backup(ts: &TestServer, job: &str, host: &Host) {
+    insert_job(
+        &ts.state().db.pool,
+        job,
+        &host.id,
+        "manual",
+        "queued",
+        now_ms(),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dispatch_gc_blocks_old_agent() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let old = enroll(&ts, &api, &repo, "host-old").await;
+        let new = enroll(&ts, &api, &repo, "host-new").await;
+        gc_on(&ts, &repo, true).await;
+        gc_cycle_running(&ts, &repo).await;
+        queue_backup(&ts, "job-old", &old).await;
+        queue_backup(&ts, "job-new", &new).await;
+        let pool = &ts.state().db.pool;
+
+        let _old = Fake::connect(&ts, &old, vec![]).await;
+        wait_state(pool, "job-old", "failed").await;
+        assert_eq!(
+            text(pool, "SELECT error_code FROM jobs WHERE id = $1", "job-old")
+                .await
+                .as_deref(),
+            Some("gc_agent_outdated"),
+            "[{}]",
+            backend.name()
+        );
+        assert_eq!(
+            text(
+                pool,
+                "SELECT error_message FROM jobs WHERE id = $1",
+                "job-old"
+            )
+            .await
+            .as_deref(),
+            Some("Update the agent on this host: a cleanup cycle is running in its repository.")
+        );
+
+        let mut new_agent = Fake::connect_with(&ts, &new, &[GC]).await;
+        let spec = new_agent.recv(assigned_spec).await;
+        assert!(spec.gc_locks_required, "[{}]", backend.name());
+        assert_eq!(state_of(pool, "job-new").await, "assigned");
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dispatch_gc_locks_required_flag() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let aware = enroll(&ts, &api, &repo, "host-aware").await;
+        let old = enroll(&ts, &api, &repo, "host-old").await;
+        let pool = &ts.state().db.pool;
+
+        queue_backup(&ts, "job-off", &aware).await;
+        let mut agent = Fake::connect_with(&ts, &aware, &[GC]).await;
+        assert!(
+            !agent.recv(assigned_spec).await.gc_locks_required,
+            "[{}] cleanup is off",
+            backend.name()
+        );
+        sqlx::query("UPDATE jobs SET state = 'succeeded', finished_at = $1 WHERE id = 'job-off'")
+            .bind(now_ms())
+            .execute(pool)
+            .await
+            .unwrap();
+
+        gc_on(&ts, &repo, true).await;
+        queue_backup(&ts, "job-on", &aware).await;
+        assert!(
+            agent.recv(assigned_spec).await.gc_locks_required,
+            "[{}] cleanup is on",
+            backend.name()
+        );
+
+        queue_backup(&ts, "job-old", &old).await;
+        let mut old_agent = Fake::connect(&ts, &old, vec![]).await;
+        let spec = old_agent.recv(assigned_spec).await;
+        assert!(
+            !spec.gc_locks_required,
+            "[{}] an agent without gc_v1 is not told",
+            backend.name()
+        );
+        assert_eq!(state_of(pool, "job-old").await, "assigned");
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dispatch_gc_restore_not_gated() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let host = enroll(&ts, &api, &repo, "host-a").await;
+        gc_on(&ts, &repo, true).await;
+        gc_cycle_running(&ts, &repo).await;
+        let snapshot = write_snapshot(&ts, "host-a").await;
+        ingest_snapshot(ts.state(), &repo, &snapshot, None)
+            .await
+            .unwrap();
+        let job = enqueue_restore(
+            ts.state(),
+            RestoreRequest {
+                snapshot_id: snapshot,
+                items: vec![
+                    ts.dir
+                        .path()
+                        .join("data-host-a/file.txt")
+                        .canonicalize()
+                        .unwrap()
+                        .into_os_string()
+                        .into_encoded_bytes(),
+                ],
+                target_host_id: host.id.clone(),
+                destination: "/srv/out".to_string(),
+                in_place: false,
+                conflict: ConflictPolicy::OverwriteChanged,
+                restore_owners: false,
+            },
+            "admin",
+        )
+        .await
+        .expect("queue a restore");
+
+        let mut agent = Fake::connect_with(&ts, &host, &["restore_v1"]).await;
+        assert_eq!(agent.recv(is_assign).await, job, "[{}]", backend.name());
         ts.stop().await;
     }
 }

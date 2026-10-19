@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use lodestore_format::keys::{MasterKey, ReadKeys};
+use lodestore_format::locks::{DEFAULT_MAX_RUNTIME, RUNTIME_MARGIN};
 use lodestore_proto::agent::v1::server_message::Body as ServerBody;
 use lodestore_proto::agent::v1::{
     JobAssign, JobCancel, JobSpec, Limits, RestoreSpec, ServerMessage,
@@ -14,8 +15,9 @@ use sqlx::Row;
 use tokio_util::sync::CancellationToken;
 
 use crate::db::now_ms;
-use crate::grpc::registry::{CAP_LIMITS, CAP_RESTORE};
+use crate::grpc::registry::{CAP_GC, CAP_LIMITS, CAP_RESTORE};
 use crate::jobs::restore::RestoreRecord;
+use crate::maintenance::gc::db as gc_db;
 use crate::repos::db::server_access;
 use crate::state::AppState;
 
@@ -23,6 +25,7 @@ const KIND_RESTORE: &str = "restore";
 const LIMITS_IGNORED_SEQ: i64 = -1;
 const LIMITS_IGNORED_MESSAGE: &str =
     "The agent on this host is too old to apply the policy limits. Update the agent.";
+const TIME_LIMIT_MESSAGE: &str = "The backup ran longer than its time limit and was stopped.";
 const TICK: Duration = Duration::from_secs(1);
 const JANITOR_EVERY: Duration = Duration::from_secs(60);
 const PROGRESS_FLUSH: Duration = Duration::from_secs(10);
@@ -59,6 +62,40 @@ pub async fn run(state: AppState, stop: CancellationToken) -> anyhow::Result<()>
             }
         }
     }
+}
+
+struct GcGate {
+    enabled: bool,
+    /// A cleanup cycle holds its marker in the repository, or stopped while
+    /// deleting and still does.
+    unfinished: bool,
+}
+
+async fn gc_gate(state: &AppState, host_id: &str) -> anyhow::Result<GcGate> {
+    let enabled = sqlx::query(
+        "SELECT s.enabled FROM agents a JOIN gc_settings s ON s.repository_id = a.repository_id \
+         WHERE a.id = $1",
+    )
+    .bind(host_id)
+    .fetch_optional(&state.db.pool)
+    .await?
+    .map(|row| row.try_get::<i64, _>("enabled"))
+    .transpose()?
+    .is_some_and(|enabled| enabled != 0);
+    let unfinished = sqlx::query(
+        "SELECT COUNT(*) AS n FROM gc_cycles c JOIN agents a ON a.repository_id = c.repository_id \
+         WHERE a.id = $1 AND c.dry_run = 0 AND (c.state NOT IN ('done', 'failed', 'aborted') \
+         OR (c.state = 'failed' AND c.error_after_delete = 1))",
+    )
+    .bind(host_id)
+    .fetch_one(&state.db.pool)
+    .await?
+    .try_get::<i64, _>("n")?
+        > 0;
+    Ok(GcGate {
+        enabled,
+        unfinished,
+    })
 }
 
 pub async fn assign_queued(state: &AppState, only_agent: Option<&str>) -> anyhow::Result<()> {
@@ -105,6 +142,13 @@ pub async fn assign_queued(state: &AppState, only_agent: Option<&str>) -> anyhow
                 .await?;
                 continue;
             }
+            let source = row
+                .try_get::<Option<String>, _>("restore_json")?
+                .and_then(|json| serde_json::from_str::<RestoreRecord>(&json).ok())
+                .map(|record| record.source_repository_id);
+            if gc_db::sweeping(state, source.as_deref()).await? {
+                continue;
+            }
             match RestoreSpec::decode(raw.as_slice()) {
                 Ok(spec) => (None, Some(spec)),
                 Err(_) => {
@@ -114,7 +158,25 @@ pub async fn assign_queued(state: &AppState, only_agent: Option<&str>) -> anyhow
             }
         } else {
             match JobSpec::decode(raw.as_slice()) {
-                Ok(spec) => (Some(spec), None),
+                Ok(mut spec) => {
+                    if spec.max_runtime_s == 0 {
+                        spec.max_runtime_s = DEFAULT_MAX_RUNTIME.as_secs();
+                    }
+                    let gc = gc_gate(state, &host_id).await?;
+                    let aware = state.registry.supports(&host_id, CAP_GC);
+                    if gc.unfinished && !aware {
+                        fail_job(
+                            state,
+                            &job_id,
+                            "gc_agent_outdated",
+                            "Update the agent on this host: a cleanup cycle is running in its repository.",
+                        )
+                        .await?;
+                        continue;
+                    }
+                    spec.gc_locks_required = aware && (gc.enabled || gc.unfinished);
+                    (Some(spec), None)
+                }
                 Err(_) => {
                     fail_unreadable(state, &job_id, &kind).await?;
                     continue;
@@ -315,6 +377,42 @@ async fn flush_progress(state: &AppState) {
     }
 }
 
+async fn fail_overdue(pool: &sqlx::AnyPool, now_ms: i64) -> anyhow::Result<()> {
+    let margin_ms = i64::try_from(RUNTIME_MARGIN.as_millis())?;
+    let active = sqlx::query(
+        "SELECT id, spec, COALESCE(started_at, assigned_at) AS began FROM jobs \
+         WHERE kind <> $1 AND state IN ('assigned', 'running') \
+         AND COALESCE(started_at, assigned_at) < $2",
+    )
+    .bind(KIND_RESTORE)
+    .bind(now_ms - margin_ms)
+    .fetch_all(pool)
+    .await?;
+    for row in active {
+        let raw: Vec<u8> = row.try_get("spec")?;
+        let limit = match JobSpec::decode(raw.as_slice()) {
+            Ok(spec) if spec.max_runtime_s > 0 => Duration::from_secs(spec.max_runtime_s),
+            _ => DEFAULT_MAX_RUNTIME,
+        };
+        let deadline = row
+            .try_get::<i64, _>("began")?
+            .saturating_add(i64::try_from((limit + RUNTIME_MARGIN).as_millis())?);
+        if deadline >= now_ms {
+            continue;
+        }
+        sqlx::query(
+            "UPDATE jobs SET state = 'failed', finished_at = $1, error_code = 'time_limit', \
+             error_message = $2 WHERE id = $3 AND state IN ('assigned', 'running')",
+        )
+        .bind(now_ms)
+        .bind(TIME_LIMIT_MESSAGE)
+        .bind(row.try_get::<String, _>("id")?)
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
 pub async fn janitor_once(state: &AppState, now_ms: i64) -> anyhow::Result<()> {
     let pool = &state.db.pool;
     sqlx::query(
@@ -350,6 +448,8 @@ pub async fn janitor_once(state: &AppState, now_ms: i64) -> anyhow::Result<()> {
             messages::interrupt(state, &host_id, &row.try_get::<String, _>("id")?).await?;
         }
     }
+
+    fail_overdue(pool, now_ms).await?;
 
     sqlx::query(
         "DELETE FROM job_events WHERE job_id IN \

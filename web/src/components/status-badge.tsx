@@ -6,6 +6,7 @@ import {
 	CircleSlash,
 	CircleX,
 	Clock,
+	Hourglass,
 	Loader2,
 	Minus,
 	TriangleAlert,
@@ -40,6 +41,11 @@ const statuses = {
 		icon: Loader2,
 		tone: "text-foreground motion-safe:[&>svg]:animate-spin",
 		label: copy.jobs.status.running,
+	},
+	waiting: {
+		icon: Hourglass,
+		tone: "text-neutral",
+		label: copy.jobs.status.waiting,
 	},
 	succeeded: {
 		icon: CircleCheck,

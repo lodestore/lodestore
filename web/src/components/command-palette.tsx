@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { type NavigateOptions, useNavigate } from "@tanstack/react-router";
 import {
+	Eraser,
 	KeyRound,
 	LogOut,
 	Monitor,
@@ -14,6 +15,7 @@ import { type ReactNode, useLayoutEffect, useRef, useState } from "react";
 import { getListHostsQueryOptions } from "@/api/gen/endpoints";
 import type { Host } from "@/api/gen/model";
 import { NAV_ITEMS } from "@/components/app-sidebar";
+import { RECLAIM_ANCHOR } from "@/components/repos/reclaim/reclaim-card";
 import { StatusBadge } from "@/components/status-badge";
 import { useTheme } from "@/components/theme/theme-provider";
 import {
@@ -194,7 +196,26 @@ function PaletteBody({
 		.slice(0, 8);
 
 	const noRepositories = reposResult.data?.length === 0;
-	const actions = [
+	const allRepositories = reposResult.data ?? [];
+	const cleanup = allRepositories.slice(0, 8).map((repo) => ({
+		label:
+			allRepositories.length === 1
+				? copy.palette.freeUpSpace
+				: copy.palette.freeUpSpaceIn(repo.name),
+		icon: Eraser,
+		keywords: copy.palette.cleanupKeywords,
+		run: go({
+			to: "/settings/repositories/$id",
+			params: { id: repo.id },
+			hash: RECLAIM_ANCHOR,
+		}),
+	}));
+	const allActions: {
+		label: string;
+		icon: typeof Eraser;
+		keywords?: string;
+		run: () => void;
+	}[] = [
 		{
 			label: copy.palette.addHost,
 			icon: Server,
@@ -232,8 +253,15 @@ function PaletteBody({
 			icon: Monitor,
 			run: run(() => setTheme("system")),
 		},
+		...cleanup,
 		{ label: copy.signOut, icon: LogOut, run: run(signOut) },
-	].filter(({ label }) => normalize(label).includes(query));
+	];
+	const actions = allActions.filter(
+		({ label, keywords }) =>
+			normalize(label).includes(query) ||
+			(query !== "" &&
+				(keywords ?? "").split(" ").some((word) => word.startsWith(query))),
+	);
 
 	const pending = hostsResult.isPending || reposResult.isPending;
 

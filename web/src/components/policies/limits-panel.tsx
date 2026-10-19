@@ -27,6 +27,9 @@ function summary(draft: LimitsDraft) {
 	if (draft.uploadRate.trim() !== "") {
 		parts.push(text.upload(draft.uploadRate.trim()));
 	}
+	if (draft.maxRuntime.trim() !== "") {
+		parts.push(text.maxRun(draft.maxRuntime.trim()));
+	}
 	if (draft.nice !== "") parts.push(text.nice(draft.nice));
 	if (draft.ioniceClass === "idle") {
 		parts.push(text.io(text.ioKindIdle));
@@ -52,11 +55,14 @@ export function LimitsPanel({
 	const set = (patch: Partial<LimitsDraft>) => onChange({ ...draft, ...patch });
 	const parts = summary(draft);
 	const rateError = problems.get("spec.limits.uploadRate");
+	const runtimeError = problems.get("spec.limits.maxRuntime");
 	const niceError = problems.get("spec.limits.nice");
 	const levelError = problems.get("spec.limits.ioniceLevel");
 	const classError = problems.get("spec.limits.ioniceClass");
 	const [open, setOpen] = useState(parts.length > 0);
-	const failing = Boolean(rateError || niceError || levelError || classError);
+	const failing = Boolean(
+		rateError || runtimeError || niceError || levelError || classError,
+	);
 
 	return (
 		<Collapsible
@@ -94,6 +100,24 @@ export function LimitsPanel({
 							placeholder={text.uploadPlaceholder}
 							value={draft.uploadRate}
 							onChange={(e) => set({ uploadRate: e.target.value })}
+						/>
+					)}
+				</RowField>
+				<RowField
+					label={text.maxRuntimeLabel}
+					helper={text.maxRuntimeHelper}
+					error={runtimeError}
+				>
+					{(a11y) => (
+						<Input
+							{...a11y}
+							className="font-mono"
+							autoComplete="off"
+							autoCapitalize="off"
+							spellCheck={false}
+							placeholder={text.maxRuntimePlaceholder}
+							value={draft.maxRuntime}
+							onChange={(e) => set({ maxRuntime: e.target.value })}
 						/>
 					)}
 				</RowField>

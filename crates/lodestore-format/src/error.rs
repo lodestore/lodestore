@@ -2,7 +2,7 @@ use crate::store::BlobError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("storage error: {0}")]
+    #[error(transparent)]
     Store(#[from] BlobError),
     #[error("cryptographic operation failed")]
     Crypto,
@@ -26,6 +26,8 @@ pub enum Error {
     InvalidInput(String),
     #[error("interrupted")]
     Interrupted,
+    #[error("the backup ran longer than its time limit of {limit_secs}s; no snapshot was written")]
+    DeadlineExceeded { limit_secs: u64 },
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }

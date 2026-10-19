@@ -38,6 +38,8 @@ const AAD_SNAPSHOT_KEY: &[u8] = b"snapshot-key";
 const AAD_PACK_HEADER: &[u8] = b"pack-header";
 const AAD_INDEX: &[u8] = b"index";
 const AAD_SNAPSHOT: &[u8] = b"snapshot";
+const AAD_GC_MANIFEST: &[u8] = b"gc-manifest";
+const AAD_WRITER_MARKER: &[u8] = b"writer-marker";
 
 /// The only source of randomness in the format: master key, pack keys,
 /// nonces, salts and HPKE encapsulation all draw from here, so a test can swap
@@ -318,6 +320,32 @@ pub fn seal_index_shard(
 
 pub fn open_index_shard(key: &[u8; 32], repo_id: &RepoId, sealed: &[u8]) -> Result<Vec<u8>> {
     aead_open(key, &cat(&[repo_id, AAD_INDEX]), sealed)
+}
+
+pub fn seal_gc_manifest_body(
+    key: &[u8; 32],
+    repo_id: &RepoId,
+    body: &[u8],
+    entropy: &mut Entropy,
+) -> Result<Vec<u8>> {
+    aead_seal(key, &cat(&[repo_id, AAD_GC_MANIFEST]), body, entropy)
+}
+
+pub fn open_gc_manifest_body(key: &[u8; 32], repo_id: &RepoId, sealed: &[u8]) -> Result<Vec<u8>> {
+    aead_open(key, &cat(&[repo_id, AAD_GC_MANIFEST]), sealed)
+}
+
+pub fn seal_writer_marker_body(
+    key: &[u8; 32],
+    repo_id: &RepoId,
+    body: &[u8],
+    entropy: &mut Entropy,
+) -> Result<Vec<u8>> {
+    aead_seal(key, &cat(&[repo_id, AAD_WRITER_MARKER]), body, entropy)
+}
+
+pub fn open_writer_marker_body(key: &[u8; 32], repo_id: &RepoId, sealed: &[u8]) -> Result<Vec<u8>> {
+    aead_open(key, &cat(&[repo_id, AAD_WRITER_MARKER]), sealed)
 }
 
 pub fn seal_snapshot_body(

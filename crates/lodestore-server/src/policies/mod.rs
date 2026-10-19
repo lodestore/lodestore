@@ -6,7 +6,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use lodestore_policy::jiff::Timestamp;
 use lodestore_policy::schedule::DstNote;
-use lodestore_policy::{BackupPolicy, Problem, Retention, parse_yaml, to_yaml, validate};
+use lodestore_policy::{BackupPolicy, Problem, Retention, Schedule, parse_yaml, to_yaml, validate};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use sqlx::any::AnyRow;
@@ -330,7 +330,11 @@ async fn detail(state: &AppState, row: PolicyRow) -> Result<PolicyDetail, ApiErr
 }
 
 fn schedule_info(policy: &BackupPolicy, now: i64) -> Option<ScheduleInfo> {
-    let compiled = policy.spec.schedule.as_ref()?.compile().ok()?;
+    schedule_info_of(policy.spec.schedule.as_ref()?, now)
+}
+
+pub(crate) fn schedule_info_of(schedule: &Schedule, now: i64) -> Option<ScheduleInfo> {
+    let compiled = schedule.compile().ok()?;
     let from = Timestamp::from_millisecond(now).ok()?;
     Some(ScheduleInfo {
         summary: compiled.describe(),

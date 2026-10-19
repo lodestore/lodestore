@@ -168,6 +168,8 @@ message JobSpec {
   repeated string tags = 8;
   string stdin_name = 9;
   Limits limits = 10;
+  uint64 max_runtime_s = 11;
+  bool gc_locks_required = 12;
 }
 
 enum IoniceClass {

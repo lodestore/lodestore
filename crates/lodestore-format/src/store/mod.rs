@@ -3,6 +3,7 @@ pub mod location;
 pub mod opendal;
 pub mod policy;
 pub mod probe;
+pub mod purge;
 pub mod s3;
 
 use std::fmt;
@@ -17,6 +18,7 @@ use crate::error::{Error, Result};
 pub use local::LocalFsStore;
 pub use location::RepoLocation;
 pub use opendal::OpendalStore;
+pub use purge::{BlobPurge, PurgeOutcome, RetainedVersion};
 pub use s3::{S3Options, S3Store, S3Url, StaticCredentials};
 
 #[derive(Debug, thiserror::Error)]

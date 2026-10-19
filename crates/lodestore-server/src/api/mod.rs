@@ -22,7 +22,8 @@ use utoipa_axum::router::OpenApiRouter;
 use crate::error::ErrorBody;
 use crate::state::AppState;
 use crate::{
-    assets, auth, browse, catalog, download, hosts, install, jobs, policies, repos, system,
+    assets, auth, browse, catalog, download, hosts, install, jobs, maintenance, policies, repos,
+    system,
 };
 
 mod docs;
@@ -41,6 +42,7 @@ mod docs;
         (name = "Snapshots", description = "Snapshots recorded in the server catalog."),
         (name = "Restore", description = "Hosts and snapshots to restore from, newest first."),
         (name = "Repositories", description = "Storage repositories and the credentials agents write with."),
+        (name = "Cleanup", description = "Free up space: dry runs, cleanup cycles and their settings."),
         (name = "Server", description = "Server version and health."),
         (name = "Setup", description = "First start: create the administrator from the setup link."),
     )
@@ -95,6 +97,7 @@ fn api_router() -> OpenApiRouter<AppState> {
         .merge(download::routes())
         .merge(policies::routes())
         .merge(jobs::api::routes())
+        .merge(maintenance::gc::api::routes())
 }
 
 pub fn openapi() -> utoipa::openapi::OpenApi {

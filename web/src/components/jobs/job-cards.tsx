@@ -443,6 +443,8 @@ export function failureText(job: JobDetail) {
 			break;
 		case "inline_not_allowed":
 			return e.inline_not_allowed(host);
+		case "gc_agent_outdated":
+			return e.gc_agent_outdated(host);
 		case "hook_timeout":
 			if (has("script", "timeout")) {
 				return e.hook_timeout(detail.script, detail.timeout);

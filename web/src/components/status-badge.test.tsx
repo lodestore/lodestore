@@ -28,4 +28,14 @@ describe("StatusBadge job statuses", () => {
 		expect(badge?.className).toContain("motion-safe:[&>svg]:animate-spin");
 		expect(badge?.className).toContain("text-foreground");
 	});
+
+	it("waiting badge is neutral and static", () => {
+		render(<StatusBadge status="waiting" />);
+		const badge = screen
+			.getByText(copy.jobs.status.waiting)
+			.closest("[data-status]");
+		expect(badge?.className).toContain("text-neutral");
+		expect(badge?.className).not.toContain("animate-spin");
+		expect(badge?.querySelector("svg")).not.toBeNull();
+	});
 });

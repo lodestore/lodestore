@@ -199,6 +199,30 @@ fn policy_limits_bounds() {
 }
 
 #[test]
+fn policy_max_runtime_bounds() {
+    const RULE: &str = "Use a duration from 1h to 7d, such as 12h.";
+    let limits = |value: &str| format!("  limits:\n    maxRuntime: {value}\n");
+    for ok in ["1h", "12h", "7d", "168h"] {
+        accepted(&limits(ok));
+    }
+    for bad in ["59m", "8d", "169h", "abc", "0h", "\"\""] {
+        check(&limits(bad), "spec.limits.maxRuntime", RULE);
+    }
+}
+
+#[test]
+fn policy_max_runtime_roundtrip() {
+    let policy = parse_yaml(&with_paths("  limits:\n    maxRuntime: 2h\n")).unwrap();
+    assert_eq!(
+        policy.spec.limits.as_ref().unwrap().max_runtime.as_deref(),
+        Some("2h")
+    );
+    let text = to_yaml(&policy);
+    assert!(text.contains("maxRuntime: 2h"), "{text}");
+    assert_eq!(parse_yaml(&text).unwrap(), policy);
+}
+
+#[test]
 fn policy_retention_counts() {
     const COUNT: &str = "Enter a whole number of 1 or more.";
     const DURATION: &str = "Use a duration such as 15m, 24h, 30d or 1y.";

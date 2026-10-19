@@ -238,7 +238,7 @@ fn policy_matches_phase1_contract() {
     assert_eq!(statements[2]["Resource"][0], "arn:aws:s3:::b");
     assert_eq!(
         statements[2]["Condition"]["StringLike"]["s3:prefix"],
-        serde_json::json!(["p/index/*", "p/index/"])
+        serde_json::json!(["p/index/*", "p/index/", "p/locks/*", "p/locks/"])
     );
 }
 

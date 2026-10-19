@@ -45,3 +45,9 @@ export const scopeCount = (n: number) =>
 
 export const dayCount = (n: number) =>
 	`${count.format(n)} ${noun(n, "day", "days")}`;
+
+export const packCount = (n: number) =>
+	`${count.format(n)} ${noun(n, "pack", "packs")}`;
+
+export const markerCount = (n: number) =>
+	`${count.format(n)} ${noun(n, "marker", "markers")}`;

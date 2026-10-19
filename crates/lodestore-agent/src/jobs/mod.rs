@@ -115,6 +115,7 @@ pub struct JobHub {
     stopping: AtomicBool,
     tick: Duration,
     net: Mutex<NetOptions>,
+    stdin_max_runtime_s: AtomicU64,
 }
 
 /// What a job executor gets: report phases, events and the final result, and
@@ -283,7 +284,17 @@ impl JobHub {
             stopping: AtomicBool::new(false),
             tick,
             net: Mutex::new(NetOptions::default()),
+            stdin_max_runtime_s: AtomicU64::new(0),
         }))
+    }
+
+    /// Time limit of jobs taken from the local socket; 0, the start value,
+    /// means `DEFAULT_MAX_RUNTIME`. Production leaves it at 0: the cleanup
+    /// pause floor knows the policies' limits, not a value set on one agent,
+    /// so a longer limit here would let a stream outlive the pause.
+    pub fn set_stdin_max_runtime(&self, limit: Duration) {
+        self.stdin_max_runtime_s
+            .store(limit.as_secs(), Ordering::Relaxed);
     }
 
     pub fn set_net(&self, net: NetOptions) {
@@ -554,6 +565,8 @@ impl JobHub {
         let spec = JobSpec {
             policy_name: header.policy.clone().unwrap_or_default(),
             stdin_name: header.name,
+            max_runtime_s: self.stdin_max_runtime_s.load(Ordering::Relaxed),
+            gc_locks_required: true,
             tags: header
                 .policy
                 .map(|p| vec![format!("policy={p}")])

@@ -194,6 +194,7 @@ export const policies = {
 				? "Limits · no limits"
 				: `Limits · ${parts.join(" · ")}`,
 		upload: (rate: string) => `upload ${rate}`,
+		maxRun: (value: string) => `max run ${value}`,
 		nice: (n: string) => `nice ${n}`,
 		io: (kind: string) => `I/O ${kind}`,
 		ioKindBestEffort: "best effort",
@@ -202,6 +203,9 @@ export const policies = {
 		uploadPlaceholder: "Unlimited",
 		uploadHelper:
 			"Caps the upload speed to storage. Examples: 20MiB/s, 500KiB/s.",
+		maxRuntimeLabel: "Max run time",
+		maxRuntimePlaceholder: "12h",
+		maxRuntimeHelper: "A backup that runs longer stops and saves no snapshot.",
 		niceLabel: "CPU priority (nice)",
 		nicePlaceholder: "Default",
 		niceHelper: "Higher means lower priority. 0 keeps the default.",

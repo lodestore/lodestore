@@ -129,4 +129,15 @@ describe("formatRelative", () => {
 		expect(formatRelative(later(86_400), now)).toBe("tomorrow");
 		expect(formatRelative(later(86_400), now, "always")).toBe("in 1 day");
 	});
+
+	it("counts days by the calendar, not by 24-hour blocks", () => {
+		const evening = new Date(2026, 9, 18, 20, 20);
+		const at = (h: number) => new Date(evening.getTime() + h * 3_600_000);
+		expect(formatRelative(at(31), evening)).toBe("in 2 days");
+		expect(formatRelative(at(-26), evening)).toBe("yesterday");
+	});
+
+	it("says just now for the current second", () => {
+		expect(formatRelative(now, now)).toBe("just now");
+	});
 });

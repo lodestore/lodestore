@@ -12,7 +12,7 @@ use super::restore::{RestoreRequest, enqueue_restore};
 use super::{
     ACTIVE_STATES, ConflictPolicyDto, DOWNLOAD_COLUMNS, JOB_COLUMNS, JOB_FROM, JobDetail, JobKind,
     JobProgressDto, JobSource, JobState, JobSummary, RunJob, busy_hosts, download_summary, enqueue,
-    job_spec, load_download, load_job, summary_from_row,
+    gc_select, gc_summary, job_spec, load_download, load_job, summary_from_row,
 };
 use crate::auth::tokens::{JobsRead, JobsRun, RestoreScope, Scoped};
 use crate::browse::AGENTLESS;
@@ -55,7 +55,8 @@ pub struct JobPage {
 #[derive(Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct JobsQuery {
-    /// One of queued, running, succeeded, warnings, failed, cancelled, interrupted, not_started.
+    /// One of queued, running, waiting, succeeded, warnings, failed, cancelled, interrupted,
+    /// not_started. `running` also lists cleanup cycles that are waiting.
     pub status: Option<String>,
     /// Exact policy name.
     pub policy: Option<String>,
@@ -65,7 +66,7 @@ pub struct JobsQuery {
     pub host: Option<String>,
     /// Exact host id.
     pub host_id: Option<String>,
-    /// `backup`, `restore` or `download`.
+    /// `backup`, `restore`, `download` or `gc`.
     pub kind: Option<String>,
     /// One-based page number.
     pub page: Option<u64>,
@@ -121,14 +122,19 @@ pub async fn list_jobs(
             "Unknown source \"{source}\"."
         )));
     }
-    let want_jobs = kind != Some(JobKind::Download);
+    let want_jobs = !matches!(kind, Some(JobKind::Download | JobKind::Gc));
     let want_downloads = kind.is_none() || kind == Some(JobKind::Download);
+    let want_gc = kind.is_none() || kind == Some(JobKind::Gc);
 
     let page = query.page.unwrap_or(1).max(1);
     let offset = i64::try_from(page - 1)
         .unwrap_or(i64::MAX)
         .saturating_mul(PAGE_SIZE);
-    let merged = want_jobs && want_downloads;
+    let merged = [want_jobs, want_downloads, want_gc]
+        .iter()
+        .filter(|wanted| **wanted)
+        .count()
+        > 1;
     let (sql_offset, sql_limit) = if merged {
         (0, offset.saturating_add(PAGE_SIZE))
     } else {
@@ -167,6 +173,21 @@ pub async fn list_jobs(
             entries.push((key, Entry::Download(row)));
         }
     }
+    if want_gc {
+        let (count, rows) = fetch_gc(&state, &query, status, sql_limit, sql_offset).await?;
+        total += count;
+        for row in rows {
+            let key = SortKey::new(
+                matches!(
+                    row.try_get::<String, _>("state")?.as_str(),
+                    "marking" | "repacking" | "waiting" | "verifying" | "sweeping"
+                ),
+                row.try_get("created_at")?,
+                row.try_get("id")?,
+            );
+            entries.push((key, Entry::Gc(row)));
+        }
+    }
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     let skip = if merged { offset as usize } else { 0 };
 
@@ -176,6 +197,7 @@ pub async fn list_jobs(
         items.push(match entry {
             Entry::Job(row) => summary_from_row(&state, row, &busy)?,
             Entry::Download(row) => download_summary(&state, row)?.0,
+            Entry::Gc(row) => gc_summary(row)?,
         });
     }
     for item in &mut items {
@@ -205,6 +227,7 @@ impl SortKey {
 enum Entry {
     Job(AnyRow),
     Download(AnyRow),
+    Gc(AnyRow),
 }
 
 fn place(binds: &mut Vec<String>, value: String) -> String {
@@ -308,7 +331,9 @@ async fn fetch_downloads(
             JobState::Running => "state = 'running'".to_string(),
             JobState::Succeeded => "state = 'succeeded'".to_string(),
             JobState::Interrupted => "state = 'interrupted'".to_string(),
-            JobState::Warnings | JobState::Failed | JobState::Cancelled => "1 = 0".to_string(),
+            JobState::Waiting | JobState::Warnings | JobState::Failed | JobState::Cancelled => {
+                "1 = 0".to_string()
+            }
         });
     }
     if query.policy.is_some() || query.source.as_deref() == Some("cli") {
@@ -358,6 +383,60 @@ async fn fetch_downloads(
         .bind(offset)
         .fetch_all(&state.db.pool)
         .await?;
+    Ok((total, rows))
+}
+
+async fn fetch_gc(
+    state: &AppState,
+    query: &JobsQuery,
+    status: Option<JobState>,
+    limit: i64,
+    offset: i64,
+) -> Result<(i64, Vec<AnyRow>), ApiError> {
+    let mut clauses: Vec<&str> = Vec::new();
+    if let Some(status) = status {
+        clauses.push(match status {
+            JobState::Running => {
+                "state IN ('marking', 'repacking', 'waiting', 'verifying', 'sweeping')"
+            }
+            JobState::Waiting => "state = 'waiting'",
+            JobState::Succeeded => "state = 'done'",
+            JobState::Failed => "state = 'failed'",
+            JobState::Cancelled => "state = 'aborted'",
+            JobState::Queued
+            | JobState::Warnings
+            | JobState::Interrupted
+            | JobState::NotStarted => "1 = 0",
+        });
+    }
+    let hostless = query.policy.is_some()
+        || query.source.as_deref() == Some("cli")
+        || query.host.as_deref().is_some_and(|h| !h.is_empty())
+        || query.host_id.as_deref().is_some_and(|h| !h.is_empty());
+    if hostless {
+        clauses.push("1 = 0");
+    }
+    let filter = if clauses.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", clauses.join(" AND "))
+    };
+
+    let total: i64 = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SELECT COUNT(*) AS n FROM gc_cycles{filter}"
+    )))
+    .fetch_one(&state.db.pool)
+    .await?
+    .try_get("n")?;
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "{}{filter} ORDER BY CASE WHEN state IN ('done', 'failed', 'aborted') THEN 1 ELSE 0 END, \
+         created_at DESC, id DESC LIMIT $1 OFFSET $2",
+        gc_select()
+    )))
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(&state.db.pool)
+    .await?;
     Ok((total, rows))
 }
 

@@ -18,7 +18,7 @@ use crate::pb;
 use crate::reader::Reader;
 use crate::store::BlobStore;
 
-const SNAPSHOT_PREFIX: &str = "snapshots/";
+pub(crate) const SNAPSHOT_PREFIX: &str = "snapshots/";
 pub const ENVELOPE_VERSION: u32 = 1;
 
 pub fn snapshot_object_key(id: &BlobId) -> String {

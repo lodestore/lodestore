@@ -133,6 +133,43 @@ pub enum Command {
     },
     /// Apply policy YAML files to a Lodestore server; exits 4 when --dry-run finds changes
     Apply(ApplyArgs),
+    /// Free storage space of a repository on a Lodestore server (same as `lode server gc`)
+    Gc {
+        #[command(flatten)]
+        server: ServerArgs,
+        #[command(flatten)]
+        args: GcArgs,
+    },
+}
+
+#[derive(Debug, Args)]
+#[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
+pub struct GcArgs {
+    #[command(subcommand)]
+    pub command: Option<GcCommand>,
+    /// Repository name or id; a name is looked up in the policies (needs policies:read)
+    #[arg(value_name = "REPO", required = true)]
+    pub repo: Option<String>,
+    /// Report how much space a cleanup would free and change nothing
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum GcCommand {
+    /// Show the state of the running cleanup and the last reports
+    Status {
+        /// Repository name or id
+        repo: String,
+    },
+    /// Close the markers of backups that never finished, so deletion can go on
+    Unlock {
+        /// Repository name or id
+        repo: String,
+        /// Unlock without asking on a terminal
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -192,6 +229,8 @@ pub enum ServerCommand {
     },
     /// Restore a snapshot to a host through the server
     Restore(ServerRestoreArgs),
+    /// Free storage space of a repository: run a cleanup, a dry run, show or unlock it
+    Gc(GcArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -440,6 +479,10 @@ pub struct BackupFlags {
     /// Keep only the CACHEDIR.TAG file of directories that carry a valid one
     #[arg(long)]
     pub exclude_caches: bool,
+
+    /// Skip the check that the credentials can read locks/ in the repository
+    #[arg(long)]
+    pub no_gc_check: bool,
 }
 
 #[derive(Debug, Subcommand)]

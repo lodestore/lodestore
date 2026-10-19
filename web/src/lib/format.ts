@@ -55,7 +55,7 @@ const dayParts = new Intl.DateTimeFormat("en", {
 	year: "numeric",
 });
 
-function dayName(ms: number) {
+export function dayName(ms: number) {
 	const part = (type: Intl.DateTimeFormatPartTypes) =>
 		dayParts.formatToParts(ms).find((p) => p.type === type)?.value;
 	return `${part("day")} ${part("month")} ${part("year")}`;

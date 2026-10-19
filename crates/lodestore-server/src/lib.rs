@@ -13,6 +13,7 @@ pub mod grpc;
 pub mod hosts;
 pub mod install;
 pub mod jobs;
+pub mod maintenance;
 pub mod pki;
 pub mod policies;
 pub mod repos;
@@ -92,9 +93,11 @@ pub async fn serve(config: Config, listeners: Listeners) -> anyhow::Result<Serve
         repos: repos::ReposState::default(),
         catalog: catalog::CatalogJobs::default(),
         readers: browse::tree::RepoReaders::default(),
+        gc: maintenance::gc::GcRuns::default(),
     };
     auth::bootstrap_admin(&state).await?;
     download::interrupt_running(&state).await?;
+    maintenance::gc::interrupt_dry_runs(&state).await?;
     catalog::resume_unsynced(&state).await;
 
     let rest_addr = listeners.rest.local_addr()?;
@@ -118,6 +121,10 @@ pub async fn serve(config: Config, listeners: Listeners) -> anyhow::Result<Serve
     let mut tasks = vec![rest, grpc, janitor, catalog];
     if state.config.schedule_tick_secs > 0 {
         tasks.push(tokio::spawn(schedule::run(state.clone(), stop.clone())));
+        tasks.push(tokio::spawn(maintenance::gc::run(
+            state.clone(),
+            stop.clone(),
+        )));
     }
 
     tracing::info!(%rest_addr, %grpc_addr, "lodestore server started");

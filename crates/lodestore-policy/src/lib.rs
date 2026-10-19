@@ -2,6 +2,7 @@
 //! the UI and `lode apply`.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use lodestore_format::fs::filter::PathMatcher;
 use serde::{Deserialize, Serialize};
@@ -10,7 +11,7 @@ mod duration;
 pub mod retention;
 pub mod schedule;
 
-pub use duration::{parse_duration, parse_rate};
+pub use duration::{format_duration, format_size, parse_duration, parse_rate, parse_size};
 pub use jiff;
 
 pub const API_VERSION: &str = "lodestore.io/v1alpha1";
@@ -34,9 +35,13 @@ const COUNT_RULE: &str = "Enter a whole number of 1 or more.";
 const RATE_RULE: &str = "Use a rate such as 50MiB/s or 800KiB/s.";
 const NICE_RULE: &str = "Enter a whole number from 0 to 19.";
 const LEVEL_RULE: &str = "Enter a whole number from 0 to 7.";
+const RUNTIME_RULE: &str = "Use a duration from 1h to 7d, such as 12h.";
 const LEVEL_CLASS_RULE: &str = "Set ioniceClass to best-effort to use a level.";
 const MAX_NICE: i64 = 19;
 const MAX_IONICE_LEVEL: i64 = 7;
+const MIN_RUNTIME: Duration = Duration::from_hours(1);
+/// The longest `spec.limits.maxRuntime` a policy may set.
+pub const MAX_RUNTIME: Duration = Duration::from_hours(7 * 24);
 const MAX_COUNT: i64 = u32::MAX as i64;
 
 pub(crate) fn zone_rule(value: &str) -> String {
@@ -139,6 +144,8 @@ pub struct Limits {
     pub ionice_class: Option<IoniceClass>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ionice_level: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_runtime: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -386,6 +393,11 @@ fn validate_limits(limits: &Limits, out: &mut Vec<Problem>) {
         } else if limits.ionice_class != Some(IoniceClass::BestEffort) {
             out.push(Problem::at("spec.limits.ioniceLevel", LEVEL_CLASS_RULE));
         }
+    }
+    if let Some(runtime) = &limits.max_runtime
+        && !parse_duration(runtime).is_some_and(|d| (MIN_RUNTIME..=MAX_RUNTIME).contains(&d))
+    {
+        out.push(Problem::at("spec.limits.maxRuntime", RUNTIME_RULE));
     }
 }
 

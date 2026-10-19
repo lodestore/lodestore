@@ -128,6 +128,46 @@ pub async fn check(location: &RepoLocation, creds: &AccessKey) -> (CheckStatus, 
     }
 }
 
+fn tag_number(text: &str, tag: &str) -> Option<u64> {
+    text.split_once(&format!("<{tag}>"))?
+        .1
+        .split_once(&format!("</{tag}>"))?
+        .0
+        .trim()
+        .parse()
+        .ok()
+}
+
+fn parse_default_retention(body: &str) -> Option<Duration> {
+    if !body.contains("<ObjectLockEnabled>Enabled") {
+        return None;
+    }
+    let rule = body
+        .split_once("<DefaultRetention>")?
+        .1
+        .split_once("</DefaultRetention>")?
+        .0;
+    let days = match (tag_number(rule, "Days"), tag_number(rule, "Years")) {
+        (Some(days), None) => days,
+        (None, Some(years)) => years.checked_mul(365)?,
+        _ => return None,
+    };
+    Some(Duration::from_secs(days.checked_mul(86_400)?))
+}
+
+/// The retention the bucket gives every new object, when Object Lock is
+/// enabled and a default is set. Any other answer is `None`.
+pub async fn default_retention(location: &RepoLocation, creds: &AccessKey) -> Option<Duration> {
+    match fetch(location, creds).await {
+        Ok((200, body)) => parse_default_retention(&body),
+        Ok(_) => None,
+        Err(error) => {
+            tracing::warn!(%error, "could not read the Object Lock default retention");
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,5 +235,29 @@ mod tests {
             verdict(500, ""),
             (CheckStatus::Warn, Some("could not check: HTTP 500".into()))
         );
+    }
+
+    #[test]
+    fn default_retention_reads_days_and_years() {
+        let rule = |inner: &str| {
+            format!(
+                "<ObjectLockConfiguration><ObjectLockEnabled>Enabled</ObjectLockEnabled>\
+                 <Rule><DefaultRetention><Mode>COMPLIANCE</Mode>{inner}</DefaultRetention></Rule>\
+                 </ObjectLockConfiguration>"
+            )
+        };
+        let day = Duration::from_secs(86_400);
+        assert_eq!(parse_default_retention(&rule("<Days>1</Days>")), Some(day));
+        assert_eq!(
+            parse_default_retention(&rule("<Years>2</Years>")),
+            Some(day * 730)
+        );
+        assert_eq!(parse_default_retention(&rule("")), None);
+        assert_eq!(
+            parse_default_retention(&rule("<Days>1</Days><Years>1</Years>")),
+            None
+        );
+        assert_eq!(parse_default_retention(&rule("<Days>x</Days>")), None);
+        assert_eq!(parse_default_retention("<ObjectLockConfiguration/>"), None);
     }
 }

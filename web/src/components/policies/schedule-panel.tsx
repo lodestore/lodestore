@@ -53,9 +53,11 @@ function DstLine({ note }: { note: DstNote }) {
 export function NextRuns({
 	info,
 	pending,
+	showJitter = true,
 }: {
 	info: ScheduleInfo;
 	pending?: boolean;
+	showJitter?: boolean;
 }) {
 	const text = copy.policies.schedule;
 	return (
@@ -77,7 +79,7 @@ export function NextRuns({
 					</li>
 				))}
 			</ul>
-			{info.jitter_secs > 0 && (
+			{showJitter && info.jitter_secs > 0 && (
 				<p className="text-sm text-muted-foreground">
 					{text.jitterNote(formatDurationShort(info.jitter_secs))}
 				</p>
@@ -95,12 +97,18 @@ export function SchedulePanel({
 	problems,
 	info,
 	pending,
+	showOptions = true,
+	showJitter = true,
+	cronHelper,
 }: {
 	draft: ScheduleDraft;
 	onChange: (draft: ScheduleDraft) => void;
 	problems: FieldProblems;
 	info?: ScheduleInfo | null;
 	pending?: boolean;
+	showOptions?: boolean;
+	showJitter?: boolean;
+	cronHelper?: string;
 }) {
 	const text = copy.policies.schedule;
 	const set = (patch: Partial<ScheduleDraft>) =>
@@ -123,7 +131,11 @@ export function SchedulePanel({
 			<FieldLegend variant="label" className="mb-2">
 				{text.legend}
 			</FieldLegend>
-			<RowField label={text.cron} helper={text.cronHelper} error={cronError}>
+			<RowField
+				label={text.cron}
+				helper={cronHelper ?? text.cronHelper}
+				error={cronError}
+			>
 				{(a11y) => (
 					<Input
 						{...a11y}
@@ -150,64 +162,66 @@ export function SchedulePanel({
 				<ErrorText id={zoneErrorId} message={zoneError} />
 			</Field>
 			{hasCron && !cronError && info && (
-				<NextRuns info={info} pending={pending} />
+				<NextRuns info={info} pending={pending} showJitter={showJitter} />
 			)}
-			<Collapsible
-				open={open || Boolean(jitterError || catchUpError)}
-				onOpenChange={setOpen}
-				className="flex flex-col gap-4"
-			>
-				<CollapsibleTrigger asChild>
-					<Button
-						type="button"
-						variant="outline"
-						size="sm"
-						className="group/options self-start"
-					>
-						<ChevronDown
-							aria-hidden
-							className="transition-transform group-data-[state=closed]/options:-rotate-90"
-						/>
-						{text.optionsHeader(
-							draft.jitter.trim() || DEFAULT_JITTER,
-							draft.catchUpWindow.trim() || DEFAULT_CATCH_UP,
-						)}
-					</Button>
-				</CollapsibleTrigger>
-				<CollapsibleContent className="flex flex-col gap-4">
-					<FieldDescription>
-						{hasCron ? text.optionsHelper : text.optionsNeedCron}
-					</FieldDescription>
-					<RowField label={text.jitter} error={jitterError}>
-						{(a11y) => (
-							<Input
-								{...a11y}
-								className="font-mono"
-								autoComplete="off"
-								spellCheck={false}
-								placeholder={text.jitterPlaceholder}
-								disabled={!hasCron}
-								value={draft.jitter}
-								onChange={(e) => set({ jitter: e.target.value })}
+			{showOptions && (
+				<Collapsible
+					open={open || Boolean(jitterError || catchUpError)}
+					onOpenChange={setOpen}
+					className="flex flex-col gap-4"
+				>
+					<CollapsibleTrigger asChild>
+						<Button
+							type="button"
+							variant="outline"
+							size="sm"
+							className="group/options self-start"
+						>
+							<ChevronDown
+								aria-hidden
+								className="transition-transform group-data-[state=closed]/options:-rotate-90"
 							/>
-						)}
-					</RowField>
-					<RowField label={text.catchUp} error={catchUpError}>
-						{(a11y) => (
-							<Input
-								{...a11y}
-								className="font-mono"
-								autoComplete="off"
-								spellCheck={false}
-								placeholder={text.catchUpPlaceholder}
-								disabled={!hasCron}
-								value={draft.catchUpWindow}
-								onChange={(e) => set({ catchUpWindow: e.target.value })}
-							/>
-						)}
-					</RowField>
-				</CollapsibleContent>
-			</Collapsible>
+							{text.optionsHeader(
+								draft.jitter.trim() || DEFAULT_JITTER,
+								draft.catchUpWindow.trim() || DEFAULT_CATCH_UP,
+							)}
+						</Button>
+					</CollapsibleTrigger>
+					<CollapsibleContent className="flex flex-col gap-4">
+						<FieldDescription>
+							{hasCron ? text.optionsHelper : text.optionsNeedCron}
+						</FieldDescription>
+						<RowField label={text.jitter} error={jitterError}>
+							{(a11y) => (
+								<Input
+									{...a11y}
+									className="font-mono"
+									autoComplete="off"
+									spellCheck={false}
+									placeholder={text.jitterPlaceholder}
+									disabled={!hasCron}
+									value={draft.jitter}
+									onChange={(e) => set({ jitter: e.target.value })}
+								/>
+							)}
+						</RowField>
+						<RowField label={text.catchUp} error={catchUpError}>
+							{(a11y) => (
+								<Input
+									{...a11y}
+									className="font-mono"
+									autoComplete="off"
+									spellCheck={false}
+									placeholder={text.catchUpPlaceholder}
+									disabled={!hasCron}
+									value={draft.catchUpWindow}
+									onChange={(e) => set({ catchUpWindow: e.target.value })}
+								/>
+							)}
+						</RowField>
+					</CollapsibleContent>
+				</Collapsible>
+			)}
 		</FieldSet>
 	);
 }

@@ -17,10 +17,12 @@ keys/<hex>                   key slots (ADR 0002)
 packs/<2 hex>/<hex>          packs
 index/<hex>                  index shards
 snapshots/<hex>              sealed snapshot envelopes
-locks/                       reserved; nothing is written there yet
+locks/gc-<32 hex>            GC manifest: packs marked for deletion
+locks/writer-<32 hex>        marker of a running direct writer
+locks/writer-<32 hex>.done   empty; the writer has finished
 ```
 
-Every object except `config` is named by the lowercase hex **BLAKE3 of its exact bytes** (64 characters). A pack lives under a two-character fan-out directory taken from the first two characters of its name. Because names derive from content, a second write of the same object is a no-op, and "already exists" on a create-only write means the identical object is already there.
+Every object except `config` and those under `locks/` is named by the lowercase hex **BLAKE3 of its exact bytes** (64 characters). A pack lives under a two-character fan-out directory taken from the first two characters of its name. Because names derive from content, a second write of the same object is a no-op, and "already exists" on a create-only write means the identical object is already there.
 
 All writes are create-only (`put_if_absent`). The write path has no overwrite and no delete.
 
@@ -30,6 +32,15 @@ An object is written only after everything it refers to exists, so a reader neve
 
 - **init:** key slots, then the directory layout, then `config` last. A folder without `config` is not a repository.
 - **backup:** packs first; an index shard only after the packs it lists; the snapshot last, after all of its shards.
+
+### `locks/`
+
+The objects under `locks/` coordinate garbage collection with writers. Their names are random 16-byte ids in lowercase hex, not content hashes (the same exception as `config`), and their time is the store's `LastModified`, which a writer cannot forge into the past.
+
+- `locks/gc-<id>` is a protobuf `GcManifest` (`version`, `gc_id`, `published`, `candidate_packs` sorted) sealed with XChaCha20-Poly1305 under `k_idx`, additional data `repo_id || "gc-manifest"`. The server publishes it before it deletes anything. A writer reads every manifest when it opens the repository and ignores the records of the listed packs, so it uploads a blob again unless a second location outside the candidates holds it. A manifest that does not authenticate, has an unknown version or whose `gc_id` differs from its name stops the writer.
+- `locks/writer-<id>` is a protobuf `WriterMarker` (`version`, `writer_id`, `hostname`, `started`) sealed the same way with additional data `repo_id || "writer-marker"`. A direct writer creates it before it uploads and creates the empty `locks/writer-<id>.done` when it finishes. A marker without `.done` blocks deletion; one that does not open still counts as open.
+
+All three are create-only like every other object, and the write path never deletes them.
 
 ### Pack
 
@@ -71,6 +82,8 @@ A directory is a protobuf `Tree` of nodes sorted by name, stored as a blob of ty
 
 An index shard is an AEAD-sealed (key `k_idx`) protobuf `IndexShard`: a list of pack records, each with the pack id, the HPKE encapsulated key and sealed pack key copied from the pack prefix, the pack size, and the pack's entries (the same 45-byte records, concatenated). The in-memory index maps blob id to (pack, offset, frame length, plaintext length, type). The first record seen for a blob id wins; duplicates across shards are harmless.
 
+`IndexShard.supersedes` lists the ids of shards that the new shard ranks below every shard not listed anywhere. It is a preference, never a reason to lose a location: a reader uses a superseded shard's record of a blob only while no current shard places that blob, whatever order the shards are read in. Any writer key can seal a shard, so a shard that supersedes everything hides nothing. A collector compacts the index in this order: it writes the new shards with an empty `supersedes`, reads the index back without the shards it is replacing and checks that every live blob is still placed in a listed pack, then writes one shard without records whose `supersedes` names the replaced shards. Only then does it delete the replaced shards, the ones it chose itself, and after them the packs. A compaction cut short leaves duplicate records and nothing missing. The golden vectors in `tests/fixtures/v1/index-vectors.json` fix this resolution.
+
 A reader checks, before trusting a record, that the entry lies after the prefix and inside the pack size and that the declared plaintext length is within the limit for its type. Plaintext is then verified against its keyed hash after decryption, so a wrong index can cause an error but never wrong data.
 
 ### `index_refs` and independence from LIST
@@ -79,7 +92,7 @@ A snapshot carries `index_refs`: the ids of the index shards that cover every bl
 
 ### Rebuilding the index
 
-The index is a cache; the packs are the truth. `lode repo rebuild-index` lists `packs/`, skips packs that some shard already mentions, and for each remaining pack fetches the first 1175 bytes, the last 10 bytes and the header frame with three ranged reads. It opens the pack key with the repository private key, decrypts the header, checks every entry against the pack's bounds, and writes new shards with at most 1024 pack records each. A pack that cannot be parsed is skipped with a warning and the command exits with code 1; the others are still indexed. A second run finds nothing to do and writes no shard.
+The index is a cache; the packs are the truth. `lode repo rebuild-index` lists `packs/`, skips packs that some shard already mentions and packs a running cleanup has marked for deletion in `locks/gc-*`, and for each remaining pack fetches the first 1175 bytes, the last 10 bytes and the header frame with three ranged reads. It opens the pack key with the repository private key, decrypts the header, checks every entry against the pack's bounds, and writes new shards with at most 1024 pack records each. A pack that cannot be parsed is skipped with a warning and the command exits with code 1; the others are still indexed. A second run finds nothing to do and writes no shard.
 
 The rebuild does not hash a pack to compare it with its name: that needs a full download and belongs to integrity verification. A tampered pack is still caught when a blob is read, by authentication and by the keyed-hash check.
 

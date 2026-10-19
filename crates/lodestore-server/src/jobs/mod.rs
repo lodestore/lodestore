@@ -2,8 +2,10 @@ pub mod api;
 pub mod restore;
 
 use std::collections::{BTreeMap, HashSet};
+use std::time::Duration;
 
-use lodestore_policy::{BackupPolicy, Hook, IoniceClass, Limits, parse_rate};
+use lodestore_format::locks::DEFAULT_MAX_RUNTIME;
+use lodestore_policy::{BackupPolicy, Hook, IoniceClass, Limits, parse_duration, parse_rate};
 use lodestore_proto::agent::v1::{
     ConflictPolicy, Hook as ProtoHook, IoniceClass as ProtoIonice, JobSpec, Limits as ProtoLimits,
 };
@@ -17,6 +19,9 @@ use self::restore::RestoreRecord;
 use crate::db::now_ms;
 use crate::download::archive::ArchiveFormat;
 use crate::error::ApiError;
+use crate::maintenance::gc::api::{GcProgress, GcReport};
+use crate::maintenance::gc::db::{CYCLE_COLUMNS, cycle_from_row};
+use crate::maintenance::gc::{GcOrigin, GcState};
 use crate::state::AppState;
 
 pub const ACTIVE_STATES: &str = "'queued', 'assigned', 'running'";
@@ -27,6 +32,7 @@ pub const RUNNING_STATES: &str = "'assigned', 'running'";
 pub enum JobState {
     Queued,
     Running,
+    Waiting,
     Succeeded,
     Warnings,
     Failed,
@@ -40,6 +46,7 @@ impl JobState {
         Some(match text {
             "queued" | "assigned" => JobState::Queued,
             "running" => JobState::Running,
+            "waiting" => JobState::Waiting,
             "succeeded" => JobState::Succeeded,
             "warnings" => JobState::Warnings,
             "failed" => JobState::Failed,
@@ -54,6 +61,7 @@ impl JobState {
         match self {
             JobState::Queued => &["queued", "assigned"],
             JobState::Running => &["running"],
+            JobState::Waiting => &["waiting"],
             JobState::Succeeded => &["succeeded"],
             JobState::Warnings => &["warnings"],
             JobState::Failed => &["failed"],
@@ -152,6 +160,7 @@ pub enum JobKind {
     Backup,
     Restore,
     Download,
+    Gc,
 }
 
 impl JobKind {
@@ -160,6 +169,7 @@ impl JobKind {
             "backup" => JobKind::Backup,
             "restore" => JobKind::Restore,
             "download" => JobKind::Download,
+            "gc" => JobKind::Gc,
             _ => return None,
         })
     }
@@ -262,6 +272,23 @@ pub struct DownloadInfo {
 }
 
 #[derive(Serialize, ToSchema)]
+pub struct GcJobInfo {
+    pub repository_id: String,
+    pub repository_name: String,
+    pub dry_run: bool,
+    pub origin: GcOrigin,
+    pub phase: GcState,
+    pub progress: Option<GcProgress>,
+    pub delete_after: Option<i64>,
+    pub bytes_freed: Option<u64>,
+    pub locked_bytes: Option<u64>,
+    pub locked_until: Option<i64>,
+    /// Deletion is held back by a running backup or restore.
+    pub postponed: bool,
+    pub stopped_while_deleting: bool,
+}
+
+#[derive(Serialize, ToSchema)]
 pub struct JobBrief {
     pub id: String,
     pub state: JobState,
@@ -308,6 +335,7 @@ pub struct JobSummary {
     pub restore: Option<RestoreInfo>,
     pub restore_result: Option<RestoreResultDto>,
     pub download: Option<DownloadInfo>,
+    pub gc: Option<GcJobInfo>,
     pub incomplete: bool,
     pub warnings_total: u64,
     pub errors_total: u64,
@@ -355,6 +383,16 @@ fn hook_spec(hook: &Hook) -> ProtoHook {
     }
 }
 
+pub fn max_runtime_of(policy: &BackupPolicy) -> Duration {
+    policy
+        .spec
+        .limits
+        .as_ref()
+        .and_then(|l| l.max_runtime.as_deref())
+        .and_then(parse_duration)
+        .unwrap_or(DEFAULT_MAX_RUNTIME)
+}
+
 pub fn job_spec(policy: &BackupPolicy) -> JobSpec {
     let spec = &policy.spec;
     JobSpec {
@@ -370,8 +408,15 @@ pub fn job_spec(policy: &BackupPolicy) -> JobSpec {
         limits: spec
             .limits
             .as_ref()
-            .filter(|l| *l != &Limits::default())
+            .filter(|l| {
+                Limits {
+                    max_runtime: None,
+                    ..(*l).clone()
+                } != Limits::default()
+            })
             .map(limits_spec),
+        max_runtime_s: max_runtime_of(policy).as_secs(),
+        gc_locks_required: false,
     }
 }
 
@@ -521,7 +566,7 @@ pub(crate) fn summary_from_row(
         });
     let db_kind: String = row.try_get("kind")?;
     let kind = match JobKind::parse(&db_kind) {
-        Some(JobKind::Download) | None => return Err(unknown("kind", &db_kind)),
+        Some(JobKind::Download | JobKind::Gc) | None => return Err(unknown("kind", &db_kind)),
         Some(kind) => kind,
     };
     let restore = match kind {
@@ -543,6 +588,7 @@ pub(crate) fn summary_from_row(
             None
         },
         download: None,
+        gc: None,
         source: match source.as_str() {
             "manual" => JobSource::Manual,
             "cli" => JobSource::Cli,
@@ -650,6 +696,7 @@ pub(crate) fn download_summary(
             bytes_sent: count(row, "bytes_sent")?,
             started_by: row.try_get("started_by")?,
         }),
+        gc: None,
         incomplete: false,
         warnings_total: 0,
         errors_total: 0,
@@ -659,6 +706,78 @@ pub(crate) fn download_summary(
         error_code,
     };
     Ok((summary, row.try_get("repository_id")?))
+}
+
+const GC_EXTRA_COLUMNS: &str = "summary_json, \
+    (SELECT name FROM repositories r WHERE r.id = gc_cycles.repository_id) AS repository_name";
+
+pub(crate) fn gc_select() -> String {
+    format!("SELECT {CYCLE_COLUMNS}, {GC_EXTRA_COLUMNS} FROM gc_cycles")
+}
+
+pub(crate) fn gc_summary(row: &AnyRow) -> Result<JobSummary, ApiError> {
+    let cycle = cycle_from_row(row).map_err(ApiError::Internal)?;
+    let report: Option<GcReport> = json_column(row, "summary_json")?;
+    let state = match cycle.state {
+        GcState::Marking | GcState::Repacking | GcState::Verifying | GcState::Sweeping => {
+            JobState::Running
+        }
+        GcState::Waiting => JobState::Waiting,
+        GcState::Done => JobState::Succeeded,
+        GcState::Failed => JobState::Failed,
+        GcState::Aborted => JobState::Cancelled,
+    };
+    let p = &cycle.progress;
+    let info = GcJobInfo {
+        repository_name: row.try_get("repository_name")?,
+        repository_id: cycle.repository_id,
+        dry_run: cycle.dry_run,
+        origin: cycle.origin,
+        phase: cycle.state,
+        progress: p.shown(),
+        delete_after: cycle.delete_after,
+        bytes_freed: report.as_ref().map(|r| r.bytes_freed),
+        locked_bytes: report.as_ref().map(|r| r.locked_bytes),
+        locked_until: report.as_ref().and_then(|r| r.locked_until),
+        postponed: !p.blocked_by_writers.is_empty() || p.waiting_for_restores,
+        stopped_while_deleting: cycle.state == GcState::Failed
+            && (cycle.sweep_started || cycle.error_after_delete),
+    };
+    Ok(JobSummary {
+        id: cycle.id,
+        kind: JobKind::Gc,
+        host_id: String::new(),
+        hostname: String::new(),
+        policy_name: None,
+        policy_exists: false,
+        source: JobSource::Manual,
+        origin: match cycle.origin {
+            GcOrigin::Manual => JobOrigin::Manual,
+            GcOrigin::Schedule => JobOrigin::Schedule,
+        },
+        missed_runs: None,
+        stdin_name: None,
+        state,
+        phase: None,
+        queued_at: cycle.created_at,
+        started_at: cycle.started_at,
+        finished_at: cycle.finished_at,
+        queue_reason: None,
+        host_online: false,
+        progress: None,
+        snapshot_id: None,
+        snapshot_suspicious: false,
+        stats: None,
+        restore: None,
+        restore_result: None,
+        download: None,
+        gc: Some(info),
+        incomplete: false,
+        warnings_total: 0,
+        errors_total: 0,
+        error_code: None,
+        error_message: cycle.error,
+    })
 }
 
 pub async fn load_download(state: &AppState, id: &str) -> Result<Option<JobDetail>, ApiError> {

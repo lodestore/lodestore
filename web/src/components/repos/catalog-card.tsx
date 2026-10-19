@@ -7,6 +7,7 @@ import {
 	useRebuildCatalog,
 } from "@/api/gen/endpoints";
 import type { CatalogStatus } from "@/api/gen/model";
+import { Fact } from "@/components/fact";
 import { PathText, TextWithPaths } from "@/components/path-text";
 import { RelativeTime } from "@/components/relative-time";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -46,21 +47,6 @@ export function useCatalogStatus() {
 			refetchIntervalInBackground: false,
 		},
 	});
-}
-
-function Fact({
-	label,
-	children,
-}: {
-	label: string;
-	children: React.ReactNode;
-}) {
-	return (
-		<div className="flex flex-col gap-1">
-			<dt className="text-sm text-muted-foreground">{label}</dt>
-			<dd className="font-semibold">{children}</dd>
-		</div>
-	);
 }
 
 function RebuildProgress({ status }: { status: CatalogStatus }) {

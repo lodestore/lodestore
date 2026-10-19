@@ -1,5 +1,5 @@
 import { Link, useNavigate } from "@tanstack/react-router";
-import { MoreHorizontal, ShieldAlert } from "lucide-react";
+import { Database, Lock, MoreHorizontal, ShieldAlert } from "lucide-react";
 import type { JobKind, JobSummary } from "@/api/gen/model";
 import { restoreFailureText } from "@/components/jobs/job-cards";
 import { TextWithPaths } from "@/components/path-text";
@@ -30,8 +30,10 @@ import {
 } from "@/components/ui/tooltip";
 import { copy } from "@/copy";
 import {
+	dayName,
 	formatBytes,
 	formatCount,
+	formatDateTime,
 	formatDuration,
 	percent,
 } from "@/lib/format";
@@ -42,6 +44,7 @@ import { cn } from "@/lib/utils";
 export type JobState =
 	| "queued"
 	| "running"
+	| "waiting"
 	| "succeeded"
 	| "warnings"
 	| "failed"
@@ -55,6 +58,7 @@ export type JobRow = {
 	restore?: JobSummary["restore"];
 	restore_result?: JobSummary["restore_result"];
 	download?: JobSummary["download"];
+	gc?: JobSummary["gc"];
 	host_id: string;
 	hostname: string;
 	policy_name?: string | null;
@@ -275,7 +279,93 @@ function SuspiciousMark() {
 	);
 }
 
+function GcResult({ job }: { job: JobRow }) {
+	const gc = job.gc;
+	if (!gc) return <span>{copy.common.dash}</span>;
+	const text = copy.jobs.gc;
+	const muted = (value: string) => (
+		<span className="text-sm text-muted-foreground">{value}</span>
+	);
+	switch (job.state) {
+		case "running": {
+			const label = text.phases[gc.phase];
+			if (!gc.progress || gc.progress.total <= 0) {
+				return <span className="text-sm">{label}</span>;
+			}
+			const pct = percent({
+				files_done: gc.progress.done,
+				files_total: gc.progress.total,
+			});
+			return (
+				<div className="flex items-center gap-2">
+					<Progress
+						value={pct}
+						aria-label={text.progressLabel}
+						className="w-32 shrink-0"
+					/>
+					<span className="text-sm">{label}</span>
+				</div>
+			);
+		}
+		case "waiting":
+			if (gc.postponed) return muted(text.postponed);
+			return gc.delete_after != null ? (
+				muted(text.deletesAfter(formatDateTime(gc.delete_after)))
+			) : (
+				<span>{copy.common.dash}</span>
+			);
+		case "succeeded": {
+			const bytes = gc.bytes_freed ?? 0;
+			const size = formatBytes(bytes);
+			return (
+				<span className="inline-flex items-center gap-2 text-sm">
+					{bytes <= 0
+						? text.nothingToFree
+						: gc.dry_run
+							? text.wouldFree(size)
+							: text.freed(size)}
+					<LockedMark gc={gc} />
+				</span>
+			);
+		}
+		case "failed":
+			return (
+				<span className="text-sm">
+					{gc.stopped_while_deleting
+						? text.stoppedWhileDeleting
+						: text.stoppedNothingDeleted}
+				</span>
+			);
+		case "cancelled":
+			return muted(text.stoppedNothingDeleted);
+		default:
+			return <span>{copy.common.dash}</span>;
+	}
+}
+
+function LockedMark({ gc }: { gc: NonNullable<JobRow["gc"]> }) {
+	const bytes = gc.locked_bytes ?? 0;
+	if (bytes <= 0) return null;
+	const size = formatBytes(bytes);
+	const hint =
+		gc.locked_until != null
+			? copy.jobs.gc.frees(size, dayName(gc.locked_until))
+			: copy.jobs.gc.freesUnknown(size);
+	return (
+		<Tooltip>
+			<TooltipTrigger asChild>
+				<span tabIndex={0} className="inline-flex text-muted-foreground">
+					<Lock aria-hidden className="size-4" />
+					<span className="sr-only">{copy.jobs.gc.heldByLock}</span>
+				</span>
+			</TooltipTrigger>
+			<TooltipContent>{hint}</TooltipContent>
+		</Tooltip>
+	);
+}
+
 export function JobResult({ job }: { job: JobRow }) {
+	if (job.kind === "gc") return <GcResult job={job} />;
 	if (job.kind === "restore" || job.kind === "download") {
 		return <OtherJobResult job={job} />;
 	}
@@ -347,16 +437,25 @@ export function JobResult({ job }: { job: JobRow }) {
 	}
 }
 
+const repositoryLink = (job: JobRow) => ({
+	to: "/settings/repositories/$id" as const,
+	params: { id: job.gc?.repository_id ?? "" },
+	hash: "free-up-space",
+});
+
 function Started({ job }: { job: JobRow }) {
 	const queued = job.state === "queued";
 	const at = new Date(
 		queued ? job.queued_at : (job.started_at ?? job.queued_at),
 	);
 	const relative = formatRelative(at, new Date());
+	const target =
+		job.kind === "gc"
+			? repositoryLink(job)
+			: { to: "/jobs/$id" as const, params: { id: job.id } };
 	return (
 		<Link
-			to="/jobs/$id"
-			params={{ id: job.id }}
+			{...target}
 			className="rounded-sm text-sm"
 			title={at.toLocaleString("en", {
 				dateStyle: "medium",
@@ -371,6 +470,7 @@ function Started({ job }: { job: JobRow }) {
 }
 
 function Duration({ job }: { job: JobRow }) {
+	if (job.state === "waiting") return <span>{copy.common.dash}</span>;
 	if (job.state === "running" && job.started_at != null) {
 		return (
 			<span className="text-sm">
@@ -418,6 +518,33 @@ function PolicyLine({ job }: { job: JobRow }) {
 		<div className="max-w-56 truncate text-sm text-muted-foreground">
 			{line(job.policy_name)}
 		</div>
+	);
+}
+
+function GcName({ job }: { job: JobRow }) {
+	const gc = job.gc;
+	const text = copy.jobs.gc;
+	const name = text.repository(gc?.repository_name ?? job.hostname);
+	const kind = gc?.dry_run
+		? text.kindDryRun
+		: gc?.origin === "schedule"
+			? text.kindScheduled
+			: text.kind;
+	return (
+		<>
+			<Truncated text={name} className="max-w-52">
+				<Link
+					{...repositoryLink(job)}
+					className="flex max-w-52 items-center gap-2 rounded-sm text-base font-semibold"
+				>
+					<Database aria-hidden className="size-4 shrink-0" />
+					<span className="truncate">{name}</span>
+				</Link>
+			</Truncated>
+			<div className="text-sm whitespace-nowrap text-muted-foreground">
+				{kind}
+			</div>
+		</>
 	);
 }
 
@@ -515,7 +642,11 @@ export function JobsTable({
 	const showHost = !hide.includes("host");
 	const showPolicy = !hide.includes("policy");
 	const openJob = (job: JobRow) =>
-		void navigate({ to: "/jobs/$id", params: { id: job.id } });
+		void navigate(
+			job.kind === "gc"
+				? repositoryLink(job)
+				: { to: "/jobs/$id", params: { id: job.id } },
+		);
 
 	if (!loading && jobs.length === 0) return null;
 
@@ -562,7 +693,14 @@ export function JobsTable({
 									<StatusBadge status={job.state} />
 								</TableCell>
 								<TableCell className="px-4">
-									{showHost ? (
+									{job.kind === "gc" ? (
+										<>
+											<GcName job={job} />
+											<div className="@min-[1024px]:hidden">
+												<StatusBadge status={job.state} />
+											</div>
+										</>
+									) : showHost ? (
 										<>
 											<Truncated text={job.hostname} className="max-w-52">
 												{isAgentless(job.host_id) ? (
@@ -601,12 +739,14 @@ export function JobsTable({
 									className="px-4"
 									onClick={(e) => e.stopPropagation()}
 								>
-									<JobActions
-										job={job}
-										onOpen={openJob}
-										onCancel={onCancel}
-										onRerun={onRerun}
-									/>
+									{job.kind !== "gc" && (
+										<JobActions
+											job={job}
+											onOpen={openJob}
+											onCancel={onCancel}
+											onRerun={onRerun}
+										/>
+									)}
 								</TableCell>
 							</TableRow>
 						))

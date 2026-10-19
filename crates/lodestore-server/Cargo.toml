@@ -64,6 +64,8 @@ rust-embed = { version = "8.13.0", optional = true }
 
 [dev-dependencies]
 tempfile = "3.27.0"
+bytes = "1"
+opendal = { version = "0.59.4", default-features = false, features = ["services-s3"] }
 tokio = { version = "1.53.2", features = ["macros"] }
 lodestore-testkit = { path = "../lodestore-testkit" }
 lodestore-agent = { path = "../lodestore-agent" }

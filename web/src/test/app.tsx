@@ -14,6 +14,7 @@ export const repository = {
 	location_display: "s3://bucket/prefix",
 	hosts_count: 0,
 	agent_key_state: "verified",
+	cleanup: { state: "off", at: null },
 };
 
 export const serverInfo = {

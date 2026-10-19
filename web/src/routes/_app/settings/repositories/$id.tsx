@@ -6,6 +6,7 @@ import { agentKeyWarning } from "@/components/capability-checklist";
 import { PolicyPanel } from "@/components/policy-panel";
 import { AgentKeyBadge } from "@/components/repos/agent-key-badge";
 import { CatalogCard } from "@/components/repos/catalog-card";
+import { ReclaimCard } from "@/components/repos/reclaim/reclaim-card";
 import { ReplaceAgentKeyDialog } from "@/components/repos/replace-agent-key-dialog";
 import { StorageChecksCard } from "@/components/repos/storage-checks-card";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -153,7 +154,9 @@ function RepositoryPage() {
 
 					<CatalogCard repositoryId={repository.id} />
 
-					<Card>
+					<ReclaimCard repositoryId={repository.id} />
+
+					<Card id="agent-key">
 						<CardHeader>
 							<CardTitle>
 								<h2>{copy.repos.agentKeyTitle}</h2>

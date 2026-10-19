@@ -48,6 +48,14 @@ impl RepoReaders {
                 .or_insert_with(|| ReaderCache::new(DEFAULT_TREE_BUDGET)),
         )
     }
+
+    /// Forgets what was cached for the repository; readers in use keep theirs.
+    pub fn invalidate(&self, repository_id: &str) {
+        self.caches
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(repository_id);
+    }
 }
 
 pub async fn reader(state: &AppState, repository_id: &str) -> anyhow::Result<Reader<Store>> {

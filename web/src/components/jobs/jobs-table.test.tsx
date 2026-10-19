@@ -50,7 +50,11 @@ function renderTable(props: Parameters<typeof JobsTable>[0]) {
 	const stub = (path: string) =>
 		createRoute({ getParentRoute: () => root, path, component: () => null });
 	const router = createRouter({
-		routeTree: root.addChildren([stub("/jobs/$id"), stub("/hosts/$id")]),
+		routeTree: root.addChildren([
+			stub("/jobs/$id"),
+			stub("/hosts/$id"),
+			stub("/settings/repositories/$id"),
+		]),
 		history: createMemoryHistory({ initialEntries: ["/"] }),
 	});
 	render(<RouterProvider router={router as never} />);
@@ -66,6 +70,7 @@ describe("JobsTable", () => {
 	it.each<JobState>([
 		"queued",
 		"running",
+		"waiting",
 		"succeeded",
 		"warnings",
 		"failed",
@@ -512,5 +517,167 @@ describe("JobsTable restore and download rows", () => {
 		const row = await rowOf("dl-1");
 		expect(within(row).getByText("old-box")).toBeVisible();
 		expect(within(row).queryByRole("link", { name: "old-box" })).toBeNull();
+	});
+});
+
+function gcJob(
+	over: Partial<JobRow> = {},
+	gc: Partial<NonNullable<JobRow["gc"]>> = {},
+): JobRow {
+	return job({
+		id: "gc-1",
+		kind: "gc",
+		host_id: "",
+		hostname: "Main repo",
+		policy_name: null,
+		stats: null,
+		gc: {
+			repository_id: "repo-1",
+			repository_name: "Main repo",
+			dry_run: false,
+			origin: "manual",
+			phase: "done",
+			postponed: false,
+			stopped_while_deleting: false,
+			...gc,
+		},
+		...over,
+	});
+}
+
+describe("JobsTable cleanup rows", () => {
+	it("gc row links to the repository card", async () => {
+		const user = userEvent.setup();
+		const router = renderTable({ jobs: [gcJob()] });
+		const row = await rowOf("gc-1");
+		const link = within(row).getByRole("link", {
+			name: "Repository Main repo",
+		});
+		expect(link).toHaveAttribute(
+			"href",
+			"/settings/repositories/repo-1#free-up-space",
+		);
+		expect(within(row).getByText("Cleanup")).toBeVisible();
+		await user.click(within(row).getByText("Nothing to free"));
+		expect(router.state.location.pathname).toBe(
+			"/settings/repositories/repo-1",
+		);
+		expect(router.state.location.hash).toBe("free-up-space");
+	});
+
+	it("gc row shows phase and progress while running", async () => {
+		renderTable({
+			jobs: [
+				gcJob(
+					{ state: "running", finished_at: null },
+					{ phase: "repacking", progress: { done: 1, total: 4, bytes: 10 } },
+				),
+			],
+		});
+		const row = await rowOf("gc-1");
+		expect(within(row).getByText("Rewriting packs")).toBeVisible();
+		expect(within(row).getByRole("progressbar")).toHaveAttribute(
+			"aria-valuenow",
+			"25",
+		);
+	});
+
+	it("gc dry run row shows would free", async () => {
+		renderTable({
+			jobs: [
+				gcJob({}, { dry_run: true, bytes_freed: 3_221_225_472 }),
+				gcJob({ id: "gc-2" }, { bytes_freed: 1_048_576, origin: "schedule" }),
+				gcJob({ id: "gc-3" }, { bytes_freed: 0 }),
+			],
+		});
+		const dry = await rowOf("gc-1");
+		expect(within(dry).getByText("Would free 3 GiB")).toBeVisible();
+		expect(within(dry).getByText("Cleanup · dry run")).toBeVisible();
+		const real = await rowOf("gc-2");
+		expect(within(real).getByText("Freed 1 MiB")).toBeVisible();
+		expect(within(real).getByText("Cleanup · scheduled")).toBeVisible();
+		expect(
+			within(await rowOf("gc-3")).getByText("Nothing to free"),
+		).toBeVisible();
+	});
+
+	it("gc row has no actions menu", async () => {
+		renderTable({ jobs: [gcJob()] });
+		const row = await rowOf("gc-1");
+		expect(within(row).queryByRole("button")).toBeNull();
+	});
+
+	it("gc waiting row shows delete date", async () => {
+		const at = new Date(2026, 9, 24, 3, 0).getTime();
+		renderTable({
+			jobs: [
+				gcJob({ state: "waiting" }, { phase: "waiting", delete_after: at }),
+			],
+		});
+		const row = await rowOf("gc-1");
+		expect(within(row).getByText(/^Deletes after .*24, 2026/)).toBeVisible();
+		expect(row.querySelector('[data-status="waiting"]')).not.toBeNull();
+		expect(within(row).queryByText(/Running|Postponed/)).toBeNull();
+	});
+
+	it("gc postponed row", async () => {
+		renderTable({
+			jobs: [
+				gcJob(
+					{ state: "waiting" },
+					{ phase: "waiting", postponed: true, delete_after: Date.now() },
+				),
+			],
+		});
+		expect(
+			within(await rowOf("gc-1")).getByText("Postponed by unfinished backups"),
+		).toBeVisible();
+	});
+
+	it("gc row shows object lock hint", async () => {
+		const user = userEvent.setup();
+		const until = new Date(2026, 9, 24, 12, 0).getTime();
+		renderTable({
+			jobs: [
+				gcJob(
+					{},
+					{
+						bytes_freed: 1_048_576,
+						locked_bytes: 3_435_973_837,
+						locked_until: until,
+					},
+				),
+				gcJob({ id: "gc-2" }, { bytes_freed: 1_048_576, locked_bytes: 0 }),
+			],
+		});
+		const row = await rowOf("gc-1");
+		const mark = within(row).getByText("Some data is held by Object Lock");
+		await user.hover(mark);
+		expect(
+			(await screen.findAllByText("3.2 GiB frees after 24 Oct 2026"))[0],
+		).toBeInTheDocument();
+		expect(
+			within(await rowOf("gc-2")).queryByText(
+				"Some data is held by Object Lock",
+			),
+		).toBeNull();
+	});
+
+	it("gc failed row says whether anything was deleted", async () => {
+		renderTable({
+			jobs: [
+				gcJob({ state: "failed" }, { phase: "failed" }),
+				gcJob(
+					{ id: "gc-2", state: "failed" },
+					{ phase: "failed", stopped_while_deleting: true },
+				),
+			],
+		});
+		expect(
+			within(await rowOf("gc-1")).getByText("Stopped, nothing deleted"),
+		).toBeVisible();
+		expect(
+			within(await rowOf("gc-2")).getByText("Stopped while deleting"),
+		).toBeVisible();
 	});
 });

@@ -196,3 +196,22 @@ message WriterKeys {
   bytes k_idx = 5;
   HpkeSuite hpke = 6;
 }
+
+// Sealed under the index key as `locks/gc-<32 hex of gc_id>`. The object name
+// is the random gc_id, not a hash of the content.
+message GcManifest {
+  uint32 version = 1;
+  bytes gc_id = 2;
+  Timestamp published = 3;
+  // 32-byte pack ids, sorted
+  repeated bytes candidate_packs = 4;
+}
+
+// Sealed under the index key as `locks/writer-<32 hex of writer_id>`. The
+// object name is the random writer_id, not a hash of the content.
+message WriterMarker {
+  uint32 version = 1;
+  bytes writer_id = 2;
+  bytes hostname = 3;
+  Timestamp started = 4;
+}

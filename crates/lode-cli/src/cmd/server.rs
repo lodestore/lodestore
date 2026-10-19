@@ -28,11 +28,12 @@ pub async fn run(
         ServerCommand::Jobs { command } => jobs(&client, out, command).await?,
         ServerCommand::Snapshots { command } => snapshots(&client, out, command).await?,
         ServerCommand::Restore(args) => restore(&client, out, args).await?,
+        ServerCommand::Gc(args) => return super::gc::run(&client, out, args).await,
     }
     Ok(0)
 }
 
-fn time(ms: Option<i64>) -> String {
+pub(super) fn time(ms: Option<i64>) -> String {
     ms.map_or_else(
         || "-".into(),
         |ms| {
@@ -724,7 +725,7 @@ struct SnapshotPage {
 
 const SNAPSHOT_PAGE: usize = 200;
 
-fn size(bytes: u64) -> String {
+pub(super) fn size(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut value = bytes as f64;
     let mut unit = 0;

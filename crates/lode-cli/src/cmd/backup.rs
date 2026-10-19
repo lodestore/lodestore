@@ -10,14 +10,17 @@ use lodestore_format::fs;
 use lodestore_format::fs::filter::PathMatcher;
 use lodestore_format::fs::walk::WalkOptions;
 use lodestore_format::index::hex32;
+use lodestore_format::locks::UNMARKED_WRITER_LIMIT;
 use lodestore_format::reader::Reader;
 use lodestore_format::snapshot::{ParentTree, find_parent};
 use lodestore_format::store::Store;
-use lodestore_format::writer::{BackupOptions, BackupOutcome, BackupProgress, canonical_roots};
+use lodestore_format::writer::{
+    BackupOptions, BackupOutcome, BackupProgress, Deadline, Writer, canonical_roots,
+};
 use serde::Serialize;
 
 use crate::cli::{BackupFlags, SecretArgs, UsageError};
-use crate::open::open_for_write;
+use crate::open::{Marker, open_for_write};
 use crate::output::{JsonPath, Output, StatsJson, Throttle, spinner, warn_skipped};
 
 const EXIT_INCOMPLETE: u8 = 3;
@@ -87,8 +90,44 @@ pub async fn run(
         )
         .into());
     }
-    let (mut writer, reader) = open_for_write(url, args).await?;
-    let hostname = flags.host.map_or_else(fs::hostname, String::into_bytes);
+    let hostname = flags
+        .host
+        .clone()
+        .map_or_else(fs::hostname, String::into_bytes);
+    let opened = open_for_write(url, args, &hostname, flags.no_gc_check).await?;
+    let deadline = unmarked_deadline(&opened.marker);
+    let result = backup_paths(
+        opened.writer,
+        opened.reader,
+        hostname,
+        deadline,
+        out,
+        paths,
+        flags,
+    )
+    .await;
+    opened.marker.close().await;
+    result
+}
+
+fn unmarked_deadline(marker: &Marker) -> Option<Deadline> {
+    let deadline = marker.unmarked_deadline()?;
+    eprintln!(
+        "warning: cannot write the cleanup marker in locks/ (access denied); this backup must finish within {}h or no snapshot is saved",
+        UNMARKED_WRITER_LIMIT.as_secs() / 3600
+    );
+    Some(deadline)
+}
+
+async fn backup_paths(
+    mut writer: Writer<Store>,
+    reader: Option<Reader<Store>>,
+    hostname: Vec<u8>,
+    deadline: Option<Deadline>,
+    out: Output,
+    paths: &[PathBuf],
+    flags: BackupFlags,
+) -> Result<u8> {
     let roots: Vec<Vec<u8>> = canonical_roots(paths)?
         .iter()
         .map(|r| r.as_os_str().as_bytes().to_vec())
@@ -135,6 +174,7 @@ pub async fn run(
                 },
                 cancel: cancel_on_ctrl_c(),
                 prescan: true,
+                deadline,
                 ..Default::default()
             },
             &progress,
@@ -207,7 +247,7 @@ fn progress_sink<'a>(
 }
 
 async fn run_stdin(url: &str, args: &SecretArgs, out: Output, flags: BackupFlags) -> Result<u8> {
-    let name = flags.name.unwrap_or_default();
+    let name = flags.name.clone().unwrap_or_default();
     if name.is_empty() {
         return Err(UsageError("--name must not be empty".into()).into());
     }
@@ -217,8 +257,35 @@ async fn run_stdin(url: &str, args: &SecretArgs, out: Output, flags: BackupFlags
         )
         .into());
     }
-    let (mut writer, reader) = open_for_write(url, args).await?;
-    let hostname = flags.host.map_or_else(fs::hostname, String::into_bytes);
+    let hostname = flags
+        .host
+        .clone()
+        .map_or_else(fs::hostname, String::into_bytes);
+    let opened = open_for_write(url, args, &hostname, flags.no_gc_check).await?;
+    let deadline = unmarked_deadline(&opened.marker);
+    let result = backup_stdin(
+        opened.writer,
+        opened.reader,
+        hostname,
+        deadline,
+        out,
+        name,
+        flags,
+    )
+    .await;
+    opened.marker.close().await;
+    result
+}
+
+async fn backup_stdin(
+    mut writer: Writer<Store>,
+    reader: Option<Reader<Store>>,
+    hostname: Vec<u8>,
+    deadline: Option<Deadline>,
+    out: Output,
+    name: String,
+    flags: BackupFlags,
+) -> Result<u8> {
     let tag = format!("stdin={name}");
     let parent = match reader {
         None => None,
@@ -255,6 +322,7 @@ async fn run_stdin(url: &str, args: &SecretArgs, out: Output, flags: BackupFlags
                 tags,
                 parent,
                 cancel: cancel_on_ctrl_c(),
+                deadline,
                 ..Default::default()
             },
             &progress,

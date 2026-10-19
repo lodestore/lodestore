@@ -14,17 +14,23 @@ use hpke::kem::XWing;
 use hpke::{Kem, Serializable};
 use lodestore_format::chunker::{Chunker, blob_id};
 use lodestore_format::crypto::{
-    BLOB_TYPE_DATA, CTX_CDC_SEED, CTX_CHUNK_ID_KEY, CTX_HPKE_IKM, CTX_INDEX_KEY, CTX_PACK_KEY,
-    CTX_SNAPSHOT_KEY, Entropy, derive_key, open_frame, open_pack_header, open_pack_key,
-    open_snapshot_key, seal_frame, seal_index_shard, seal_pack_header, seal_pack_key,
-    seal_snapshot_body, seal_snapshot_key,
+    BLOB_TYPE_DATA, BlobId, CTX_CDC_SEED, CTX_CHUNK_ID_KEY, CTX_HPKE_IKM, CTX_INDEX_KEY,
+    CTX_PACK_KEY, CTX_SNAPSHOT_KEY, Entropy, HPKE_ENC_LEN, SEALED_KEY_LEN, derive_key, open_frame,
+    open_pack_header, open_pack_key, open_snapshot_key, seal_frame, seal_index_shard,
+    seal_pack_header, seal_pack_key, seal_snapshot_body, seal_snapshot_key,
 };
+use lodestore_format::index::{Index, index_object_key, open_shard, seal_shard_superseding};
 use lodestore_format::keys::{
     KdfCost, MasterKey, RecoveryKey, cdc_seed, open_password_slot, open_recovery_slot,
     seal_password_slot, seal_recovery_slot,
 };
-use lodestore_format::pack::{CODEC_RAW, PackBuilder, compress};
+use lodestore_format::locks::{
+    gc_manifest_key, open_gc_manifest, open_writer_marker, seal_gc_manifest, seal_writer_marker,
+    writer_done_key, writer_marker_key,
+};
+use lodestore_format::pack::{CODEC_RAW, PACK_PREFIX_LEN, PackBuilder, compress};
 use lodestore_format::pb;
+use prost::Message;
 use rand_chacha::ChaCha20Rng;
 use rand_chacha::rand_core::{Rng, SeedableRng};
 use serde_json::{Value, json};
@@ -37,6 +43,14 @@ const KDF: KdfCost = KdfCost {
 
 fn path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/v1/vectors.json")
+}
+
+fn index_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/v1/index-vectors.json")
+}
+
+fn gc_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/v1/gc-vectors.json")
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -254,6 +268,197 @@ fn vectors() -> Value {
     all.insert("hpke".into(), hpke());
     all.insert("pack".into(), pack());
     Value::Object(all)
+}
+
+fn gc_vectors() -> Value {
+    let key = [7u8; 32];
+    let repo_id = [1u8; 16];
+    let at = Some(pb::Timestamp {
+        seconds: 1_700_000_000,
+        nanos: 0,
+    });
+
+    let gc_id = [0x11u8; 16];
+    let manifest = pb::GcManifest {
+        version: 1,
+        gc_id: gc_id.to_vec(),
+        published: at,
+        candidate_packs: vec![vec![0xA1; 32], vec![0xB2; 32]],
+    };
+    let sealed_manifest = seal_gc_manifest(&key, &repo_id, &manifest, &mut entropy(14)).unwrap();
+    let manifest_key = gc_manifest_key(&gc_id);
+    assert_eq!(
+        open_gc_manifest(&key, &repo_id, &manifest_key, &sealed_manifest).unwrap(),
+        manifest
+    );
+
+    let writer_id = [0x22u8; 16];
+    let marker = pb::WriterMarker {
+        version: 1,
+        writer_id: writer_id.to_vec(),
+        hostname: b"vector-host".to_vec(),
+        started: at,
+    };
+    let sealed_marker = seal_writer_marker(&key, &repo_id, &marker, &mut entropy(15)).unwrap();
+    let marker_key = writer_marker_key(&writer_id);
+    assert_eq!(
+        open_writer_marker(&key, &repo_id, &marker_key, &sealed_marker).unwrap(),
+        marker
+    );
+
+    json!({
+        "key": hex(&key),
+        "repo_id": hex(&repo_id),
+        "gc_manifest": {
+            "chacha20_seed": 14,
+            "object": manifest_key,
+            "plaintext": hex(&manifest.encode_to_vec()),
+            "sealed": hex(&sealed_manifest),
+        },
+        "writer_marker": {
+            "chacha20_seed": 15,
+            "object": marker_key,
+            "done_object": writer_done_key(&writer_id),
+            "plaintext": hex(&marker.encode_to_vec()),
+            "sealed": hex(&sealed_marker),
+        },
+    })
+}
+
+#[test]
+fn gc_vectors_match() {
+    let committed: Value = serde_json::from_str(&fs::read_to_string(gc_path()).unwrap()).unwrap();
+    assert_eq!(gc_vectors(), committed);
+}
+
+#[test]
+#[ignore = "generates frozen fixtures; run once via LODE_GENERATE_FIXTURES=1 cargo nextest run -p lodestore-format --run-ignored only gc_vectors_generate_v1"]
+fn gc_vectors_generate_v1() {
+    if std::env::var_os("LODE_GENERATE_FIXTURES").is_none() {
+        eprintln!("skipped: set LODE_GENERATE_FIXTURES=1 to generate fixtures");
+        return;
+    }
+    let mut out = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(gc_path())
+        .unwrap_or_else(|e| panic!("{}: {e}; the v1 vectors are frozen", gc_path().display()));
+    let text = serde_json::to_string_pretty(&gc_vectors()).unwrap();
+    std::io::Write::write_all(&mut out, format!("{text}\n").as_bytes()).unwrap();
+}
+
+fn vector_record(pack: u8, blobs: &[u8]) -> pb::PackRecord {
+    let mut entries = Vec::new();
+    for (i, blob) in blobs.iter().enumerate() {
+        entries.extend_from_slice(&[*blob; 32]);
+        entries.push(BLOB_TYPE_DATA);
+        entries.extend_from_slice(&(PACK_PREFIX_LEN as u32 + 100 * i as u32).to_le_bytes());
+        entries.extend_from_slice(&100u32.to_le_bytes());
+        entries.extend_from_slice(&200u32.to_le_bytes());
+    }
+    pb::PackRecord {
+        pack_id: vec![pack; 32],
+        hpke_enc: vec![0; HPKE_ENC_LEN],
+        sealed_pack_key: vec![0; SEALED_KEY_LEN],
+        pack_size: 5000,
+        entries,
+    }
+}
+
+/// Which pack every blob resolves to when `shards` are loaded in the given
+/// order.
+fn resolve(shards: &[(BlobId, pb::IndexShard)], order: &[usize], blobs: &[u8]) -> Vec<String> {
+    let mut index = Index::default();
+    for i in order {
+        let (id, shard) = &shards[*i];
+        index.add_shard(*id, shard).unwrap();
+    }
+    blobs
+        .iter()
+        .map(|b| {
+            index
+                .get(&[*b; 32], BLOB_TYPE_DATA)
+                .map_or_else(String::new, |loc| hex(&loc.pack_id[..1]))
+        })
+        .collect()
+}
+
+/// `supersedes` only ranks shards: a superseded shard's record is used while
+/// no current shard places the blob, so no shard can hide a blob.
+fn index_vectors() -> Value {
+    let key = [7u8; 32];
+    let repo_id = [1u8; 16];
+    let seal = |packs: Vec<pb::PackRecord>, supersedes: Vec<BlobId>, seed: u8| {
+        seal_shard_superseding(&key, &repo_id, packs, supersedes, &mut entropy(seed)).unwrap()
+    };
+    let (b, b_bytes) = seal(vec![vector_record(0x10, &[4, 5])], vec![], 20);
+    let (c, c_bytes) = seal(vec![vector_record(0x11, &[4])], vec![], 21);
+    let (a, a_bytes) = seal(vec![vector_record(0x12, &[5])], vec![b], 22);
+    let (commit, commit_bytes) = seal(vec![], vec![a, b, c], 23);
+    let sealed = [
+        (b, b_bytes),
+        (c, c_bytes),
+        (a, a_bytes),
+        (commit, commit_bytes),
+    ];
+    let shards: Vec<(BlobId, pb::IndexShard)> = sealed
+        .iter()
+        .map(|(id, bytes)| (*id, open_shard(&key, &repo_id, id, bytes).unwrap()))
+        .collect();
+    let blobs = [4u8, 5, 6];
+    let orders: [&[usize]; 4] = [&[0, 1, 2], &[2, 1, 0], &[1, 2, 0], &[0, 1, 2, 3]];
+    let shard_json: Vec<Value> = sealed
+        .iter()
+        .zip(&shards)
+        .zip(20u8..)
+        .map(|(((id, bytes), (_, shard)), seed)| {
+            json!({
+                "chacha20_seed": seed,
+                "object": index_object_key(id),
+                "plaintext": hex(&shard.encode_to_vec()),
+                "sealed": hex(bytes),
+            })
+        })
+        .collect();
+    let resolved: Vec<Value> = orders
+        .iter()
+        .map(|order| {
+            json!({
+                "order": order,
+                "packs": resolve(&shards, order, &blobs),
+            })
+        })
+        .collect();
+    json!({
+        "key": hex(&key),
+        "repo_id": hex(&repo_id),
+        "shards": shard_json,
+        "blobs": blobs.iter().map(|b| hex(&[*b])).collect::<Vec<_>>(),
+        "resolved_pack": resolved,
+    })
+}
+
+#[test]
+fn index_vectors_match() {
+    let committed: Value =
+        serde_json::from_str(&fs::read_to_string(index_path()).unwrap()).unwrap();
+    assert_eq!(index_vectors(), committed);
+}
+
+#[test]
+#[ignore = "generates frozen fixtures; run once via LODE_GENERATE_FIXTURES=1 cargo nextest run -p lodestore-format --run-ignored only index_vectors_generate_v1"]
+fn index_vectors_generate_v1() {
+    if std::env::var_os("LODE_GENERATE_FIXTURES").is_none() {
+        eprintln!("skipped: set LODE_GENERATE_FIXTURES=1 to generate fixtures");
+        return;
+    }
+    let mut out = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(index_path())
+        .unwrap_or_else(|e| panic!("{}: {e}; the v1 vectors are frozen", index_path().display()));
+    let text = serde_json::to_string_pretty(&index_vectors()).unwrap();
+    std::io::Write::write_all(&mut out, format!("{text}\n").as_bytes()).unwrap();
 }
 
 #[test]

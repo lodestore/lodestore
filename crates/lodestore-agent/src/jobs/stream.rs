@@ -16,7 +16,7 @@ use lodestore_proto::agent::v1::{
 };
 use serde_json::{Value, json};
 
-use super::runner::open_writer;
+use super::runner::{gc_locks_gate, job_deadline, open_writer, time_limit};
 use super::{JobCtx, failed};
 
 const MAX_FRAME: usize = 1 << 20;
@@ -155,6 +155,7 @@ fn error_reply(code: &str, message: &str) -> Value {
 }
 
 async fn backup(ctx: &JobCtx, stream: &UnixStream, spec: &JobSpec) -> (JobFinished, Value) {
+    let deadline = job_deadline(spec);
     let mut writer =
         match open_writer(ctx.paths(), Arc::clone(&ctx.progress_cell().bytes_stored)).await {
             Ok(writer) => writer,
@@ -166,6 +167,17 @@ async fn backup(ctx: &JobCtx, stream: &UnixStream, spec: &JobSpec) -> (JobFinish
                 );
             }
         };
+    if let Some(refused) = gc_locks_gate(writer.gc_locks_denied(), spec.gc_locks_required) {
+        ctx.event(
+            JobEventLevel::Error,
+            &refused.error_code,
+            b"",
+            "",
+            &refused.error_message,
+        );
+        let reply = error_reply("backup_failed", &refused.error_message);
+        return (refused, reply);
+    }
     let Ok(inner) = stream.try_clone() else {
         let text = "cannot use the socket";
         return (
@@ -222,6 +234,7 @@ async fn backup(ctx: &JobCtx, stream: &UnixStream, spec: &JobSpec) -> (JobFinish
                 tags: spec.tags.clone(),
                 agent_id: Some(ctx.agent_id().as_bytes().to_vec()),
                 cancel: ctx.cancel_flag(),
+                deadline: Some(deadline),
                 ..Default::default()
             },
             &progress,
@@ -302,6 +315,18 @@ async fn backup(ctx: &JobCtx, stream: &UnixStream, spec: &JobSpec) -> (JobFinish
                 },
                 error_reply("backup_failed", text),
             )
+        }
+        Err(Error::DeadlineExceeded { limit_secs }) => {
+            let finished = time_limit(limit_secs);
+            ctx.event(
+                JobEventLevel::Error,
+                &finished.error_code,
+                b"",
+                "",
+                &finished.error_message,
+            );
+            let reply = error_reply("backup_failed", &finished.error_message);
+            (finished, reply)
         }
         Err(e) => {
             let (code, text) = if frames.broken {

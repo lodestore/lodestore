@@ -17,6 +17,7 @@ use zeroize::Zeroizing;
 use crate::auth::AuthUser;
 use crate::db::now_ms;
 use crate::error::{ApiError, ErrorBody};
+use crate::maintenance::gc::api::CleanupSummary;
 use crate::repos::checks::{
     Opened, open_draft, run_checks, run_probe, split_secret_options, to_result,
 };
@@ -324,7 +325,7 @@ async fn register(state: &AppState, r: Registration) -> Result<RepositorySummary
         .await?
         .ok_or_else(|| ApiError::Internal(anyhow::anyhow!("the new repository vanished")))?;
     state.repos.lock().unlocked.insert(id, true);
-    Ok(summary_of(&row, 0, Some(true)))
+    Ok(summary_of(&row, 0, Some(true), CleanupSummary::OFF))
 }
 
 #[derive(Deserialize, ToSchema)]

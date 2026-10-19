@@ -7,6 +7,7 @@ use opendal::layers::{RetryLayer, TimeoutLayer};
 use opendal::{ErrorKind, Operator, services};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+use super::purge::{BlobPurge, PurgeOutcome, deleted_keys_op, purge_op};
 use super::{BlobDelete, BlobError, BlobStore, ListEntry, Presigned};
 use crate::error::{Error, Result};
 
@@ -83,7 +84,7 @@ impl fmt::Debug for StaticCredentials {
 /// Repository in an S3 bucket, path-style addressing. Every write carries
 /// `If-None-Match: *`; there is no unconditional write and no delete.
 pub struct S3Store {
-    op: Operator,
+    pub(super) op: Operator,
 }
 
 impl fmt::Debug for S3Store {
@@ -327,6 +328,20 @@ impl BlobDelete for S3Store {
     async fn delete(&self, key: &str) -> std::result::Result<(), BlobError> {
         check_key(key)?;
         self.op.delete(key).await.map_err(map_err)
+    }
+}
+
+impl BlobPurge for S3Store {
+    async fn purge(&self, key: &str) -> PurgeOutcome {
+        purge_op(&self.op, key).await
+    }
+
+    async fn deleted_keys(
+        &self,
+        prefix: &str,
+        older_than_ms: i64,
+    ) -> std::result::Result<Vec<String>, BlobError> {
+        deleted_keys_op(&self.op, prefix, older_than_ms).await
     }
 }
 

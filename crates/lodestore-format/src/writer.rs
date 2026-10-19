@@ -12,6 +12,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant, SystemTime};
 
 use hpke::Serializable;
 use rustix::fs::{Stat, fstat, readlinkat};
@@ -27,6 +28,7 @@ use crate::fs::walk::{CACHEDIR_TAG, ExtentReader, WalkOptions, Walker, data_exte
 use crate::fs::{conv, hostname, meta, now};
 use crate::index::{Index, index_object_key, seal_shard};
 use crate::keys::WriteKeys;
+use crate::locks;
 use crate::pack::{MAX_TREE_ULEN, PACK_TARGET_SIZE, PackBuilder, pack_object_key, parse_entries};
 use crate::pb;
 use crate::snapshot::{ParentTree, seal_snapshot, snapshot_object_key};
@@ -81,6 +83,58 @@ pub struct BackupOptions<'a> {
     pub tree_sink: Option<TreeSinkFn<'a>>,
     /// Recorded in the manifest as `agent_id`.
     pub agent_id: Option<Vec<u8>>,
+    /// Once expired the run stops like a cancelled one (open packs are
+    /// uploaded and indexed) and returns `Error::DeadlineExceeded`. It is
+    /// checked again right before the snapshot is written, so no snapshot is
+    /// ever written past it.
+    pub deadline: Option<Deadline>,
+}
+
+/// A time limit that survives a suspended machine: it counts as elapsed the
+/// larger of the monotonic and the wall-clock time since the start, so a wall
+/// clock that jumps forward expires it and one that jumps back does not extend it.
+#[derive(Debug, Clone, Copy)]
+pub struct Deadline {
+    started: Instant,
+    wall: SystemTime,
+    limit: Duration,
+}
+
+impl Deadline {
+    pub fn starting_now(limit: Duration) -> Self {
+        Deadline {
+            started: Instant::now(),
+            wall: SystemTime::now(),
+            limit,
+        }
+    }
+
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn started_at(started: Instant, wall: SystemTime, limit: Duration) -> Self {
+        Deadline {
+            started,
+            wall,
+            limit,
+        }
+    }
+
+    pub fn limit(&self) -> Duration {
+        self.limit
+    }
+
+    pub fn expired(&self) -> bool {
+        let wall = self.wall.elapsed().unwrap_or(Duration::ZERO);
+        self.started.elapsed().max(wall) >= self.limit
+    }
+
+    fn check(deadline: Option<Deadline>) -> Result<()> {
+        match deadline {
+            Some(d) if d.expired() => Err(Error::DeadlineExceeded {
+                limit_secs: d.limit.as_secs(),
+            }),
+            _ => Ok(()),
+        }
+    }
 }
 
 /// A warning or error as it is found.
@@ -108,6 +162,7 @@ impl Default for BackupOptions<'_> {
             on_issue: None,
             tree_sink: None,
             agent_id: None,
+            deadline: None,
         }
     }
 }
@@ -147,6 +202,7 @@ pub struct Writer<S: BlobStore> {
     keys: WriteKeys,
     index: Index,
     entropy: Entropy,
+    gc_locks_denied: bool,
     /// Open packs of the conformance hooks, see [`Writer::put_blob_raw`].
     #[cfg(feature = "test-hooks")]
     raw: [Option<PackBuilder>; 2],
@@ -170,13 +226,16 @@ impl<S: BlobStore> Writer<S> {
                 "the repository public key differs from the one in the keys".into(),
             ));
         }
+        let gc_locks = locks::read_gc_locks(&store, &keys.k_idx, &keys.repo_id).await?;
         let mut index = Index::default();
+        index.exclude_packs(gc_locks.candidate_packs());
         index.load_all(&store, &keys.k_idx, &keys.repo_id).await?;
         Ok(Writer {
             store,
             keys,
             index,
             entropy: Entropy::os(),
+            gc_locks_denied: gc_locks.denied,
             #[cfg(feature = "test-hooks")]
             raw: [None, None],
         })
@@ -193,6 +252,12 @@ impl<S: BlobStore> Writer<S> {
         keys.verify_config(&config_bytes)?;
         let config = config::decode(&config_bytes)?;
         Self::new(store, keys, &config).await
+    }
+
+    /// True when the store refused to list or read `locks/`: packs marked for
+    /// deletion may then still be trusted for deduplication.
+    pub fn gc_locks_denied(&self) -> bool {
+        self.gc_locks_denied
     }
 
     /// `(object key, reason)` of every listed index shard that could not be
@@ -259,17 +324,17 @@ impl<S: BlobStore> Writer<S> {
         };
         let top = match walked {
             Ok(top) => top,
-            Err(Error::Interrupted) => {
+            Err(e @ (Error::Interrupted | Error::DeadlineExceeded { .. })) => {
                 run.wind_down().await?;
-                return Err(Error::Interrupted);
+                return Err(e);
             }
             Err(e) => return Err(e),
         };
         if let Some(scan) = scan.as_mut() {
             scan.finish();
-            if run.cancelled() {
+            if let Some(e) = run.stopped() {
                 run.wind_down().await?;
-                return Err(Error::Interrupted);
+                return Err(e);
             }
             run.report(false, b"");
         }
@@ -300,6 +365,7 @@ impl<S: BlobStore> Writer<S> {
             program_version: format!("lodestore-format {}", env!("CARGO_PKG_VERSION")),
             ..Default::default()
         };
+        Deadline::check(options.deadline)?;
         let snapshot_id = self.put_snapshot(&snapshot).await?;
         Ok(BackupOutcome {
             snapshot_id,
@@ -363,8 +429,8 @@ impl<S: BlobStore> Writer<S> {
                     break;
                 }
             };
-            if run.cancelled() {
-                failure = Some(Error::Interrupted);
+            if let Some(e) = run.stopped() {
+                failure = Some(e);
                 break;
             }
             total += chunk.data.len() as u64;
@@ -414,6 +480,7 @@ impl<S: BlobStore> Writer<S> {
             program_version: format!("lodestore-format {}", env!("CARGO_PKG_VERSION")),
             ..Default::default()
         };
+        Deadline::check(options.deadline)?;
         let snapshot_id = self.put_snapshot(&snapshot).await?;
         Ok(BackupOutcome {
             snapshot_id,
@@ -661,6 +728,7 @@ struct Session<'a, 'p, S: BlobStore> {
     pack_target: usize,
     flush_packs: usize,
     cancel: Arc<AtomicBool>,
+    deadline: Option<Deadline>,
     on_issue: Option<IssueFn<'p>>,
     tree_sink: Option<TreeSinkFn<'p>>,
     scan: Option<Arc<ScanTotals>>,
@@ -693,6 +761,7 @@ impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
             pack_target: PACK_TARGET_SIZE,
             flush_packs: INDEX_FLUSH_PACKS,
             cancel: Arc::default(),
+            deadline: None,
             on_issue: None,
             tree_sink: None,
             scan: None,
@@ -708,6 +777,7 @@ impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
         self.pack_target = options.pack_target_size;
         self.flush_packs = options.index_flush_packs.max(1);
         self.cancel = Arc::clone(&options.cancel);
+        self.deadline = options.deadline;
         self.on_issue = options.on_issue.take();
         self.tree_sink = options.tree_sink.take();
     }
@@ -1062,8 +1132,8 @@ impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
         walked: &Stat,
         path: &[u8],
     ) -> Result<Option<pb::Node>> {
-        if self.cancelled() {
-            return Err(Error::Interrupted);
+        if let Some(e) = self.stopped() {
+            return Err(e);
         }
         self.cur_read = 0;
         self.report(true, path);
@@ -1168,8 +1238,8 @@ impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
                 }
                 Err(e) => return Err(e),
             };
-            if self.cancelled() {
-                return Err(Error::Interrupted);
+            if let Some(e) = self.stopped() {
+                return Err(e);
             }
             total += chunk.data.len() as u64;
             self.add_blob(BLOB_TYPE_DATA, chunk.id, &chunk.data).await?;
@@ -1277,8 +1347,12 @@ impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
         });
     }
 
-    fn cancelled(&self) -> bool {
-        self.cancel.load(Ordering::Relaxed)
+    /// Why the run has to stop now: cancelled, or past its deadline.
+    fn stopped(&self) -> Option<Error> {
+        if self.cancel.load(Ordering::Relaxed) {
+            return Some(Error::Interrupted);
+        }
+        Deadline::check(self.deadline).err()
     }
 
     /// Takes the content of `previous` for `node` when the file looks

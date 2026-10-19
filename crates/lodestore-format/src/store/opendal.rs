@@ -6,6 +6,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use opendal::{ErrorKind, Operator};
 
+use super::purge::{BlobPurge, PurgeOutcome, deleted_keys_op, purge_op};
 use super::s3::{check_key, layered, list_op, map_err, modified_op, presign_op};
 use super::{BlobDelete, BlobError, BlobStore, ListEntry, Presigned};
 use crate::error::{Error, Result};
@@ -14,7 +15,7 @@ use crate::error::{Error, Result};
 /// experimental backends; a scheme whose service was not compiled in is
 /// reported as unavailable instead of failing the build.
 pub struct OpendalStore {
-    op: Operator,
+    pub(super) op: Operator,
     conditional: bool,
 }
 
@@ -122,5 +123,19 @@ impl BlobDelete for OpendalStore {
     async fn delete(&self, key: &str) -> std::result::Result<(), BlobError> {
         check_key(key)?;
         self.op.delete(key).await.map_err(map_err)
+    }
+}
+
+impl BlobPurge for OpendalStore {
+    async fn purge(&self, key: &str) -> PurgeOutcome {
+        purge_op(&self.op, key).await
+    }
+
+    async fn deleted_keys(
+        &self,
+        prefix: &str,
+        older_than_ms: i64,
+    ) -> std::result::Result<Vec<String>, BlobError> {
+        deleted_keys_op(&self.op, prefix, older_than_ms).await
     }
 }

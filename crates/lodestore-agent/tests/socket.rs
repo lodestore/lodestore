@@ -296,6 +296,7 @@ async fn socket_records_caller_and_policy_tag() {
     assert_eq!(spec.stdin_name, "app.dump");
     assert_eq!(spec.policy_name, "db");
     assert_eq!(spec.tags, ["policy=db"]);
+    assert!(spec.gc_locks_required);
     let reports = run.hub.reports();
     assert_eq!(reports.len(), 1);
     assert_eq!(reports[0].created.as_ref(), Some(jobs[0]));

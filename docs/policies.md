@@ -27,6 +27,7 @@ spec:
     nice: 10
     ioniceClass: best-effort
     ioniceLevel: 4
+    maxRuntime: 12h
 ```
 
 Unknown fields are rejected with the line and column of the typo.
@@ -89,5 +90,8 @@ Details that matter:
 | `nice` | CPU priority of the backup, `0` to `19`. Higher means lower priority. |
 | `ioniceClass` | `best-effort` or `idle`. Leave it out for the system default. |
 | `ioniceLevel` | `0` (highest) to `7`. Only valid with `ioniceClass: best-effort`. |
+| `maxRuntime` | Time limit of one backup, from `1h` to `7d`. The default is `12h`. |
+
+A backup that does not finish within `maxRuntime` is stopped and does not create a snapshot. The server marks a backup that is still active an hour after its limit as failed with the error `time_limit`. The limit is also what lets garbage collection prove that no running backup still references data it is about to delete, so a lower value shortens the pause before deletion.
 
 `nice` and the I/O priority apply to the backup on the host and are inherited by hooks. The I/O priority is best effort: the kernel honours it only with an I/O scheduler that supports priorities, such as BFQ (or CFQ on old kernels). With `none` or `mq-deadline`, common on NVMe disks, it has little or no effect. `idle` can make backups much slower on a busy disk.

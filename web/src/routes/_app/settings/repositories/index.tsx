@@ -12,7 +12,9 @@ import { Illustration } from "@/components/brand/illustration";
 import { PathText } from "@/components/path-text";
 import { RelativeTime } from "@/components/relative-time";
 import { AgentKeyBadge } from "@/components/repos/agent-key-badge";
+import { RECLAIM_ANCHOR } from "@/components/repos/reclaim/reclaim-card";
 import { SettingsNav } from "@/components/settings/settings-nav";
+import { StatusBadge } from "@/components/status-badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -55,8 +57,13 @@ export const Route = createFileRoute("/_app/settings/repositories/")({
 
 const COLUMNS = Object.entries(copy.repos.columns);
 const WIDE_ONLY = new Set(["agentKey", "lastChecked"]);
+const LARGE_ONLY = new Set(["backend", "hosts"]);
 const wideOnly = (key: string) =>
-	WIDE_ONLY.has(key) ? "hidden xl:table-cell" : undefined;
+	WIDE_ONLY.has(key)
+		? "hidden xl:table-cell"
+		: LARGE_ONLY.has(key)
+			? "hidden lg:table-cell"
+			: undefined;
 
 function AddRepositoryButton() {
 	return (
@@ -81,6 +88,57 @@ function Location({ value }: { value: string }) {
 				<PathText value={value} />
 			</TooltipContent>
 		</Tooltip>
+	);
+}
+
+function Cleanup({ repository }: { repository: RepositorySummary }) {
+	const text = copy.repos.cleanup;
+	const { state, at } = repository.cleanup;
+	const when = at != null && at > Date.now() && (
+		<RelativeTime value={new Date(at)} />
+	);
+	const body =
+		state === "running" ? (
+			<StatusBadge status="running">{text.running}</StatusBadge>
+		) : state === "waiting" ? (
+			<span className="flex flex-wrap items-center gap-x-2">
+				<StatusBadge status="waiting">{text.waiting}</StatusBadge>
+				{when && (
+					<span className="text-sm text-muted-foreground">
+						{text.deletes}
+						{when}
+					</span>
+				)}
+			</span>
+		) : state === "postponed" ? (
+			<StatusBadge status="warnings">{text.postponed}</StatusBadge>
+		) : state === "stopped" ? (
+			<StatusBadge status="failed">{text.stopped}</StatusBadge>
+		) : state === "idle" ? (
+			<span className="text-sm">
+				{when ? (
+					<>
+						{text.next}
+						{when}
+					</>
+				) : (
+					text.manualOnly
+				)}
+			</span>
+		) : (
+			<span className="text-sm text-muted-foreground">
+				{state === "unknown" ? copy.common.dash : text.off}
+			</span>
+		);
+	return (
+		<Link
+			to="/settings/repositories/$id"
+			params={{ id: repository.id }}
+			hash={RECLAIM_ANCHOR}
+			className="inline-flex rounded-sm"
+		>
+			<span className="sr-only">{text.open(repository.name)}</span> {body}
+		</Link>
 	);
 }
 
@@ -228,7 +286,7 @@ function RepositoriesPage() {
 														{repository.name}
 													</Link>
 												</TableCell>
-												<TableCell className="px-4">
+												<TableCell className={cn("px-4", wideOnly("backend"))}>
 													<div className="flex gap-1">
 														<Badge variant="secondary">
 															{repository.backend}
@@ -243,7 +301,7 @@ function RepositoriesPage() {
 												<TableCell className="px-4">
 													<Location value={repository.location_display} />
 												</TableCell>
-												<TableCell className="px-4">
+												<TableCell className={cn("px-4", wideOnly("hosts"))}>
 													{repository.hosts_count}
 												</TableCell>
 												<TableCell className={cn("px-4", wideOnly("agentKey"))}>
@@ -263,6 +321,9 @@ function RepositoriesPage() {
 													) : (
 														copy.common.dash
 													)}
+												</TableCell>
+												<TableCell className="px-4">
+													<Cleanup repository={repository} />
 												</TableCell>
 												<TableCell className="px-4">
 													<RowActions repository={repository} />

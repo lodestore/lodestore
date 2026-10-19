@@ -260,6 +260,7 @@ async fn finish(state: &AppState, id: &str, sent: u64, error_code: Option<&str>)
             )
         ),
         (status = 404, description = "The link was already used or expired, or the snapshot is gone", body = ErrorBody),
+        (status = 409, description = "Cleanup is deleting packs in the repository; the link stays valid", body = ErrorBody),
         (status = 502, description = "The repository storage is unavailable", body = ErrorBody),
     )
 )]
@@ -268,6 +269,22 @@ async fn download_archive(
     _auth: Scoped<RestoreScope>,
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
+    let repository_id: Option<String> =
+        sqlx::query("SELECT repository_id FROM downloads WHERE id = $1")
+            .bind(&id)
+            .fetch_optional(&state.db.pool)
+            .await?
+            .map(|row| row.try_get("repository_id"))
+            .transpose()?;
+    if let Some(repository_id) = repository_id
+        && crate::maintenance::gc::db::sweeping(&state, Some(&repository_id)).await?
+    {
+        return Err(ApiError::Conflict(
+            "Cleanup is deleting packs in this repository. Use the link again when it has \
+             finished."
+                .into(),
+        ));
+    }
     let now = now_ms();
     let claimed = sqlx::query(
         "UPDATE downloads SET state = 'running', started_at = $1 \

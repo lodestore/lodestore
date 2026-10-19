@@ -7,6 +7,7 @@ use std::time::UNIX_EPOCH;
 use bytes::Bytes;
 use rustix::fs::{AtFlags, CWD, Mode, OFlags};
 
+use super::purge::{BlobPurge, PurgeOutcome};
 use super::{BlobDelete, BlobError, BlobStore, ListEntry};
 
 const TMP_PREFIX: &str = ".lode-tmp-";
@@ -259,6 +260,29 @@ impl BlobDelete for LocalFsStore {
     }
 }
 
+impl BlobPurge for LocalFsStore {
+    async fn purge(&self, key: &str) -> PurgeOutcome {
+        let path = match self.path_of(key) {
+            Ok(p) => p,
+            Err(e) => return PurgeOutcome::Failed(e),
+        };
+        let bytes = std::fs::metadata(&path).map_or(0, |m| m.len());
+        match self.delete(key).await {
+            Ok(()) => PurgeOutcome::Purged { versions: 1, bytes },
+            Err(BlobError::NotFound) => PurgeOutcome::NotFound,
+            Err(e) => PurgeOutcome::Failed(e),
+        }
+    }
+
+    async fn deleted_keys(
+        &self,
+        _prefix: &str,
+        _older_than_ms: i64,
+    ) -> Result<Vec<String>, BlobError> {
+        Ok(Vec::new())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -377,5 +401,37 @@ mod tests {
             store.modified_ms("snapshots/none").await,
             Err(BlobError::NotFound)
         ));
+    }
+
+    #[tokio::test]
+    async fn purge_local_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalFsStore::new(dir.path().join("repo"));
+        store
+            .put_if_absent("packs/ab/one", Bytes::from_static(b"12345"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            store.purge("packs/ab/one").await,
+            PurgeOutcome::Purged {
+                versions: 1,
+                bytes: 5
+            }
+        ));
+        assert!(matches!(
+            store.purge("packs/ab/one").await,
+            PurgeOutcome::NotFound
+        ));
+        assert!(matches!(
+            store.purge("../escape").await,
+            PurgeOutcome::Failed(_)
+        ));
+        assert!(
+            store
+                .deleted_keys("packs/", i64::MAX)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

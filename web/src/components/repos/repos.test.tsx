@@ -66,6 +66,7 @@ describe("repositories list", () => {
 			"Hosts",
 			"Agent key",
 			"Last checked",
+			"Cleanup",
 			"Actions",
 		]);
 		expect(screen.getByText("archive")).toBeInTheDocument();
@@ -165,6 +166,31 @@ describe("repositories list", () => {
 			await screen.findByRole("menuitem", { name: "Check storage again" }),
 		);
 		await waitFor(() => expect(checked).toBe(1));
+	});
+
+	it("shows the cleanup state and links it to the cleanup card", async () => {
+		useSignedIn({
+			repositories: [
+				{
+					...s3Repository,
+					cleanup: { state: "waiting", at: Date.now() + 2 * DAY },
+				},
+				{ ...azureRepository, cleanup: { state: "stopped", at: null } },
+			],
+		});
+		renderApp("/settings/repositories");
+
+		const waiting = await screen.findByRole("link", {
+			name: /^Cleanup of main: Waiting/,
+		});
+		expect(waiting).toHaveTextContent("deletes in 2 days");
+		expect(waiting).toHaveAttribute(
+			"href",
+			"/settings/repositories/repo-1#free-up-space",
+		);
+		expect(
+			screen.getByRole("link", { name: /^Cleanup of archive: Stopped$/ }),
+		).toBeInTheDocument();
 	});
 
 	it("links the repository name to its page", async () => {
@@ -269,7 +295,7 @@ describe("repository page", () => {
 			screen.getByRole("button", { name: "Check storage again" }),
 		);
 
-		expect(await screen.findByText("now")).toBeInTheDocument();
+		expect(await screen.findByText("just now")).toBeInTheDocument();
 		expect(mock.rechecks()).toBe(1);
 	});
 

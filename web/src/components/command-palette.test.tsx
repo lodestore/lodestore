@@ -264,6 +264,29 @@ describe("command palette hosts and repositories", () => {
 		);
 	});
 
+	it("opens the cleanup card from Free up space, also when searching cleanup", async () => {
+		mockHosts([]);
+		const { user, router } = await openPalette();
+		await user.keyboard("cleanup");
+		await user.click(screen.getByRole("option", { name: "Free up space" }));
+		await waitFor(() =>
+			expect(router.state.location.pathname).toBe(
+				`/settings/repositories/${repository.id}`,
+			),
+		);
+		expect(router.state.location.hash).toBe("free-up-space");
+	});
+
+	it("matches cleanup keywords by word start only", async () => {
+		mockHosts([]);
+		const { user, dialog } = await openPalette();
+		await user.keyboard("up c");
+		expect(optionTexts(dialog, "Free up space")).toHaveLength(0);
+		await user.clear(within(dialog).getByRole("combobox"));
+		await user.keyboard("garb");
+		expect(optionTexts(dialog, "Free up space")).toHaveLength(1);
+	});
+
 	it("opens the Add host dialog when a repository exists", async () => {
 		mockHosts([]);
 		const { user, router } = await openPalette();

@@ -1891,6 +1891,94 @@ describe("Limits section", () => {
 		expect(screen.getByRole("button", { name: "Save policy" })).toBeDisabled();
 	}, 15_000);
 
+	it("limits max run time round trips", async () => {
+		useSignedIn();
+		const requests = mockValidate();
+		mockPolicy(makeDetail("nightly", {}, { limits: { maxRuntime: "30h" } }));
+		renderApp("/policies/nightly");
+		await screen.findByRole("heading", { name: "nightly" });
+
+		expect(
+			screen.getByRole("button", { name: "Limits · max run 30h" }),
+		).toHaveAttribute("aria-expanded", "true");
+		const field = screen.getByRole("textbox", { name: "Max run time" });
+		expect(field).toHaveValue("30h");
+		expect(field).toHaveAttribute("placeholder", "12h");
+		expect(
+			screen.getByText(
+				"A backup that runs longer stops and saves no snapshot.",
+			),
+		).toBeVisible();
+
+		const user = userEvent.setup();
+		await user.type(
+			screen.getByRole("textbox", { name: "Upload rate" }),
+			"20MiB/s",
+		);
+		await waitFor(() =>
+			expect(requests.at(-1)?.policy?.spec.limits).toEqual({
+				uploadRate: "20MiB/s",
+				maxRuntime: "30h",
+			}),
+		);
+
+		await user.clear(field);
+		await user.clear(screen.getByRole("textbox", { name: "Upload rate" }));
+		await waitFor(() =>
+			expect(requests.at(-1)?.policy?.spec.limits).toBeUndefined(),
+		);
+	}, 15_000);
+
+	it("limits max run time error under field", async () => {
+		mockValidate((body) =>
+			body.policy?.spec.limits?.maxRuntime === "90m"
+				? {
+						valid: false,
+						errors: [
+							{
+								path: "spec.limits.maxRuntime",
+								message: "Enter a time from 1h to 7d.",
+							},
+						],
+						name_taken: false,
+						warnings: [],
+					}
+				: validResponse(),
+		);
+		const user = await openNew();
+		await user.click(
+			screen.getByRole("button", { name: "Limits · no limits" }),
+		);
+		const field = screen.getByRole("textbox", { name: "Max run time" });
+		await user.type(field, "90m");
+
+		const message = await screen.findByText("Enter a time from 1h to 7d.", {
+			selector: "p[id]",
+		});
+		await waitFor(() => expect(field).toHaveAttribute("aria-invalid", "true"));
+		expect(field.getAttribute("aria-describedby")).toContain(message.id);
+	}, 15_000);
+
+	it("limits max run time in yaml", async () => {
+		const requests = mockValidate((body) =>
+			validResponse({
+				yaml: `maxRuntime: ${body.policy?.spec.limits?.maxRuntime ?? "none"}\n`,
+			}),
+		);
+		const user = await openNew();
+		const yaml = screen.getByRole("textbox", { name: "Policy YAML" });
+		await user.click(
+			screen.getByRole("button", { name: "Limits · no limits" }),
+		);
+		await user.type(
+			screen.getByRole("textbox", { name: "Max run time" }),
+			"12h",
+		);
+
+		await waitFor(() => expect(yaml).toHaveValue("maxRuntime: 12h\n"));
+		expect(requests.at(-1)?.policy?.spec.limits).toEqual({ maxRuntime: "12h" });
+	}, 15_000);
+
 	it("limits edit updates yaml", async () => {
 		const requests = mockValidate((body) =>
 			validResponse({

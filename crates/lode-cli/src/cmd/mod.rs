@@ -2,6 +2,7 @@ mod apply;
 mod backup;
 mod backup_agent;
 mod dump;
+mod gc;
 mod key;
 mod ls;
 mod repo;
@@ -17,6 +18,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use crate::cli::{Cli, Command, UsageError};
+use crate::client::Client;
 use crate::open::resolve_repository;
 use crate::output::Output;
 use crate::profile::load_profile;
@@ -53,6 +55,10 @@ pub fn run(cli: Cli) -> Result<u8> {
         }
         Command::Apply(args) => {
             return rt.block_on(apply::run(args, profile.as_ref(), out));
+        }
+        Command::Gc { server, args } => {
+            let client = Client::resolve(server.server, profile.as_ref())?;
+            return rt.block_on(gc::run(&client, out, args));
         }
         other => other,
     };
@@ -92,7 +98,7 @@ pub fn run(cli: Cli) -> Result<u8> {
                 target,
                 flags,
             } => restore::run(&url, &secret, out, &snapshot, &target, flags).await,
-            Command::Server { .. } | Command::Apply(_) => {
+            Command::Server { .. } | Command::Apply(_) | Command::Gc { .. } => {
                 unreachable!("server commands return before this point")
             }
         }

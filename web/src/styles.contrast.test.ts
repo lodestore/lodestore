@@ -23,6 +23,17 @@ function luminance(hex: string) {
 	return 0.2126 * r + 0.7152 * g + 0.0722 * b;
 }
 
+function blend(fg: string, bg: string, alpha: number) {
+	const mixed = [1, 3, 5].map((i) => {
+		const f = Number.parseInt(fg.slice(i, i + 2), 16);
+		const g = Number.parseInt(bg.slice(i, i + 2), 16);
+		return Math.round(f * alpha + g * (1 - alpha))
+			.toString(16)
+			.padStart(2, "0");
+	});
+	return `#${mixed.join("")}`;
+}
+
 function contrast(a: string, b: string) {
 	const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
 	return (hi + 0.05) / (lo + 0.05);
@@ -93,4 +104,13 @@ function check(
 describe.each(Object.entries(themes))("%s theme contrast", (theme, t) => {
 	it("text pairs reach 4.5:1", () => check(theme, t, text, 4.5));
 	it("borders and graphics reach 3:1", () => check(theme, t, graphics, 3));
+
+	it("the destructive alert description tint reaches 4.5:1 on its card", () => {
+		const tint = blend(t.destructive, t.card, 0.9);
+		const ratio = contrast(tint, t.card);
+		expect(
+			ratio,
+			`${theme}: destructive at 90% on --card is ${ratio.toFixed(2)}:1`,
+		).toBeGreaterThanOrEqual(4.5);
+	});
 });

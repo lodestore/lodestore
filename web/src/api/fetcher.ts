@@ -1,19 +1,26 @@
+import type { FieldError, PreflightProblem } from "@/api/gen/model";
+
 export class ApiError extends Error {
 	readonly status: number;
 	readonly code: string;
 	readonly retryAfter?: number;
+	readonly problems?: PreflightProblem[];
+	readonly errors?: FieldError[];
 
 	constructor(
 		status: number,
 		code: string,
 		message: string,
 		retryAfter?: number,
+		details: { problems?: PreflightProblem[]; errors?: FieldError[] } = {},
 	) {
 		super(message);
 		this.name = "ApiError";
 		this.status = status;
 		this.code = code;
 		this.retryAfter = retryAfter;
+		this.problems = details.problems;
+		this.errors = details.errors;
 	}
 }
 
@@ -88,13 +95,18 @@ export async function apiFetch<T>(
 		const body = (await response.json().catch(() => null)) as {
 			code?: string;
 			message?: string;
+			problems?: PreflightProblem[];
+			errors?: FieldError[];
 		} | null;
 		const retryAfter = Number(response.headers.get("Retry-After"));
 		const error = new ApiError(
 			response.status,
 			body?.code ?? "unknown",
-			body?.message ?? response.statusText,
+			body?.message ??
+				body?.errors?.map((e) => e.message).join(" ") ??
+				response.statusText,
 			Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : undefined,
+			{ problems: body?.problems, errors: body?.errors },
 		);
 		if (response.status === 401 && !AUTH_PATHS.includes(url)) {
 			unauthorizedHandler?.();

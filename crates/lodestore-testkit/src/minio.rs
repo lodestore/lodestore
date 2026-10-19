@@ -143,10 +143,10 @@ pub fn write_only_policy(bucket: &str) -> serde_json::Value {
             {"Effect": "Allow", "Action": ["s3:PutObject"],
              "Resource": [arn("packs/*"), arn("index/*"), arn("snapshots/*")]},
             {"Effect": "Allow", "Action": ["s3:GetObject"],
-             "Resource": [arn("config"), arn("index/*")]},
+             "Resource": [arn("config"), arn("index/*"), arn("locks/*")]},
             {"Effect": "Allow", "Action": ["s3:ListBucket"],
              "Resource": [format!("arn:aws:s3:::{bucket}")],
-             "Condition": {"StringLike": {"s3:prefix": ["index/*", "index/"]}}},
+             "Condition": {"StringLike": {"s3:prefix": ["index/*", "index/", "locks/*", "locks/"]}}},
         ],
     })
 }
@@ -263,6 +263,13 @@ impl MinioServer {
             .expect("mc mb");
     }
 
+    pub async fn create_versioned_bucket(&self, name: &str) {
+        self.create_bucket(name).await;
+        self.mc(&["version", "enable", &format!("lode/{name}")])
+            .await
+            .expect("mc version enable");
+    }
+
     /// A bucket with Object Lock and a default COMPLIANCE retention of a day.
     pub async fn create_locked_bucket(&self, name: &str) {
         let target = format!("lode/{name}");
@@ -274,8 +281,34 @@ impl MinioServer {
             .expect("mc retention set");
     }
 
+    /// A bucket with Object Lock and a default GOVERNANCE retention of a day.
+    pub async fn create_governance_bucket(&self, name: &str) {
+        let target = format!("lode/{name}");
+        self.mc(&["mb", "--with-lock", &target])
+            .await
+            .expect("mc mb --with-lock");
+        self.mc(&["retention", "set", "--default", "GOVERNANCE", "1d", &target])
+            .await
+            .expect("mc retention set");
+    }
+
+    /// Drops the retention of one version as root, standing in for the lock
+    /// running out.
+    pub async fn clear_retention(&self, bucket: &str, key: &str, version_id: &str) {
+        self.mc(&[
+            "retention",
+            "clear",
+            "--version-id",
+            version_id,
+            &format!("lode/{bucket}/{key}"),
+        ])
+        .await
+        .expect("mc retention clear");
+    }
+
     /// A user that can add objects under `packs/`, `index/` and `snapshots/`,
-    /// read `config` and `index/`, and list `index/`, but never delete.
+    /// read `config`, `index/` and `locks/`, and list `index/` and `locks/`, but
+    /// never delete and never write under `locks/`.
     pub async fn create_write_only_user(&self, bucket: &str) -> (String, String) {
         self.create_user_with_policy(bucket, &write_only_policy(bucket).to_string())
             .await
@@ -331,6 +364,29 @@ impl MinioServer {
                 v["key"].as_str() == Some(name) && v["isDeleteMarker"].as_bool() != Some(true)
             })
             .filter_map(|v| v["versionId"].as_str().map(str::to_owned))
+            .collect()
+    }
+
+    /// Every version id of the object with whether it is a delete marker,
+    /// newest first.
+    pub async fn object_versions_all(&self, bucket: &str, key: &str) -> Vec<(String, bool)> {
+        let out = self
+            .mc(&[
+                "ls",
+                "--versions",
+                "--json",
+                &format!("lode/{bucket}/{key}"),
+            ])
+            .await
+            .expect("mc ls --versions");
+        let name = key.rsplit('/').next().unwrap_or(key);
+        out.lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter(|v| v["key"].as_str() == Some(name))
+            .filter_map(|v| {
+                let id = v["versionId"].as_str()?.to_owned();
+                Some((id, v["isDeleteMarker"].as_bool() == Some(true)))
+            })
             .collect()
     }
 

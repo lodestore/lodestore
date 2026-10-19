@@ -145,3 +145,17 @@ After every backup that ends as succeeded or with warnings, the server applies t
 
 - Suspicious marks and the anomaly details live in the database only. If the database is lost and the catalog is rebuilt from the bucket, the marks are gone; the rebuilt snapshots are not bound to a job, so retention neither counts nor forgets them, and old history simply stops being rotated.
 - A forgotten snapshot cannot be brought back without bucket versioning. The interface shows a preview of what a rule change would forget and asks for confirmation before it saves a tighter rule, to guard against an accidental change.
+
+## Garbage collection and storage keys
+
+Forgetting a snapshot only removes its manifest. Space comes back when the server runs garbage collection, which deletes packs and index shards that no remaining snapshot references. Deletion is a server-only act.
+
+**What an agent key can do around `locks/`.**
+
+- Read: the agent key may list and read `locks/`. Garbage collection publishes the candidate packs of a cycle there, and a running backup checks them before it reuses an existing pack.
+- Not write: the agent key has no `PutObject` on `locks/`, so a compromised host cannot plant a candidate list or block a collection cycle with markers that never close.
+- Not delete: no `Delete*` action is granted on any prefix. On a bucket with versioning or Object Lock this covers deleting a version by its version id as well.
+
+**What the server key needs.** The server deletes with its own key, never the agent key, and never asks the storage to bypass a lock. On AWS S3 versioned deletion takes `s3:DeleteObject`, `s3:DeleteObjectVersion`, `s3:ListBucketVersions` and `s3:GetObjectVersion` in addition to the rights it already uses. MinIO does not tell these apart: a key with `s3:DeleteObject` alone removed a version in testing, so a MinIO setup that works does not prove the AWS policy is complete.
+
+**Locked versions.** When the storage refuses to delete a version because Object Lock still protects it (MinIO answers 400 `InvalidRequest`, AWS answers 403 `AccessDenied`), the version is reported as retained, not as a failure. Its delete marker is kept until the last real version is gone, otherwise the object would reappear in listings. A later cycle frees the version once the lock has run out.

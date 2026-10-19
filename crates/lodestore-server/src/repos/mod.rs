@@ -18,6 +18,7 @@ use utoipa_axum::routes;
 use crate::auth::AuthUser;
 use crate::db::now_ms;
 use crate::error::{ApiError, ErrorBody};
+use crate::maintenance::gc::api::{CleanupSummary, cleanup_summary_or_unknown};
 use crate::repos::db::{AccessKey, RepoFull};
 use crate::state::AppState;
 
@@ -117,6 +118,7 @@ pub struct RepositorySummary {
     pub agent_key_state: String,
     pub checked_at: Option<i64>,
     pub unlocked: Option<bool>,
+    pub cleanup: CleanupSummary,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -131,6 +133,7 @@ pub(crate) fn summary_of(
     row: &RepoFull,
     hosts_count: i64,
     unlocked: Option<bool>,
+    cleanup: CleanupSummary,
 ) -> RepositorySummary {
     let location = lodestore_format::store::RepoLocation {
         backend: row.backend.clone(),
@@ -146,6 +149,7 @@ pub(crate) fn summary_of(
         agent_key_state: row.agent_key_state.clone(),
         checked_at: row.checked_at,
         unlocked,
+        cleanup,
     }
 }
 
@@ -181,17 +185,16 @@ async fn list_repositories(
     let rows = db::list_repositories(&state).await?;
     let hosts = db::active_hosts(&state).await?;
     let cache = state.repos.lock().unlocked.clone();
-    Ok(Json(
-        rows.iter()
-            .map(|r| {
-                summary_of(
-                    r,
-                    hosts.get(&r.id).copied().unwrap_or(0),
-                    cache.get(&r.id).copied(),
-                )
-            })
-            .collect(),
-    ))
+    let mut out = Vec::with_capacity(rows.len());
+    for r in &rows {
+        out.push(summary_of(
+            r,
+            hosts.get(&r.id).copied().unwrap_or(0),
+            cache.get(&r.id).copied(),
+            cleanup_summary_or_unknown(&state, &r.id).await,
+        ));
+    }
+    Ok(Json(out))
 }
 
 #[utoipa::path(
@@ -223,7 +226,12 @@ async fn get_repository(
         .map_err(|e| ApiError::Internal(e.into()))?
         .unwrap_or_default();
     Ok(Json(RepositoryDetail {
-        summary: summary_of(&row, hosts.get(&id).copied().unwrap_or(0), unlocked),
+        summary: summary_of(
+            &row,
+            hosts.get(&id).copied().unwrap_or(0),
+            unlocked,
+            cleanup_summary_or_unknown(&state, &id).await,
+        ),
         location: LocationDto {
             backend: row.backend.clone(),
             options: row.options.clone(),
