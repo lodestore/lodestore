@@ -658,8 +658,13 @@ async fn policies_schedule_info_in_validate() {
             .iter()
             .map(|n| n["kind"].as_str().unwrap())
             .collect();
-        assert!(kinds.contains(&"skipped"), "{kinds:?}");
-        assert!(kinds.contains(&"repeated"), "{kinds:?}");
+        // The 366-day horizon can miss one of the two transitions when the last Sunday drifts
+        // later next year, but it always holds at least one.
+        assert!(!kinds.is_empty(), "{kinds:?}");
+        assert!(
+            kinds.iter().all(|k| ["skipped", "repeated"].contains(k)),
+            "{kinds:?}"
+        );
 
         let (status, created) = http
             .post(

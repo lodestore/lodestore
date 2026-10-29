@@ -15,6 +15,8 @@ export function formatBytes(bytes: number) {
 	return `${number.format(value)} ${UNITS[unit]}`;
 }
 
+export const formatRatio = (ratio: number) => `${number.format(ratio)}×`;
+
 export const formatRate = (bytesPerSecond: number) =>
 	`${formatBytes(bytesPerSecond)}/s`;
 

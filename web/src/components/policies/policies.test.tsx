@@ -389,6 +389,94 @@ describe("Policy editor tabs", () => {
 	});
 });
 
+async function openOptions(user: ReturnType<typeof userEvent.setup>) {
+	await user.click(await screen.findByRole("button", { name: /^Options · / }));
+	return screen.findByRole("textbox", {
+		name: "Alert if no backup succeeds for",
+	});
+}
+
+describe("Dead-man threshold", () => {
+	it("saves the dead-man threshold", async () => {
+		const requests = mockValidate();
+		const created: unknown[] = [];
+		server.use(
+			http.post("/api/v1/policies", async ({ request }) => {
+				created.push(await request.json());
+				return HttpResponse.json(makeDetail("etc-and-home"), { status: 201 });
+			}),
+			http.get("/api/v1/policies/etc-and-home", () =>
+				HttpResponse.json(makeDetail("etc-and-home")),
+			),
+		);
+		const user = await openNew();
+		const field = await openOptions(user);
+		expect(field).toHaveAttribute("placeholder", "auto (2 intervals + jitter)");
+		expect(field).toHaveValue("");
+		expect(
+			screen.getByText(
+				"Leave empty to alert after two missed runs. Policies without a schedule never alert.",
+			),
+		).toBeInTheDocument();
+
+		await user.type(field, "36h");
+		await waitFor(() =>
+			expect(requests.at(-1)?.policy?.spec.alerts).toEqual({ maxAge: "36h" }),
+		);
+		const save = screen.getByRole("button", { name: "Save policy" });
+		await waitFor(() => expect(save).toBeEnabled());
+		await user.click(save);
+		await waitFor(() => expect(created).toHaveLength(1));
+		expect(created[0]).toMatchObject({
+			policy: { spec: { alerts: { maxAge: "36h" } } },
+		});
+	});
+
+	it("omits empty alerts", async () => {
+		const requests = mockValidate();
+		const user = await openNew();
+		await waitFor(() => expect(requests.length).toBeGreaterThan(0));
+		const field = await openOptions(user);
+		await user.type(field, "36h");
+		await waitFor(() =>
+			expect(requests.at(-1)?.policy?.spec.alerts).toEqual({ maxAge: "36h" }),
+		);
+		await user.clear(field);
+		await waitFor(() =>
+			expect(requests.at(-1)?.policy?.spec).not.toHaveProperty("alerts"),
+		);
+		expect(
+			policyFromDraft(draftFromPolicy(makePolicy("nightly"))).spec.alerts,
+		).toBeUndefined();
+	});
+
+	it("shows the threshold error", async () => {
+		mockValidate((body) =>
+			body.policy?.spec.alerts?.maxAge === "soon"
+				? {
+						valid: false,
+						errors: [
+							{
+								path: "spec.alerts.maxAge",
+								message: "Use a duration such as 36h or 3d.",
+							},
+						],
+						name_taken: false,
+						warnings: [],
+					}
+				: validResponse(),
+		);
+		const user = await openNew();
+		const field = await openOptions(user);
+		await user.type(field, "soon");
+		const message = await screen.findByText(
+			"Use a duration such as 36h or 3d.",
+		);
+		await waitFor(() => expect(field).toHaveAttribute("aria-invalid", "true"));
+		expect(field.getAttribute("aria-describedby")).toContain(message.id);
+	});
+});
+
 const pathsValues = () =>
 	screen
 		.getAllByRole("textbox", { name: "Paths" })

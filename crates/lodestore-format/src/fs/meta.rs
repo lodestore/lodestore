@@ -154,7 +154,9 @@ fn timespec(ts: Option<&pb::Timestamp>) -> rustix::fs::Timespec {
 /// Applies owner, xattrs, mode and times, in that order: a chown clears
 /// setuid and setgid, an ACL xattr rewrites the group bits, and any of them
 /// touches ctime. Every failure is recorded in `out` and the rest still runs.
-/// Without `owners` the owner is left alone and nothing is reported about it.
+/// Without `owners` the owner is left alone and nothing is reported about it,
+/// and neither setuid, setgid nor file capabilities are applied: they would
+/// grant the snapshot's privileges to whoever runs the restore.
 pub fn apply_metadata(
     target: &Target<'_>,
     node: &pb::Node,
@@ -183,6 +185,9 @@ pub fn apply_metadata(
     }
 
     for x in &node.xattrs {
+        if !owners && x.name == b"security.capability" {
+            continue;
+        }
         let set = match target {
             Target::Fd(fd) => fsetxattr(fd, x.name.as_slice(), &x.value, XattrFlags::empty()),
             Target::Entry { dir, name, .. } => lsetxattr(
@@ -197,7 +202,8 @@ pub fn apply_metadata(
         }
     }
 
-    let mode = Mode::from_bits_truncate(conv(node.mode & 0o7777));
+    let bits = if owners { 0o7777 } else { 0o1777 };
+    let mode = Mode::from_bits_truncate(conv(node.mode & bits));
     let chmod = match target {
         Target::Fd(fd) => Some(fchmod(fd, mode)),
         // A symlink has no mode of its own on Linux.

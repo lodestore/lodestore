@@ -1,3 +1,5 @@
+import { longDuration } from "@/copy.overview";
+
 export const hostBackup = {
 	runBackup: "Run backup",
 	startFailed: "start the backup",
@@ -10,6 +12,32 @@ export const hostBackup = {
 	jobsEmptyHeading: "No jobs on this host yet",
 	jobsEmptyBody: "Run a policy on this host and its jobs appear here.",
 	openInJobs: "Open in Jobs",
+	alertsTitle: "Alerts for this host",
+	runs: {
+		label: "Recent runs",
+		outcomes: {
+			succeeded: "Succeeded",
+			failed: "Failed",
+			skipped: "Skipped",
+		},
+		tick: (outcome: string, at: string, policy?: string | null) =>
+			policy ? `${outcome} · ${at} · ${policy}` : `${outcome} · ${at}`,
+		newestRight: "Newest on the right.",
+	},
+	health: {
+		title: "Backup health",
+		loadFailed:
+			"Couldn't load backup health. Check that the server is reachable, then retry.",
+		lastSuccess: "Last successful backup",
+		never: "Never",
+		overdueAfter: "Overdue after",
+		notSet: "Not set",
+		overdueAfterValue: (seconds: number) => longDuration(seconds),
+		alerts: "Alerts",
+		active: "Active",
+		silencedUntil: (when: string) => `Silenced until ${when}`,
+		silencedForever: "Silenced until removed",
+	},
 } as const;
 
 export const snapshots = {

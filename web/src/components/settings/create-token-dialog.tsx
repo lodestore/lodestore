@@ -210,6 +210,11 @@ function CreateTokenBody({
 							>
 								{scope}
 							</Label>
+							{scope === Scope["metrics:read"] && (
+								<span className="text-sm text-muted-foreground">
+									{text.dialog.forPrometheus}
+								</span>
+							)}
 							{scope === Scope["snapshots:delete"] && (
 								<Badge variant="outline" className="text-warning">
 									<TriangleAlert aria-hidden />

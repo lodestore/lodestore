@@ -6,6 +6,7 @@ use crate::catalog::CatalogJobs;
 use crate::config::Config;
 use crate::db::Db;
 use crate::grpc::registry::Registry;
+use crate::maintenance::check::CheckGate;
 use crate::maintenance::gc::GcRuns;
 use crate::pki::Pki;
 use crate::repos::ReposState;
@@ -23,4 +24,6 @@ pub struct AppState {
     pub catalog: CatalogJobs,
     pub readers: RepoReaders,
     pub gc: GcRuns,
+    pub checks: CheckGate,
+    pub started_at_ms: i64,
 }

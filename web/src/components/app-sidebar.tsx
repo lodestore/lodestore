@@ -14,6 +14,7 @@ import {
 	ShieldCheck,
 	Sun,
 } from "lucide-react";
+import { useCountAlerts } from "@/api/gen/endpoints";
 import { LogoMark } from "@/components/brand/logo-mark";
 import { type Theme, useTheme } from "@/components/theme/theme-provider";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -56,13 +57,14 @@ export type NavItem = {
 };
 
 const { workspace, backup, system } = copy.shell.groups;
+const ALERT_POLL_MS = 30_000;
+const alertText = copy.overview.sidebar;
 
 export const NAV_ITEMS: NavItem[] = [
 	{
 		label: copy.nav.overview,
 		to: "/overview",
 		icon: LayoutDashboard,
-		soon: true,
 		group: workspace,
 	},
 	{ label: copy.nav.hosts, to: "/hosts", icon: Server, group: workspace },
@@ -121,6 +123,13 @@ export function AppSidebar({ onOpenPalette }: { onOpenPalette: () => void }) {
 	const signOut = useSignOut();
 	const { setOpenMobile } = useSidebar();
 	const { theme, setTheme } = useTheme();
+	const alerts = useCountAlerts({
+		query: {
+			refetchInterval: ALERT_POLL_MS,
+			refetchIntervalInBackground: false,
+		},
+	});
+	const unsilenced = alerts.isError ? 0 : (alerts.data?.unsilenced ?? 0);
 
 	return (
 		<Sidebar collapsible="icon">
@@ -144,6 +153,8 @@ export function AppSidebar({ onOpenPalette }: { onOpenPalette: () => void }) {
 								<SidebarMenu>
 									{group.items.map(({ label, to, icon: Icon, soon }) => {
 										const section = sectionOf(to);
+										const count = to === "/overview" ? unsilenced : 0;
+										const countLabel = alertText.label(count);
 										const isActive =
 											pathname === section ||
 											pathname.startsWith(`${section}/`);
@@ -152,7 +163,13 @@ export function AppSidebar({ onOpenPalette }: { onOpenPalette: () => void }) {
 												<SidebarMenuButton
 													asChild
 													isActive={isActive}
-													tooltip={soon ? `${label} · ${copy.soon}` : label}
+													tooltip={
+														soon
+															? `${label} · ${copy.soon}`
+															: count > 0
+																? `${label} · ${countLabel}`
+																: label
+													}
 													className="data-[active=true]:bg-primary-subtle data-[active=true]:font-semibold data-[active=true]:text-primary-strong"
 												>
 													<Link to={to}>
@@ -160,6 +177,20 @@ export function AppSidebar({ onOpenPalette }: { onOpenPalette: () => void }) {
 														<span>{label}</span>
 													</Link>
 												</SidebarMenuButton>
+												{count > 0 && (
+													<>
+														<SidebarMenuBadge
+															role="img"
+															aria-label={countLabel}
+															className="peer-data-[size=default]/menu-button:top-2.5"
+														>
+															{alertText.badge(count)}
+														</SidebarMenuBadge>
+														<span className="pointer-events-none absolute top-2 right-2 hidden size-2 rounded-full bg-destructive group-data-[collapsible=icon]:block">
+															<span className="sr-only">{countLabel}</span>
+														</span>
+													</>
+												)}
 												{soon && (
 													<SidebarMenuBadge className="text-muted-foreground peer-data-[size=default]/menu-button:top-2.5">
 														{copy.soon}

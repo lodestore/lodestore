@@ -1,0 +1,48 @@
+groups:
+  - name: lodestore-backups
+    rules:
+      - alert: LodestoreBackupFailed
+        expr: lodestore_backup_last_status == 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Backup failed on {{ $labels.host }}"
+          description: "Policy {{ $labels.policy }}: the last backup on {{ $labels.host }} failed."
+      - alert: LodestoreNoRecentBackup
+        expr: lodestore_backup_overdue == 1
+        labels:
+          severity: warning
+        annotations:
+          summary: "No recent backup on {{ $labels.host }}"
+          description: "Policy {{ $labels.policy }}: the last successful backup on {{ $labels.host }} is older than the policy allows."
+  - name: lodestore-agents
+    rules:
+      - alert: LodestoreAgentOffline
+        expr: lodestore_host_agent_up == 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.host }} is offline"
+          description: "The agent on {{ $labels.host }} has not been connected for 15 minutes."
+  - name: lodestore-repositories
+    rules:
+      - alert: LodestoreCheckFailed
+        expr: lodestore_check_last_status == 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ if eq $labels.level \"packs\" }}Pack reading{{ else if eq $labels.level \"restore\" }}Test restore{{ else }}Structure{{ end }} check failed on {{ $labels.repository }}"
+          description: "The last {{ $labels.level }} check of repository {{ $labels.repository }} found problems or stopped. Open the report in Integrity checks."
+  - name: lodestore-certificates
+    rules:
+      - alert: LodestoreCertificateExpiring
+        expr: |
+          (lodestore_host_cert_expiry_timestamp_seconds - time() < 14 * 86400)
+          or
+          (lodestore_server_cert_expiry_timestamp_seconds - time() < 14 * 86400)
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ if $labels.host }}Agent certificate on {{ $labels.host }}{{ else }}Server gRPC certificate{{ end }} {{ if lt $value 0.0 }}has expired{{ else }}expires in {{ $value | humanizeDuration }}{{ end }}"
+          description: "Agent certificates renew while the agent is online and the built-in server certificate renews itself. A certificate you supplied has to be replaced by hand."

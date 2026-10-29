@@ -1,6 +1,7 @@
 mod apply;
 mod backup;
 mod backup_agent;
+mod check;
 mod dump;
 mod gc;
 mod key;
@@ -90,6 +91,7 @@ pub fn run(cli: Cli) -> Result<u8> {
             Command::Ls { snapshot, long } => ls::run(&url, &secret, out, &snapshot, long)
                 .await
                 .map(|()| 0),
+            Command::Check(args) => check::run(&url, &secret, out, args).await,
             Command::Dump { snapshot, path } => {
                 dump::run(&url, &secret, &snapshot, &path).await.map(|()| 0)
             }

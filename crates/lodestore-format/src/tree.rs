@@ -394,7 +394,7 @@ impl<'s> SelectionWalk<'s> {
 
 /// Checks one node of a restore the way [`validate_subtree`] does: the chunks
 /// of a file add up to its size, and the members of a hardlink group agree.
-async fn check_node<S: BlobStore>(
+pub(crate) async fn check_node<S: BlobStore>(
     reader: &mut Reader<S>,
     groups: &mut HashMap<u64, (u64, [u8; 32])>,
     node: &pb::Node,

@@ -604,12 +604,22 @@ async fn resume(state: &AppState, failed: &CycleRow, by: &str) -> Result<(), GcF
     if let Some(problem) = preflight::old_agents_problem(state, &failed.repository_id).await? {
         return Err(GcFailure::Preflight(vec![problem]));
     }
+    let admit = state.checks.admit.lock().await;
+    if cycle::restores_active(state, &failed.repository_id).await? {
+        return Err(ApiError::Conflict(
+            "Restores, downloads or checks are reading this repository. \
+             The cleanup continues when they finish."
+                .into(),
+        )
+        .into());
+    }
     if !db::resume_failed(state, &failed.id).await? {
         return Err(ApiError::Conflict(
             "A cleanup cycle is already running in this repository.".into(),
         )
         .into());
     }
+    drop(admit);
     let message = format!("Cleanup continues where it stopped ({by}).");
     cycle::event(state, &failed.id, "info", "resumed", &message).await;
     spawn_drive(state, &failed.id);
@@ -635,7 +645,8 @@ async fn resume_stopped(state: &AppState, now_ms: i64) -> anyhow::Result<()> {
             .is_none_or(|at| now_ms >= at.saturating_add(ms(resume_backoff(failures))));
         let busy = db::active_cycle_of(state, &failed.repository_id, false)
             .await?
-            .is_some();
+            .is_some()
+            || cycle::restores_active(state, &failed.repository_id).await?;
         if !due || busy {
             continue;
         }

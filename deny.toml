@@ -8,6 +8,7 @@ allow = [
     "Zlib",
     "CC0-1.0",
     "CDLA-Permissive-2.0",
+    "0BSD",
 ]
 exceptions = [
     { crate = "lodestore-server", allow = ["AGPL-3.0-only"] },

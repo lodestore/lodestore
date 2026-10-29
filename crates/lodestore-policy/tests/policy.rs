@@ -223,6 +223,43 @@ fn policy_max_runtime_roundtrip() {
 }
 
 #[test]
+fn policy_alerts_max_age_valid() {
+    let alerts = |value: &str| format!("  alerts:\n    maxAge: {value}\n");
+    for ok in ["1h", "36h", "3d", "365d"] {
+        accepted(&alerts(ok));
+    }
+    let policy = parse_yaml(&with_paths(&alerts("36h"))).unwrap();
+    assert_eq!(
+        policy.spec.alerts.as_ref().unwrap().max_age.as_deref(),
+        Some("36h")
+    );
+    let text = to_yaml(&policy);
+    assert!(text.contains("maxAge: 36h"), "{text}");
+    assert_eq!(parse_yaml(&text).unwrap(), policy);
+}
+
+#[test]
+fn policy_alerts_max_age_rejected() {
+    const RULE: &str = "Use a duration such as 36h or 3d.";
+    for bad in ["10m", "400d", "soon", "0h"] {
+        check(
+            &format!("  alerts:\n    maxAge: {bad}\n"),
+            "spec.alerts.maxAge",
+            RULE,
+        );
+    }
+}
+
+#[test]
+fn policy_without_alerts_serializes_unchanged() {
+    let policy = parse_yaml(QUICKSTART).unwrap();
+    assert!(policy.spec.alerts.is_none());
+    assert!(!to_yaml(&policy).contains("alerts"));
+    let json = serde_json::to_value(&policy).unwrap();
+    assert!(json["spec"].get("alerts").is_none(), "{json}");
+}
+
+#[test]
 fn policy_retention_counts() {
     const COUNT: &str = "Enter a whole number of 1 or more.";
     const DURATION: &str = "Use a duration such as 15m, 24h, 30d or 1y.";

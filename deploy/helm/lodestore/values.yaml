@@ -23,4 +23,13 @@ unlockKey: ""
 existingSecret: ""
 adminPassword: ""
 
+config: {}
+
+extraVolumes: []
+
+extraVolumeMounts: []
+
+metrics:
+  port: 0
+
 resources: {}

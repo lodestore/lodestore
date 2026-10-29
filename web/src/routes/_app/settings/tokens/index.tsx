@@ -1,4 +1,4 @@
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 import { useListTokens } from "@/api/gen/endpoints";
 import type { ApiTokenItem } from "@/api/gen/model";
@@ -41,7 +41,7 @@ function restoreFocus(event: Event, id: string | undefined) {
 
 function TokensPage() {
 	const { create, state } = Route.useSearch();
-	const navigate = useNavigate();
+	const navigate = Route.useNavigate();
 	const [creating, setCreating] = useState(create === true);
 	const [revoking, setRevoking] = useState<ApiTokenItem>();
 	const origin = useRef<string>(undefined);
@@ -52,7 +52,6 @@ function TokensPage() {
 		if (!create) return;
 		setCreating(true);
 		void navigate({
-			to: "/settings/tokens",
 			search: (prev) => ({ ...prev, create: undefined }),
 			replace: true,
 		});
@@ -80,7 +79,6 @@ function TokensPage() {
 				isError={tokens.isError}
 				onFilterChange={(next) =>
 					void navigate({
-						to: "/settings/tokens",
 						search: (prev) => ({
 							...prev,
 							state: next === "revoked" ? "revoked" : undefined,

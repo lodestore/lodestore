@@ -662,16 +662,18 @@ async fn verifying(state: &AppState, cycle: &CycleRow) -> anyhow::Result<StepOut
     .await
     .context("compacting the index and checking that every live blob can still be found")?;
 
-    if hold_for_restores(state, cycle, &seen).await? {
-        return Ok(StepOutcome::Postponed);
-    }
     refuse_old_agents(state, &cycle.repository_id).await?;
     refuse_foreign_marker(state, cycle, &source).await?;
     let resurrected: Vec<String> = verified.resurrected.iter().map(hex32).collect();
     let rewrite: Vec<String> = plan.rewrite.iter().map(hex32).collect();
+    let admit = state.checks.admit.lock().await;
+    if hold_for_restores(state, cycle, &seen).await? {
+        return Ok(StepOutcome::Postponed);
+    }
     if !db::begin_sweep(state, &cycle.id, &resurrected, &rewrite).await? {
         return finished(state, &cycle.id).await;
     }
+    drop(admit);
     event(
         state,
         &cycle.id,
@@ -683,10 +685,10 @@ async fn verifying(state: &AppState, cycle: &CycleRow) -> anyhow::Result<StepOut
     Ok(StepOutcome::Advanced(GcState::Sweeping))
 }
 
-/// Restore jobs reading this repository and downloads in flight. A restore
-/// whose source can't be read counts as reading this one. New restores and
-/// downloads wait while the sweep runs.
-async fn restores_active(state: &AppState, repository_id: &str) -> anyhow::Result<bool> {
+/// Restore jobs reading this repository, downloads in flight and checks
+/// running on it. A restore whose source can't be read counts as reading this
+/// one. New restores, downloads and checks wait while the sweep runs.
+pub(crate) async fn restores_active(state: &AppState, repository_id: &str) -> anyhow::Result<bool> {
     let jobs = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT restore_json FROM jobs WHERE kind = 'restore' AND state IN ({ACTIVE_STATES})"
     )))
@@ -708,7 +710,17 @@ async fn restores_active(state: &AppState, repository_id: &str) -> anyhow::Resul
     .bind(repository_id)
     .fetch_one(&state.db.pool)
     .await?;
-    Ok(downloads.try_get::<i64, _>("n")? > 0)
+    if downloads.try_get::<i64, _>("n")? > 0 {
+        return Ok(true);
+    }
+    let checks = sqlx::query(
+        "SELECT COUNT(*) AS n FROM check_runs \
+         WHERE repository_id = $1 AND state IN ('queued', 'running')",
+    )
+    .bind(repository_id)
+    .fetch_one(&state.db.pool)
+    .await?;
+    Ok(checks.try_get::<i64, _>("n")? > 0)
 }
 
 /// Records whether deletion has to wait for restores and downloads.

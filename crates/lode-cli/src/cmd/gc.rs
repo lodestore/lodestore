@@ -11,8 +11,8 @@ use crate::cli::{GcArgs, GcCommand, UsageError};
 use crate::client::{ApiFailure, Client, failure, seg};
 use crate::output::Output;
 
-const POLL: Duration = Duration::from_secs(2);
-const POLL_RETRIES: u32 = 3;
+pub(crate) const POLL: Duration = Duration::from_secs(2);
+pub(crate) const POLL_RETRIES: u32 = 3;
 const MONTHS: [&str; 12] = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
@@ -132,7 +132,7 @@ fn is_not_found(err: &anyhow::Error) -> bool {
 
 /// An id is used as given; any other text is a repository name, looked up
 /// in the policies because the repository list is not open to API tokens.
-async fn resolve(client: &Client, repo: &str) -> Result<String> {
+pub(crate) async fn resolve(client: &Client, repo: &str) -> Result<String> {
     match client.get_json::<Value>(&gc_path(repo), &[]).await {
         Ok(_) => return Ok(repo.to_owned()),
         Err(err) if is_not_found(&err) => {}
@@ -203,7 +203,7 @@ fn show_progress(cycle: &Cycle, shown: &mut String) {
 
 /// A failure that says nothing about the cycle: the server could not be
 /// reached or answered with a server error.
-fn transient(e: &anyhow::Error) -> bool {
+pub(crate) fn transient(e: &anyhow::Error) -> bool {
     match e.downcast_ref::<ApiFailure>() {
         Some(f) => f.status >= 500,
         None => e.chain().any(|c| c.is::<reqwest::Error>()),

@@ -172,10 +172,63 @@ describe("API tokens: create", () => {
 		).toBeNull();
 		expect(
 			within(dialog).getByText(
-				"For CI that applies policies, choose policies:read and policies:write. Policies with retention also need snapshots:delete.",
+				"For CI that applies policies, choose policies:read and policies:write. Policies with retention also need snapshots:delete. For Prometheus, choose metrics:read.",
 			),
 		).toBeInTheDocument();
 		expect(within(dialog).getByText("Deletes data")).toBeInTheDocument();
+	});
+
+	it("offers the metrics scope", async () => {
+		const user = userEvent.setup();
+		mockTokens([]);
+		await openTokens();
+		expect(
+			screen.getByText(
+				/A token cannot manage tokens, repositories, notification channels or the admin password\./,
+			),
+		).toBeInTheDocument();
+		await user.click(createButton());
+		const dialog = await screen.findByRole("dialog", {
+			name: "Create API token",
+		});
+		const names = within(dialog)
+			.getAllByRole("checkbox")
+			.map((box) => box.getAttribute("id"))
+			.filter((id) => id?.includes(":"));
+		const scopes = names.map((id) => id?.split("-").pop());
+		expect(scopes.indexOf("metrics:read")).toBe(scopes.indexOf("jobs:run") + 1);
+		expect(scopes.indexOf("metrics:read")).toBeLessThan(
+			scopes.indexOf("snapshots:read"),
+		);
+		const row = within(dialog)
+			.getByRole("checkbox", { name: "metrics:read" })
+			.closest("div") as HTMLElement;
+		expect(within(row).getByText("For Prometheus")).toBeVisible();
+		expect(within(row).queryByText("Deletes data")).toBeNull();
+	});
+
+	it("offers the alerts scope after hosts:write", async () => {
+		const user = userEvent.setup();
+		mockTokens([]);
+		await openTokens();
+		await user.click(createButton());
+		const dialog = await screen.findByRole("dialog", {
+			name: "Create API token",
+		});
+		const scopes = within(dialog)
+			.getAllByRole("checkbox")
+			.map((box) => box.getAttribute("id"))
+			.filter((id) => id?.includes(":"))
+			.map((id) => id?.split("-").pop());
+		expect(scopes.indexOf("alerts:write")).toBe(
+			scopes.indexOf("hosts:write") + 1,
+		);
+		await user.click(
+			within(dialog).getByRole("checkbox", { name: "alerts:write" }),
+		);
+		expect(
+			within(dialog).getByRole("checkbox", { name: "alerts:write" }),
+		).toBeChecked();
 	});
 
 	it("create param opens dialog", async () => {

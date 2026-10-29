@@ -32,6 +32,8 @@ pub enum Scope {
     HostsRead,
     #[serde(rename = "hosts:write")]
     HostsWrite,
+    #[serde(rename = "alerts:write")]
+    AlertsWrite,
     #[serde(rename = "policies:read")]
     PoliciesRead,
     #[serde(rename = "policies:write")]
@@ -40,6 +42,8 @@ pub enum Scope {
     JobsRead,
     #[serde(rename = "jobs:run")]
     JobsRun,
+    #[serde(rename = "metrics:read")]
+    MetricsRead,
     #[serde(rename = "snapshots:read")]
     SnapshotsRead,
     #[serde(rename = "snapshots:delete")]
@@ -49,13 +53,15 @@ pub enum Scope {
 }
 
 impl Scope {
-    pub const ALL: [Scope; 9] = [
+    pub const ALL: [Scope; 11] = [
         Scope::HostsRead,
         Scope::HostsWrite,
+        Scope::AlertsWrite,
         Scope::PoliciesRead,
         Scope::PoliciesWrite,
         Scope::JobsRead,
         Scope::JobsRun,
+        Scope::MetricsRead,
         Scope::SnapshotsRead,
         Scope::SnapshotsDelete,
         Scope::Restore,
@@ -65,10 +71,12 @@ impl Scope {
         match self {
             Scope::HostsRead => "hosts:read",
             Scope::HostsWrite => "hosts:write",
+            Scope::AlertsWrite => "alerts:write",
             Scope::PoliciesRead => "policies:read",
             Scope::PoliciesWrite => "policies:write",
             Scope::JobsRead => "jobs:read",
             Scope::JobsRun => "jobs:run",
+            Scope::MetricsRead => "metrics:read",
             Scope::SnapshotsRead => "snapshots:read",
             Scope::SnapshotsDelete => "snapshots:delete",
             Scope::Restore => "restore",
@@ -94,10 +102,12 @@ macro_rules! scope_markers {
 scope_markers! {
     HostsRead => HostsRead,
     HostsWrite => HostsWrite,
+    AlertsWrite => AlertsWrite,
     PoliciesRead => PoliciesRead,
     PoliciesWrite => PoliciesWrite,
     JobsRead => JobsRead,
     JobsRun => JobsRun,
+    MetricsRead => MetricsRead,
     SnapshotsRead => SnapshotsRead,
     SnapshotsDelete => SnapshotsDelete,
     RestoreScope => Restore,
@@ -398,4 +408,28 @@ pub fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(list_tokens, create_token))
         .routes(routes!(revoke_token))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn metrics_scope_round_trips() {
+        let scope: Scope = serde_json::from_str("\"metrics:read\"").unwrap();
+        assert_eq!(scope, Scope::MetricsRead);
+        assert_eq!(scope.as_str(), "metrics:read");
+        assert_eq!(serde_json::to_string(&scope).unwrap(), "\"metrics:read\"");
+        assert_eq!(Scope::ALL.len(), 11);
+        let names: Vec<&str> = Scope::ALL.iter().map(|s| s.as_str()).collect();
+        let at = names.iter().position(|n| *n == "metrics:read").unwrap();
+        assert_eq!(names[at - 1], "jobs:run");
+        assert_eq!(names[at + 1], "snapshots:read");
+        let alerts = names.iter().position(|n| *n == "alerts:write").unwrap();
+        assert_eq!(names[alerts - 1], "hosts:write");
+        for scope in Scope::ALL {
+            let parsed: Scope = serde_json::from_str(&format!("\"{}\"", scope.as_str())).unwrap();
+            assert_eq!(parsed, scope);
+        }
+    }
 }

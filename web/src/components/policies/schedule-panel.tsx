@@ -118,7 +118,9 @@ export function SchedulePanel({
 	const zoneError = problems.get("spec.schedule.timezone");
 	const jitterError = problems.get("spec.schedule.jitter");
 	const catchUpError = problems.get("spec.schedule.catchUpWindow");
+	const maxAgeError = problems.get("spec.alerts.maxAge");
 	const changed =
+		draft.maxAge.trim() !== "" ||
 		(draft.jitter.trim() !== "" && draft.jitter.trim() !== DEFAULT_JITTER) ||
 		(draft.catchUpWindow.trim() !== "" &&
 			draft.catchUpWindow.trim() !== DEFAULT_CATCH_UP);
@@ -166,7 +168,7 @@ export function SchedulePanel({
 			)}
 			{showOptions && (
 				<Collapsible
-					open={open || Boolean(jitterError || catchUpError)}
+					open={open || Boolean(jitterError || catchUpError || maxAgeError)}
 					onOpenChange={setOpen}
 					className="flex flex-col gap-4"
 				>
@@ -216,6 +218,24 @@ export function SchedulePanel({
 									disabled={!hasCron}
 									value={draft.catchUpWindow}
 									onChange={(e) => set({ catchUpWindow: e.target.value })}
+								/>
+							)}
+						</RowField>
+						<RowField
+							label={text.maxAge}
+							helper={text.maxAgeHelper}
+							error={maxAgeError}
+						>
+							{(a11y) => (
+								<Input
+									{...a11y}
+									className="font-mono"
+									autoComplete="off"
+									autoCapitalize="off"
+									spellCheck={false}
+									placeholder={text.maxAgePlaceholder}
+									value={draft.maxAge}
+									onChange={(e) => set({ maxAge: e.target.value })}
 								/>
 							)}
 						</RowField>

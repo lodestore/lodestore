@@ -3,12 +3,14 @@ import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { describe, expect, it } from "vitest";
 import type {
+	FleetHost,
 	HostDetail,
 	HostPolicy,
 	JobSummary,
 	SnapshotItem,
 } from "@/api/gen/model";
 import { renderApp, useSignedIn } from "@/test/app";
+import { alertFixture, fleetHost, useAlerts } from "@/test/fleet";
 import { server } from "@/test/server";
 
 const DAY = 86_400_000;
@@ -150,6 +152,20 @@ async function openHost(detail: HostDetail, search = "", mocks: Mocks = {}) {
 	return view;
 }
 
+function mockHealth(detail: HostDetail, over: Partial<FleetHost> = {}) {
+	server.use(
+		http.get(`/api/v1/fleet/hosts/${detail.id}`, () =>
+			HttpResponse.json(
+				fleetHost("healthy", {
+					id: detail.id,
+					hostname: detail.hostname,
+					...over,
+				}),
+			),
+		),
+	);
+}
+
 describe("Host page", () => {
 	it("shows the host name, status, last seen and breadcrumb", async () => {
 		const host = makeDetail("web-1");
@@ -158,7 +174,7 @@ describe("Host page", () => {
 		const heading = screen.getByRole("heading", { level: 1 });
 		expect(heading).toHaveTextContent("web-1");
 		expect(heading).toHaveAttribute("data-page-title");
-		expect(screen.getAllByText("Online").length).toBeGreaterThan(0);
+		expect(screen.getAllByText("Agent online").length).toBeGreaterThan(0);
 		expect(screen.getByText(/^Last seen /)).toBeInTheDocument();
 		const crumbs = screen.getByRole("navigation", { name: "breadcrumb" });
 		expect(within(crumbs).getByRole("link", { name: "Hosts" })).toHaveAttribute(
@@ -171,6 +187,52 @@ describe("Host page", () => {
 		expect(
 			screen.getByRole("button", { name: "Revoke host" }),
 		).toBeInTheDocument();
+	});
+
+	it("shows the overview state and the agent status", async () => {
+		const host = makeDetail("web-1");
+		mockHealth(host, { state: "failed" });
+		await openHost(host);
+		expect(
+			(await screen.findByText("Failed")).closest("[data-status]"),
+		).toHaveAttribute("data-status", "failed");
+		expect(screen.getByText("Agent online")).toBeInTheDocument();
+	});
+
+	it("shows the protected state and an offline agent", async () => {
+		const host = makeDetail("web-2", { status: "offline" });
+		mockHealth(host);
+		await openHost(host);
+		expect(
+			(await screen.findByText("Protected")).closest("[data-status]"),
+		).toHaveAttribute("data-status", "protected");
+		expect(screen.getByText("Agent offline")).toBeInTheDocument();
+	});
+
+	it("names the host in the silence trigger", async () => {
+		const host = makeDetail("web-1");
+		mockHealth(host);
+		await openHost(host);
+		const trigger = await screen.findByRole("button", {
+			name: "Silence alerts for web-1",
+		});
+		expect(trigger).toHaveTextContent("Silence alerts");
+	});
+
+	it("keeps the header buttons one size", async () => {
+		const host = makeDetail("web-1");
+		mockHealth(host);
+		await openHost(host);
+		for (const name of [
+			"Silence alerts for web-1",
+			"Edit labels",
+			"Revoke host",
+		]) {
+			expect(await screen.findByRole("button", { name })).toHaveAttribute(
+				"data-size",
+				"default",
+			);
+		}
 	});
 
 	it("links the repository to its settings page", async () => {
@@ -293,6 +355,8 @@ describe("Host page", () => {
 	it("shows a revoked banner and no actions for a revoked host", async () => {
 		await openHost(makeDetail("old-1", { status: "revoked" }));
 		expect(screen.getByText(/This host is revoked\./)).toBeInTheDocument();
+		expect(document.querySelector("[data-status=revoked]")).not.toBeNull();
+		expect(screen.queryByText("Protected")).toBeNull();
 		expect(screen.queryByRole("button", { name: "Edit labels" })).toBeNull();
 		expect(screen.queryByRole("button", { name: "Revoke host" })).toBeNull();
 		expect(screen.queryByRole("button", { name: /Run backup/ })).toBeNull();
@@ -811,6 +875,108 @@ describe("Host page", () => {
 				screen.getByRole("button", { name: "Retry loading" }),
 			);
 			expect(await screen.findByText("a1b2c3d4")).toBeInTheDocument();
+		});
+	});
+
+	describe("health", () => {
+		it("shows alerts for this host", async () => {
+			const host = makeDetail("web-1");
+			mockHealth(host);
+			useAlerts([
+				alertFixture("a1", { host: { id: host.id, hostname: "web-1" } }),
+			]);
+			await openHost(host);
+			expect(
+				await screen.findByRole("heading", { name: "Alerts for this host" }),
+			).toBeInTheDocument();
+			expect(await screen.findByText(/Backup failed on/)).toBeInTheDocument();
+		});
+
+		it("hides the alerts card without alerts", async () => {
+			const host = makeDetail("web-1");
+			mockHealth(host);
+			await openHost(host);
+			expect(
+				await screen.findByRole("heading", { name: "Backup health" }),
+			).toBeInTheDocument();
+			expect(
+				screen.queryByRole("heading", { name: "Alerts for this host" }),
+			).toBeNull();
+		});
+
+		it("shows backup health facts", async () => {
+			const host = makeDetail("web-1");
+			mockHealth(host, {
+				last_success_at: Date.now() - 3_600_000,
+				overdue_after_secs: 2 * 86_400,
+				silenced: true,
+				silenced_until: null,
+			});
+			await openHost(host);
+			const card = (
+				await screen.findByRole("heading", { name: "Backup health" })
+			).closest("[data-slot=card]") as HTMLElement;
+			expect(within(card).getByText("Last successful backup")).toBeVisible();
+			expect(within(card).getByText("2 days")).toBeVisible();
+			expect(within(card).getByText("Silenced until removed")).toBeVisible();
+		});
+
+		it("shows placeholders when nothing is scheduled", async () => {
+			const host = makeDetail("web-1");
+			mockHealth(host);
+			await openHost(host);
+			const card = (
+				await screen.findByRole("heading", { name: "Backup health" })
+			).closest("[data-slot=card]") as HTMLElement;
+			expect(within(card).getByText("Never")).toBeVisible();
+			expect(within(card).getByText("Not set")).toBeVisible();
+			expect(within(card).getByText("Active")).toBeVisible();
+		});
+
+		it("hides health cards when the fleet request fails", async () => {
+			const host = makeDetail("web-1");
+			server.use(
+				http.get(`/api/v1/fleet/hosts/${host.id}`, () =>
+					HttpResponse.json({ code: "x", message: "boom" }, { status: 500 }),
+				),
+			);
+			await openHost(host);
+			expect(await screen.findByText("Kernel")).toBeInTheDocument();
+			expect(
+				screen.queryByRole("heading", { name: "Backup health" }),
+			).toBeNull();
+			expect(
+				screen.queryByRole("button", { name: "Silence alerts for web-1" }),
+			).toBeNull();
+		});
+
+		it("silences from the host header", async () => {
+			const host = makeDetail("web-1");
+			mockHealth(host);
+			let body: unknown;
+			server.use(
+				http.put(`/api/v1/hosts/${host.id}/silence`, async ({ request }) => {
+					body = await request.json();
+					return HttpResponse.json({
+						host_id: host.id,
+						created_at: Date.now(),
+						created_by: "admin",
+						until: Date.now() + DAY,
+					});
+				}),
+			);
+			await openHost(host);
+			const user = userEvent.setup();
+			await user.click(
+				await screen.findByRole("button", { name: "Silence alerts for web-1" }),
+			);
+			await user.click(
+				await screen.findByRole("menuitem", { name: "For 1 day" }),
+			);
+			expect(
+				await screen.findByText("Alerts for web-1 are silenced for 1 day."),
+			).toBeInTheDocument();
+			expect(body).toEqual({ duration: "day" });
 		});
 	});
 });

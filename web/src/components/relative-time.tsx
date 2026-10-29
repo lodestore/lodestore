@@ -73,10 +73,12 @@ export function RelativeTime({
 	value,
 	now,
 	numeric,
+	tabIndex = 0,
 }: {
 	value: string | Date;
 	now?: Date;
 	numeric?: "auto" | "always";
+	tabIndex?: number;
 }) {
 	useTick();
 	const date = new Date(value);
@@ -89,7 +91,7 @@ export function RelativeTime({
 		<TooltipProvider>
 			<Tooltip>
 				<TooltipTrigger asChild>
-					<time dateTime={date.toISOString()} tabIndex={0}>
+					<time dateTime={date.toISOString()} tabIndex={tabIndex}>
 						{formatRelative(date, now ?? new Date(), numeric)}
 					</time>
 				</TooltipTrigger>

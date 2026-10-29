@@ -173,6 +173,21 @@ impl Pki {
         Ok(pki)
     }
 
+    pub fn grpc_not_after(&self) -> i64 {
+        self.leaf
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .not_after
+    }
+
+    #[doc(hidden)]
+    pub fn set_grpc_not_after(&self, not_after: i64) {
+        self.leaf
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .not_after = not_after;
+    }
+
     pub fn grpc_identity(&self) -> (String, Zeroizing<String>) {
         let leaf = self.leaf.read().unwrap_or_else(|p| p.into_inner());
         (leaf.cert_pem.clone(), leaf.key_pem.clone())

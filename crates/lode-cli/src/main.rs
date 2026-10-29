@@ -19,6 +19,7 @@ const EXIT_USAGE: u8 = 2;
 const EXIT_REPO_NOT_FOUND: u8 = 10;
 const EXIT_REPO_EXISTS: u8 = 11;
 const EXIT_UNLOCK: u8 = 12;
+const EXIT_CHECK_FAILED: u8 = 3;
 const EXIT_DRIFT: u8 = 4;
 const EXIT_TOKEN: u8 = 13;
 const EXIT_INTERRUPTED: u8 = 130;

@@ -18,15 +18,17 @@ A route that takes a token needs one scope. Routes not listed below work with a 
 
 | Scope | Routes |
 | --- | --- |
-| `hosts:read` | `GET /api/v1/hosts`, `GET /api/v1/hosts/{id}` |
+| `hosts:read` | `GET /api/v1/hosts`, `GET /api/v1/hosts/{id}`, `GET /api/v1/fleet`, `GET /api/v1/fleet/hosts/{id}`, `GET /api/v1/alerts`, `GET /api/v1/alerts/count` |
 | `hosts:write` | `PUT /api/v1/hosts/{id}/labels`, `POST /api/v1/hosts/{id}/revoke` |
+| `alerts:write` | `PUT /api/v1/hosts/{id}/silence`, `DELETE /api/v1/hosts/{id}/silence` |
 | `policies:read` | `GET /api/v1/policies`, `GET /api/v1/policies/{name}`, `POST /api/v1/policies/validate`, `POST /api/v1/policies/{name}/retention-preview`, `GET /api/v1/hosts/{id}/policies` |
-| `policies:write` | `POST /api/v1/policies`, `PUT /api/v1/policies/{name}`, `DELETE /api/v1/policies/{name}`, `POST /api/v1/policies/apply` |
-| `jobs:read` | `GET /api/v1/jobs`, `GET /api/v1/jobs/{id}`, `GET /api/v1/jobs/{id}/events` |
-| `jobs:run` | `POST /api/v1/jobs/{id}/cancel`, `POST /api/v1/jobs/{id}/rerun`, `POST /api/v1/policies/{name}/run`, `POST /api/v1/hosts/{id}/run` |
+| `policies:write` | `POST /api/v1/policies`, `PUT /api/v1/policies/{name}`, `DELETE /api/v1/policies/{name}`, `POST /api/v1/policies/apply`, `PUT /api/v1/repositories/{id}/checks/settings` |
+| `jobs:read` | `GET /api/v1/jobs`, `GET /api/v1/jobs/{id}`, `GET /api/v1/jobs/{id}/events`, `GET /api/v1/repositories/{id}/checks`, `GET /api/v1/repositories/{id}/checks/runs/{run_id}`, `GET /api/v1/repositories/{id}/checks/runs/{run_id}/report`, `POST /api/v1/repositories/{id}/checks/settings/validate` |
+| `jobs:run` | `POST /api/v1/jobs/{id}/cancel`, `POST /api/v1/jobs/{id}/rerun`, `POST /api/v1/policies/{name}/run`, `POST /api/v1/hosts/{id}/run`, `POST /api/v1/repositories/{id}/checks/{level}/run`, `POST /api/v1/repositories/{id}/checks/runs/{run_id}/cancel` |
 | `snapshots:read` | `GET /api/v1/hosts/{id}/snapshots`, `GET /api/v1/restore/hosts`, `GET /api/v1/restore/snapshots`, `GET /api/v1/snapshots/{id}`, `GET /api/v1/snapshots/{id}/entries`, `GET /api/v1/snapshots/{id}/search`, `POST /api/v1/snapshots/{id}/summary` |
 | `snapshots:delete` | `PUT /api/v1/snapshots/{id}/suspicious`, `DELETE /api/v1/snapshots/{id}` |
 | `restore` | `POST /api/v1/restores`, `POST /api/v1/downloads`, `GET /api/v1/downloads/{id}/archive` |
+| `metrics:read` | `GET /metrics`, see [Metrics](metrics.md) |
 
 The OpenAPI document lists the scope next to the `bearer` requirement of each of these routes.
 
@@ -64,3 +66,35 @@ The answer is `{"total", "forget", "floor", "suspicious", "truncated", "hosts"}`
 - `progress.upload_speed_bps` is the live upload speed of a running job.
 - `retention` (job detail) is the result of the retention pass after a backup: `state` (`running`, `done`, `skipped`), `forgot`, `kept` and `blocked`, the snapshots the repository refused to delete, each with `reason` and `kept_in_catalog`.
 - `limits` (job detail) holds the limits the job ran with (`upload_rate_bps`, `nice`, `ionice_class`, `ionice_level`) and is `null` when there were none.
+
+## Fleet and alerts
+
+These routes take a session or a token with the scope shown in the table above. They are the data of the Overview page. [Alerts and notifications](alerts.md) explains the alerts themselves.
+
+- `GET /api/v1/fleet` returns every host with one state (`failed`, `overdue`, `offline`, `not_protected` or `healthy`), its last successful backup, its worst policy, the last snapshot and whether its alerts are silenced, plus the `totals` per state and the `storage` of all repositories (size in the bucket, logical size, deduplication, when it was counted). `GET /api/v1/fleet/hosts/{id}` returns one host.
+- `GET /api/v1/alerts` lists alerts, newest first. `state` is `active` (the default), `resolved` or `all`; `host_id` keeps one host; `limit` is 1 to 500 (50 by default); `before` is the `id` of the last alert of the previous page. Alerts of silenced hosts stay in the list and are marked `silenced`. `total` counts all matches, not only the page. `GET /api/v1/alerts/count` returns `active` and `unsilenced`.
+- `PUT /api/v1/hosts/{id}/silence` with `{"duration": "hour" | "day" | "week" | "forever"}` silences a host and replaces an earlier silence; `DELETE` lifts it. A revoked host answers `409`.
+
+## Integrity checks
+
+Checks of a repository, see [Integrity checks](checks.md). A token needs `jobs:read` to read, `jobs:run` to start or stop a check and `policies:write` to change the settings.
+
+- `GET /api/v1/repositories/{id}/checks` returns, for each of `structure`, `packs` and `restore`, the settings, the next scheduled runs, the running check and the last finished one, plus the size counted from the bucket, the pack coverage and `blocked` when a check cannot start now.
+- `POST /api/v1/repositories/{id}/checks/{level}/run` starts a check and answers `202` with `run_id`. It answers `409` while a cleanup is running or another check is active, and `422` for an unknown level.
+- `GET /api/v1/repositories/{id}/checks/runs/{run_id}` returns the state and progress of a run; `POST .../runs/{run_id}/cancel` stops it; `GET .../runs/{run_id}/report` returns the full report with the findings and notes.
+- `PUT /api/v1/repositories/{id}/checks/settings` saves the settings of all three levels: `{"structure": {...}, "packs": {...}, "restore": {...}}`, each with `enabled`, `cron` and `timezone`, and the limits that level has (`read_per_run` for `packs`; `files_per_run` and `max_data_per_run` for `restore`). A limit left out keeps its saved value. Invalid fields answer `422` with `errors` listing each field `path` and `message`. `POST .../checks/settings/validate` does the same check without saving and also returns the next run times.
+
+## Notifications and account
+
+These routes work with a signed-in administrator session only; no token can use them, because a channel can send data out of the server and a secret must not be reachable by a script.
+
+- `GET /api/v1/notifications/channels`, `POST` to add one, `GET`, `PUT` and `DELETE` on `/api/v1/notifications/channels/{id}`. A channel has a `type` (`telegram`, `slack`, `email` or `webhook`), a `name`, `enabled`, `alert_types` (all five when left out), its `settings` and one `secret`: the bot token, the Slack webhook URL, the webhook bearer secret or the SMTP password. The answer never contains the secret, only `secret_set`. On `PUT`, leaving `secret` out or empty keeps the stored one. Channels from `server.yaml` have `source: "config"`, can be read and tested and answer `409` to `PUT` and `DELETE`.
+- `POST /api/v1/notifications/channels/test` sends a test message to a saved channel (`channel_id`) or to an unsaved draft (`channel`). A delivery that fails still answers `200`, with `ok: false` and the error of the receiver.
+- `GET` and `PUT /api/v1/notifications/thresholds` read and change `offline_after` and `cert_days`. `PUT` may send one of them; the other keeps its value.
+- `GET` and `PUT /api/v1/account` read and change the administrator's email, the address email channels use when they name no recipient. `POST /api/v1/account/password` changes the password and signs out the other sessions.
+
+Invalid input answers `422` with `errors`, a list of `{path, message}`.
+
+## Metrics
+
+`GET /metrics` is not part of the OpenAPI document. It answers in the Prometheus text format to a token with `metrics:read` or to a session, and without credentials on the optional `metrics_listen` address. See [Metrics](metrics.md).

@@ -1,6 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { type NavigateOptions, useNavigate } from "@tanstack/react-router";
 import {
+	Bell,
+	BellPlus,
 	Eraser,
 	KeyRound,
 	LogOut,
@@ -10,6 +12,7 @@ import {
 	Server,
 	ShieldCheck,
 	Sun,
+	UserRound,
 } from "lucide-react";
 import { type ReactNode, useLayoutEffect, useRef, useState } from "react";
 import { getListHostsQueryOptions } from "@/api/gen/endpoints";
@@ -35,9 +38,21 @@ import { useSignOut } from "@/lib/sign-out";
 
 const EXTRA_PAGES: typeof NAV_ITEMS = [
 	{
+		label: copy.notifications.title,
+		to: "/settings/notifications",
+		icon: Bell,
+		group: copy.shell.groups.system,
+	},
+	{
 		label: copy.tokens.title,
 		to: "/settings/tokens",
 		icon: KeyRound,
+		group: copy.shell.groups.system,
+	},
+	{
+		label: copy.user.title,
+		to: "/settings/user",
+		icon: UserRound,
 		group: copy.shell.groups.system,
 	},
 ];
@@ -237,6 +252,11 @@ function PaletteBody({
 			label: copy.palette.createApiToken,
 			icon: KeyRound,
 			run: go({ to: "/settings/tokens", search: { create: true } }),
+		},
+		{
+			label: copy.notifications.paletteAdd,
+			icon: BellPlus,
+			run: go({ to: "/settings/notifications/new" }),
 		},
 		{
 			label: copy.palette.lightTheme,

@@ -174,7 +174,9 @@ describe("File browser selection", { timeout: 30_000 }, () => {
 				"Select files or folders to restore them or download an archive.",
 			),
 		).toBeVisible();
-		await user.click(screen.getByRole("checkbox", { name: "Select docs" }));
+		await user.click(
+			await screen.findByRole("checkbox", { name: "Select docs" }),
+		);
 		await user.click(
 			screen.getByRole("checkbox", { name: "Select file-001.log" }),
 		);

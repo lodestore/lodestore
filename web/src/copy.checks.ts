@@ -1,0 +1,123 @@
+import { problemCount } from "@/lib/plural";
+
+export const checks = {
+	title: "Integrity checks",
+	description:
+		"The server reads this repository on a schedule to find damaged or missing data before you need a restore.",
+	loadFailed:
+		"Couldn't load check status. Check that the server is reachable, then retry.",
+	loadFailedTitle: "Status didn't load",
+	startFailed: "start the check",
+	startFailedTitle: "Check didn't start",
+	cancelFailed: "cancel the check",
+	levels: {
+		structure: {
+			name: "Structure",
+			line: "Listing, indexes, snapshot and tree references, pack presence.",
+			running: "Checking structure",
+		},
+		packs: {
+			name: "Pack reading",
+			line: "Downloads packs, decrypts them and verifies every blob hash.",
+			running: "Reading packs",
+		},
+		restore: {
+			name: "Test restore",
+			line: "Restores random files from random snapshots into a temporary folder and compares hashes.",
+			running: "Restoring sample files",
+		},
+	},
+	status: {
+		off: "Off",
+		nextRun: ["Next run ", "."],
+		notScheduled: "Not scheduled",
+		stopped: (reason: string) => `Stopped: ${reason}`,
+	},
+	run: "Run now",
+	cancel: "Cancel check run",
+	showReport: "Show report",
+	hideReport: "Hide report",
+	progressLabel: "Check progress",
+	counter: {
+		packs: (done: string, total: string, size: string) =>
+			`${done} of ${total} packs · ${size}`,
+		files: (done: string, total: string) => `${done} of ${total} files`,
+		listing: "Comparing the listing with the indexes",
+		snapshots: "Comparing snapshots with their trees and packs",
+	},
+	blocked: {
+		cleanup: "A cleanup cycle is running. Checks wait for it.",
+		check: "Another check is running on this repository.",
+	},
+	failedAlert: {
+		title: (level: string) => `${level} check found problems`,
+		body: "Some data may not restore. Open the report for details.",
+	},
+	report: {
+		passed: "Passed. No problems found.",
+		problems: (n: number) => `Found ${problemCount(n)}.`,
+		stopped: (reason: string) => `Stopped: ${reason}`,
+		finished: "Finished ",
+		took: (duration: string) => ` · took ${duration}`,
+		facts: {
+			snapshotsChecked: "Snapshots checked",
+			treesChecked: "Trees checked",
+			packsListed: "Packs listed",
+			missingPacks: "Missing packs",
+			packsRead: "Packs read",
+			dataRead: "Data read",
+			blobsVerified: "Blobs verified",
+			damagedBlobs: "Damaged blobs",
+			coverage: (days: number) => `Checked in ${days} days`,
+			snapshotsSampled: "Snapshots sampled",
+			filesRestored: "Files restored",
+			dataRestored: "Data restored",
+			hashMismatches: "Hash mismatches",
+			skipped: "Skipped",
+		},
+		stoppedAtLimit: "Stopped at the size limit.",
+		neverChecked: (n: number) =>
+			`${new Intl.NumberFormat("en").format(n)} ${n === 1 ? "pack has" : "packs have"} never been checked.`,
+		more: (n: number) => `and ${new Intl.NumberFormat("en").format(n)} more.`,
+		download: "Download full report",
+		downloadFailed: "Couldn't download the report. Try again.",
+		findingLabel: "Finding",
+	},
+	storage: {
+		used: "Storage used",
+		logical: "Logical size",
+		dedup: "Deduplication",
+		counted: "Counted",
+		none: "Calculated after the first structure check.",
+	},
+	settings: {
+		header: "Settings",
+		headerValues: (structure: string, packs: string, restore: string) =>
+			` · structure ${structure} · pack reading ${packs} · test restore ${restore}`,
+		off: "off",
+		enabled: "Run on schedule",
+		cronHelper: "Five fields or @hourly, @daily, @weekly, @monthly.",
+		readPerRun: "Read per run",
+		readPlaceholder: "5GiB",
+		filesPerRun: "Files per run",
+		filesPlaceholder: "20",
+		maxData: "Max data per run",
+		maxDataPlaceholder: "1GiB",
+		maxDataHelper:
+			"Restoring stops when the sample reaches this size. It needs the same free space in the server data folder.",
+		sizeInvalid: "Use a size such as 5GiB or 500MiB.",
+		filesInvalid: "Enter a whole number from 1 to 1000.",
+		save: "Save settings",
+		discard: "Discard changes",
+		saved: "Check settings saved. They apply from the next run.",
+		saveFailed: "save the check settings",
+	},
+	repoColumn: "Checks",
+	repoState: {
+		passed: "Passed",
+		failed: "Failed",
+		never_run: "Never run",
+		off: "Off",
+	},
+	repoOpen: (name: string) => `Integrity checks of ${name}:`,
+};

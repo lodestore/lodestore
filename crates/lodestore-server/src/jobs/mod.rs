@@ -19,6 +19,9 @@ use self::restore::RestoreRecord;
 use crate::db::now_ms;
 use crate::download::archive::ArchiveFormat;
 use crate::error::ApiError;
+use crate::maintenance::check::api::{CheckPhase, CheckProgress};
+use crate::maintenance::check::db::{RUN_COLUMNS, run_from_row};
+use crate::maintenance::check::{CheckLevel, CheckOrigin, CheckOutcome, CheckState};
 use crate::maintenance::gc::api::{GcProgress, GcReport};
 use crate::maintenance::gc::db::{CYCLE_COLUMNS, cycle_from_row};
 use crate::maintenance::gc::{GcOrigin, GcState};
@@ -161,6 +164,7 @@ pub enum JobKind {
     Restore,
     Download,
     Gc,
+    Check,
 }
 
 impl JobKind {
@@ -170,6 +174,7 @@ impl JobKind {
             "restore" => JobKind::Restore,
             "download" => JobKind::Download,
             "gc" => JobKind::Gc,
+            "check" => JobKind::Check,
             _ => return None,
         })
     }
@@ -289,6 +294,19 @@ pub struct GcJobInfo {
 }
 
 #[derive(Serialize, ToSchema)]
+pub struct CheckJobInfo {
+    pub repository_id: String,
+    pub repository_name: String,
+    pub level: CheckLevel,
+    pub origin: CheckOrigin,
+    pub outcome: Option<CheckOutcome>,
+    pub phase: Option<CheckPhase>,
+    pub progress: Option<CheckProgress>,
+    pub findings_total: u64,
+    pub error: Option<String>,
+}
+
+#[derive(Serialize, ToSchema)]
 pub struct JobBrief {
     pub id: String,
     pub state: JobState,
@@ -336,6 +354,7 @@ pub struct JobSummary {
     pub restore_result: Option<RestoreResultDto>,
     pub download: Option<DownloadInfo>,
     pub gc: Option<GcJobInfo>,
+    pub check: Option<CheckJobInfo>,
     pub incomplete: bool,
     pub warnings_total: u64,
     pub errors_total: u64,
@@ -566,7 +585,9 @@ pub(crate) fn summary_from_row(
         });
     let db_kind: String = row.try_get("kind")?;
     let kind = match JobKind::parse(&db_kind) {
-        Some(JobKind::Download | JobKind::Gc) | None => return Err(unknown("kind", &db_kind)),
+        Some(JobKind::Download | JobKind::Gc | JobKind::Check) | None => {
+            return Err(unknown("kind", &db_kind));
+        }
         Some(kind) => kind,
     };
     let restore = match kind {
@@ -589,6 +610,7 @@ pub(crate) fn summary_from_row(
         },
         download: None,
         gc: None,
+        check: None,
         source: match source.as_str() {
             "manual" => JobSource::Manual,
             "cli" => JobSource::Cli,
@@ -697,6 +719,7 @@ pub(crate) fn download_summary(
             started_by: row.try_get("started_by")?,
         }),
         gc: None,
+        check: None,
         incomplete: false,
         warnings_total: 0,
         errors_total: 0,
@@ -772,11 +795,78 @@ pub(crate) fn gc_summary(row: &AnyRow) -> Result<JobSummary, ApiError> {
         restore_result: None,
         download: None,
         gc: Some(info),
+        check: None,
         incomplete: false,
         warnings_total: 0,
         errors_total: 0,
         error_code: None,
         error_message: cycle.error,
+    })
+}
+
+const CHECK_EXTRA_COLUMNS: &str =
+    "(SELECT name FROM repositories r WHERE r.id = check_runs.repository_id) AS repository_name";
+
+pub(crate) fn check_select() -> String {
+    format!("SELECT {RUN_COLUMNS}, {CHECK_EXTRA_COLUMNS} FROM check_runs")
+}
+
+pub(crate) fn check_summary(row: &AnyRow) -> Result<JobSummary, ApiError> {
+    let run = run_from_row(row).map_err(ApiError::Internal)?;
+    let state = match run.state {
+        CheckState::Queued => JobState::Queued,
+        CheckState::Running => JobState::Running,
+        CheckState::Done => JobState::Succeeded,
+        CheckState::Failed => JobState::Failed,
+        CheckState::Aborted => JobState::Cancelled,
+    };
+    let progress = run.progress.filter(|_| run.state.is_active());
+    let info = CheckJobInfo {
+        repository_name: row.try_get("repository_name")?,
+        repository_id: run.repository_id,
+        level: run.level,
+        origin: run.origin,
+        outcome: run.outcome,
+        phase: progress.as_ref().map(|p| p.phase),
+        progress,
+        findings_total: run.findings_total,
+        error: run.error.clone(),
+    };
+    Ok(JobSummary {
+        id: run.id,
+        kind: JobKind::Check,
+        host_id: String::new(),
+        hostname: String::new(),
+        policy_name: None,
+        policy_exists: false,
+        source: JobSource::Manual,
+        origin: match run.origin {
+            CheckOrigin::Manual => JobOrigin::Manual,
+            CheckOrigin::Schedule => JobOrigin::Schedule,
+        },
+        missed_runs: None,
+        stdin_name: None,
+        state,
+        phase: None,
+        queued_at: run.created_at,
+        started_at: run.started_at,
+        finished_at: run.finished_at,
+        queue_reason: None,
+        host_online: false,
+        progress: None,
+        snapshot_id: None,
+        snapshot_suspicious: false,
+        stats: None,
+        restore: None,
+        restore_result: None,
+        download: None,
+        gc: None,
+        check: Some(info),
+        incomplete: false,
+        warnings_total: 0,
+        errors_total: 0,
+        error_code: None,
+        error_message: run.error,
     })
 }
 

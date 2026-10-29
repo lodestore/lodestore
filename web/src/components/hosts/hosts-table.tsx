@@ -1,20 +1,14 @@
 import { Link, useNavigate } from "@tanstack/react-router";
-import {
-	ArrowDown,
-	ArrowUp,
-	ChevronsUpDown,
-	MoreHorizontal,
-	Search,
-	Server,
-	TriangleAlert,
-} from "lucide-react";
+import { MoreHorizontal, Search, Server, TriangleAlert } from "lucide-react";
 import { useState } from "react";
 import type { Host } from "@/api/gen/model";
 import {
 	Illustration,
 	type IllustrationName,
 } from "@/components/brand/illustration";
+import { TextWithPaths } from "@/components/path-text";
 import { formatRelative } from "@/components/relative-time";
+import { SortButton } from "@/components/sort-button";
 import { StatusBadge } from "@/components/status-badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -93,7 +87,7 @@ function matches(host: Host, query: string) {
 	);
 }
 
-function Truncated({
+export function Truncated({
 	text,
 	className,
 	children,
@@ -109,7 +103,9 @@ function Truncated({
 					{children ?? text}
 				</span>
 			</TooltipTrigger>
-			<TooltipContent>{text}</TooltipContent>
+			<TooltipContent>
+				<TextWithPaths text={text} />
+			</TooltipContent>
 		</Tooltip>
 	);
 }
@@ -237,35 +233,6 @@ export function CertificateText({ host }: { host: Host }) {
 			{warn && <TriangleAlert aria-hidden className="size-4" />}
 			{expiresInDays(days)}
 		</span>
-	);
-}
-
-function SortButton({
-	label,
-	active,
-	dir,
-	onClick,
-	className,
-}: {
-	label: string;
-	active: boolean;
-	dir: Sort["dir"];
-	onClick: () => void;
-	className?: string;
-}) {
-	const Icon = !active ? ChevronsUpDown : dir === "asc" ? ArrowUp : ArrowDown;
-	return (
-		<button
-			type="button"
-			onClick={onClick}
-			className={cn(
-				"inline-flex min-h-6 items-center gap-1 rounded-sm hover:text-foreground",
-				className,
-			)}
-		>
-			{label}
-			<Icon aria-hidden className="size-3.5" />
-		</button>
 	);
 }
 

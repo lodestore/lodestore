@@ -51,6 +51,7 @@ An `http://` address that is not on the loopback interface works, but the token 
 | `lode server snapshots delete <id> [--yes]` | `snapshots:delete` |
 | `lode apply -f <file or folder> [--dry-run] [--prune] [--adopt] [--manager NAME] [--yes]` | `policies:read` and `policies:write`, plus `snapshots:delete` when the files set or change `retention` |
 | `lode gc [--dry-run] <repo>`, `lode gc status <repo>`, `lode gc unlock <repo>` (also `lode server gc ...`) | See [Cleanup](#cleanup) |
+| `lode server check <repo> [--level structure\|packs\|restore]` | See [Integrity checks](#integrity-checks) |
 | `lode server restore <snapshot> --host <host> [options]` | `restore`, and `snapshots:read` when `--target` and `--in-place` are not given |
 
 A `<host>` is a host id or a hostname. A hostname is looked up in the host list, which needs `hosts:read`; a token without that scope must pass the id, which `lode server hosts list` shows in the `ID` column. When several hosts share a name, `lode` asks for the id.
@@ -154,6 +155,46 @@ A cleanup that cannot start prints the reason, one line for each failed safety c
 
 There is no command to abort a cycle; use **Abort cycle** in the repository card.
 
+### Integrity checks
+
+Two commands check that a repository is whole and restorable. [Integrity checks](checks.md) explains the three levels and what they find.
+
+```sh
+lode check -r s3://backups/main
+lode check -r s3://backups/main --level packs --read-limit 2GiB
+lode server check main --level restore
+```
+
+| Command | Where it runs | Needs |
+|---------|---------------|-------|
+| `lode check [--level L] [options]` | On this machine, straight against the repository. No server is involved. | The repository and its password or recovery key, like `lode ls`. |
+| `lode server check <repo> [--level L]` | On the server, with the server's key. The command starts it, follows it and prints the report. | A token with `jobs:run` and `jobs:read`, and `policies:read` when `<repo>` is a name, as for `lode gc`. |
+
+`--level` is `structure` (the default), `packs` or `restore`. The options of `lode check` that limit the work:
+
+| Option | Level | Meaning |
+|--------|-------|---------|
+| `--read-limit SIZE` | `packs` | Read at most this much pack data, for example `5GiB` (the default). Packs are read in random order. |
+| `--files N` | `restore` | Restore this many files, 1 to 1000. Default 20. |
+| `--max-data SIZE` | `restore` | Stop when the restored files reach this size. Default `1GiB`. They are written to a temporary folder that is removed afterwards. |
+
+`lode check` downloads what it reads to the machine it runs on, so a `packs` check of a cloud bucket costs transfer there; use `lode server check` when the server sits closer to the data. `lode server check` takes its limits from the repository's check settings and cannot be changed per run. It fails with exit code 1 and the server's message when a cleanup or another check holds the repository. If the connection to the server drops, the check continues on the server; see the Jobs page.
+
+The output uses the words of the web interface:
+
+```
+Pack reading check for repository s3://backups/main (direct)
+  Result            Passed
+  Packs read        812
+  Data read         4.9 GiB
+  Blobs verified    190,344
+  Damaged blobs     0
+```
+
+A server run prints `(server)` instead of `(direct)`, and for `packs` adds how much of the repository has been read in the last 30 days. When problems are found they follow under `Problems`, at most 20 lines and then "and N more.", and notes under `Notes`. With `--json` the command prints the report as one `check` line (`check_report` for the server run) with the complete lists.
+
+The exit code tells a script what happened: 0 when the check passed, 3 when it found problems, 1 when it could not finish. A `packs` or `restore` check that had nothing to read, because the repository has no packs, no snapshots or no files, exits with 0 and prints `Nothing to check` instead of `Passed`; with `--json` the `result` is `nothing_to_check` (the other values are `passed`, `failed` and `stopped`) and `nothing_to_check` gives the reason.
+
 ### Restore through the server
 
 `lode server restore <snapshot> --host <host>` asks the agent on that host to restore. The snapshot is the full id from `lode server snapshots list`.
@@ -164,7 +205,7 @@ There is no command to abort a cycle; use **Abort cycle** in the repository card
 | `--target DIR` | Folder on the host. Default: `/var/lodestore/restore/<date>-<first 8 of the id>` |
 | `--in-place` | Restore over the original files. Needs `--yes` |
 | `--conflict POLICY` | `overwrite-changed` (default), `skip-existing` or `stop-if-not-empty` |
-| `--no-owners` | Do not restore file owners |
+| `--no-owners` | Do not restore file owners, setuid/setgid bits or file capabilities |
 
 ### Output
 
@@ -177,5 +218,6 @@ Lists print a table with the same columns and status words as the web interface.
 | 0 | Done |
 | 1 | The server or the network failed; the message is the server's |
 | 2 | Wrong flags, the server address or token is not set, `lode apply` found an invalid file, `lode gc` got an unknown repository, or `lode gc unlock` has no terminal and no `--yes` |
+| 3 | `lode check` or `lode server check` found problems in the repository |
 | 4 | `lode apply --dry-run` found changes |
 | 13 | The token was refused: unknown, expired or revoked, or it lacks the scope named in the message |

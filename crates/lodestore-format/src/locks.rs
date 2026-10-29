@@ -14,7 +14,7 @@ use crate::crypto::{
     BlobId, Entropy, RepoId, open_gc_manifest_body, open_writer_marker_body, seal_gc_manifest_body,
     seal_writer_marker_body,
 };
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, within_size};
 use crate::fs::now;
 use crate::pb;
 use crate::store::{BlobError, BlobStore, put_named};
@@ -26,6 +26,8 @@ pub const RUNTIME_MARGIN: Duration = Duration::from_hours(1);
 pub const UNMARKED_WRITER_LIMIT: Duration = Duration::from_hours(23);
 
 const GC_PREFIX: &str = "locks/gc-";
+/// Largest cleanup manifest read from a listing.
+pub const MAX_GC_MANIFEST_SIZE: u64 = 16 << 20;
 const WRITER_PREFIX: &str = "locks/writer-";
 const DONE_SUFFIX: &str = ".done";
 const VERSION: u32 = 1;
@@ -195,6 +197,12 @@ pub async fn read_gc_locks<S: BlobStore>(
         if !entry.key.starts_with(GC_PREFIX) {
             continue;
         }
+        within_size(
+            &entry.key,
+            entry.size,
+            MAX_GC_MANIFEST_SIZE,
+            "cleanup manifest",
+        )?;
         let bytes = match store.get(&entry.key).await {
             Ok(bytes) => bytes,
             Err(BlobError::NotFound) => continue,

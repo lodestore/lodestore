@@ -1,14 +1,15 @@
+import type { ReactNode } from "react";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 
 export function StatTile({
 	label,
 	value,
-	isPending,
+	isPending = false,
 }: {
 	label: string;
-	value: number;
-	isPending: boolean;
+	value: ReactNode;
+	isPending?: boolean;
 }) {
 	return (
 		<Card className="flex-row items-center justify-between gap-4 p-4">

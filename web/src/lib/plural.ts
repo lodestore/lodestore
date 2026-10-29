@@ -49,5 +49,17 @@ export const dayCount = (n: number) =>
 export const packCount = (n: number) =>
 	`${count.format(n)} ${noun(n, "pack", "packs")}`;
 
+export const alertCount = (n: number) =>
+	`${count.format(n)} ${noun(n, "alert", "alerts")}`;
+
+export const problemCount = (n: number) =>
+	`${count.format(n)} ${noun(n, "problem", "problems")}`;
+
+export const channelCount = (n: number) =>
+	`${count.format(n)} ${noun(n, "channel", "channels")}`;
+
+export const repositoryCount = (n: number) =>
+	`${count.format(n)} ${noun(n, "repository", "repositories")}`;
+
 export const markerCount = (n: number) =>
 	`${count.format(n)} ${noun(n, "marker", "markers")}`;

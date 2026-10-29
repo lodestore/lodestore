@@ -55,6 +55,7 @@ const text: [string, string][] = [
 	["foreground", "primary-subtle"],
 	["primary-strong", "primary-subtle"],
 	["muted-foreground", "primary-subtle"],
+	["sidebar-foreground", "sidebar"],
 	["destructive", "background"],
 	["destructive", "card"],
 	["destructive", "muted"],
@@ -77,6 +78,10 @@ const graphics: [string, string][] = [
 	["ring", "card"],
 	["primary-strong", "muted"],
 	["primary-strong", "background"],
+	["destructive", "primary-subtle"],
+	["success", "primary-subtle"],
+	["warning", "primary-subtle"],
+	["neutral", "primary-subtle"],
 ];
 
 const themes = {

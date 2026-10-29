@@ -11,8 +11,9 @@ use utoipa_axum::routes;
 use super::restore::{RestoreRequest, enqueue_restore};
 use super::{
     ACTIVE_STATES, ConflictPolicyDto, DOWNLOAD_COLUMNS, JOB_COLUMNS, JOB_FROM, JobDetail, JobKind,
-    JobProgressDto, JobSource, JobState, JobSummary, RunJob, busy_hosts, download_summary, enqueue,
-    gc_select, gc_summary, job_spec, load_download, load_job, summary_from_row,
+    JobProgressDto, JobSource, JobState, JobSummary, RunJob, busy_hosts, check_select,
+    check_summary, download_summary, enqueue, gc_select, gc_summary, job_spec, load_download,
+    load_job, summary_from_row,
 };
 use crate::auth::tokens::{JobsRead, JobsRun, RestoreScope, Scoped};
 use crate::browse::AGENTLESS;
@@ -66,7 +67,7 @@ pub struct JobsQuery {
     pub host: Option<String>,
     /// Exact host id.
     pub host_id: Option<String>,
-    /// `backup`, `restore`, `download` or `gc`.
+    /// `backup`, `restore`, `download`, `gc` or `check`.
     pub kind: Option<String>,
     /// One-based page number.
     pub page: Option<u64>,
@@ -122,15 +123,16 @@ pub async fn list_jobs(
             "Unknown source \"{source}\"."
         )));
     }
-    let want_jobs = !matches!(kind, Some(JobKind::Download | JobKind::Gc));
+    let want_jobs = !matches!(kind, Some(JobKind::Download | JobKind::Gc | JobKind::Check));
     let want_downloads = kind.is_none() || kind == Some(JobKind::Download);
     let want_gc = kind.is_none() || kind == Some(JobKind::Gc);
+    let want_check = kind.is_none() || kind == Some(JobKind::Check);
 
     let page = query.page.unwrap_or(1).max(1);
     let offset = i64::try_from(page - 1)
         .unwrap_or(i64::MAX)
         .saturating_mul(PAGE_SIZE);
-    let merged = [want_jobs, want_downloads, want_gc]
+    let merged = [want_jobs, want_downloads, want_gc, want_check]
         .iter()
         .filter(|wanted| **wanted)
         .count()
@@ -188,6 +190,21 @@ pub async fn list_jobs(
             entries.push((key, Entry::Gc(row)));
         }
     }
+    if want_check {
+        let (count, rows) = fetch_checks(&state, &query, status, sql_limit, sql_offset).await?;
+        total += count;
+        for row in rows {
+            let key = SortKey::new(
+                matches!(
+                    row.try_get::<String, _>("state")?.as_str(),
+                    "queued" | "running"
+                ),
+                row.try_get("created_at")?,
+                row.try_get("id")?,
+            );
+            entries.push((key, Entry::Check(row)));
+        }
+    }
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     let skip = if merged { offset as usize } else { 0 };
 
@@ -198,6 +215,7 @@ pub async fn list_jobs(
             Entry::Job(row) => summary_from_row(&state, row, &busy)?,
             Entry::Download(row) => download_summary(&state, row)?.0,
             Entry::Gc(row) => gc_summary(row)?,
+            Entry::Check(row) => check_summary(row)?,
         });
     }
     for item in &mut items {
@@ -228,6 +246,7 @@ enum Entry {
     Job(AnyRow),
     Download(AnyRow),
     Gc(AnyRow),
+    Check(AnyRow),
 }
 
 fn place(binds: &mut Vec<String>, value: String) -> String {
@@ -432,6 +451,58 @@ async fn fetch_gc(
         "{}{filter} ORDER BY CASE WHEN state IN ('done', 'failed', 'aborted') THEN 1 ELSE 0 END, \
          created_at DESC, id DESC LIMIT $1 OFFSET $2",
         gc_select()
+    )))
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(&state.db.pool)
+    .await?;
+    Ok((total, rows))
+}
+
+async fn fetch_checks(
+    state: &AppState,
+    query: &JobsQuery,
+    status: Option<JobState>,
+    limit: i64,
+    offset: i64,
+) -> Result<(i64, Vec<AnyRow>), ApiError> {
+    let mut clauses: Vec<&str> = Vec::new();
+    if let Some(status) = status {
+        clauses.push(match status {
+            JobState::Queued => "state = 'queued'",
+            JobState::Running => "state = 'running'",
+            JobState::Succeeded => "state = 'done'",
+            JobState::Failed => "state = 'failed'",
+            JobState::Cancelled => "state = 'aborted'",
+            JobState::Waiting
+            | JobState::Warnings
+            | JobState::Interrupted
+            | JobState::NotStarted => "1 = 0",
+        });
+    }
+    let hostless = query.policy.is_some()
+        || query.source.as_deref() == Some("cli")
+        || query.host.as_deref().is_some_and(|h| !h.is_empty())
+        || query.host_id.as_deref().is_some_and(|h| !h.is_empty());
+    if hostless {
+        clauses.push("1 = 0");
+    }
+    let filter = if clauses.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", clauses.join(" AND "))
+    };
+
+    let total: i64 = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SELECT COUNT(*) AS n FROM check_runs{filter}"
+    )))
+    .fetch_one(&state.db.pool)
+    .await?
+    .try_get("n")?;
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "{}{filter} ORDER BY CASE WHEN state IN ('queued', 'running') THEN 0 ELSE 1 END, \
+         created_at DESC, id DESC LIMIT $1 OFFSET $2",
+        check_select()
     )))
     .bind(limit)
     .bind(offset)

@@ -110,6 +110,20 @@ export const jobs = {
 		frees: (size: string, date: string) => `${size} frees after ${date}`,
 		freesUnknown: (size: string) => `${size}, release date unknown`,
 	},
+	check: {
+		repository: (name: string) => `Repository ${name}`,
+		levels: {
+			structure: "structure",
+			packs: "pack reading",
+			restore: "test restore",
+		},
+		kind: (level: string, scheduled: boolean) =>
+			`Check · ${level}${scheduled ? " · scheduled" : ""}`,
+		progressLabel: "Check progress",
+		passed: "Passed",
+		cancelled: "Cancelled",
+		stopped: (reason: string) => (reason ? `Stopped: ${reason}` : "Stopped"),
+	},
 	otherStatusHint: {
 		queuedDownload: "Waiting for the browser to start the download.",
 		failedDownload: "The archive could not be built. Download it again.",

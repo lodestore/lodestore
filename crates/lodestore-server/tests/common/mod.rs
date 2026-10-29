@@ -12,7 +12,7 @@ use lodestore_format::crypto::Entropy;
 use lodestore_format::keys::KdfCost;
 use lodestore_format::repo::{InitOptions, PendingInit};
 use lodestore_format::store::LocalFsStore;
-use lodestore_server::config::{Config, GrpcConfig, Secret};
+use lodestore_server::config::{Config, GrpcConfig, NotificationsConfig, Secret};
 use lodestore_server::repos::db::{NewRepository, RepoLocation, create_repository};
 use lodestore_server::state::AppState;
 use lodestore_server::{Listeners, ServerHandle, serve};
@@ -125,6 +125,10 @@ impl TestServer {
             unlock_key: Some(Secret::new(data_encoding::HEXLOWER.encode(&[7u8; 32]))),
             admin_password: Some(Secret::new(ADMIN_PASSWORD)),
             agent_dir: dir.path().join("agents"),
+            notifications: NotificationsConfig {
+                allow_private_targets: true,
+                ..NotificationsConfig::default()
+            },
             ..Config::default()
         };
         tweak(&mut config);

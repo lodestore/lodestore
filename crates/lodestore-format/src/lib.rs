@@ -1,5 +1,6 @@
 //! Lodestore repository format v1.
 
+pub mod check;
 pub mod chunker;
 pub mod config;
 pub mod crypto;

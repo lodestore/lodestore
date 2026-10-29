@@ -2,7 +2,7 @@ import { dayCount, scopeCount } from "@/lib/plural";
 
 export const tokens = {
 	title: "API tokens",
-	lead: "Tokens let the lode CLI and CI pipelines use this server without your password. A token cannot manage tokens, repositories or the admin password.",
+	lead: "Tokens let the lode CLI and CI pipelines use this server without your password. A token cannot manage tokens, repositories, notification channels or the admin password.",
 	create: "Create token",
 	filterLabel: "Show tokens",
 	filterActive: "Active",
@@ -41,7 +41,8 @@ export const tokens = {
 		namePlaceholder: "ci-gitops",
 		permissions: "Permissions",
 		scopesHint:
-			"For CI that applies policies, choose policies:read and policies:write. Policies with retention also need snapshots:delete.",
+			"For CI that applies policies, choose policies:read and policies:write. Policies with retention also need snapshots:delete. For Prometheus, choose metrics:read.",
+		forPrometheus: "For Prometheus",
 		deletesData: "Deletes data",
 		options: "Options",
 		optionsValue: (period: string) => `· expires in ${period}`,

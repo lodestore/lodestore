@@ -124,6 +124,8 @@ pub enum Command {
         #[command(flatten)]
         flags: RestoreFlags,
     },
+    /// Check the integrity of a repository without a server; exits 3 when it finds problems
+    Check(CheckArgs),
     /// Manage a Lodestore server with an API token (LODESTORE_SERVER, LODESTORE_TOKEN)
     Server {
         #[command(flatten)]
@@ -140,6 +142,31 @@ pub enum Command {
         #[command(flatten)]
         args: GcArgs,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckLevel {
+    Structure,
+    Packs,
+    Restore,
+}
+
+#[derive(Debug, Args)]
+pub struct CheckArgs {
+    /// structure lists the bucket and follows snapshots to their blobs; packs also downloads
+    /// packs and verifies every blob; restore restores random files and compares their hashes
+    #[arg(long, value_enum, default_value_t = CheckLevel::Structure)]
+    pub level: CheckLevel,
+    /// With --level packs: read at most this much pack data, for example 5GiB (default 5GiB)
+    #[arg(long, value_name = "SIZE")]
+    pub read_limit: Option<String>,
+    /// With --level restore: restore this many files (1 to 1000, default 20)
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=1000))]
+    pub files: Option<u32>,
+    /// With --level restore: stop when the restored files reach this size, for example 1GiB (default 1GiB)
+    #[arg(long, value_name = "SIZE")]
+    pub max_data: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -231,6 +258,18 @@ pub enum ServerCommand {
     Restore(ServerRestoreArgs),
     /// Free storage space of a repository: run a cleanup, a dry run, show or unlock it
     Gc(GcArgs),
+    /// Run an integrity check of a repository on the server; exits 3 when it finds problems
+    Check(ServerCheckArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ServerCheckArgs {
+    /// Repository name or id; a name is looked up in the policies (needs policies:read)
+    pub repo: String,
+    /// structure follows snapshots to their blobs; packs also downloads packs and verifies
+    /// every blob; restore restores random files and compares their hashes
+    #[arg(long, value_enum, default_value_t = CheckLevel::Structure)]
+    pub level: CheckLevel,
 }
 
 #[derive(Debug, Subcommand)]
@@ -300,7 +339,7 @@ pub struct ServerRestoreArgs {
     /// What to do with a file that already exists
     #[arg(long, value_enum, default_value = "overwrite-changed")]
     pub conflict: ConflictArg,
-    /// Do not restore file owners
+    /// Do not restore file owners, setuid/setgid bits or file capabilities
     #[arg(long)]
     pub no_owners: bool,
 }

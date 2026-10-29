@@ -86,6 +86,22 @@ pub fn external_identity(
     Ok(Some((cert, key)))
 }
 
+/// Expiry of the certificate the gRPC listener serves, in milliseconds, and
+/// whether it is the operator's own file rather than the built-in one.
+pub fn server_cert_not_after(state: &AppState) -> anyhow::Result<(i64, bool)> {
+    use rustls_pki_types::CertificateDer;
+    use rustls_pki_types::pem::PemObject;
+
+    let Some((pem, _)) = external_identity(&state.config.grpc)? else {
+        return Ok((state.pki.grpc_not_after() * 1000, false));
+    };
+    let der = CertificateDer::from_pem_slice(pem.as_bytes())
+        .context("the server certificate holds no PEM certificate")?;
+    let (_, cert) = x509_parser::parse_x509_certificate(der.as_ref())
+        .map_err(|error| anyhow::anyhow!("parsing the server certificate: {error}"))?;
+    Ok((cert.validity().not_after.timestamp() * 1000, true))
+}
+
 type Material = (String, zeroize::Zeroizing<String>);
 
 const STOP_GRACE: Duration = Duration::from_secs(10);

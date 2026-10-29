@@ -3,12 +3,15 @@ import { Link } from "@tanstack/react-router";
 import { Copy } from "lucide-react";
 import { type ReactNode, useRef, useState } from "react";
 import { toast } from "sonner";
-import type { HostDetail, HostMount } from "@/api/gen/model";
+import { useFleetHost } from "@/api/gen/endpoints";
+import type { FleetHost, HostDetail, HostMount } from "@/api/gen/model";
 import { HostPolicies } from "@/components/hosts/host-policies";
 import { CertificateText, VersionCell } from "@/components/hosts/hosts-table";
+import { ActiveAlerts } from "@/components/overview/active-alerts";
 import { PathText } from "@/components/path-text";
 import { RelativeTime } from "@/components/relative-time";
 import { StatusBadge } from "@/components/status-badge";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -23,7 +26,7 @@ import {
 } from "@/components/ui/table";
 import { copy } from "@/copy";
 import { copyText } from "@/lib/clipboard";
-import { formatBytes } from "@/lib/format";
+import { formatBytes, formatDateTime } from "@/lib/format";
 import { infoQuery } from "@/lib/session";
 
 const FILESYSTEMS_SHOWN = 20;
@@ -159,7 +162,7 @@ function AgentId({ id }: { id: string }) {
 			<Button
 				variant="ghost"
 				size="icon-xs"
-				className="relative -my-1 shrink-0 after:absolute after:-inset-[9px]"
+				className="relative -my-1 shrink-0 after:absolute after:-inset-2"
 				aria-label={copy.hosts.details.copyAgentId}
 				onClick={onCopy}
 			>
@@ -188,77 +191,158 @@ function LabelsCard({ host }: { host: HostDetail }) {
 	);
 }
 
+const HEALTH_REFRESH_MS = 10_000;
+
+export function useHostHealth(id: string) {
+	return useFleetHost(id, {
+		query: {
+			refetchInterval: HEALTH_REFRESH_MS,
+			refetchIntervalInBackground: false,
+		},
+	});
+}
+
+function BackupHealthCard({ health }: { health: FleetHost }) {
+	const h = copy.hostBackup.health;
+	return (
+		<FactsCard
+			title={h.title}
+			facts={[
+				[
+					h.lastSuccess,
+					health.last_success_at == null ? (
+						h.never
+					) : (
+						<RelativeTime value={new Date(health.last_success_at)} />
+					),
+				],
+				[
+					h.overdueAfter,
+					health.overdue_after_secs == null
+						? h.notSet
+						: h.overdueAfterValue(health.overdue_after_secs),
+				],
+				[
+					h.alerts,
+					!health.silenced
+						? h.active
+						: health.silenced_until == null
+							? h.silencedForever
+							: h.silencedUntil(formatDateTime(health.silenced_until)),
+				],
+			]}
+		/>
+	);
+}
+
 export function HostOverview({ host }: { host: HostDetail }) {
 	const d = copy.hosts.details;
 	const info = useQuery(infoQuery);
+	const health = useHostHealth(host.id);
 	return (
-		<div className="grid gap-6 xl:grid-cols-2">
-			<FactsCard
-				title={copy.hostPage.cards.status}
-				facts={[
-					[d.status, <StatusBadge key="s" status={host.status} />],
-					[
-						d.lastContact,
-						host.last_seen_at == null ? null : (
-							<RelativeTime value={new Date(host.last_seen_at)} />
-						),
-					],
-					[d.enrolled, formatDate(host.enrolled_at)],
-					[d.agentId, <AgentId key="id" id={host.id} />],
-					[
-						d.repository,
-						<Link
-							key="r"
-							to="/settings/repositories/$id"
-							params={{ id: host.repository_id }}
-							className="rounded-sm text-primary-strong underline-offset-4 hover:underline"
-						>
-							{host.repository_name}
-						</Link>,
-					],
-				]}
-			/>
-			<FactsCard
-				title={copy.hostPage.cards.system}
-				facts={[
-					[d.os, host.os],
-					[d.arch, host.arch],
-					[d.distro, host.distro],
-					[d.kernel, host.kernel],
-					[
-						d.uptime,
-						host.uptime_s == null || host.uptime_s <= 0
-							? null
-							: formatUptime(host.uptime_s),
-					],
-					[
-						copy.hosts.columns.version,
-						<VersionCell
-							key="v"
-							version={host.version}
-							serverVersion={info.data?.version}
-						/>,
-					],
-				]}
-			/>
-			<LabelsCard host={host} />
-			<HostPolicies host={host} />
-			<FactsCard
-				title={copy.hostPage.cards.certificate}
-				facts={[
-					[d.notBefore, formatDate(host.cert_issued_at)],
-					[
-						d.notAfter,
-						<span key="a" className="inline-flex flex-wrap gap-x-2">
-							{formatDate(host.cert_not_after)}
-							<CertificateText host={host} />
-						</span>,
-					],
-					[d.nextRenewal, formatDate(host.next_renewal_at)],
-				]}
-			/>
-			<Filesystems mounts={host.mounts} />
+		<div className="flex flex-col gap-6">
+			<ActiveAlerts hostId={host.id} title={copy.hostBackup.alertsTitle} />
+			<div className="grid gap-6 xl:grid-cols-2">
+				{health.isPending ? (
+					<HealthSkeleton />
+				) : health.data ? (
+					<BackupHealthCard health={health.data} />
+				) : (
+					<Alert variant="destructive">
+						<AlertDescription className="flex flex-wrap items-center gap-4">
+							{copy.hostBackup.health.loadFailed}
+							<Button
+								variant="outline"
+								size="sm"
+								onClick={() => health.refetch()}
+							>
+								{copy.overview.retry}
+							</Button>
+						</AlertDescription>
+					</Alert>
+				)}
+				<FactsCard
+					title={copy.hostPage.cards.status}
+					facts={[
+						[d.status, <StatusBadge key="s" status={host.status} />],
+						[
+							d.lastContact,
+							host.last_seen_at == null ? null : (
+								<RelativeTime value={new Date(host.last_seen_at)} />
+							),
+						],
+						[d.enrolled, formatDate(host.enrolled_at)],
+						[d.agentId, <AgentId key="id" id={host.id} />],
+						[
+							d.repository,
+							<Link
+								key="r"
+								to="/settings/repositories/$id"
+								params={{ id: host.repository_id }}
+								className="rounded-sm text-primary-strong underline-offset-4 hover:underline"
+							>
+								{host.repository_name}
+							</Link>,
+						],
+					]}
+				/>
+				<FactsCard
+					title={copy.hostPage.cards.system}
+					facts={[
+						[d.os, host.os],
+						[d.arch, host.arch],
+						[d.distro, host.distro],
+						[d.kernel, host.kernel],
+						[
+							d.uptime,
+							host.uptime_s == null || host.uptime_s <= 0
+								? null
+								: formatUptime(host.uptime_s),
+						],
+						[
+							copy.hosts.columns.version,
+							<VersionCell
+								key="v"
+								version={host.version}
+								serverVersion={info.data?.version}
+							/>,
+						],
+					]}
+				/>
+				<LabelsCard host={host} />
+				<HostPolicies host={host} />
+				<FactsCard
+					title={copy.hostPage.cards.certificate}
+					facts={[
+						[d.notBefore, formatDate(host.cert_issued_at)],
+						[
+							d.notAfter,
+							<span key="a" className="inline-flex flex-wrap gap-x-2">
+								{formatDate(host.cert_not_after)}
+								<CertificateText host={host} />
+							</span>,
+						],
+						[d.nextRenewal, formatDate(host.next_renewal_at)],
+					]}
+				/>
+				<Filesystems mounts={host.mounts} />
+			</div>
 		</div>
+	);
+}
+
+function HealthSkeleton() {
+	return (
+		<Card aria-hidden>
+			<CardHeader>
+				<Skeleton className="h-4 w-24" />
+			</CardHeader>
+			<CardContent className="flex flex-col gap-2">
+				{[0, 1, 2].map((i) => (
+					<Skeleton key={i} className="h-4 w-full" />
+				))}
+			</CardContent>
+		</Card>
 	);
 }
 

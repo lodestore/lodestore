@@ -3,9 +3,10 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{MetadataExt, symlink};
 use std::path::{Path, PathBuf};
 
+use lodestore_format::check::structure::check_structure;
 use lodestore_format::crypto::{BLOB_TYPE_DATA, BLOB_TYPE_TREE, BlobId, Entropy};
 use lodestore_format::error::Error;
 use lodestore_format::keys::KdfCost;
@@ -13,6 +14,7 @@ use lodestore_format::pack::{CODEC_RAW, CODEC_ZSTD};
 use lodestore_format::pb;
 use lodestore_format::reader::{Overwrite, Reader, RestoreOptions, RestoreReport};
 use lodestore_format::repo::{InitOptions, PendingInit, Repository};
+use lodestore_format::snapshot::snapshot_object_key;
 use lodestore_format::store::LocalFsStore;
 use lodestore_format::tree::encode_tree;
 use lodestore_format::writer::Writer;
@@ -110,6 +112,21 @@ impl Fx {
         listing(&self.target)
     }
 
+    /// The structure check reports the snapshot, as the restore refuses it.
+    async fn assert_check_finds(&self, snapshot: &BlobId) {
+        let store = LocalFsStore::new(self.repo_dir.clone());
+        let repo = Repository::open(&store, b"pw").await.unwrap();
+        let report = check_structure(&store, repo.read_keys(), repo.config(), &|_, _, _| {})
+            .await
+            .unwrap();
+        let key = snapshot_object_key(snapshot);
+        assert!(
+            report.findings.iter().any(|f| f.key == key),
+            "no finding for {key}: {:?}",
+            report.findings
+        );
+    }
+
     /// The restore is refused as corrupt and the target is exactly as before.
     async fn assert_refused(&self, snapshot: &BlobId) {
         let before = self.listing();
@@ -183,6 +200,7 @@ async fn refuses_name(name: &[u8]) {
     bad.name = name.to_vec();
     let snap = fx.hostile(vec![bad]).await;
     fx.assert_refused(&snap).await;
+    fx.assert_check_finds(&snap).await;
 }
 
 #[tokio::test]
@@ -218,6 +236,7 @@ async fn restore_hostile_duplicate_names() {
         .hostile(vec![file("same", &[], 0), file("same", &[], 0)])
         .await;
     fx.assert_refused(&snap).await;
+    fx.assert_check_finds(&snap).await;
 }
 
 #[tokio::test]
@@ -225,6 +244,19 @@ async fn restore_hostile_unsorted() {
     let mut fx = Fx::new().await;
     let snap = fx.hostile(vec![file("b", &[], 0), file("a", &[], 0)]).await;
     fx.assert_refused(&snap).await;
+    fx.assert_check_finds(&snap).await;
+}
+
+#[tokio::test]
+async fn restore_hostile_unsorted_across_pieces() {
+    let mut fx = Fx::new().await;
+    let first = fx.tree(vec![file("b", &[], 0)]);
+    let second = fx.tree(vec![file("a", &[], 0)]);
+    let mut split = dir("z", first);
+    split.subtrees = vec![first.to_vec(), second.to_vec()];
+    let snap = fx.snapshot(vec![split]).await;
+    fx.assert_refused(&snap).await;
+    fx.assert_check_finds(&snap).await;
 }
 
 #[tokio::test]
@@ -245,6 +277,7 @@ async fn restore_hostile_deep_tree() {
         "{err:?}"
     );
     assert_eq!(fx.listing(), before);
+    fx.assert_check_finds(&snap).await;
 }
 
 #[tokio::test]
@@ -257,6 +290,7 @@ async fn restore_hostile_hardlink_group_mismatch() {
     y.hardlink_group = 7;
     let snap = fx.hostile(vec![x, y]).await;
     fx.assert_refused(&snap).await;
+    fx.assert_check_finds(&snap).await;
 }
 
 #[tokio::test]
@@ -265,11 +299,13 @@ async fn restore_hostile_size_mismatch() {
     let id = fx.data(b"12345");
     let snap = fx.hostile(vec![file("liar", &[id], 10)]).await;
     fx.assert_refused(&snap).await;
+    fx.assert_check_finds(&snap).await;
 
     let mut fx = Fx::new().await;
     let id = fx.data(b"12345");
     let snap = fx.hostile(vec![file("liar", &[id], 2)]).await;
     fx.assert_refused(&snap).await;
+    fx.assert_check_finds(&snap).await;
 }
 
 #[tokio::test]
@@ -379,4 +415,61 @@ async fn restore_hostile_oversized_tree_blob() {
     big.subtrees = vec![id.to_vec()];
     let snap = fx.hostile(vec![big]).await;
     fx.assert_refused(&snap).await;
+}
+
+fn xattr(path: &Path, name: &str) -> Option<Vec<u8>> {
+    let mut buf = vec![0u8; 256];
+    match rustix::fs::lgetxattr(path, name, &mut buf[..]) {
+        Ok(n) => {
+            buf.truncate(n);
+            Some(buf)
+        }
+        Err(_) => None,
+    }
+}
+
+#[tokio::test]
+async fn restore_hostile_no_owners_drops_setuid_and_capabilities() {
+    let mut fx = Fx::new().await;
+    let data = fx.data(b"#!/bin/sh\n");
+    let mut suid = file("suid", &[data], 10);
+    suid.mode = 0o4755;
+    suid.xattrs = vec![
+        pb::Xattr {
+            name: b"security.capability".to_vec(),
+            value: vec![1, 0, 0, 2],
+        },
+        pb::Xattr {
+            name: b"user.lodestore.test".to_vec(),
+            value: b"kept".to_vec(),
+        },
+    ];
+    let snap = fx.snapshot(vec![suid]).await;
+
+    let report = fx
+        .restore(
+            &snap,
+            &RestoreOptions {
+                skip_owners: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let out = fx.target.join("suid");
+    assert_eq!(fs::metadata(&out).unwrap().mode() & 0o7777, 0o755);
+    assert_eq!(xattr(&out, "security.capability"), None);
+    assert!(
+        !report
+            .unapplied
+            .iter()
+            .any(|u| u.what.contains("security.capability")),
+        "{:?}",
+        report.unapplied
+    );
+    assert_eq!(xattr(&out, "user.lodestore.test"), Some(b"kept".to_vec()));
+
+    fs::remove_file(&out).unwrap();
+    fx.restore(&snap, &RestoreOptions::default()).await.unwrap();
+    assert_eq!(fs::metadata(&out).unwrap().mode() & 0o7777, 0o4755);
 }

@@ -3,12 +3,12 @@
 use std::collections::HashSet;
 
 use crate::crypto::{BLOB_TYPE_DATA, BLOB_TYPE_TREE, BlobId};
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, within_size};
 use crate::index::{INDEX_PREFIX, Index, hex32, open_shard, parse_hex32};
 use crate::keys::ReadKeys;
 use crate::pb;
 use crate::reader::{Reader, ReaderCache};
-use crate::snapshot::{SNAPSHOT_PREFIX, open_snapshot, snapshot_object_key};
+use crate::snapshot::{MAX_SNAPSHOT_SIZE, SNAPSHOT_PREFIX, open_snapshot, snapshot_object_key};
 use crate::store::{BlobError, BlobStore};
 use crate::tree::decode_tree;
 
@@ -27,6 +27,8 @@ pub async fn load_shards<S: BlobStore>(store: &S, keys: &ReadKeys) -> Result<Sha
         let Some(shard_id) = entry.key.strip_prefix(INDEX_PREFIX).and_then(parse_hex32) else {
             continue;
         };
+        // shortcut: a shard is read whole; compaction legitimately writes shards of many
+        // GiB, so no size cap fits. Parse shards streaming if planted giant ones matter.
         let bytes = store.get(&entry.key).await?;
         match open_shard(keys.k_idx(), keys.repo_id(), &shard_id, &bytes) {
             Ok(shard) => out.shards.push((shard_id, shard)),
@@ -128,12 +130,13 @@ pub async fn mark<S: BlobStore>(
         .into_iter()
         .filter_map(|e| {
             let id = e.key.strip_prefix(SNAPSHOT_PREFIX).and_then(parse_hex32)?;
-            (snapshot_object_key(&id) == e.key).then_some((e.key, id))
+            (snapshot_object_key(&id) == e.key).then_some((e.key, id, e.size))
         })
         .collect();
     let total = listed.len() as u64;
-    for (done, (key, id)) in listed.into_iter().enumerate() {
+    for (done, (key, id, size)) in listed.into_iter().enumerate() {
         progress(done as u64, total);
+        within_size(&key, size, MAX_SNAPSHOT_SIZE, "snapshot")?;
         let bytes = match store.get(&key).await {
             Ok(bytes) => bytes,
             Err(BlobError::NotFound) => {

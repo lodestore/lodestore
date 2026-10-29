@@ -12,6 +12,7 @@ import { Illustration } from "@/components/brand/illustration";
 import { PathText } from "@/components/path-text";
 import { RelativeTime } from "@/components/relative-time";
 import { AgentKeyBadge } from "@/components/repos/agent-key-badge";
+import { CHECKS_ANCHOR } from "@/components/repos/checks/checks-card";
 import { RECLAIM_ANCHOR } from "@/components/repos/reclaim/reclaim-card";
 import { SettingsNav } from "@/components/settings/settings-nav";
 import { StatusBadge } from "@/components/status-badge";
@@ -55,8 +56,11 @@ export const Route = createFileRoute("/_app/settings/repositories/")({
 	component: RepositoriesPage,
 });
 
-const COLUMNS = Object.entries(copy.repos.columns);
-const WIDE_ONLY = new Set(["agentKey", "lastChecked"]);
+const COLUMNS = [
+	...Object.entries(copy.repos.columns),
+	["checks", copy.checks.repoColumn],
+];
+const WIDE_ONLY = new Set(["agentKey", "lastChecked", "checks"]);
 const LARGE_ONLY = new Set(["backend", "hosts"]);
 const wideOnly = (key: string) =>
 	WIDE_ONLY.has(key)
@@ -138,6 +142,40 @@ function Cleanup({ repository }: { repository: RepositorySummary }) {
 			className="inline-flex rounded-sm"
 		>
 			<span className="sr-only">{text.open(repository.name)}</span> {body}
+		</Link>
+	);
+}
+
+function Checks({ repository }: { repository: RepositorySummary }) {
+	const text = copy.checks;
+	const { state, finished_at: at } = repository.checks ?? {};
+	if (!state) return copy.common.dash;
+	return (
+		<Link
+			to="/settings/repositories/$id"
+			params={{ id: repository.id }}
+			hash={CHECKS_ANCHOR}
+			className="inline-flex flex-wrap items-center gap-x-2 rounded-sm"
+		>
+			<span className="sr-only">{text.repoOpen(repository.name)}</span>{" "}
+			<StatusBadge
+				status={
+					state === "passed"
+						? "passed"
+						: state === "failed"
+							? "failed"
+							: state === "never_run"
+								? "never_run"
+								: "neutral"
+				}
+			>
+				{text.repoState[state]}
+			</StatusBadge>
+			{at != null && (
+				<span className="text-sm text-muted-foreground">
+					<RelativeTime value={new Date(at)} />
+				</span>
+			)}
 		</Link>
 	);
 }
@@ -324,6 +362,9 @@ function RepositoriesPage() {
 												</TableCell>
 												<TableCell className="px-4">
 													<Cleanup repository={repository} />
+												</TableCell>
+												<TableCell className={cn("px-4", wideOnly("checks"))}>
+													<Checks repository={repository} />
 												</TableCell>
 												<TableCell className="px-4">
 													<RowActions repository={repository} />

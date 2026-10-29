@@ -1,0 +1,162 @@
+import { sentence } from "@/lib/sentence";
+
+export const notifications = {
+	title: "Notifications",
+	lead: "Alerts go to every enabled channel that has the alert type checked. Silenced hosts send nothing.",
+	add: "Add channel",
+	paletteAdd: "Add notification channel",
+	newTitle: "Add channel",
+	newBreadcrumb: "New channel",
+	back: "Back to notifications",
+	settings: "Settings",
+	alertTypes: {
+		backup_failed: "Backup failed",
+		no_recent_backup: "No recent backup",
+		agent_offline: "Agent offline",
+		check_failed: "Check failed",
+		certificate_expiring: "Certificate expiring",
+	},
+	kinds: {
+		telegram: "Telegram",
+		slack: "Slack",
+		email: "Email",
+		webhook: "Webhook",
+	},
+	table: {
+		columns: {
+			name: "Name",
+			type: "Type",
+			alertTypes: "Alert types",
+			lastDelivery: "Last delivery",
+		},
+		actionsColumn: "Actions",
+		actionsFor: (name: string) => `Actions for ${name}`,
+		fromConfig: "From server config",
+		allTypes: "All types",
+		someTypes: (n: number, total: number) => `${n} of ${total}`,
+		sent: "Sent",
+		failed: "Failed",
+		neverSent: "Never sent",
+		sendTest: "Send test",
+		edit: "Edit",
+		view: "View",
+		delete: "Delete channel",
+		channelsAria: (n: number) => `${n} ${n === 1 ? "channel" : "channels"}`,
+		emptyHeading: "No notification channels",
+		emptyBody:
+			"Alerts show on Overview only. Add Telegram, Slack, email or a webhook to be told when a backup fails.",
+		loadFailed:
+			"Couldn't load notification channels. Check that the server is reachable, then retry.",
+	},
+	form: {
+		type: "Type",
+		name: "Name",
+		namePlaceholder: "on-call-telegram",
+		botToken: "Bot token",
+		botTokenName: "bot token",
+		chatId: "Chat ID",
+		chatIdHint: "A number, or @channelname for public channels.",
+		slackUrl: "Webhook URL",
+		slackUrlName: "webhook URL",
+		slackHint: "Create an incoming webhook in Slack and paste its URL.",
+		url: "URL",
+		secret: "Secret",
+		secretName: "secret",
+		webhookHint:
+			"Lodestore sends an Alertmanager-compatible payload. Existing Alertmanager receivers work without changes.",
+		recipients: "Recipients",
+		recipientsHint: (email: string) =>
+			`Leave empty to use the admin email (${email}).`,
+		smtpHost: "SMTP host",
+		port: "Port",
+		security: "Security",
+		starttls: "STARTTLS",
+		tls: "TLS",
+		username: "Username",
+		password: "Password",
+		passwordName: "password",
+		from: "From",
+		sendAlerts: "Send these alerts",
+		enabled: "Enabled",
+		save: "Save channel",
+		saved: "Channel saved.",
+		saveFailed: (message?: string) =>
+			`Couldn't save the channel. ${sentence(message)}Fix the settings, then try again.`,
+		loadFailed:
+			"Couldn't load the channel. Check that the server is reachable, then retry.",
+		notFound: "Channel not found",
+	},
+	secret: {
+		mask: "••••••••",
+		saved: "Saved",
+		savedAria: (label: string) => `${label} saved, not shown`,
+		replace: (name: string) => `Replace ${name}`,
+		keep: "Keep saved",
+		config: "Set in server config",
+	},
+	config: {
+		notice:
+			"This channel is defined in the server configuration. Change it there and restart the server.",
+		destination: "Destination",
+		secretSet: "Secret",
+	},
+	test: {
+		send: "Send test message",
+		sent: (destination: string) =>
+			`Test message sent. Check ${destination} to confirm it arrived.`,
+		failed: (message?: string) =>
+			`Couldn't send the test message. ${sentence(message)}Check the channel settings, then try again.`,
+		toastSent: (name: string) => `Test message sent to ${name}.`,
+		toastFailed: (name: string, message?: string) =>
+			`Couldn't send the test message to ${name}. ${sentence(message)}Check the channel settings, then try again.`,
+		destinations: {
+			telegram: (chatId: string) => `chat ${chatId}`,
+			slack: "your Slack channel",
+			email: (recipients: string) => recipients,
+			webhook: "your webhook receiver",
+		},
+	},
+	validation: {
+		name: "Enter a name for the channel.",
+		botToken: "Enter a bot token.",
+		chatId: "Enter a chat ID.",
+		slackUrl: "Enter a webhook URL starting with https://.",
+		webhookUrl: "Enter a URL starting with http:// or https://.",
+		recipients: "Enter a recipient or set an admin email in Settings, User.",
+		smtpHost: "Enter the SMTP host.",
+		port: "Enter a port from 1 to 65535.",
+		alertTypes: "Choose at least one alert type.",
+	},
+	delete: {
+		title: (name: string) => `Delete ${name}?`,
+		body: "Alerts stop going to this channel. This cannot be undone.",
+		confirm: "Delete channel",
+		keep: "Keep channel",
+		action: "delete the channel",
+		done: "Channel deleted.",
+	},
+	thresholds: {
+		title: "Alert thresholds",
+		lead: "When a host counts as offline, and when certificate expiry raises an alert. No-recent-backup limits are set per policy.",
+		offline: "Agent offline after",
+		offlinePlaceholder: "15m",
+		cert: "Certificate expires within",
+		certPlaceholder: "14",
+		days: "days",
+		save: "Save settings",
+		discard: "Discard changes",
+		saved: "Thresholds saved. They apply from the next check.",
+		saveFailed: (message?: string) =>
+			`Couldn't save the settings. ${sentence(message)}Try again.`,
+		loadFailed:
+			"Couldn't load the alert thresholds. Check that the server is reachable, then retry.",
+		offlineInvalid: (floor: string) =>
+			`Use a duration of ${floor} or more, such as 15m or 1h.`,
+		certInvalid: (max: number) =>
+			`Enter a whole number of days from 1 to ${max}.`,
+	},
+	overviewHint: {
+		text: "Nobody is notified yet.",
+		link: "Set up notifications",
+	},
+} as const;

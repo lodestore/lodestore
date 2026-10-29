@@ -1,5 +1,11 @@
 import { Link, useNavigate } from "@tanstack/react-router";
-import { Database, Lock, MoreHorizontal, ShieldAlert } from "lucide-react";
+import {
+	Database,
+	Lock,
+	MoreHorizontal,
+	ScanSearch,
+	ShieldAlert,
+} from "lucide-react";
 import type { JobKind, JobSummary } from "@/api/gen/model";
 import { restoreFailureText } from "@/components/jobs/job-cards";
 import { TextWithPaths } from "@/components/path-text";
@@ -37,7 +43,7 @@ import {
 	formatDuration,
 	percent,
 } from "@/lib/format";
-import { warningCount } from "@/lib/plural";
+import { problemCount, warningCount } from "@/lib/plural";
 import { shortId } from "@/lib/snapshot";
 import { cn } from "@/lib/utils";
 
@@ -59,6 +65,7 @@ export type JobRow = {
 	restore_result?: JobSummary["restore_result"];
 	download?: JobSummary["download"];
 	gc?: JobSummary["gc"];
+	check?: JobSummary["check"];
 	host_id: string;
 	hostname: string;
 	policy_name?: string | null;
@@ -343,6 +350,57 @@ function GcResult({ job }: { job: JobRow }) {
 	}
 }
 
+function CheckResult({ job }: { job: JobRow }) {
+	const check = job.check;
+	if (!check) return <span>{copy.common.dash}</span>;
+	const text = copy.jobs.check;
+	const muted = (value: string) => (
+		<span className="text-sm text-muted-foreground">{value}</span>
+	);
+	switch (job.state) {
+		case "running": {
+			const label = copy.checks.levels[check.level].running;
+			const progress = check.progress;
+			if (!progress || progress.total <= 0) {
+				return <span className="text-sm">{label}</span>;
+			}
+			return (
+				<div className="flex items-center gap-2">
+					<Progress
+						value={percent({
+							files_done: progress.done,
+							files_total: progress.total,
+						})}
+						aria-label={text.progressLabel}
+						className="w-32 shrink-0"
+					/>
+					<span className="text-sm">{label}</span>
+				</div>
+			);
+		}
+		case "succeeded":
+			return <span className="text-sm">{text.passed}</span>;
+		case "failed": {
+			if (
+				check.outcome === "problems" ||
+				(check.outcome == null && check.findings_total > 0)
+			) {
+				return (
+					<span className="text-sm">{problemCount(check.findings_total)}</span>
+				);
+			}
+			const reason = check.error?.trim() ?? "";
+			return (
+				<Truncated text={text.stopped(reason)} className="max-w-64 text-sm" />
+			);
+		}
+		case "cancelled":
+			return muted(text.cancelled);
+		default:
+			return <span>{copy.common.dash}</span>;
+	}
+}
+
 function LockedMark({ gc }: { gc: NonNullable<JobRow["gc"]> }) {
 	const bytes = gc.locked_bytes ?? 0;
 	if (bytes <= 0) return null;
@@ -366,6 +424,7 @@ function LockedMark({ gc }: { gc: NonNullable<JobRow["gc"]> }) {
 
 export function JobResult({ job }: { job: JobRow }) {
 	if (job.kind === "gc") return <GcResult job={job} />;
+	if (job.kind === "check") return <CheckResult job={job} />;
 	if (job.kind === "restore" || job.kind === "download") {
 		return <OtherJobResult job={job} />;
 	}
@@ -437,11 +496,19 @@ export function JobResult({ job }: { job: JobRow }) {
 	}
 }
 
-const repositoryLink = (job: JobRow) => ({
-	to: "/settings/repositories/$id" as const,
-	params: { id: job.gc?.repository_id ?? "" },
-	hash: "free-up-space",
-});
+const isRepositoryJob = (job: JobRow) =>
+	job.kind === "gc" || job.kind === "check";
+
+const repositoryLink = (job: JobRow) => {
+	const check = job.kind === "check";
+	const id = check ? job.check?.repository_id : job.gc?.repository_id;
+	if (!id) return { to: "/jobs/$id" as const, params: { id: job.id } };
+	return {
+		to: "/settings/repositories/$id" as const,
+		params: { id },
+		hash: check ? "checks" : "free-up-space",
+	};
+};
 
 function Started({ job }: { job: JobRow }) {
 	const queued = job.state === "queued";
@@ -449,10 +516,9 @@ function Started({ job }: { job: JobRow }) {
 		queued ? job.queued_at : (job.started_at ?? job.queued_at),
 	);
 	const relative = formatRelative(at, new Date());
-	const target =
-		job.kind === "gc"
-			? repositoryLink(job)
-			: { to: "/jobs/$id" as const, params: { id: job.id } };
+	const target = isRepositoryJob(job)
+		? repositoryLink(job)
+		: { to: "/jobs/$id" as const, params: { id: job.id } };
 	return (
 		<Link
 			{...target}
@@ -518,6 +584,29 @@ function PolicyLine({ job }: { job: JobRow }) {
 		<div className="max-w-56 truncate text-sm text-muted-foreground">
 			{line(job.policy_name)}
 		</div>
+	);
+}
+
+function CheckName({ job }: { job: JobRow }) {
+	const check = job.check;
+	const text = copy.jobs.check;
+	const name = text.repository(check?.repository_name ?? job.hostname);
+	const level = check ? text.levels[check.level] : "";
+	return (
+		<>
+			<Truncated text={name} className="max-w-52">
+				<Link
+					{...repositoryLink(job)}
+					className="flex max-w-52 items-center gap-2 rounded-sm text-base font-semibold"
+				>
+					<ScanSearch aria-hidden className="size-4 shrink-0" />
+					<span className="truncate">{name}</span>
+				</Link>
+			</Truncated>
+			<div className="text-sm whitespace-nowrap text-muted-foreground">
+				{text.kind(level, check?.origin === "schedule")}
+			</div>
+		</>
 	);
 }
 
@@ -643,7 +732,7 @@ export function JobsTable({
 	const showPolicy = !hide.includes("policy");
 	const openJob = (job: JobRow) =>
 		void navigate(
-			job.kind === "gc"
+			isRepositoryJob(job)
 				? repositoryLink(job)
 				: { to: "/jobs/$id", params: { id: job.id } },
 		);
@@ -693,9 +782,13 @@ export function JobsTable({
 									<StatusBadge status={job.state} />
 								</TableCell>
 								<TableCell className="px-4">
-									{job.kind === "gc" ? (
+									{isRepositoryJob(job) ? (
 										<>
-											<GcName job={job} />
+											{job.kind === "check" ? (
+												<CheckName job={job} />
+											) : (
+												<GcName job={job} />
+											)}
 											<div className="@min-[1024px]:hidden">
 												<StatusBadge status={job.state} />
 											</div>
@@ -739,7 +832,7 @@ export function JobsTable({
 									className="px-4"
 									onClick={(e) => e.stopPropagation()}
 								>
-									{job.kind !== "gc" && (
+									{!isRepositoryJob(job) && (
 										<JobActions
 											job={job}
 											onOpen={openJob}

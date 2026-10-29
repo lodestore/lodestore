@@ -1,6 +1,6 @@
-# Backup policies: schedule, retention and limits
+# Backup policies: schedule, retention, limits and alerts
 
-A `BackupPolicy` is one strict YAML document shared by the UI, `lode apply` and CI. This page covers the three blocks that make a policy run on its own: `spec.schedule`, `spec.retention` and `spec.limits`. All three are optional. A policy without them runs only when started by hand, keeps every snapshot and uploads without limits. The `apiVersion` stays `lodestore.io/v1alpha1`.
+A `BackupPolicy` is one strict YAML document shared by the UI, `lode apply` and CI. This page covers the four blocks that make a policy run on its own and tell you when it does not: `spec.schedule`, `spec.retention`, `spec.limits` and `spec.alerts`. All four are optional. A policy without them runs only when started by hand, keeps every snapshot and uploads without limits. The `apiVersion` stays `lodestore.io/v1alpha1`.
 
 ```yaml
 apiVersion: lodestore.io/v1alpha1
@@ -28,6 +28,8 @@ spec:
     ioniceClass: best-effort
     ioniceLevel: 4
     maxRuntime: 12h
+  alerts:
+    maxAge: 36h
 ```
 
 Unknown fields are rejected with the line and column of the typo.
@@ -95,3 +97,13 @@ Details that matter:
 A backup that does not finish within `maxRuntime` is stopped and does not create a snapshot. The server marks a backup that is still active an hour after its limit as failed with the error `time_limit`. The limit is also what lets garbage collection prove that no running backup still references data it is about to delete, so a lower value shortens the pause before deletion.
 
 `nice` and the I/O priority apply to the backup on the host and are inherited by hooks. The I/O priority is best effort: the kernel honours it only with an I/O scheduler that supports priorities, such as BFQ (or CFQ on old kernels). With `none` or `mq-deadline`, common on NVMe disks, it has little or no effect. `idle` can make backups much slower on a busy disk.
+
+## alerts
+
+| Field | Meaning |
+| --- | --- |
+| `maxAge` | How old the last successful backup of this policy may get on a host before the alert **No recent backup** fires and the host shows as overdue. `1h` to `365d`. |
+
+Lodestore always watches for a policy that goes silent, whether or not it reports an error. Without `maxAge` the limit comes from the schedule: twice the longest gap between the next scheduled runs, plus the schedule's `jitter`. For a daily policy with the default `15m` jitter that is about 48 hours and 15 minutes, so one missed night is tolerated and two are not. Set `maxAge` when that is too loose, for example `maxAge: 36h` for a daily policy you cannot miss, or too strict, for example `maxAge: 10d` for a weekly policy that is often skipped on purpose.
+
+A policy with no schedule and no `maxAge` has no limit: it runs only by hand, so being old is not a fault. The limit is counted for each host the policy applies to. The age starts at the last successful backup, or, when the host has none yet, at the later of the time the host enrolled and the time the policy was created. See [Alerts and notifications](alerts.md#no-recent-backup-the-dead-man-rule).

@@ -66,6 +66,7 @@ export type ScheduleDraft = {
 	timezone: string;
 	jitter: string;
 	catchUpWindow: string;
+	maxAge: string;
 };
 
 export type LimitsDraft = {
@@ -97,6 +98,7 @@ export const BLANK_SCHEDULE: ScheduleDraft = {
 	timezone: "UTC",
 	jitter: "",
 	catchUpWindow: "",
+	maxAge: "",
 };
 
 export const BLANK_LIMITS: LimitsDraft = {
@@ -169,6 +171,7 @@ export function draftFromPolicy(policy: BackupPolicy): PolicyDraft {
 			timezone: spec.schedule?.timezone || "UTC",
 			jitter: spec.schedule?.jitter ?? "",
 			catchUpWindow: spec.schedule?.catchUpWindow ?? "",
+			maxAge: spec.alerts?.maxAge ?? "",
 		},
 		retention: {
 			keepLast: countToDraft(spec.retention?.keepLast),
@@ -223,6 +226,12 @@ function scheduleFromDraft({
 	};
 }
 
+function alertsFromDraft({
+	maxAge,
+}: ScheduleDraft): BackupPolicy["spec"]["alerts"] {
+	return maxAge.trim() === "" ? undefined : { maxAge: maxAge.trim() };
+}
+
 export function retentionFromDraft(
 	draft: RetentionDraft,
 ): Retention | undefined {
@@ -275,6 +284,7 @@ export function policyFromDraft(draft: PolicyDraft): BackupPolicy {
 			oneFileSystem: draft.oneFileSystem,
 			excludeCaches: draft.excludeCaches,
 			schedule: scheduleFromDraft(draft.schedule),
+			alerts: alertsFromDraft(draft.schedule),
 			retention: retentionFromDraft(draft.retention),
 			limits: limitsFromDraft(draft.limits),
 			hooks: {
@@ -370,7 +380,7 @@ function HookRow({
 					</Button>
 					<Button
 						type="button"
-						variant="ghost"
+						variant="outline"
 						size="icon"
 						aria-label={form.removeHook}
 						onClick={onRemove}
@@ -750,7 +760,7 @@ function PathRow({
 				/>
 				<Button
 					type="button"
-					variant="ghost"
+					variant="outline"
 					size="icon"
 					aria-label={removeLabel}
 					onClick={onRemove}

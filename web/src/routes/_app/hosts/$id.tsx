@@ -9,6 +9,7 @@ import { EditLabelsDialog } from "@/components/hosts/edit-labels-dialog";
 import {
 	HostOverview,
 	HostOverviewSkeleton,
+	useHostHealth,
 } from "@/components/hosts/host-overview";
 import { RevokeHostDialog } from "@/components/hosts/revoke-host-dialog";
 import { RunBackupButton } from "@/components/hosts/run-backup-button";
@@ -18,6 +19,8 @@ import {
 	useRerunAction,
 } from "@/components/jobs/cancel-job-dialog";
 import { type JobRow, JobsTable, toJobRow } from "@/components/jobs/jobs-table";
+import { HostStateBadge } from "@/components/overview/host-state";
+import { SilenceMenu } from "@/components/overview/silence-menu";
 import { formatRelative } from "@/components/relative-time";
 import { StatusBadge } from "@/components/status-badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -151,6 +154,7 @@ function HostPage() {
 	const [editing, setEditing] = useState<HostDetail>();
 	const [revoking, setRevoking] = useState<HostDetail>();
 	const revoked = host?.status === "revoked";
+	const health = useHostHealth(id).data;
 
 	return (
 		<div className="flex flex-col gap-6 pb-8">
@@ -200,7 +204,7 @@ function HostPage() {
 
 			{host && (
 				<>
-					<header className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start">
+					<header className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-start">
 						<div className="flex min-w-0 flex-col gap-1">
 							<div className="flex flex-wrap items-center gap-2">
 								<h1
@@ -209,7 +213,12 @@ function HostPage() {
 								>
 									{host.hostname}
 								</h1>
-								<StatusBadge status={host.status} />
+								{health && <HostStateBadge state={health.state} />}
+								<StatusBadge status={host.status}>
+									{host.status === "revoked"
+										? undefined
+										: copy.hostPage.agent[host.status]}
+								</StatusBadge>
 							</div>
 							{host.last_seen_at != null && (
 								<time
@@ -223,8 +232,15 @@ function HostPage() {
 							)}
 						</div>
 						{!revoked && (
-							<div className="flex gap-2">
+							<div className="flex flex-wrap gap-2">
 								<RunBackupButton host={host} />
+								{health && (
+									<SilenceMenu
+										hostId={host.id}
+										hostname={host.hostname}
+										silenced={health.silenced}
+									/>
+								)}
 								<Button variant="outline" onClick={() => setEditing(host)}>
 									{copy.hostPage.editLabels}
 								</Button>

@@ -108,6 +108,7 @@ pub async fn run(
                 include,
                 verify: flags.verify,
                 dry_run: flags.dry_run,
+                skip_owners: false,
             },
             &progress,
         )

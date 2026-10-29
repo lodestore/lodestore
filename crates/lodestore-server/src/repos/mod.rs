@@ -18,6 +18,8 @@ use utoipa_axum::routes;
 use crate::auth::AuthUser;
 use crate::db::now_ms;
 use crate::error::{ApiError, ErrorBody};
+use crate::maintenance::check::ChecksSummary;
+use crate::maintenance::check::db::repo_checks_summary;
 use crate::maintenance::gc::api::{CleanupSummary, cleanup_summary_or_unknown};
 use crate::repos::db::{AccessKey, RepoFull};
 use crate::state::AppState;
@@ -108,7 +110,7 @@ pub struct CheckResult {
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
-pub struct RepositorySummary {
+pub struct RepositoryBase {
     pub id: String,
     pub name: String,
     pub backend: String,
@@ -122,24 +124,33 @@ pub struct RepositorySummary {
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct RepositorySummary {
+    #[serde(flatten)]
+    pub base: RepositoryBase,
+    /// The worst result of the integrity checks, from the catalog.
+    pub checks: ChecksSummary,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct RepositoryDetail {
     #[serde(flatten)]
-    pub summary: RepositorySummary,
+    pub base: RepositoryBase,
     pub location: LocationDto,
+    /// What the storage checks of the connection found.
     pub checks: Vec<CheckDto>,
 }
 
-pub(crate) fn summary_of(
+pub(crate) fn base_of(
     row: &RepoFull,
     hosts_count: i64,
     unlocked: Option<bool>,
     cleanup: CleanupSummary,
-) -> RepositorySummary {
+) -> RepositoryBase {
     let location = lodestore_format::store::RepoLocation {
         backend: row.backend.clone(),
         options: row.options.clone(),
     };
-    RepositorySummary {
+    RepositoryBase {
         id: row.id.clone(),
         name: row.name.clone(),
         backend: row.backend.clone(),
@@ -187,12 +198,15 @@ async fn list_repositories(
     let cache = state.repos.lock().unlocked.clone();
     let mut out = Vec::with_capacity(rows.len());
     for r in &rows {
-        out.push(summary_of(
-            r,
-            hosts.get(&r.id).copied().unwrap_or(0),
-            cache.get(&r.id).copied(),
-            cleanup_summary_or_unknown(&state, &r.id).await,
-        ));
+        out.push(RepositorySummary {
+            base: base_of(
+                r,
+                hosts.get(&r.id).copied().unwrap_or(0),
+                cache.get(&r.id).copied(),
+                cleanup_summary_or_unknown(&state, &r.id).await,
+            ),
+            checks: repo_checks_summary(&state, &r.id).await?,
+        });
     }
     Ok(Json(out))
 }
@@ -226,7 +240,7 @@ async fn get_repository(
         .map_err(|e| ApiError::Internal(e.into()))?
         .unwrap_or_default();
     Ok(Json(RepositoryDetail {
-        summary: summary_of(
+        base: base_of(
             &row,
             hosts.get(&id).copied().unwrap_or(0),
             unlocked,

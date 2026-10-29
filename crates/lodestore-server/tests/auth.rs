@@ -647,6 +647,40 @@ async fn rest_csrf_required() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rest_csrf_required_for_account_and_channels() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let (client, base) = (Client::new(), ts.rest_url());
+        let (cookie, _) = sign_in(&client, &base).await;
+        let name = backend.name();
+
+        for (method, path) in [
+            ("PUT", "/api/v1/account"),
+            ("POST", "/api/v1/account/password"),
+            ("POST", "/api/v1/notifications/channels"),
+            ("POST", "/api/v1/notifications/channels/test"),
+            ("PUT", "/api/v1/notifications/channels/nope"),
+            ("DELETE", "/api/v1/notifications/channels/nope"),
+        ] {
+            let missing = client
+                .request(method.parse().unwrap(), format!("{base}{path}"))
+                .header("cookie", &cookie)
+                .json(&json!({}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(missing.status(), 403, "{method} {path} [{name}]");
+            assert_eq!(error_code(missing).await, "csrf", "{method} {path}");
+        }
+
+        let anonymous = get(&client, &base, "/api/v1/account", None).await;
+        assert_eq!(anonymous.status(), 401, "[{name}]");
+        assert_eq!(error_code(anonymous).await, "unauthorized");
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn rest_csrf_origin_follows_public_url_behind_a_proxy() {
     for backend in backends() {
         let ts = TestServer::start_with(&backend, |c| {

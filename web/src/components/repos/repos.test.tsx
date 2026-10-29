@@ -45,7 +45,7 @@ async function openAfterGuard(
 ) {
 	const { router } = renderApp(first);
 	await screen.findByRole("heading", {
-		name: "See every backup at a glance",
+		name: "Overview",
 	});
 	swap();
 	await act(() => router.navigate({ to: path }));
@@ -67,6 +67,7 @@ describe("repositories list", () => {
 			"Agent key",
 			"Last checked",
 			"Cleanup",
+			"Checks",
 			"Actions",
 		]);
 		expect(screen.getByText("archive")).toBeInTheDocument();
@@ -190,6 +191,45 @@ describe("repositories list", () => {
 		);
 		expect(
 			screen.getByRole("link", { name: /^Cleanup of archive: Stopped$/ }),
+		).toBeInTheDocument();
+	});
+
+	it("shows the checks column", async () => {
+		useSignedIn({
+			repositories: [
+				{
+					...s3Repository,
+					checks: { state: "failed", finished_at: Date.now() - 3_600_000 },
+				},
+				{
+					...azureRepository,
+					checks: { state: "never_run", finished_at: null },
+				},
+				{
+					...azureRepository,
+					id: "repo-3",
+					name: "cold",
+					checks: { state: "off", finished_at: null },
+				},
+			],
+		});
+		renderApp("/settings/repositories");
+
+		const failed = await screen.findByRole("link", {
+			name: /^Integrity checks of main: Failed/,
+		});
+		expect(failed).toHaveTextContent("1 hour ago");
+		expect(failed).toHaveAttribute(
+			"href",
+			"/settings/repositories/repo-1#checks",
+		);
+		expect(
+			screen.getByRole("link", {
+				name: /^Integrity checks of archive: Never run$/,
+			}),
+		).toBeInTheDocument();
+		expect(
+			screen.getByRole("link", { name: /^Integrity checks of cold: Off$/ }),
 		).toBeInTheDocument();
 	});
 

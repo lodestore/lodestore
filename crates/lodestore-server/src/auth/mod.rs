@@ -1,3 +1,4 @@
+pub mod account;
 pub mod limits;
 pub mod setup;
 pub mod tokens;
@@ -275,25 +276,40 @@ fn origin_allowed(origin: &str, host: Option<&str>, public_url: &str) -> bool {
         .is_some_and(|authority| origin_key(&wanted.0, &authority) == wanted)
 }
 
-pub(crate) async fn start_session(
+/// Records a new session for `user_id` and returns the cookie value.
+/// `None` when the account no longer has `password_hash`, so a sign-in that
+/// verified a password which was changed meanwhile gets no session.
+pub async fn insert_session(
     state: &AppState,
-    jar: CookieJar,
     user_id: &str,
-) -> Result<CookieJar, ApiError> {
+    password_hash: &str,
+) -> Result<Option<String>, ApiError> {
     let cookie_value = random_token();
     let now = now_ms();
-    sqlx::query(
+    let inserted = sqlx::query(
         "INSERT INTO sessions (id_hash, user_id, csrf_token, created_at, expires_at, last_seen_at) \
-         VALUES ($1, $2, $3, $4, $5, $4)",
+         SELECT $1, $2, $3, $4, $5, $4 FROM admin_users WHERE id = $2 AND password_hash = $6",
     )
     .bind(session_hash(&cookie_value))
     .bind(user_id)
     .bind(random_token())
     .bind(now)
     .bind(now + SESSION_DAYS * DAY_MS)
+    .bind(password_hash)
     .execute(&state.db.pool)
     .await?;
+    Ok((inserted.rows_affected() > 0).then_some(cookie_value))
+}
 
+pub(crate) async fn start_session(
+    state: &AppState,
+    jar: CookieJar,
+    user_id: &str,
+    password_hash: &str,
+) -> Result<CookieJar, ApiError> {
+    let cookie_value = insert_session(state, user_id, password_hash)
+        .await?
+        .ok_or(ApiError::Unauthorized)?;
     let cookie = Cookie::build((SESSION_COOKIE, cookie_value))
         .http_only(true)
         .same_site(SameSite::Strict)
@@ -342,7 +358,8 @@ async fn login(
         None => (None, DUMMY_HASH.clone()),
     };
     let password = req.password;
-    let ok = tokio::task::spawn_blocking(move || verify_password(&password, &hash))
+    let verified = hash.clone();
+    let ok = tokio::task::spawn_blocking(move || verify_password(&password, &verified))
         .await
         .map_err(|e| ApiError::Internal(e.into()))?;
     let user_id = match (ok, user_id) {
@@ -350,7 +367,7 @@ async fn login(
         _ => return Err(ApiError::Unauthorized.into()),
     };
     state.auth.limits.login_succeeded(client, &req.username);
-    let jar = start_session(&state, jar, &user_id).await?;
+    let jar = start_session(&state, jar, &user_id, &hash).await?;
     Ok((jar, StatusCode::NO_CONTENT))
 }
 
@@ -403,6 +420,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(logout))
         .routes(routes!(session))
         .merge(setup::routes())
+        .merge(account::routes())
         .merge(tokens::routes())
 }
 

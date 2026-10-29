@@ -133,7 +133,7 @@ describe("command palette shell", () => {
 		expect(options[0]).toHaveTextContent("Repositories");
 	});
 
-	it("lists six pages with Soon on the stub", async () => {
+	it("lists the six pages", async () => {
 		const user = userEvent.setup();
 		await openApp();
 		await user.click(trigger());
@@ -142,7 +142,7 @@ describe("command palette shell", () => {
 		});
 		const pages = within(dialog).getAllByRole("option").slice(0, 6);
 		expect(pages.map((o) => o.textContent)).toEqual([
-			"OverviewSoon",
+			"Overview",
 			"Hosts",
 			"Policies",
 			"Jobs",
@@ -327,6 +327,22 @@ describe("command palette hosts and repositories", () => {
 		).toBeInTheDocument();
 		await waitFor(() =>
 			expect(router.state.location.search).not.toHaveProperty("create"),
+		);
+	});
+
+	it("offers the user command", async () => {
+		mockHosts([]);
+		const { user, dialog, router } = await openPalette();
+		await user.keyboard("user");
+		expect(
+			within(dialog)
+				.getAllByRole("option")
+				.map((o) => o.textContent),
+		).toEqual(["User"]);
+
+		await user.click(screen.getByRole("option", { name: "User" }));
+		await waitFor(() =>
+			expect(router.state.location.pathname).toBe("/settings/user"),
 		);
 	});
 

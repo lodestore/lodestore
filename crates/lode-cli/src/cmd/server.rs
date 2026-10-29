@@ -29,6 +29,7 @@ pub async fn run(
         ServerCommand::Snapshots { command } => snapshots(&client, out, command).await?,
         ServerCommand::Restore(args) => restore(&client, out, args).await?,
         ServerCommand::Gc(args) => return super::gc::run(&client, out, args).await,
+        ServerCommand::Check(args) => return super::check::run_server(&client, out, args).await,
     }
     Ok(0)
 }

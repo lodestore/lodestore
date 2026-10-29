@@ -179,6 +179,7 @@ export function ReclaimSettings({
 								timezone: draft.timezone,
 								jitter: "",
 								catchUpWindow: "",
+								maxAge: "",
 							}}
 							onChange={({ cron, timezone }) => update({ cron, timezone })}
 							problems={problems}

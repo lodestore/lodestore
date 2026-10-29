@@ -11,7 +11,7 @@ use crate::crypto::{
     BlobId, Entropy, HpkePrivateKey, HpkePublicKey, NONCE_LEN, RepoId, open_snapshot_body,
     open_snapshot_key, seal_snapshot_body, seal_snapshot_key,
 };
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, within_size};
 use crate::index::{hex32, parse_hex32};
 use crate::keys::ReadKeys;
 use crate::pb;
@@ -20,6 +20,8 @@ use crate::store::BlobStore;
 
 pub(crate) const SNAPSHOT_PREFIX: &str = "snapshots/";
 pub const ENVELOPE_VERSION: u32 = 1;
+/// Largest snapshot object read from a listing.
+pub const MAX_SNAPSHOT_SIZE: u64 = 64 << 20;
 
 pub fn snapshot_object_key(id: &BlobId) -> String {
     format!("{SNAPSHOT_PREFIX}{}", hex32(id))
@@ -117,6 +119,10 @@ pub async fn list_snapshots<S: BlobStore>(store: &S, keys: &ReadKeys) -> Result<
         else {
             continue;
         };
+        if let Err(e) = within_size(&entry.key, entry.size, MAX_SNAPSHOT_SIZE, "snapshot") {
+            out.skipped.push((entry.key, e.to_string()));
+            continue;
+        }
         let bytes = store.get(&entry.key).await?;
         match open_snapshot(keys.hpke_private_key(), keys.repo_id(), &id, &bytes) {
             Ok(snapshot) => out.entries.push(SnapshotEntry { id, snapshot }),

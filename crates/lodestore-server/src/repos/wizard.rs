@@ -17,13 +17,14 @@ use zeroize::Zeroizing;
 use crate::auth::AuthUser;
 use crate::db::now_ms;
 use crate::error::{ApiError, ErrorBody};
+use crate::maintenance::check::db::repo_checks_summary;
 use crate::maintenance::gc::api::CleanupSummary;
 use crate::repos::checks::{
     Opened, open_draft, run_checks, run_probe, split_secret_options, to_result,
 };
 use crate::repos::db::{self, NewRepository, RepoExtras, RepoLocation};
 use crate::repos::{
-    CheckResult, RepositoryDraft, RepositorySummary, WIZARD_TTL_MS, WizardEntry, summary_of,
+    CheckResult, RepositoryDraft, RepositorySummary, WIZARD_TTL_MS, WizardEntry, base_of,
 };
 use crate::state::AppState;
 
@@ -324,8 +325,11 @@ async fn register(state: &AppState, r: Registration) -> Result<RepositorySummary
     let row = db::find_repository(state, &id)
         .await?
         .ok_or_else(|| ApiError::Internal(anyhow::anyhow!("the new repository vanished")))?;
-    state.repos.lock().unlocked.insert(id, true);
-    Ok(summary_of(&row, 0, Some(true), CleanupSummary::OFF))
+    state.repos.lock().unlocked.insert(id.clone(), true);
+    Ok(RepositorySummary {
+        base: base_of(&row, 0, Some(true), CleanupSummary::OFF),
+        checks: repo_checks_summary(state, &id).await?,
+    })
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -420,7 +424,7 @@ async fn connect_repository(
         },
     )
     .await?;
-    crate::catalog::start_rebuild(&state, &summary.id);
+    crate::catalog::start_rebuild(&state, &summary.base.id);
     Ok((StatusCode::CREATED, Json(summary)).into_response())
 }
 

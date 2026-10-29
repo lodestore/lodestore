@@ -6,6 +6,8 @@ use anyhow::Context;
 use clap::Args;
 use serde::Deserialize;
 
+use crate::alerts::model::AlertType;
+
 pub const DEFAULT_CONFIG_FILE: &str = "/etc/lodestore/server.yaml";
 
 #[derive(Clone, Deserialize, PartialEq, Eq)]
@@ -59,9 +61,69 @@ pub struct Config {
     pub join_token_ttl_secs: i64,
     pub agent_cert_lifetime_secs: i64,
     pub schedule_tick_secs: u64,
+    pub metrics_listen: Option<SocketAddr>,
     #[serde(skip)]
     pub grpc_public_address_defaulted: bool,
+    #[serde(skip)]
+    pub notifications: NotificationsConfig,
 }
+
+#[derive(Debug, Clone, Default)]
+pub struct NotificationsConfig {
+    pub channels: Vec<ConfigChannel>,
+    pub allow_private_targets: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConfigChannel {
+    pub name: String,
+    pub enabled: bool,
+    pub alerts: Vec<AlertType>,
+    pub kind: ChannelSpec,
+}
+
+#[derive(Debug, Clone)]
+pub enum ChannelSpec {
+    Telegram {
+        bot_token: Secret,
+        chat_id: String,
+    },
+    Webhook {
+        url: String,
+        secret: Option<Secret>,
+    },
+    Slack {
+        webhook_url: Secret,
+    },
+    Email {
+        smtp_host: String,
+        port: u16,
+        security: SmtpSecurity,
+        username: Option<String>,
+        password: Option<Secret>,
+        from: String,
+        to: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SmtpSecurity {
+    Starttls,
+    Tls,
+}
+
+fn smtp_port() -> u16 {
+    587
+}
+
+const ALL_ALERT_TYPES: [AlertType; 5] = [
+    AlertType::BackupFailed,
+    AlertType::NoRecentBackup,
+    AlertType::AgentOffline,
+    AlertType::CheckFailed,
+    AlertType::CertificateExpiring,
+];
 
 fn nodename() -> String {
     rustix::system::uname()
@@ -113,7 +175,9 @@ impl Default for Config {
             join_token_ttl_secs: 3600,
             agent_cert_lifetime_secs: 7_776_000,
             schedule_tick_secs: crate::schedule::SCHEDULE_TICK.as_secs(),
+            metrics_listen: None,
             grpc_public_address_defaulted: true,
+            notifications: NotificationsConfig::default(),
         }
     }
 }
@@ -160,6 +224,8 @@ pub struct ConfigArgs {
     pub join_token_ttl_secs: Option<i64>,
     #[arg(long, env = "LODESTORE_AGENT_CERT_LIFETIME", hide = true)]
     pub agent_cert_lifetime_secs: Option<i64>,
+    #[arg(long, env = "LODESTORE_METRICS_LISTEN")]
+    pub metrics_listen: Option<SocketAddr>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -185,6 +251,169 @@ struct FileConfig {
     agent_dir: Option<PathBuf>,
     join_token_ttl_secs: Option<i64>,
     agent_cert_lifetime_secs: Option<i64>,
+    metrics_listen: Option<SocketAddr>,
+    notifications: FileNotifications,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FileNotifications {
+    channels: Vec<FileChannel>,
+    allow_private_targets: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum FileChannel {
+    Telegram {
+        name: String,
+        #[serde(default = "yes")]
+        enabled: bool,
+        alerts: Option<Vec<AlertType>>,
+        bot_token_file: PathBuf,
+        chat_id: String,
+    },
+    Webhook {
+        name: String,
+        #[serde(default = "yes")]
+        enabled: bool,
+        alerts: Option<Vec<AlertType>>,
+        url: String,
+        secret_file: Option<PathBuf>,
+    },
+    Slack {
+        name: String,
+        #[serde(default = "yes")]
+        enabled: bool,
+        alerts: Option<Vec<AlertType>>,
+        webhook_url_file: PathBuf,
+    },
+    Email {
+        name: String,
+        #[serde(default = "yes")]
+        enabled: bool,
+        alerts: Option<Vec<AlertType>>,
+        smtp_host: String,
+        #[serde(default = "smtp_port")]
+        port: u16,
+        #[serde(default = "default_security")]
+        security: SmtpSecurity,
+        username: Option<String>,
+        password_file: Option<PathBuf>,
+        from: String,
+        #[serde(default)]
+        to: Vec<String>,
+    },
+}
+
+fn default_security() -> SmtpSecurity {
+    SmtpSecurity::Starttls
+}
+
+fn read_secret_file(channel: &str, field: &str, path: &Path) -> anyhow::Result<Secret> {
+    let text = std::fs::read_to_string(path).with_context(|| {
+        format!(
+            "notification channel {channel}: reading {field} {}",
+            path.display()
+        )
+    })?;
+    let text = text.trim_end();
+    anyhow::ensure!(
+        !text.is_empty(),
+        "notification channel {channel}: {field} {} is empty",
+        path.display()
+    );
+    Ok(Secret::new(text))
+}
+
+fn resolve_channels(file: FileNotifications) -> anyhow::Result<Vec<ConfigChannel>> {
+    file.channels
+        .into_iter()
+        .map(|channel| {
+            Ok(match channel {
+                FileChannel::Telegram {
+                    name,
+                    enabled,
+                    alerts,
+                    bot_token_file,
+                    chat_id,
+                } => ConfigChannel {
+                    kind: ChannelSpec::Telegram {
+                        bot_token: read_secret_file(&name, "bot_token_file", &bot_token_file)?,
+                        chat_id,
+                    },
+                    name,
+                    enabled,
+                    alerts: alerts.unwrap_or_else(|| ALL_ALERT_TYPES.to_vec()),
+                },
+                FileChannel::Webhook {
+                    name,
+                    enabled,
+                    alerts,
+                    url,
+                    secret_file,
+                } => ConfigChannel {
+                    kind: ChannelSpec::Webhook {
+                        url,
+                        secret: secret_file
+                            .map(|path| read_secret_file(&name, "secret_file", &path))
+                            .transpose()?,
+                    },
+                    name,
+                    enabled,
+                    alerts: alerts.unwrap_or_else(|| ALL_ALERT_TYPES.to_vec()),
+                },
+                FileChannel::Slack {
+                    name,
+                    enabled,
+                    alerts,
+                    webhook_url_file,
+                } => ConfigChannel {
+                    kind: ChannelSpec::Slack {
+                        webhook_url: read_secret_file(
+                            &name,
+                            "webhook_url_file",
+                            &webhook_url_file,
+                        )?,
+                    },
+                    name,
+                    enabled,
+                    alerts: alerts.unwrap_or_else(|| ALL_ALERT_TYPES.to_vec()),
+                },
+                FileChannel::Email {
+                    name,
+                    enabled,
+                    alerts,
+                    smtp_host,
+                    port,
+                    security,
+                    username,
+                    password_file,
+                    from,
+                    to,
+                } => ConfigChannel {
+                    kind: ChannelSpec::Email {
+                        smtp_host,
+                        port,
+                        security,
+                        username,
+                        password: password_file
+                            .map(|path| read_secret_file(&name, "password_file", &path))
+                            .transpose()?,
+                        from,
+                        to,
+                    },
+                    name,
+                    enabled,
+                    alerts: alerts.unwrap_or_else(|| ALL_ALERT_TYPES.to_vec()),
+                },
+            })
+        })
+        .collect()
 }
 
 fn load_file(explicit: Option<&Path>) -> anyhow::Result<FileConfig> {
@@ -290,6 +519,9 @@ impl Config {
         {
             c.agent_cert_lifetime_secs = v;
         }
+        c.metrics_listen = args.metrics_listen.or(file.metrics_listen);
+        c.notifications.allow_private_targets = file.notifications.allow_private_targets;
+        c.notifications.channels = resolve_channels(file.notifications)?;
         c.validate().context("invalid configuration")?;
         Ok(c)
     }
@@ -317,8 +549,64 @@ impl Config {
             self.grpc.tls_cert_file.is_some() == self.grpc.tls_key_file.is_some(),
             "grpc tls_cert_file and tls_key_file must be set together"
         );
-        Ok(())
+        validate_channels(&self.notifications.channels)
     }
+}
+
+fn validate_channels(channels: &[ConfigChannel]) -> anyhow::Result<()> {
+    let mut seen = std::collections::HashSet::new();
+    for (i, channel) in channels.iter().enumerate() {
+        let name = channel.name.as_str();
+        anyhow::ensure!(
+            !name.trim().is_empty(),
+            "notification channel #{}: name must not be empty",
+            i + 1
+        );
+        anyhow::ensure!(
+            seen.insert(name),
+            "notification channel name {name} is used twice"
+        );
+        anyhow::ensure!(
+            !channel.alerts.is_empty(),
+            "notification channel {name}: alerts must not be empty"
+        );
+        match &channel.kind {
+            ChannelSpec::Webhook { url, .. } => anyhow::ensure!(
+                url.starts_with("http://") || url.starts_with("https://"),
+                "notification channel {name}: url must start with http:// or https://"
+            ),
+            ChannelSpec::Telegram { chat_id, .. } => anyhow::ensure!(
+                !chat_id.trim().is_empty(),
+                "notification channel {name}: chat_id must not be empty"
+            ),
+            ChannelSpec::Slack { webhook_url } => anyhow::ensure!(
+                webhook_url.expose().starts_with("https://"),
+                "notification channel {name}: webhook URL must start with https://"
+            ),
+            ChannelSpec::Email {
+                smtp_host,
+                from,
+                to,
+                ..
+            } => {
+                anyhow::ensure!(
+                    !smtp_host.trim().is_empty(),
+                    "notification channel {name}: smtp_host must not be empty"
+                );
+                from.parse::<lettre::Address>().map_err(|e| {
+                    anyhow::anyhow!(
+                        "notification channel {name}: from {from:?} is not an email address: {e}"
+                    )
+                })?;
+                for address in to {
+                    address.parse::<lettre::Address>().map_err(|e| {
+                        anyhow::anyhow!("notification channel {name}: to {address:?} is not an email address: {e}")
+                    })?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_public_url(url: &str) -> anyhow::Result<()> {
@@ -414,5 +702,262 @@ mod tests {
         ] {
             assert!(validate_public_url(bad).is_err(), "{bad}");
         }
+    }
+
+    fn load(yaml: &str, files: &[(&str, &str)]) -> anyhow::Result<Config> {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, body) in files {
+            std::fs::write(dir.path().join(name), body).unwrap();
+        }
+        let path = dir.path().join("server.yaml");
+        std::fs::write(&path, yaml.replace("{dir}", dir.path().to_str().unwrap())).unwrap();
+        Config::from_args(ConfigArgs {
+            config: Some(path),
+            ..ConfigArgs::default()
+        })
+    }
+
+    fn chain(result: anyhow::Result<Config>) -> String {
+        format!("{:#}", result.unwrap_err())
+    }
+
+    #[test]
+    fn metrics_listen_from_yaml_and_env() {
+        assert_eq!(load("", &[]).unwrap().metrics_listen, None);
+        let yaml = load("metrics_listen: \"0.0.0.0:9464\"", &[]).unwrap();
+        assert_eq!(yaml.metrics_listen, Some("0.0.0.0:9464".parse().unwrap()));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("server.yaml");
+        std::fs::write(&path, "metrics_listen: \"0.0.0.0:9464\"").unwrap();
+        let env = Config::from_args(ConfigArgs {
+            config: Some(path),
+            metrics_listen: Some("127.0.0.1:9100".parse().unwrap()),
+            ..ConfigArgs::default()
+        })
+        .unwrap();
+        assert_eq!(env.metrics_listen, Some("127.0.0.1:9100".parse().unwrap()));
+
+        let err = chain(load("metrics_listen: not-an-address", &[]));
+        assert!(
+            err.contains("metrics_listen") || err.contains("invalid socket address"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn notifications_yaml_reads_secret_files() {
+        let c = load(
+            "notifications:
+  channels:
+    - {name: ops-hook, type: webhook, url: 'https://hooks.example.com/x', secret_file: '{dir}/hook'}
+    - {name: ops-tg, type: telegram, bot_token_file: '{dir}/tg', chat_id: '-100'}",
+            &[("hook", "hook-secret\n"), ("tg", "123:abc\n")],
+        )
+        .unwrap();
+        let [hook, tg] = c.notifications.channels.as_slice() else {
+            panic!("expected two channels");
+        };
+        assert_eq!((hook.name.as_str(), hook.enabled), ("ops-hook", true));
+        assert_eq!(hook.alerts, ALL_ALERT_TYPES);
+        assert_eq!(tg.alerts, ALL_ALERT_TYPES);
+        let ChannelSpec::Webhook { url, secret } = &hook.kind else {
+            panic!("webhook expected");
+        };
+        assert_eq!(url, "https://hooks.example.com/x");
+        assert_eq!(secret.as_ref().unwrap().expose(), "hook-secret");
+        let ChannelSpec::Telegram { bot_token, chat_id } = &tg.kind else {
+            panic!("telegram expected");
+        };
+        assert_eq!((bot_token.expose(), chat_id.as_str()), ("123:abc", "-100"));
+    }
+
+    #[test]
+    fn notifications_private_targets_off_by_default() {
+        assert!(!load("", &[]).unwrap().notifications.allow_private_targets);
+        let c = load("notifications:\n  allow_private_targets: true", &[]).unwrap();
+        assert!(c.notifications.allow_private_targets);
+    }
+
+    #[test]
+    fn notifications_inline_secret_rejected() {
+        let err = chain(load(
+            "notifications:
+  channels:
+    - {name: ops-tg, type: telegram, bot_token: '123:abc', chat_id: '-100'}",
+            &[],
+        ));
+        assert!(err.contains("unknown field `bot_token`"), "{err}");
+    }
+
+    #[test]
+    fn notifications_duplicate_names_rejected() {
+        let err = chain(load(
+            "notifications:
+  channels:
+    - {name: ops-hook, type: webhook, url: 'https://a.example/x'}
+    - {name: ops-hook, type: webhook, url: 'https://b.example/x'}",
+            &[],
+        ));
+        assert!(
+            err.contains("notification channel name ops-hook is used twice"),
+            "{err}"
+        );
+        let err = chain(load(
+            "notifications:
+  channels:
+    - {name: '', type: webhook, url: 'https://a.example/x'}",
+            &[],
+        ));
+        assert!(err.contains("name must not be empty"), "{err}");
+        let err = chain(load(
+            "notifications:
+  channels:
+    - {name: quiet, type: webhook, url: 'https://a.example/x', alerts: []}",
+            &[],
+        ));
+        assert!(err.contains("quiet: alerts must not be empty"), "{err}");
+    }
+
+    #[test]
+    fn notifications_bad_webhook_url_rejected() {
+        let err = chain(load(
+            "notifications:
+  channels:
+    - {name: ops-hook, type: webhook, url: 'ftp://example.com/x'}",
+            &[],
+        ));
+        assert!(
+            err.contains("ops-hook: url must start with http:// or https://"),
+            "{err}"
+        );
+        let err = chain(load(
+            "notifications:
+  channels:
+    - {name: ops-hook, type: webhook, url: 'https://a.example/x', secret_file: '{dir}/missing'}",
+            &[],
+        ));
+        assert!(
+            err.contains("secret_file") && err.contains("missing"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn notifications_slack_requires_https() {
+        let yaml = "notifications:
+  channels:
+    - {name: ops-slack, type: slack, webhook_url_file: '{dir}/slack'}";
+        let err = chain(load(
+            yaml,
+            &[("slack", "http://hooks.slack.com/services/T/B/X\n")],
+        ));
+        assert!(
+            err.contains("ops-slack: webhook URL must start with https://"),
+            "{err}"
+        );
+        let c = load(
+            yaml,
+            &[("slack", "https://hooks.slack.com/services/T/B/X\n")],
+        )
+        .unwrap();
+        let ChannelSpec::Slack { webhook_url } = &c.notifications.channels[0].kind else {
+            panic!("slack expected");
+        };
+        assert_eq!(
+            webhook_url.expose(),
+            "https://hooks.slack.com/services/T/B/X"
+        );
+    }
+
+    #[test]
+    fn notifications_email_defaults() {
+        let c = load(
+            "notifications:
+  channels:
+    - {name: mail, type: email, smtp_host: smtp.example.com, from: 'lodestore@example.com'}
+    - {name: mail-tls, type: email, smtp_host: smtp.example.com, port: 465, security: tls, username: u, password_file: '{dir}/pw', from: 'lodestore@example.com', to: ['ops@example.com']}",
+            &[("pw", "smtp-pass\n")],
+        )
+        .unwrap();
+        let [mail, tls] = c.notifications.channels.as_slice() else {
+            panic!("expected two channels");
+        };
+        let ChannelSpec::Email {
+            port,
+            security,
+            password,
+            to,
+            ..
+        } = &mail.kind
+        else {
+            panic!("email expected");
+        };
+        assert_eq!(
+            (*port, *security, password.is_none()),
+            (587, SmtpSecurity::Starttls, true)
+        );
+        assert!(to.is_empty());
+        let ChannelSpec::Email {
+            port,
+            security,
+            password,
+            username,
+            to,
+            ..
+        } = &tls.kind
+        else {
+            panic!("email expected");
+        };
+        assert_eq!((*port, *security), (465, SmtpSecurity::Tls));
+        assert_eq!(password.as_ref().unwrap().expose(), "smtp-pass");
+        assert_eq!((username.as_deref(), to.len()), (Some("u"), 1));
+        assert!(!format!("{c:?}").contains("smtp-pass"));
+    }
+
+    #[test]
+    fn notifications_email_address_rejected() {
+        let err = chain(load(
+            "notifications:
+  channels:
+    - {name: mail, type: email, smtp_host: smtp.example.com, from: nope}",
+            &[],
+        ));
+        assert!(err.contains("mail: from"), "{err}");
+        let err = chain(load(
+            "notifications:
+  channels:
+    - {name: mail, type: email, smtp_host: smtp.example.com, from: 'a@example.com', to: ['ops@']}",
+            &[],
+        ));
+        assert!(err.contains("mail: to"), "{err}");
+    }
+
+    #[test]
+    fn notifications_plain_smtp_rejected() {
+        let err = chain(load(
+            "notifications:
+  channels:
+    - {name: mail, type: email, smtp_host: smtp.example.com, from: 'a@example.com', security: none}",
+            &[],
+        ));
+        assert!(err.contains("unknown variant `none`"), "{err}");
+    }
+
+    #[test]
+    fn notifications_debug_redacts_secrets() {
+        let c = load(
+            "notifications:
+  channels:
+    - {name: ops-hook, type: webhook, url: 'https://a.example/x', secret_file: '{dir}/hook'}
+    - {name: ops-tg, type: telegram, bot_token_file: '{dir}/tg', chat_id: '-100'}",
+            &[("hook", "hook-secret"), ("tg", "123:abc")],
+        )
+        .unwrap();
+        let debug = format!("{c:?}");
+        assert!(
+            !debug.contains("hook-secret") && !debug.contains("123:abc"),
+            "{debug}"
+        );
     }
 }

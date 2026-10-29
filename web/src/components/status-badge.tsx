@@ -1,5 +1,6 @@
 import {
 	Ban,
+	BellOff,
 	Circle,
 	CircleCheck,
 	CircleDashed,
@@ -76,6 +77,36 @@ const statuses = {
 		icon: CircleDashed,
 		tone: "text-neutral",
 		label: copy.jobs.status.not_started,
+	},
+	overdue: {
+		icon: Clock,
+		tone: "text-warning",
+		label: copy.overview.status.overdue,
+	},
+	silenced: {
+		icon: BellOff,
+		tone: "text-neutral",
+		label: copy.overview.status.silenced,
+	},
+	passed: {
+		icon: CircleCheck,
+		tone: "text-success",
+		label: copy.overview.status.passed,
+	},
+	protected: {
+		icon: CircleCheck,
+		tone: "text-muted-foreground",
+		label: copy.overview.status.protected,
+	},
+	not_protected: {
+		icon: CircleDashed,
+		tone: "text-neutral",
+		label: copy.overview.status.notProtected,
+	},
+	never_run: {
+		icon: CircleDashed,
+		tone: "text-neutral",
+		label: copy.overview.status.neverRun,
 	},
 } as const;
 

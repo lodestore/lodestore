@@ -148,7 +148,7 @@ async fn create_admin(
     )
     .bind(&user_id)
     .bind(&req.username)
-    .bind(hash)
+    .bind(&hash)
     .bind(now_ms())
     .execute(&state.db.pool)
     .await;
@@ -158,7 +158,7 @@ async fn create_admin(
     }
     tracing::info!(username = %req.username, "admin account created");
     state.auth.limits.setup_succeeded(client);
-    let jar = start_session(&state, jar, &user_id).await?;
+    let jar = start_session(&state, jar, &user_id, &hash).await?;
     Ok((jar, StatusCode::NO_CONTENT))
 }
 

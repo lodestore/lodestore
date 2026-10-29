@@ -681,3 +681,94 @@ describe("JobsTable cleanup rows", () => {
 		).toBeVisible();
 	});
 });
+
+function checkJob(
+	over: Partial<JobRow> = {},
+	check: Partial<NonNullable<JobRow["check"]>> = {},
+): JobRow {
+	return job({
+		id: "check-1",
+		kind: "check",
+		host_id: "",
+		hostname: "main",
+		policy_name: null,
+		stats: null,
+		check: {
+			repository_id: "repo-1",
+			repository_name: "main",
+			level: "structure",
+			origin: "manual",
+			findings_total: 0,
+			...check,
+		},
+		...over,
+	});
+}
+
+describe("JobsTable check rows", () => {
+	it("renders check rows", async () => {
+		const router = renderTable({
+			jobs: [
+				checkJob(
+					{ state: "running" },
+					{
+						level: "packs",
+						origin: "schedule",
+						phase: "packs",
+						progress: { phase: "packs", done: 3, total: 10, bytes: 1024 },
+					},
+				),
+			],
+		});
+		const row = await rowOf("check-1");
+		const link = within(row).getByRole("link", { name: "Repository main" });
+		expect(link).toHaveAttribute(
+			"href",
+			"/settings/repositories/repo-1#checks",
+		);
+		expect(
+			within(row).getByText("Check · pack reading · scheduled"),
+		).toBeVisible();
+		expect(within(row).getByRole("progressbar")).toBeVisible();
+		expect(within(row).getByText("Reading packs")).toBeVisible();
+		expect(within(row).queryByRole("button")).toBeNull();
+
+		await userEvent.click(within(row).getByText("Reading packs"));
+		expect(router.state.location.pathname).toBe(
+			"/settings/repositories/repo-1",
+		);
+		expect(router.state.location.hash).toBe("checks");
+	});
+
+	it("renders check results", async () => {
+		const reason = "Stopped at the size limit.";
+		renderTable({
+			jobs: [
+				checkJob({ id: "c-ok", state: "succeeded" }),
+				checkJob(
+					{ id: "c-bad", state: "failed" },
+					{ outcome: "problems", findings_total: 2 },
+				),
+				checkJob(
+					{ id: "c-stop", state: "failed" },
+					{ outcome: "stopped", error: reason },
+				),
+				checkJob(
+					{ id: "c-long", state: "failed" },
+					{ outcome: "stopped", error: "x".repeat(200) },
+				),
+				checkJob({ id: "c-cancel", state: "cancelled" }),
+			],
+		});
+		expect(within(await rowOf("c-ok")).getByText("Passed")).toBeVisible();
+		expect(within(await rowOf("c-bad")).getByText("2 problems")).toBeVisible();
+		expect(
+			within(await rowOf("c-stop")).getByText(`Stopped: ${reason}`),
+		).toBeVisible();
+		expect(
+			within(await rowOf("c-long")).getByText(`Stopped: ${"x".repeat(200)}`),
+		).toBeVisible();
+		const cells = (await rowOf("c-cancel")).querySelectorAll("td");
+		expect(cells[cells.length - 2]).toHaveTextContent("Cancelled");
+	});
+});

@@ -49,6 +49,9 @@ pub struct RestoreOptions {
     pub verify: bool,
     /// Decide and count without creating or changing anything.
     pub dry_run: bool,
+    /// Leave owners, setuid/setgid bits and file capabilities of the
+    /// snapshot out.
+    pub skip_owners: bool,
 }
 
 /// Splits `<snapshot>[:<path>]`. The path is empty when none is given.
@@ -298,6 +301,9 @@ impl<S: BlobStore> Reader<S> {
         &self.store
     }
 
+    // shortcut: shards and snapshots named directly are fetched without a size
+    // check; add a size probe to BlobStore if an unlisted path ever reads
+    // untrusted keys.
     pub async fn snapshot(&self, id: &BlobId) -> Result<pb::Snapshot> {
         let bytes = self.store.get(&snapshot_object_key(id)).await?;
         open_snapshot(
@@ -702,7 +708,7 @@ impl<S: BlobStore> Reader<S> {
             dry_run: options.dry_run,
             k_id: Key32::new(*self.keys.k_id()),
             seed: self.keys.cdc_seed(),
-            restore_owners: true,
+            restore_owners: !options.skip_owners,
         };
         let mut restorer = Restorer::open(target, settings)?;
         let mut walk = SelectedWalk::new(TreeCursor::new(nodes, base), options.include.as_ref());

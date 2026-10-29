@@ -43,6 +43,18 @@ impl Error {
     }
 }
 
+/// Refuses an object the listing shows larger than a `what` can be, so that
+/// it is never downloaded.
+pub(crate) fn within_size(key: &str, size: u64, max: u64, what: &str) -> Result<()> {
+    if size > max {
+        return Err(Error::corrupt(
+            key,
+            format!("{size} bytes, more than a {what} can be ({max})"),
+        ));
+    }
+    Ok(())
+}
+
 impl From<rustix::io::Errno> for Error {
     fn from(e: rustix::io::Errno) -> Self {
         Error::Io(e.into())

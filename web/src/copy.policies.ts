@@ -174,6 +174,10 @@ export const policies = {
 		jitterPlaceholder: "15m",
 		catchUp: "Catch up window",
 		catchUpPlaceholder: "24h",
+		maxAge: "Alert if no backup succeeds for",
+		maxAgePlaceholder: "auto (2 intervals + jitter)",
+		maxAgeHelper:
+			"Leave empty to alert after two missed runs. Policies without a schedule never alert.",
 		optionsHelper:
 			"Catch up runs one backup after missed slots, if the last missed slot is within the window.",
 		optionsNeedCron: "Set a cron expression to use these options.",

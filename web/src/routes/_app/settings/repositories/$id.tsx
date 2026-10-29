@@ -6,6 +6,7 @@ import { agentKeyWarning } from "@/components/capability-checklist";
 import { PolicyPanel } from "@/components/policy-panel";
 import { AgentKeyBadge } from "@/components/repos/agent-key-badge";
 import { CatalogCard } from "@/components/repos/catalog-card";
+import { ChecksCard } from "@/components/repos/checks/checks-card";
 import { ReclaimCard } from "@/components/repos/reclaim/reclaim-card";
 import { ReplaceAgentKeyDialog } from "@/components/repos/replace-agent-key-dialog";
 import { StorageChecksCard } from "@/components/repos/storage-checks-card";
@@ -153,6 +154,8 @@ function RepositoryPage() {
 					/>
 
 					<CatalogCard repositoryId={repository.id} />
+
+					<ChecksCard repositoryId={repository.id} />
 
 					<ReclaimCard repositoryId={repository.id} />
 

@@ -1,19 +1,27 @@
 import { catalog } from "@/copy.catalog";
+import { checks } from "@/copy.checks";
 import { gc } from "@/copy.gc";
 import { hostBackup, snapshots } from "@/copy.host";
 import { jobs } from "@/copy.jobs";
+import { notifications } from "@/copy.notifications";
+import { overview } from "@/copy.overview";
 import { policies } from "@/copy.policies";
 import { restore } from "@/copy.restore";
 import { tokens } from "@/copy.tokens";
+import { user } from "@/copy.user";
 import { sentence } from "@/lib/sentence";
 
 export const copy = {
 	catalog,
+	checks,
 	gc,
 	jobs,
+	notifications,
+	overview,
 	policies,
 	restore,
 	tokens,
+	user,
 	hostBackup,
 	snapshots,
 	nav: {
@@ -27,7 +35,9 @@ export const copy = {
 	settingsNav: {
 		label: "Settings sections",
 		repositories: "Repositories",
+		notifications: "Notifications",
 		tokens: "API tokens",
+		user: "User",
 	},
 	soon: "Soon",
 	brand: "Lodestore",
@@ -72,46 +82,8 @@ export const copy = {
 		hostsFailed: "Couldn't load hosts",
 		repositoriesFailed: "Couldn't load repositories",
 	},
-	preview: {
-		badge: "Arrives in a later release",
-		footnote: "Nothing is needed from you now.",
-		overview: {
-			title: "See every backup at a glance",
-			lead: "A live view of protected hosts, the last successful backup of each and how much storage you use.",
-			bullets: [
-				"Which hosts are protected and which need attention",
-				"Last successful backup per host",
-				"Storage growth over time",
-			],
-		},
-		policies: {
-			title: "Decide what gets backed up, and when",
-			lead: "Policies pick hosts by label and describe what to protect, how often and how long to keep it.",
-			bullets: [
-				"Select hosts by label, such as env=prod",
-				"Schedules and retention in one place",
-				"Databases, Proxmox and Kubernetes sources",
-			],
-		},
-		jobs: {
-			title: "Follow every backup as it runs",
-			lead: "Watch running and finished jobs, with logs and the reason for any failure.",
-			bullets: [
-				"Live progress for each host",
-				"Clear errors with a next step",
-				"History you can filter by host or policy",
-			],
-		},
-		hostSnapshots: {
-			title: "Snapshots will appear here",
-			lead: "Once a policy backs up this host, every snapshot is listed here and can be restored.",
-		},
-		hostJobs: {
-			title: "Jobs will appear here",
-			lead: "Backup jobs that ran on this host are listed here with their status.",
-		},
-	},
 	hostPage: {
+		agent: { online: "Agent online", offline: "Agent offline" },
 		tabs: { overview: "Overview", snapshots: "Snapshots", jobs: "Jobs" },
 		editLabels: "Edit labels",
 		revoke: "Revoke host",
@@ -391,7 +363,11 @@ export const copy = {
 			certificate: "Certificate",
 			actions: "Actions",
 		},
-		tiles: { total: "Total hosts", online: "Online", offline: "Offline" },
+		tiles: {
+			total: "Total hosts",
+			online: "Agents online",
+			offline: "Agents offline",
+		},
 		openRow: (name: string) => `Open ${name}`,
 		viewDetails: "View details",
 		previous: "Previous",

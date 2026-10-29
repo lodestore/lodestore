@@ -42,6 +42,9 @@ const MAX_IONICE_LEVEL: i64 = 7;
 const MIN_RUNTIME: Duration = Duration::from_hours(1);
 /// The longest `spec.limits.maxRuntime` a policy may set.
 pub const MAX_RUNTIME: Duration = Duration::from_hours(7 * 24);
+const MAX_AGE_RULE: &str = "Use a duration such as 36h or 3d.";
+const MIN_MAX_AGE: Duration = Duration::from_hours(1);
+const MAX_MAX_AGE: Duration = Duration::from_hours(365 * 24);
 const MAX_COUNT: i64 = u32::MAX as i64;
 
 pub(crate) fn zone_rule(value: &str) -> String {
@@ -91,6 +94,16 @@ pub struct PolicySpec {
     pub retention: Option<Retention>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<Limits>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alerts: Option<Alerts>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct Alerts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_age: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -351,6 +364,11 @@ pub fn validate(policy: &BackupPolicy) -> Vec<Problem> {
     }
     if let Some(limits) = &spec.limits {
         validate_limits(limits, &mut out);
+    }
+    if let Some(max_age) = spec.alerts.as_ref().and_then(|a| a.max_age.as_deref())
+        && !parse_duration(max_age).is_some_and(|d| (MIN_MAX_AGE..=MAX_MAX_AGE).contains(&d))
+    {
+        out.push(Problem::at("spec.alerts.maxAge", MAX_AGE_RULE));
     }
     out
 }

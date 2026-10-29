@@ -84,8 +84,8 @@ describe("Hosts page", () => {
 			screen.getByText(label, { selector: "div" }).nextElementSibling
 				?.textContent;
 		expect(tile("Total hosts")).toBe("3");
-		expect(tile("Online")).toBe("2");
-		expect(tile("Offline")).toBe("1");
+		expect(tile("Agents online")).toBe("2");
+		expect(tile("Agents offline")).toBe("1");
 	});
 
 	it("shows zero online when every active host is offline", async () => {
@@ -93,7 +93,7 @@ describe("Hosts page", () => {
 		await openHosts();
 		await screen.findByText("a");
 		expect(
-			screen.getByText("Online", { selector: "div" }).nextElementSibling,
+			screen.getByText("Agents online", { selector: "div" }).nextElementSibling,
 		).toHaveTextContent("0");
 	});
 

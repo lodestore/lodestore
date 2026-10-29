@@ -2,7 +2,7 @@ mod common;
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use common::{Api, TestServer, WAIT, backends, bearer_client, wait_until};
 use lodestore_format::crypto::{BLOB_TYPE_DATA, BlobId, Entropy, HPKE_ENC_LEN, SEALED_KEY_LEN};
@@ -878,6 +878,78 @@ async fn gc_cycle_waits_for_restore() {
     }
 }
 
+async fn seed_check_run(ts: &TestServer, repo: &str, state: &str) {
+    sqlx::query(
+        "INSERT INTO check_runs (id, repository_id, level, origin, started_by, state, created_at) \
+         VALUES ('check-1', $1, 'packs', 'manual', 'test', $2, 0)",
+    )
+    .bind(repo)
+    .bind(state)
+    .execute(&ts.state().db.pool)
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn checks_gc_sweep_waits_for_check() {
+    for backend in backends() {
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let (b, c) = forgotten_a(&ts, "main").await;
+        enable(&ts, &api, &repo).await;
+        let before = packs_size(&ts, "main");
+        seed_check_run(&ts, &repo, "running").await;
+
+        let id = run_cycle(&api, &repo).await;
+        let later = after_pause(&ts, &id).await;
+        let packs = files_under(&ts.local_repo_root("main").join("packs"));
+        assert_eq!(
+            steps(&ts, &id, later).await,
+            StepOutcome::Postponed,
+            "[{}]",
+            backend.name()
+        );
+        let status: Value = api
+            .get(&format!("/api/v1/repositories/{repo}/gc"))
+            .await
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(status["cycle"]["waiting_for_restores"], true);
+        assert_eq!(
+            files_under(&ts.local_repo_root("main").join("packs")),
+            packs
+        );
+
+        sqlx::query("UPDATE check_runs SET state = 'done' WHERE id = 'check-1'")
+            .execute(&ts.state().db.pool)
+            .await
+            .unwrap();
+        finish_ok(&ts, &id, later, before, &b, &c).await;
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn checks_gc_other_repo_not_blocking() {
+    for backend in backends() {
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let other = ts.create_local_repository("other").await;
+        let (b, c) = forgotten_a(&ts, "main").await;
+        enable(&ts, &api, &repo).await;
+        let before = packs_size(&ts, "main");
+        seed_check_run(&ts, &other, "running").await;
+
+        let id = run_cycle(&api, &repo).await;
+        let later = after_pause(&ts, &id).await;
+        finish_ok(&ts, &id, later, before, &b, &c).await;
+        ts.stop().await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn gc_cycle_restore_after_gc() {
     for backend in backends() {
@@ -947,7 +1019,18 @@ async fn gc_cycle_tick_resumes_once() {
             .unwrap();
 
         let now = lodestore_server::db::now_ms();
-        let guard = ts.state().gc.claim(&id).expect("not driven yet");
+        // The driver records `waiting` just before it releases its claim.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let guard = loop {
+            if let Some(guard) = ts.state().gc.claim(&id) {
+                break guard;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the paused driver kept its claim"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
         assert!(ts.state().gc.claim(&id).is_none(), "one driver per cycle");
         lodestore_server::maintenance::gc::tick_once(ts.state(), now)
             .await

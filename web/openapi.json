@@ -10,6 +10,159 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/api/v1/account": {
+      "get": {
+        "tags": [
+          "Account"
+        ],
+        "summary": "Get the administrator's account",
+        "operationId": "get_account",
+        "responses": {
+          "200": {
+            "description": "The signed-in administrator",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Account"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "Account"
+        ],
+        "summary": "Change the administrator's email",
+        "description": "The address is where email channels send alerts unless a channel names its own.",
+        "operationId": "update_account",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AccountInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Saved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Account"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The address is not valid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountErrors"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/account/password": {
+      "post": {
+        "tags": [
+          "Account"
+        ],
+        "summary": "Change the administrator's password",
+        "description": "Every other session is signed out; the current one stays. A wrong current password answers 422, not 401, so the interface does not take it for an expired session.",
+        "operationId": "change_password",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasswordChange"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "The password is changed"
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`wrong_password` or `weak_password`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many attempts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      }
+    },
     "/api/v1/agent-policy": {
       "get": {
         "tags": [
@@ -57,6 +210,114 @@
             }
           }
         }
+      }
+    },
+    "/api/v1/alerts": {
+      "get": {
+        "tags": [
+          "Alerts"
+        ],
+        "summary": "List alerts",
+        "description": "Active alerts by default, or the history. Newest first. Alerts of silenced hosts stay in the list and are marked.",
+        "operationId": "list_alerts",
+        "parameters": [
+          {
+            "name": "state",
+            "in": "query",
+            "description": "`active` (default), `resolved` or `all`.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "active",
+                "resolved",
+                "all"
+              ]
+            }
+          },
+          {
+            "name": "host_id",
+            "in": "query",
+            "description": "Only alerts of this host.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size, 1 to 500; 50 by default.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "description": "The `id` of the last alert of the previous page; lists the alerts started before it.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of alerts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertList"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "bearer": [
+              "hosts:read"
+            ]
+          }
+        ]
+      }
+    },
+    "/api/v1/alerts/count": {
+      "get": {
+        "tags": [
+          "Alerts"
+        ],
+        "summary": "Count active alerts",
+        "operationId": "count_alerts",
+        "responses": {
+          "200": {
+            "description": "Active alerts, and those of hosts that are not silenced",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertCount"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "bearer": [
+              "hosts:read"
+            ]
+          }
+        ]
       }
     },
     "/api/v1/auth/login": {
@@ -365,6 +626,90 @@
           {
             "bearer": [
               "restore"
+            ]
+          }
+        ]
+      }
+    },
+    "/api/v1/fleet": {
+      "get": {
+        "tags": [
+          "Overview"
+        ],
+        "summary": "Fleet overview",
+        "description": "Every host with one state (failed, overdue, offline, not protected or healthy), its last successful backup and its worst policy, plus totals and the space used.",
+        "operationId": "fleet_overview",
+        "responses": {
+          "200": {
+            "description": "Host states, totals and storage",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FleetOverview"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "bearer": [
+              "hosts:read"
+            ]
+          }
+        ]
+      }
+    },
+    "/api/v1/fleet/hosts/{id}": {
+      "get": {
+        "tags": [
+          "Overview"
+        ],
+        "summary": "Fleet state of one host",
+        "operationId": "fleet_host",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Host id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The host state and its worst policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FleetHost"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown or revoked host",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "bearer": [
+              "hosts:read"
             ]
           }
         ]
@@ -740,6 +1085,124 @@
         ]
       }
     },
+    "/api/v1/hosts/{id}/silence": {
+      "put": {
+        "tags": [
+          "Alerts"
+        ],
+        "summary": "Silence a host",
+        "description": "A silenced host sends no notifications. Its alerts stay visible and the host keeps its real state. A new silence replaces the previous one.",
+        "operationId": "silence_host",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Host id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SilenceInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The silence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SilenceDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown host",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The host is revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          },
+          {
+            "bearer": [
+              "alerts:write"
+            ]
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "Alerts"
+        ],
+        "summary": "Lift the silence of a host",
+        "operationId": "resume_host_alerts",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Host id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The host is no longer silenced"
+          },
+          "404": {
+            "description": "Unknown host",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          },
+          {
+            "bearer": [
+              "alerts:write"
+            ]
+          }
+        ]
+      }
+    },
     "/api/v1/hosts/{id}/snapshots": {
       "get": {
         "tags": [
@@ -859,7 +1322,7 @@
           {
             "name": "kind",
             "in": "query",
-            "description": "`backup`, `restore`, `download` or `gc`.",
+            "description": "`backup`, `restore`, `download`, `gc` or `check`.",
             "required": false,
             "schema": {
               "type": "string"
@@ -1267,6 +1730,465 @@
             }
           }
         }
+      }
+    },
+    "/api/v1/notifications/channels": {
+      "get": {
+        "tags": [
+          "Notifications"
+        ],
+        "summary": "List the notification channels",
+        "description": "Channels created here and channels defined in the server configuration. Secrets are never returned; `secret_set` says whether one is stored.",
+        "operationId": "list_channels",
+        "responses": {
+          "200": {
+            "description": "The channels by name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ChannelDto"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "Notifications"
+        ],
+        "summary": "Add a notification channel",
+        "operationId": "create_channel",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChannelInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A field is not valid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FieldErrors"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/notifications/channels/test": {
+      "post": {
+        "tags": [
+          "Notifications"
+        ],
+        "summary": "Send a test message",
+        "description": "Tests a saved channel (`channel_id`) or a form draft (`channel`) without saving it. The stored secret is reused only while the address stays the same. A failed delivery answers 200 with `ok: false` and the error.",
+        "operationId": "test_channel",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChannelTestInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The outcome of the delivery",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelTestResult"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such channel",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A field of the draft is not valid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FieldErrors"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/notifications/channels/{id}": {
+      "get": {
+        "tags": [
+          "Notifications"
+        ],
+        "summary": "Get a notification channel",
+        "operationId": "get_channel",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Channel id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The channel",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such channel",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "Notifications"
+        ],
+        "summary": "Change a notification channel",
+        "description": "The type cannot change. Without a `secret` the stored one stays while the address stays the same. Channels from the server configuration answer 409.",
+        "operationId": "update_channel",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Channel id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChannelInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Saved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such channel",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The channel is defined in the server configuration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A field is not valid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FieldErrors"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "Notifications"
+        ],
+        "summary": "Delete a notification channel",
+        "description": "Its pending and past deliveries go with it. Channels from the server configuration answer 409.",
+        "operationId": "delete_channel",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Channel id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such channel",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The channel is defined in the server configuration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/notifications/thresholds": {
+      "get": {
+        "tags": [
+          "Notifications"
+        ],
+        "summary": "Get the alert thresholds",
+        "operationId": "get_alert_thresholds",
+        "responses": {
+          "200": {
+            "description": "The thresholds in force",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertThresholds"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "Notifications"
+        ],
+        "summary": "Change the alert thresholds",
+        "description": "Takes effect from the next alert evaluation.",
+        "operationId": "put_alert_thresholds",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AlertThresholdsInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Saved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertThresholds"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A value is not valid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FieldErrors"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
       }
     },
     "/api/v1/policies": {
@@ -2371,6 +3293,475 @@
           {
             "csrf": [],
             "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/repositories/{id}/checks": {
+      "get": {
+        "tags": [
+          "Checks"
+        ],
+        "summary": "Get the check status of a repository",
+        "description": "Per level: the settings, the next scheduled runs, the running check and the last one that finished. Also the size of the bucket and how much of it pack reading has covered lately.",
+        "operationId": "get_check_status",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Repository id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The check status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckStatus"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown repository",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "bearer": [
+              "jobs:read"
+            ]
+          }
+        ]
+      }
+    },
+    "/api/v1/repositories/{id}/checks/runs/{run_id}": {
+      "get": {
+        "tags": [
+          "Checks"
+        ],
+        "summary": "Get a check run",
+        "operationId": "get_check_run",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Repository id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "run_id",
+            "in": "path",
+            "description": "Check run id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The run",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckRunDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown repository or check",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "bearer": [
+              "jobs:read"
+            ]
+          }
+        ]
+      }
+    },
+    "/api/v1/repositories/{id}/checks/runs/{run_id}/cancel": {
+      "post": {
+        "tags": [
+          "Checks"
+        ],
+        "summary": "Stop a running check",
+        "description": "A queued check ends at once; a running one stops within a second or so.",
+        "operationId": "cancel_check",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Repository id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "run_id",
+            "in": "path",
+            "description": "Check run id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "The check is stopping",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckStarted"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown repository or check",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The check has ended already",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          },
+          {
+            "bearer": [
+              "jobs:run"
+            ]
+          }
+        ]
+      }
+    },
+    "/api/v1/repositories/{id}/checks/runs/{run_id}/report": {
+      "get": {
+        "tags": [
+          "Checks"
+        ],
+        "summary": "Get the full report of a finished check",
+        "description": "Lists every finding and note, not only the first few.",
+        "operationId": "get_check_report",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Repository id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "run_id",
+            "in": "path",
+            "description": "Check run id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The report",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckFullReport"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown repository or check, or a check without a report",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "bearer": [
+              "jobs:read"
+            ]
+          }
+        ]
+      }
+    },
+    "/api/v1/repositories/{id}/checks/settings": {
+      "put": {
+        "tags": [
+          "Checks"
+        ],
+        "summary": "Save the check settings of a repository",
+        "description": "Each level has its own schedule and limits. A limit left out keeps its saved value. Saving moves the schedule on from the time of the change.",
+        "operationId": "put_check_settings",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Repository id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CheckSettingsInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Saved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckStatus"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown repository",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A field is not valid; nothing was saved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckSettingsErrors"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          },
+          {
+            "bearer": [
+              "policies:write"
+            ]
+          }
+        ]
+      }
+    },
+    "/api/v1/repositories/{id}/checks/settings/validate": {
+      "post": {
+        "tags": [
+          "Checks"
+        ],
+        "summary": "Check the settings without saving them",
+        "operationId": "validate_check_settings",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Repository id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CheckSettingsInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The next runs of every level and the fields that are not valid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckSettingsCheck"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown repository",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          },
+          {
+            "bearer": [
+              "jobs:read"
+            ]
+          }
+        ]
+      }
+    },
+    "/api/v1/repositories/{id}/checks/{level}/run": {
+      "post": {
+        "tags": [
+          "Checks"
+        ],
+        "summary": "Start a check now",
+        "description": "The server reads the bucket with its own key; no agent is needed. Levels: `structure`, `packs` and `restore` (restores a sample of files into a scratch folder and deletes it again). Follow the run in the check status or in the jobs list.",
+        "operationId": "start_check",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Repository id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "level",
+            "in": "path",
+            "description": "`structure`, `packs` or `restore`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "The check started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckStarted"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown repository",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A cleanup cycle or another check is running",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unknown level",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          },
+          {
+            "bearer": [
+              "jobs:run"
+            ]
           }
         ]
       }
@@ -3874,6 +5265,49 @@
   },
   "components": {
     "schemas": {
+      "Account": {
+        "type": "object",
+        "required": [
+          "username"
+        ],
+        "properties": {
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "username": {
+            "type": "string"
+          }
+        }
+      },
+      "AccountErrors": {
+        "type": "object",
+        "required": [
+          "errors"
+        ],
+        "properties": {
+          "errors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FieldError"
+            }
+          }
+        }
+      },
+      "AccountInput": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Empty or left out clears the address."
+          }
+        }
+      },
       "AgentPolicy": {
         "type": "object",
         "required": [
@@ -3888,6 +5322,280 @@
             "type": "string"
           }
         }
+      },
+      "AlertCount": {
+        "type": "object",
+        "required": [
+          "active",
+          "unsilenced"
+        ],
+        "properties": {
+          "active": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "unsilenced": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Active alerts of hosts that are not silenced, and alerts without a host.",
+            "minimum": 0
+          }
+        }
+      },
+      "AlertDto": {
+        "type": "object",
+        "required": [
+          "id",
+          "type",
+          "severity",
+          "state",
+          "title",
+          "detail",
+          "started_at",
+          "silenced",
+          "facts"
+        ],
+        "properties": {
+          "cert": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CertKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "check_level": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "detail": {
+            "type": "string"
+          },
+          "facts": {
+            "$ref": "#/components/schemas/AlertFacts"
+          },
+          "host": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/HostRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "policy": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "repository": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RepoRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "resolved_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "severity": {
+            "$ref": "#/components/schemas/Severity"
+          },
+          "silenced": {
+            "type": "boolean",
+            "description": "The host is silenced; only host alerts can be."
+          },
+          "silenced_until": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "started_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "state": {
+            "$ref": "#/components/schemas/AlertState"
+          },
+          "title": {
+            "type": "string"
+          },
+          "type": {
+            "$ref": "#/components/schemas/AlertType"
+          }
+        }
+      },
+      "AlertFacts": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "external": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "findings": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "last_seen_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "last_success_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "limit_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "not_after": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          }
+        }
+      },
+      "AlertList": {
+        "type": "object",
+        "required": [
+          "alerts",
+          "total"
+        ],
+        "properties": {
+          "alerts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AlertDto"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "All alerts matching `state` and `host_id`, not only this page.",
+            "minimum": 0
+          }
+        }
+      },
+      "AlertState": {
+        "type": "string",
+        "enum": [
+          "firing",
+          "resolved"
+        ]
+      },
+      "AlertThresholds": {
+        "type": "object",
+        "required": [
+          "offline_after",
+          "cert_days",
+          "offline_floor",
+          "cert_days_max"
+        ],
+        "properties": {
+          "cert_days": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many days before a certificate expires the alert fires.",
+            "minimum": 0
+          },
+          "cert_days_max": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "offline_after": {
+            "type": "string",
+            "description": "How long a host stays silent before it counts as offline, such as `15m`."
+          },
+          "offline_floor": {
+            "type": "string"
+          }
+        }
+      },
+      "AlertThresholdsInput": {
+        "type": "object",
+        "properties": {
+          "cert_days": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "A whole number of days from 1 to 60. Left out keeps the saved one."
+          },
+          "offline_after": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A duration such as `15m` or `1h`, not below the floor. Left out keeps the saved one."
+          }
+        }
+      },
+      "AlertType": {
+        "type": "string",
+        "enum": [
+          "backup_failed",
+          "no_recent_backup",
+          "agent_offline",
+          "check_failed",
+          "certificate_expiring"
+        ]
+      },
+      "Alerts": {
+        "type": "object",
+        "properties": {
+          "maxAge": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
       },
       "AnomalyKind": {
         "type": "string",
@@ -4149,6 +5857,13 @@
         },
         "additionalProperties": false
       },
+      "BlockReason": {
+        "type": "string",
+        "enum": [
+          "cleanup",
+          "check"
+        ]
+      },
       "BlockedForget": {
         "type": "object",
         "required": [
@@ -4281,6 +5996,13 @@
           }
         }
       },
+      "CertKind": {
+        "type": "string",
+        "enum": [
+          "agent",
+          "grpc"
+        ]
+      },
       "ChangeAction": {
         "type": "string",
         "enum": [
@@ -4288,6 +6010,221 @@
           "update",
           "delete"
         ]
+      },
+      "ChannelDto": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "type",
+          "enabled",
+          "alert_types",
+          "source",
+          "settings",
+          "secret_set"
+        ],
+        "properties": {
+          "alert_types": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AlertType"
+            }
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "last_delivery": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LastDelivery"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "secret_set": {
+            "type": "boolean",
+            "description": "Whether a secret is stored; the secret itself is never returned."
+          },
+          "settings": {
+            "$ref": "#/components/schemas/ChannelSettingsDto"
+          },
+          "source": {
+            "$ref": "#/components/schemas/ChannelSource"
+          },
+          "type": {
+            "$ref": "#/components/schemas/ChannelKind"
+          }
+        }
+      },
+      "ChannelInput": {
+        "type": "object",
+        "required": [
+          "type",
+          "name"
+        ],
+        "properties": {
+          "alert_types": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AlertType"
+            },
+            "description": "Left out means all five alert types."
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "secret": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The bot token (Telegram), webhook URL (Slack), bearer secret (webhook) or SMTP\npassword (email). Left out or empty keeps the stored secret."
+          },
+          "settings": {
+            "$ref": "#/components/schemas/ChannelSettingsDto"
+          },
+          "type": {
+            "$ref": "#/components/schemas/ChannelKind"
+          }
+        }
+      },
+      "ChannelKind": {
+        "type": "string",
+        "enum": [
+          "telegram",
+          "slack",
+          "email",
+          "webhook"
+        ]
+      },
+      "ChannelSettingsDto": {
+        "type": "object",
+        "properties": {
+          "chat_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "from": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "port": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "recipients": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "security": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SmtpMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "smtp_host": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "username": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "ChannelSource": {
+        "type": "string",
+        "enum": [
+          "ui",
+          "config"
+        ]
+      },
+      "ChannelTestInput": {
+        "type": "object",
+        "properties": {
+          "channel": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ChannelInput",
+                "description": "A form draft, tested without saving. With `channel_id`, an empty secret falls\nback to the one saved for that channel."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "channel_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A saved channel; with no `channel` it is tested as saved."
+          }
+        }
+      },
+      "ChannelTestResult": {
+        "type": "object",
+        "required": [
+          "ok",
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "ok": {
+            "type": "boolean"
+          }
+        }
+      },
+      "CheckBlocked": {
+        "type": "object",
+        "required": [
+          "reason",
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/components/schemas/BlockReason"
+          }
+        }
       },
       "CheckDto": {
         "type": "object",
@@ -4307,6 +6244,327 @@
           },
           "status": {
             "type": "string"
+          }
+        }
+      },
+      "CheckFinding": {
+        "type": "object",
+        "required": [
+          "kind",
+          "key",
+          "detail"
+        ],
+        "properties": {
+          "detail": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string",
+            "description": "The object key the finding is about."
+          },
+          "kind": {
+            "type": "string",
+            "description": "For example `missing_pack`, `pack_mismatch` or `damaged_blob`."
+          }
+        }
+      },
+      "CheckFullReport": {
+        "type": "object",
+        "required": [
+          "run",
+          "findings",
+          "notes",
+          "notes_total"
+        ],
+        "properties": {
+          "findings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CheckFinding"
+            }
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CheckNote"
+            }
+          },
+          "notes_total": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "run": {
+            "$ref": "#/components/schemas/CheckRunDto"
+          }
+        }
+      },
+      "CheckJobInfo": {
+        "type": "object",
+        "required": [
+          "repository_id",
+          "repository_name",
+          "level",
+          "origin",
+          "findings_total"
+        ],
+        "properties": {
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "findings_total": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "level": {
+            "$ref": "#/components/schemas/CheckLevel"
+          },
+          "origin": {
+            "$ref": "#/components/schemas/CheckOrigin"
+          },
+          "outcome": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CheckOutcome"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "phase": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CheckPhase"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "progress": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CheckProgress"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "repository_id": {
+            "type": "string"
+          },
+          "repository_name": {
+            "type": "string"
+          }
+        }
+      },
+      "CheckLevel": {
+        "type": "string",
+        "enum": [
+          "structure",
+          "packs",
+          "restore"
+        ]
+      },
+      "CheckLevelInput": {
+        "type": "object",
+        "required": [
+          "enabled",
+          "cron",
+          "timezone"
+        ],
+        "properties": {
+          "cron": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "files_per_run": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "`restore` only: a whole number from 1 to 1000. Left out, the saved value stays."
+          },
+          "max_data_per_run": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`restore` only: a size such as `1GiB`. Left out, the saved value stays."
+          },
+          "read_per_run": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`packs` only: a size such as `5GiB`. Left out, the saved value stays."
+          },
+          "timezone": {
+            "type": "string"
+          }
+        }
+      },
+      "CheckLevelSettings": {
+        "type": "object",
+        "required": [
+          "enabled",
+          "cron",
+          "timezone",
+          "read_per_run",
+          "files_per_run",
+          "max_data_per_run"
+        ],
+        "properties": {
+          "cron": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "files_per_run": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many files a test restore restores, from 1 to 1000.",
+            "minimum": 0
+          },
+          "max_data_per_run": {
+            "type": "string",
+            "description": "A size such as `1GiB`: the most data a test restore writes to the server's disk."
+          },
+          "read_per_run": {
+            "type": "string",
+            "description": "A size such as `5GiB`: how much of the bucket a pack reading run downloads."
+          },
+          "timezone": {
+            "type": "string"
+          }
+        }
+      },
+      "CheckLevelStatus": {
+        "type": "object",
+        "required": [
+          "level",
+          "settings"
+        ],
+        "properties": {
+          "last": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CheckRunDto",
+                "description": "The newest run that reached a verdict."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "level": {
+            "$ref": "#/components/schemas/CheckLevel"
+          },
+          "running": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CheckRunDto"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "schedule": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ScheduleInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "settings": {
+            "$ref": "#/components/schemas/CheckLevelSettings"
+          }
+        }
+      },
+      "CheckNote": {
+        "type": "object",
+        "required": [
+          "kind",
+          "key",
+          "detail"
+        ],
+        "properties": {
+          "detail": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          }
+        }
+      },
+      "CheckOrigin": {
+        "type": "string",
+        "enum": [
+          "manual",
+          "schedule"
+        ]
+      },
+      "CheckOutcome": {
+        "type": "string",
+        "enum": [
+          "passed",
+          "problems",
+          "stopped"
+        ]
+      },
+      "CheckPhase": {
+        "type": "string",
+        "enum": [
+          "listing",
+          "indexes",
+          "snapshots",
+          "packs",
+          "restoring"
+        ]
+      },
+      "CheckProgress": {
+        "type": "object",
+        "required": [
+          "phase",
+          "done",
+          "total",
+          "bytes"
+        ],
+        "properties": {
+          "bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "done": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "phase": {
+            "$ref": "#/components/schemas/CheckPhase"
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
           }
         }
       },
@@ -4333,6 +6591,291 @@
           },
           "existing_repository": {
             "type": "boolean"
+          }
+        }
+      },
+      "CheckRunDto": {
+        "type": "object",
+        "required": [
+          "id",
+          "level",
+          "origin",
+          "state",
+          "created_at",
+          "started_by",
+          "findings_total",
+          "summary",
+          "findings"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "findings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CheckFinding"
+            },
+            "description": "The first findings; the report lists them all."
+          },
+          "findings_total": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "finished_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "id": {
+            "type": "string"
+          },
+          "level": {
+            "$ref": "#/components/schemas/CheckLevel"
+          },
+          "origin": {
+            "$ref": "#/components/schemas/CheckOrigin"
+          },
+          "outcome": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CheckOutcome"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "progress": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CheckProgress"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "started_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "started_by": {
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/CheckState"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/CheckSummary"
+          }
+        }
+      },
+      "CheckSettingsCheck": {
+        "type": "object",
+        "required": [
+          "schedules",
+          "errors"
+        ],
+        "properties": {
+          "errors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FieldError"
+            }
+          },
+          "schedules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LevelSchedule"
+            }
+          }
+        }
+      },
+      "CheckSettingsErrors": {
+        "type": "object",
+        "required": [
+          "errors"
+        ],
+        "properties": {
+          "errors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FieldError"
+            }
+          }
+        }
+      },
+      "CheckSettingsInput": {
+        "type": "object",
+        "required": [
+          "structure",
+          "packs",
+          "restore"
+        ],
+        "properties": {
+          "packs": {
+            "$ref": "#/components/schemas/CheckLevelInput"
+          },
+          "restore": {
+            "$ref": "#/components/schemas/CheckLevelInput"
+          },
+          "structure": {
+            "$ref": "#/components/schemas/CheckLevelInput"
+          }
+        }
+      },
+      "CheckStarted": {
+        "type": "object",
+        "required": [
+          "run_id"
+        ],
+        "properties": {
+          "run_id": {
+            "type": "string"
+          }
+        }
+      },
+      "CheckState": {
+        "type": "string",
+        "enum": [
+          "queued",
+          "running",
+          "done",
+          "failed",
+          "aborted"
+        ]
+      },
+      "CheckStatus": {
+        "type": "object",
+        "required": [
+          "repository_id",
+          "levels"
+        ],
+        "properties": {
+          "blocked": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CheckBlocked"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "coverage": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PackCoverage"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "levels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CheckLevelStatus"
+            }
+          },
+          "repository_id": {
+            "type": "string"
+          },
+          "usage": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RepoUsageDto"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "CheckSummary": {
+        "type": "object",
+        "properties": {
+          "packs": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PacksSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "restore": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RestoreSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "structure": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/StructureSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "ChecksState": {
+        "type": "string",
+        "enum": [
+          "passed",
+          "failed",
+          "never_run",
+          "off"
+        ]
+      },
+      "ChecksSummary": {
+        "type": "object",
+        "description": "The worst result of the enabled levels, as the repository list shows it.",
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "finished_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When the run that decided `state` finished."
+          },
+          "state": {
+            "$ref": "#/components/schemas/ChecksState"
           }
         }
       },
@@ -4747,6 +7290,275 @@
           "path": {
             "type": "string",
             "description": "The policy-style path of the field, such as `spec.pause`."
+          }
+        }
+      },
+      "FieldErrors": {
+        "type": "object",
+        "required": [
+          "errors"
+        ],
+        "properties": {
+          "errors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FieldError"
+            }
+          }
+        }
+      },
+      "FleetHost": {
+        "type": "object",
+        "required": [
+          "id",
+          "hostname",
+          "labels",
+          "platform",
+          "state",
+          "agent_online",
+          "silenced",
+          "has_policy",
+          "recent_runs"
+        ],
+        "properties": {
+          "agent_last_seen_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "agent_online": {
+            "type": "boolean"
+          },
+          "has_policy": {
+            "type": "boolean"
+          },
+          "hostname": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Label"
+            }
+          },
+          "last_snapshot": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LastSnapshot"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_success_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "overdue_after_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "platform": {
+            "type": "string"
+          },
+          "recent_runs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RecentRun"
+            },
+            "description": "The last finished backup runs of the host, oldest first, at most 10."
+          },
+          "silenced": {
+            "type": "boolean"
+          },
+          "silenced_until": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "state": {
+            "$ref": "#/components/schemas/HostState"
+          },
+          "worst": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/FleetPair"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "FleetOverview": {
+        "type": "object",
+        "required": [
+          "generated_at",
+          "totals",
+          "storage",
+          "hosts"
+        ],
+        "properties": {
+          "generated_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "hosts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FleetHost"
+            }
+          },
+          "storage": {
+            "$ref": "#/components/schemas/FleetStorage"
+          },
+          "totals": {
+            "$ref": "#/components/schemas/FleetTotals"
+          }
+        }
+      },
+      "FleetPair": {
+        "type": "object",
+        "required": [
+          "policy",
+          "problem",
+          "age_secs"
+        ],
+        "properties": {
+          "age_secs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "policy": {
+            "type": "string"
+          },
+          "problem": {
+            "$ref": "#/components/schemas/PairProblem"
+          }
+        }
+      },
+      "FleetStorage": {
+        "type": "object",
+        "required": [
+          "repositories",
+          "counted"
+        ],
+        "properties": {
+          "counted": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Repositories whose size has been counted.",
+            "minimum": 0
+          },
+          "counted_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "dedup_ratio": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Logical size divided by the size in the bucket."
+          },
+          "logical_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "physical_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "repositories": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "FleetTotals": {
+        "type": "object",
+        "required": [
+          "hosts",
+          "healthy",
+          "overdue",
+          "failed",
+          "offline",
+          "not_protected"
+        ],
+        "properties": {
+          "failed": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "healthy": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "hosts": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "not_protected": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "offline": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "overdue": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
           }
         }
       },
@@ -5777,6 +8589,16 @@
           }
         }
       },
+      "HostState": {
+        "type": "string",
+        "enum": [
+          "failed",
+          "overdue",
+          "offline",
+          "not_protected",
+          "healthy"
+        ]
+      },
       "HostStatus": {
         "type": "string",
         "enum": [
@@ -5973,7 +8795,8 @@
           "backup",
           "restore",
           "download",
-          "gc"
+          "gc",
+          "check"
         ]
       },
       "JobOrigin": {
@@ -6185,6 +9008,16 @@
           "errors_total"
         ],
         "properties": {
+          "check": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CheckJobInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "download": {
             "oneOf": [
               {
@@ -6479,6 +9312,73 @@
           }
         }
       },
+      "LastDelivery": {
+        "type": "object",
+        "required": [
+          "ok",
+          "at"
+        ],
+        "properties": {
+          "at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ok": {
+            "type": "boolean"
+          }
+        }
+      },
+      "LastSnapshot": {
+        "type": "object",
+        "required": [
+          "time",
+          "bytes_total",
+          "bytes_added"
+        ],
+        "properties": {
+          "bytes_added": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "bytes_total": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "time": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "LevelSchedule": {
+        "type": "object",
+        "required": [
+          "level"
+        ],
+        "properties": {
+          "level": {
+            "$ref": "#/components/schemas/CheckLevel"
+          },
+          "schedule": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ScheduleInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
       "Limits": {
         "type": "object",
         "properties": {
@@ -6679,6 +9579,85 @@
           }
         }
       },
+      "PackCoverage": {
+        "type": "object",
+        "required": [
+          "packs",
+          "checked_30d_pct",
+          "never_checked"
+        ],
+        "properties": {
+          "checked_30d_pct": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Whole percent of packs read in the last 30 days.",
+            "minimum": 0
+          },
+          "never_checked": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "packs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "PacksSummary": {
+        "type": "object",
+        "required": [
+          "packs_read",
+          "bytes_read",
+          "blobs_verified",
+          "damaged_blobs"
+        ],
+        "properties": {
+          "blobs_verified": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "bytes_read": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "damaged_blobs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "packs_read": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "PairProblem": {
+        "type": "string",
+        "enum": [
+          "overdue",
+          "failed"
+        ]
+      },
+      "PasswordChange": {
+        "type": "object",
+        "required": [
+          "current_password",
+          "new_password"
+        ],
+        "properties": {
+          "current_password": {
+            "type": "string"
+          },
+          "new_password": {
+            "type": "string"
+          }
+        }
+      },
       "PolicyChange": {
         "type": "object",
         "required": [
@@ -6814,6 +9793,16 @@
           "paths"
         ],
         "properties": {
+          "alerts": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Alerts"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "exclude": {
             "type": "array",
             "items": {
@@ -7082,66 +10071,82 @@
           "host_busy"
         ]
       },
-      "RepositoryDetail": {
-        "allOf": [
-          {
-            "$ref": "#/components/schemas/RepositorySummary"
-          },
-          {
-            "type": "object",
-            "required": [
-              "location",
-              "checks"
-            ],
-            "properties": {
-              "checks": {
-                "type": "array",
-                "items": {
-                  "$ref": "#/components/schemas/CheckDto"
-                }
-              },
-              "location": {
-                "$ref": "#/components/schemas/LocationDto"
-              }
-            }
-          }
-        ]
-      },
-      "RepositoryDraft": {
+      "RecentRun": {
         "type": "object",
         "required": [
-          "location"
+          "finished_at",
+          "outcome"
         ],
         "properties": {
-          "agent_credentials": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/Credentials"
-              },
-              {
-                "type": "null"
-              }
-            ]
+          "finished_at": {
+            "type": "integer",
+            "format": "int64"
           },
-          "location": {
-            "$ref": "#/components/schemas/LocationDto"
+          "outcome": {
+            "$ref": "#/components/schemas/RunOutcome"
           },
-          "name": {
-            "type": "string"
-          },
-          "server_credentials": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/Credentials"
-              },
-              {
-                "type": "null"
-              }
+          "policy": {
+            "type": [
+              "string",
+              "null"
             ]
           }
         }
       },
-      "RepositorySummary": {
+      "RepoRef": {
+        "type": "object",
+        "required": [
+          "id",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "RepoUsageDto": {
+        "type": "object",
+        "required": [
+          "physical_bytes",
+          "logical_bytes",
+          "packs",
+          "counted_at"
+        ],
+        "properties": {
+          "counted_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "dedup_ratio": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Logical size divided by the size in the bucket."
+          },
+          "logical_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "packs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "physical_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "RepositoryBase": {
         "type": "object",
         "required": [
           "id",
@@ -7193,6 +10198,85 @@
             ]
           }
         }
+      },
+      "RepositoryDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/RepositoryBase"
+          },
+          {
+            "type": "object",
+            "required": [
+              "location",
+              "checks"
+            ],
+            "properties": {
+              "checks": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/CheckDto"
+                },
+                "description": "What the storage checks of the connection found."
+              },
+              "location": {
+                "$ref": "#/components/schemas/LocationDto"
+              }
+            }
+          }
+        ]
+      },
+      "RepositoryDraft": {
+        "type": "object",
+        "required": [
+          "location"
+        ],
+        "properties": {
+          "agent_credentials": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Credentials"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "location": {
+            "$ref": "#/components/schemas/LocationDto"
+          },
+          "name": {
+            "type": "string"
+          },
+          "server_credentials": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Credentials"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "RepositorySummary": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/RepositoryBase"
+          },
+          {
+            "type": "object",
+            "required": [
+              "checks"
+            ],
+            "properties": {
+              "checks": {
+                "$ref": "#/components/schemas/ChecksSummary",
+                "description": "The worst result of the integrity checks, from the catalog."
+              }
+            }
+          }
+        ]
       },
       "RestoreBody": {
         "type": "object",
@@ -7446,6 +10530,49 @@
           }
         }
       },
+      "RestoreSummary": {
+        "type": "object",
+        "required": [
+          "snapshots_sampled",
+          "files_restored",
+          "bytes_restored",
+          "hash_mismatches",
+          "skipped",
+          "stopped_at_limit"
+        ],
+        "properties": {
+          "bytes_restored": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "files_restored": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "hash_mismatches": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Files that did not come back right or could not be restored.",
+            "minimum": 0
+          },
+          "skipped": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Chosen files that no longer fitted in the size limit.",
+            "minimum": 0
+          },
+          "snapshots_sampled": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "stopped_at_limit": {
+            "type": "boolean"
+          }
+        }
+      },
       "Retention": {
         "type": "object",
         "properties": {
@@ -7606,6 +10733,14 @@
           }
         }
       },
+      "RunOutcome": {
+        "type": "string",
+        "enum": [
+          "succeeded",
+          "failed",
+          "skipped"
+        ]
+      },
       "RunResult": {
         "type": "object",
         "required": [
@@ -7697,10 +10832,12 @@
         "enum": [
           "hosts:read",
           "hosts:write",
+          "alerts:write",
           "policies:read",
           "policies:write",
           "jobs:read",
           "jobs:run",
+          "metrics:read",
           "snapshots:read",
           "snapshots:delete",
           "restore"
@@ -7954,6 +11091,61 @@
           }
         }
       },
+      "Severity": {
+        "type": "string",
+        "enum": [
+          "critical",
+          "warning"
+        ]
+      },
+      "SilenceDto": {
+        "type": "object",
+        "required": [
+          "host_id",
+          "created_at",
+          "created_by"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "created_by": {
+            "type": "string"
+          },
+          "host_id": {
+            "type": "string"
+          },
+          "until": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "`null` until the silence is lifted."
+          }
+        }
+      },
+      "SilenceDuration": {
+        "type": "string",
+        "enum": [
+          "hour",
+          "day",
+          "week",
+          "forever"
+        ]
+      },
+      "SilenceInput": {
+        "type": "object",
+        "required": [
+          "duration"
+        ],
+        "properties": {
+          "duration": {
+            "$ref": "#/components/schemas/SilenceDuration"
+          }
+        }
+      },
       "SkippedSnapshot": {
         "type": "object",
         "required": [
@@ -7968,6 +11160,13 @@
             "type": "string"
           }
         }
+      },
+      "SmtpMode": {
+        "type": "string",
+        "enum": [
+          "starttls",
+          "tls"
+        ]
       },
       "SnapshotItem": {
         "type": "object",
@@ -8141,6 +11340,37 @@
             "minimum": 0
           },
           "files_unchanged": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "StructureSummary": {
+        "type": "object",
+        "required": [
+          "snapshots_checked",
+          "trees_checked",
+          "packs_listed",
+          "missing_packs"
+        ],
+        "properties": {
+          "missing_packs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "packs_listed": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "snapshots_checked": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "trees_checked": {
             "type": "integer",
             "format": "int64",
             "minimum": 0
@@ -8392,6 +11622,10 @@
       "description": "Sign in and out, read the session and its CSRF token."
     },
     {
+      "name": "Account",
+      "description": "The administrator: email and password."
+    },
+    {
       "name": "Hosts",
       "description": "Enrolled hosts, their labels, join tokens and manual backups."
     },
@@ -8422,6 +11656,22 @@
     {
       "name": "Cleanup",
       "description": "Free up space: dry runs, cleanup cycles and their settings."
+    },
+    {
+      "name": "Checks",
+      "description": "Integrity checks of repositories: structure, pack reading and test restores."
+    },
+    {
+      "name": "Alerts",
+      "description": "Active alerts, their history and per-host silences."
+    },
+    {
+      "name": "Notifications",
+      "description": "Alert channels, test messages and alert thresholds."
+    },
+    {
+      "name": "Overview",
+      "description": "Fleet health at a glance: host states, last backups and storage use."
     },
     {
       "name": "Server",

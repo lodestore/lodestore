@@ -14,18 +14,13 @@ async function renderAt(path: string) {
 describe("app shell", () => {
 	beforeEach(() => useSignedIn());
 
-	it("shows an honest preview on /overview", async () => {
+	it("opens the fleet overview on /overview", async () => {
 		await renderAt("/overview");
-		const h1 = screen.getByRole("heading", {
-			level: 1,
-			name: "See every backup at a glance",
-		});
-		const main = h1.closest("section") as HTMLElement;
-		expect(within(main).getByText(copy.preview.badge)).toBeInTheDocument();
-		expect(within(main).getAllByRole("listitem")).toHaveLength(3);
-		expect(within(main).getByText(copy.preview.footnote)).toBeInTheDocument();
-		expect(within(main).queryAllByRole("button")).toHaveLength(0);
-		expect(within(main).queryAllByRole("link")).toHaveLength(0);
+		const h1 = screen.getByRole("heading", { level: 1, name: "Overview" });
+		expect(h1).toHaveAttribute("data-page-title");
+		expect(
+			await screen.findByText(copy.overview.empty.heading),
+		).toBeInTheDocument();
 	});
 
 	it("opens the working Restore section instead of a preview", async () => {
@@ -36,32 +31,11 @@ describe("app shell", () => {
 		expect(
 			await screen.findByText(copy.restore.empty.heading),
 		).toBeInTheDocument();
-		expect(screen.queryByText(copy.preview.badge)).not.toBeInTheDocument();
 	});
 
 	it.each(["/policies", "/jobs"])("opens the %s section", async (path) => {
 		await renderAt(path);
 		expect(document.querySelector("h1[data-page-title]")).toBeInTheDocument();
-	});
-
-	it("swaps the preview illustration with the theme", async () => {
-		const user = userEvent.setup();
-		await renderAt("/overview");
-		const main = document.getElementById("main") as HTMLElement;
-		expect(main.querySelectorAll("img")).toHaveLength(1);
-		expect(main.querySelector("img")).toHaveAttribute(
-			"src",
-			expect.stringContaining("preview-overview.light"),
-		);
-		await user.click(screen.getByRole("button", { name: /admin/ }));
-		await user.click(
-			await screen.findByRole("menuitemradio", { name: "Dark" }),
-		);
-		expect(main.querySelectorAll("img")).toHaveLength(1);
-		expect(main.querySelector("img")).toHaveAttribute(
-			"src",
-			expect.stringContaining("preview-overview.dark"),
-		);
 	});
 
 	it("moves focus to the heading on every route change", async () => {
@@ -112,9 +86,9 @@ describe("app shell", () => {
 		expect(current[0]).toHaveTextContent("Overview");
 	});
 
-	it("shows a Soon badge on the stub section", async () => {
+	it("shows no Soon badge on Overview", async () => {
 		await renderAt("/overview");
-		expect(screen.getAllByText("Soon")).toHaveLength(1);
+		expect(screen.queryByText("Soon")).toBeNull();
 	});
 
 	it("makes the skip link the first tab stop and targets main", async () => {

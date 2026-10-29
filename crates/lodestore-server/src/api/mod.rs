@@ -22,8 +22,8 @@ use utoipa_axum::router::OpenApiRouter;
 use crate::error::ErrorBody;
 use crate::state::AppState;
 use crate::{
-    assets, auth, browse, catalog, download, hosts, install, jobs, maintenance, policies, repos,
-    system,
+    alerts, assets, auth, browse, catalog, download, fleet, hosts, install, jobs, maintenance,
+    notify, policies, repos, system,
 };
 
 mod docs;
@@ -35,6 +35,7 @@ mod docs;
     security(("session" = [])),
     tags(
         (name = "Auth", description = "Sign in and out, read the session and its CSRF token."),
+        (name = "Account", description = "The administrator: email and password."),
         (name = "Hosts", description = "Enrolled hosts, their labels, join tokens and manual backups."),
         (name = "Tokens", description = "API tokens for CI and the CLI, limited to the scopes they are issued with."),
         (name = "Policies", description = "Backup policies: which hosts, which paths, which repository."),
@@ -43,6 +44,10 @@ mod docs;
         (name = "Restore", description = "Hosts and snapshots to restore from, newest first."),
         (name = "Repositories", description = "Storage repositories and the credentials agents write with."),
         (name = "Cleanup", description = "Free up space: dry runs, cleanup cycles and their settings."),
+        (name = "Checks", description = "Integrity checks of repositories: structure, pack reading and test restores."),
+        (name = "Alerts", description = "Active alerts, their history and per-host silences."),
+        (name = "Notifications", description = "Alert channels, test messages and alert thresholds."),
+        (name = "Overview", description = "Fleet health at a glance: host states, last backups and storage use."),
         (name = "Server", description = "Server version and health."),
         (name = "Setup", description = "First start: create the administrator from the setup link."),
     )
@@ -98,6 +103,10 @@ fn api_router() -> OpenApiRouter<AppState> {
         .merge(policies::routes())
         .merge(jobs::api::routes())
         .merge(maintenance::gc::api::routes())
+        .merge(maintenance::check::api::routes())
+        .merge(fleet::routes())
+        .merge(alerts::api::routes())
+        .merge(notify::api::routes())
 }
 
 pub fn openapi() -> utoipa::openapi::OpenApi {

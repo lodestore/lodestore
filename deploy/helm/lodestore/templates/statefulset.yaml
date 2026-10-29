@@ -15,6 +15,10 @@ spec:
     metadata:
       labels:
         {{- include "lodestore.labels" . | nindent 8 }}
+      {{- if .Values.config }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+      {{- end }}
     spec:
       securityContext:
         runAsNonRoot: true
@@ -34,6 +38,10 @@ spec:
               containerPort: 8080
             - name: grpc
               containerPort: 8443
+            {{- if gt (int .Values.metrics.port) 0 }}
+            - name: metrics
+              containerPort: {{ int .Values.metrics.port }}
+            {{- end }}
           env:
             - name: LODESTORE_GRPC_PUBLIC_ADDRESS
               value: {{ $grpcAddress | quote }}
@@ -50,6 +58,10 @@ spec:
             {{- if include "lodestore.hasDatabase" . }}
             - name: LODESTORE_DATABASE_URL_FILE
               value: /etc/lodestore/database/database-url
+            {{- end }}
+            {{- if gt (int .Values.metrics.port) 0 }}
+            - name: LODESTORE_METRICS_LISTEN
+              value: {{ printf "0.0.0.0:%d" (int .Values.metrics.port) | quote }}
             {{- end }}
           livenessProbe:
             httpGet:
@@ -74,6 +86,15 @@ spec:
               mountPath: /etc/lodestore/database
               readOnly: true
             {{- end }}
+            {{- if .Values.config }}
+            - name: config
+              mountPath: /etc/lodestore/server.yaml
+              subPath: server.yaml
+              readOnly: true
+            {{- end }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
       volumes:
         - name: secret
           secret:
@@ -87,6 +108,14 @@ spec:
             items:
               - key: database-url
                 path: database-url
+        {{- end }}
+        {{- if .Values.config }}
+        - name: config
+          configMap:
+            name: {{ include "lodestore.fullname" . }}-config
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
         {{- end }}
   volumeClaimTemplates:
     - metadata:
