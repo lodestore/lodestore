@@ -27,9 +27,9 @@ export function formatDuration(ms: number) {
 	const hours = Math.floor(total / 3600);
 	const minutes = Math.floor((total % 3600) / 60);
 	const seconds = total % 60;
-	if (hours > 0) return `${hours} h ${minutes} min`;
-	if (minutes > 0) return `${minutes} min ${seconds} s`;
-	return `${seconds} s`;
+	if (hours > 0) return `${hours}\u00a0h ${minutes}\u00a0min`;
+	if (minutes > 0) return `${minutes}\u00a0min ${seconds}\u00a0s`;
+	return `${seconds}\u00a0s`;
 }
 
 export function formatTimeLeft(seconds?: number | null) {

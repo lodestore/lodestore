@@ -22,8 +22,8 @@ use utoipa_axum::router::OpenApiRouter;
 use crate::error::ErrorBody;
 use crate::state::AppState;
 use crate::{
-    alerts, assets, auth, browse, catalog, download, fleet, hosts, install, jobs, maintenance,
-    notify, policies, repos, system,
+    alerts, assets, auth, browse, catalog, download, find, fleet, hosts, install, jobs,
+    maintenance, notify, policies, repos, system,
 };
 
 mod docs;
@@ -99,6 +99,7 @@ fn api_router() -> OpenApiRouter<AppState> {
         .merge(repos::routes())
         .merge(catalog::routes())
         .merge(browse::routes())
+        .merge(find::api::routes())
         .merge(download::routes())
         .merge(policies::routes())
         .merge(jobs::api::routes())

@@ -5,6 +5,7 @@ use crate::browse::tree::RepoReaders;
 use crate::catalog::CatalogJobs;
 use crate::config::Config;
 use crate::db::Db;
+use crate::find::FindSessions;
 use crate::grpc::registry::Registry;
 use crate::maintenance::check::CheckGate;
 use crate::maintenance::gc::GcRuns;
@@ -25,5 +26,6 @@ pub struct AppState {
     pub readers: RepoReaders,
     pub gc: GcRuns,
     pub checks: CheckGate,
+    pub find: FindSessions,
     pub started_at_ms: i64,
 }

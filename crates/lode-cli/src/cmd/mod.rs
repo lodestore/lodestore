@@ -3,6 +3,7 @@ mod backup;
 mod backup_agent;
 mod check;
 mod dump;
+mod find;
 mod gc;
 mod key;
 mod ls;

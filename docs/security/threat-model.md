@@ -13,13 +13,15 @@ The server keeps a catalog in SQLite or PostgreSQL. Some of its rows are secrets
 
 Every one of these values is wrapped with XChaCha20-Poly1305 under a 32-byte **unlock key** before it is written to the database. The associated data names the kind and id of the secret, so a wrapped value cannot be moved to another row. The wrap format carries a version number.
 
+The server also keeps a search cache in `<data_dir>/find-cache/`: the list of file paths of every snapshot that a fleet-wide find has walked. Each frame of a cache file is compressed and sealed with the same AEAD under the unlock key, with the snapshot id, the frame position and the end of the file bound in as associated data, so the file holds no path in the clear and a reordered or truncated file is rejected. A file is deleted together with its snapshot and whenever it fails to open (a different unlock key included); the server rebuilds it from the bucket on the next search. The cache is only an accelerator: restoring needs nothing from it.
+
 The unlock key comes from `LODESTORE_UNLOCK_KEY` or `LODESTORE_UNLOCK_KEY_FILE`. If neither is set, the server generates one on first start in `<data_dir>/unlock.key` (mode 0600, created exclusively), logs a warning that the key sits next to the database, and shows a banner in the UI until the key is moved. The server then unlocks the secrets by itself on every start: there is no prompt.
 
 ## What an attacker gets
 
 | The attacker has | Master secrets of the repositories | Notes |
 | --- | --- | --- |
-| Only the database (a leaked backup of the catalog, a stolen SQL dump) | Not exposed | Secrets are ciphertext. Host names, schedules and snapshot metadata are visible. |
+| Only the database (a leaked backup of the catalog, a stolen SQL dump) | Not exposed | Secrets are ciphertext. Host names, schedules and snapshot metadata are visible. A copy of `data_dir` does not reveal file names either as long as the unlock key is not in it (see the auto-generated `unlock.key` above): the search cache is sealed under that key. |
 | Only the unlock key | Not exposed | The key opens nothing without the wrapped values. |
 | The database and the unlock key | **Exposed, for every repository** | This combination yields the master secrets, the S3 credentials and the CA key. Auto-unlock does not protect against it. |
 | The server host with a running process | **Exposed** | Unlocked secrets live in the process memory. |

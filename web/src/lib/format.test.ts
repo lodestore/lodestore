@@ -38,9 +38,9 @@ describe("number formatters", () => {
 	});
 
 	it("formats durations in the largest two units", () => {
-		expect(formatDuration(900)).toBe("1 s");
-		expect(formatDuration(65_000)).toBe("1 min 5 s");
-		expect(formatDuration(3_780_000)).toBe("1 h 3 min");
+		expect(formatDuration(900)).toBe("1\u00a0s");
+		expect(formatDuration(65_000)).toBe("1\u00a0min 5\u00a0s");
+		expect(formatDuration(3_780_000)).toBe("1\u00a0h 3\u00a0min");
 	});
 });
 

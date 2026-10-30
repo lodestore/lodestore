@@ -48,6 +48,8 @@ sha2 = "0.11.1"
 zeroize = "1.9.1"
 getrandom = "0.4.3"
 data-encoding = "2.11.1"
+globset = { version = "0.4.20", default-features = false }
+blake3 = "1.8.7"
 rustix = { version = "1.1.5", features = ["system"] }
 uuid = { version = "1", features = ["v7"] }
 serde = { version = "1", features = ["derive"] }

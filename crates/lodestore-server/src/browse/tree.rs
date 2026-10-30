@@ -170,7 +170,7 @@ pub struct EntriesQuery {
     pub offset: Option<u64>,
 }
 
-fn kind_of(node: &pb::Node) -> EntryKind {
+pub(crate) fn kind_of(node: &pb::Node) -> EntryKind {
     match pb::NodeType::try_from(node.r#type) {
         Ok(pb::NodeType::Dir) => EntryKind::Dir,
         Ok(pb::NodeType::File) => EntryKind::File,
@@ -179,7 +179,7 @@ fn kind_of(node: &pb::Node) -> EntryKind {
     }
 }
 
-fn mtime_ms(node: &pb::Node) -> i64 {
+pub(crate) fn mtime_ms(node: &pb::Node) -> i64 {
     node.mtime.as_ref().map_or(0, |t| {
         t.seconds
             .saturating_mul(1000)

@@ -1,5 +1,6 @@
 import { catalog } from "@/copy.catalog";
 import { checks } from "@/copy.checks";
+import { find } from "@/copy.find";
 import { gc } from "@/copy.gc";
 import { hostBackup, snapshots } from "@/copy.host";
 import { jobs } from "@/copy.jobs";
@@ -14,6 +15,7 @@ import { sentence } from "@/lib/sentence";
 export const copy = {
 	catalog,
 	checks,
+	find,
 	gc,
 	jobs,
 	notifications,
@@ -66,6 +68,7 @@ export const copy = {
 		addRepository: "Add repository",
 		createPolicy: "Create policy",
 		createApiToken: "Create API token",
+		findFile: "Find file…",
 		freeUpSpace: "Free up space",
 		freeUpSpaceIn: (name: string) => `Free up space in ${name}`,
 		cleanupKeywords: "cleanup clean gc garbage reclaim",

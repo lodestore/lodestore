@@ -13,12 +13,30 @@ const matching = (pattern: RegExp) =>
 		.refine((value) => value === undefined || pattern.test(value))
 		.catch(undefined);
 
+const whole = z
+	.union([z.number(), z.string()])
+	.transform(Number)
+	.pipe(z.number().int().min(0))
+	.optional()
+	.catch(undefined);
+
+const BASE64URL = /^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-]{2,3})?$/;
+
 export const Route = createFileRoute("/_app/restore")({
 	validateSearch: z.object({
 		host: text,
 		snapshot: matching(/^[0-9a-f]{64}$/),
-		path: matching(/^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-]{2,3})?$/),
+		path: matching(BASE64URL),
 		q: text,
+		tab: z.enum(["host", "find"]).optional().catch(undefined),
+		find: text,
+		hosts: text,
+		labels: text,
+		since: whole,
+		until: whole,
+		run: whole,
+		file: text,
+		select: matching(BASE64URL),
 	}),
 	component: RestoreWorkspace,
 });

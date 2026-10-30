@@ -700,6 +700,7 @@ async fn remove_vanished(
             .bind(repository_id)
             .execute(&state.db.pool)
             .await?;
+        crate::find::cache::remove(&crate::find::cache::dir(&state.config.data_dir), id);
     }
     Ok(None)
 }

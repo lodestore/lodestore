@@ -631,6 +631,318 @@
         ]
       }
     },
+    "/api/v1/find": {
+      "post": {
+        "tags": [
+          "Restore"
+        ],
+        "summary": "Start a search for files in the snapshots of all hosts",
+        "operationId": "start_find",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FindRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "The search runs; poll it with `GET /api/v1/find/{id}`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FindStarted"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token lacks `snapshots:read`, or the CSRF token is missing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The pattern or a filter is not valid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FindFieldErrors"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many searches are queued or running",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          },
+          {
+            "bearer": [
+              "snapshots:read"
+            ]
+          }
+        ]
+      }
+    },
+    "/api/v1/find/{id}": {
+      "get": {
+        "tags": [
+          "Restore"
+        ],
+        "summary": "Read the progress and the results of a search",
+        "operationId": "get_find",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Search id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "Only the groups that changed after this revision.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Progress and the groups that changed after `after`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FindSession"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token lacks `snapshots:read`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown search",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "bearer": [
+              "snapshots:read"
+            ]
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "Restore"
+        ],
+        "summary": "Stop a search; what it found stays",
+        "operationId": "cancel_find",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Search id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The search is stopped, or was over already"
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token lacks `snapshots:read`, or the CSRF token is missing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown search",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          },
+          {
+            "bearer": [
+              "snapshots:read"
+            ]
+          }
+        ]
+      }
+    },
+    "/api/v1/find/{id}/groups/{index}": {
+      "get": {
+        "tags": [
+          "Restore"
+        ],
+        "summary": "Read one found file with every snapshot of each version",
+        "operationId": "get_find_group",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Search id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "index",
+            "in": "path",
+            "description": "Index of the group in the search",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The group with the full list of snapshots per version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FindGroup"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token lacks `snapshots:read`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown search or group",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "bearer": [
+              "snapshots:read"
+            ]
+          }
+        ]
+      }
+    },
     "/api/v1/fleet": {
       "get": {
         "tags": [
@@ -7304,6 +7616,368 @@
             "items": {
               "$ref": "#/components/schemas/FieldError"
             }
+          }
+        }
+      },
+      "FindFieldErrors": {
+        "type": "object",
+        "required": [
+          "errors"
+        ],
+        "properties": {
+          "errors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FieldError"
+            }
+          }
+        }
+      },
+      "FindGone": {
+        "type": "object",
+        "required": [
+          "last_ms",
+          "next_ms"
+        ],
+        "properties": {
+          "last_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The newest snapshot of the host that still holds the file."
+          },
+          "next_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The next snapshot of the host, which no longer has it."
+          }
+        }
+      },
+      "FindGroup": {
+        "type": "object",
+        "required": [
+          "index",
+          "host_key",
+          "hostname",
+          "agent",
+          "labels",
+          "path_b64",
+          "path",
+          "last_seen_ms",
+          "versions",
+          "revision"
+        ],
+        "properties": {
+          "agent": {
+            "type": "boolean"
+          },
+          "gone": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/FindGone",
+                "description": "Set when a newer snapshot of the host exists without this file; known once the search is over."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "host_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "host_key": {
+            "type": "string",
+            "description": "An agent id or `agentless:{hostname}`."
+          },
+          "hostname": {
+            "type": "string"
+          },
+          "index": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Position in the order groups were found; it does not change.",
+            "minimum": 0
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Label"
+            }
+          },
+          "last_seen_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "path": {
+            "type": "string"
+          },
+          "path_b64": {
+            "type": "string",
+            "description": "Exact path bytes, base64url without padding."
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The revision of the session at the last change of this group.",
+            "minimum": 0
+          },
+          "versions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FindVersion"
+            }
+          }
+        }
+      },
+      "FindRequest": {
+        "type": "object",
+        "required": [
+          "pattern"
+        ],
+        "properties": {
+          "hosts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Host keys (an agent id or `agentless:{hostname}`) to search, at most 500. Together with\n`labels` this is a union; all hosts when both are empty."
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Also search hosts whose agent carries all of these labels, as `key=value`; at most 20."
+          },
+          "pattern": {
+            "type": "string",
+            "description": "A name fragment (`nginx.conf`), a glob for names (`*.conf`) or a glob for the whole\npath (`/etc/nginx/**`); case does not matter; 1 to 255 characters."
+          },
+          "since": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Only snapshots taken at or after this time, in milliseconds."
+          },
+          "until": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Only snapshots taken at or before this time, in milliseconds."
+          }
+        }
+      },
+      "FindSession": {
+        "type": "object",
+        "required": [
+          "id",
+          "pattern",
+          "state",
+          "limit",
+          "scanned",
+          "total",
+          "skipped",
+          "searched_hosts",
+          "hosts",
+          "files",
+          "versions",
+          "started_at",
+          "revision",
+          "groups"
+        ],
+        "properties": {
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "files": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "finished_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FindGroup"
+            }
+          },
+          "hosts": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Hosts with at least one match.",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The most files (groups) a search keeps.",
+            "minimum": 0
+          },
+          "pattern": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "scanned": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "searched_hosts": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Hosts whose snapshots the search reads.",
+            "minimum": 0
+          },
+          "skipped": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "started_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "state": {
+            "$ref": "#/components/schemas/FindState"
+          },
+          "stop_reason": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/FindStop"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "versions": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "FindSnapshotRef": {
+        "type": "object",
+        "required": [
+          "id",
+          "time_ms"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "time_ms": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "FindStarted": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        }
+      },
+      "FindState": {
+        "type": "string",
+        "enum": [
+          "running",
+          "done",
+          "incomplete",
+          "failed",
+          "cancelled"
+        ]
+      },
+      "FindStop": {
+        "type": "string",
+        "enum": [
+          "limit",
+          "timeout"
+        ]
+      },
+      "FindVersion": {
+        "type": "object",
+        "required": [
+          "kind",
+          "size",
+          "mtime_ms",
+          "first_ms",
+          "last_ms",
+          "snapshot_count",
+          "snapshots"
+        ],
+        "properties": {
+          "content_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Identifies the content within one repository (16 bytes, hex); empty for an empty file or\na link."
+          },
+          "first_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/EntryKind"
+          },
+          "last_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "mtime_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "snapshot_count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "snapshots": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FindSnapshotRef"
+            },
+            "description": "The newest snapshots holding this version, newest first."
           }
         }
       },

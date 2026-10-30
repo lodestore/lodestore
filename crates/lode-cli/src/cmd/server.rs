@@ -30,6 +30,7 @@ pub async fn run(
         ServerCommand::Restore(args) => restore(&client, out, args).await?,
         ServerCommand::Gc(args) => return super::gc::run(&client, out, args).await,
         ServerCommand::Check(args) => return super::check::run_server(&client, out, args).await,
+        ServerCommand::Find(args) => return super::find::run_server(&client, out, args).await,
     }
     Ok(0)
 }
@@ -46,7 +47,7 @@ pub(super) fn time(ms: Option<i64>) -> String {
     )
 }
 
-fn table(header: &[&str], rows: &[Vec<String>]) {
+pub(super) fn table(header: &[&str], rows: &[Vec<String>]) {
     let mut widths: Vec<usize> = header.iter().map(|h| h.len()).collect();
     for row in rows {
         for (width, cell) in widths.iter_mut().zip(row) {

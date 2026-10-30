@@ -1,6 +1,7 @@
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::Context;
 use clap::Args;
@@ -63,9 +64,28 @@ pub struct Config {
     pub schedule_tick_secs: u64,
     pub metrics_listen: Option<SocketAddr>,
     #[serde(skip)]
+    pub find: FindConfig,
+    #[serde(skip)]
     pub grpc_public_address_defaulted: bool,
     #[serde(skip)]
     pub notifications: NotificationsConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct FindConfig {
+    pub max_matches: u64,
+    pub timeout: Duration,
+    pub cache_max_bytes: u64,
+}
+
+impl Default for FindConfig {
+    fn default() -> Self {
+        FindConfig {
+            max_matches: 1000,
+            timeout: Duration::from_secs(600),
+            cache_max_bytes: 1 << 30,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -176,6 +196,7 @@ impl Default for Config {
             agent_cert_lifetime_secs: 7_776_000,
             schedule_tick_secs: crate::schedule::SCHEDULE_TICK.as_secs(),
             metrics_listen: None,
+            find: FindConfig::default(),
             grpc_public_address_defaulted: true,
             notifications: NotificationsConfig::default(),
         }
@@ -253,6 +274,38 @@ struct FileConfig {
     agent_cert_lifetime_secs: Option<i64>,
     metrics_listen: Option<SocketAddr>,
     notifications: FileNotifications,
+    find: FileFind,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FileFind {
+    max_matches: Option<i64>,
+    timeout_secs: Option<i64>,
+    cache_max_mb: Option<i64>,
+}
+
+fn positive(key: &str, value: i64) -> anyhow::Result<u64> {
+    u64::try_from(value)
+        .ok()
+        .filter(|v| *v > 0)
+        .with_context(|| format!("find.{key} must be greater than zero"))
+}
+
+fn resolve_find(file: FileFind) -> anyhow::Result<FindConfig> {
+    let mut find = FindConfig::default();
+    if let Some(v) = file.max_matches {
+        find.max_matches = positive("max_matches", v)?;
+    }
+    if let Some(v) = file.timeout_secs {
+        find.timeout = Duration::from_secs(positive("timeout_secs", v)?);
+    }
+    if let Some(v) = file.cache_max_mb {
+        find.cache_max_bytes = positive("cache_max_mb", v)?
+            .checked_mul(1 << 20)
+            .context("find.cache_max_mb is too large")?;
+    }
+    Ok(find)
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -520,6 +573,7 @@ impl Config {
             c.agent_cert_lifetime_secs = v;
         }
         c.metrics_listen = args.metrics_listen.or(file.metrics_listen);
+        c.find = resolve_find(file.find)?;
         c.notifications.allow_private_targets = file.notifications.allow_private_targets;
         c.notifications.channels = resolve_channels(file.notifications)?;
         c.validate().context("invalid configuration")?;
@@ -743,6 +797,30 @@ mod tests {
             err.contains("metrics_listen") || err.contains("invalid socket address"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn find_section_parses_and_rejects_zero() {
+        let defaults = load("", &[]).unwrap().find;
+        assert_eq!(defaults.max_matches, 1000);
+        assert_eq!(defaults.timeout, Duration::from_secs(600));
+        assert_eq!(defaults.cache_max_bytes, 1 << 30);
+
+        let c = load(
+            "find:\n  max_matches: 50\n  timeout_secs: 30\n  cache_max_mb: 64",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(c.find.max_matches, 50);
+        assert_eq!(c.find.timeout, Duration::from_secs(30));
+        assert_eq!(c.find.cache_max_bytes, 64 << 20);
+
+        for key in ["max_matches", "timeout_secs", "cache_max_mb"] {
+            for value in ["0", "-1"] {
+                let err = chain(load(&format!("find:\n  {key}: {value}"), &[]));
+                assert!(err.contains(key), "{key}: {err}");
+            }
+        }
     }
 
     #[test]

@@ -28,7 +28,13 @@ import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { copy } from "@/copy";
 import { formatCount } from "@/lib/format";
-import { absolutePath, displayName, pathParts } from "@/lib/names";
+import {
+	absolutePath,
+	decodeB64,
+	decodeText,
+	displayName,
+	pathParts,
+} from "@/lib/names";
 
 const route = getRouteApi("/_app/restore");
 
@@ -42,11 +48,13 @@ export function FileBrowser({
 	path,
 	q,
 	selection,
+	preselect,
 }: {
 	snapshot: string;
 	path: string;
 	q?: string;
 	selection: Selection;
+	preselect?: string;
 }) {
 	const navigate = route.useNavigate();
 	const heading = useRef<HTMLHeadingElement>(null);
@@ -73,6 +81,18 @@ export function FileBrowser({
 			event.preventDefault();
 			target.current?.focus();
 		};
+
+	const preselected = useRef(false);
+	const selectItem = selection.selectFolder;
+	useEffect(() => {
+		if (!preselect || preselected.current) return;
+		preselected.current = true;
+		selectItem({
+			pathB64: absolutePath(pathParts(preselect)),
+			display: displayName(decodeText(decodeB64(preselect))),
+			isDir: false,
+		});
+	}, [preselect, selectItem]);
 
 	const [noMatch, setNoMatch] = useState(false);
 	const [opened, setOpened] = useState(0);
@@ -181,6 +201,7 @@ export function FileBrowser({
 						rows={rows}
 						folder={folder}
 						selection={selection}
+						complete={rows !== undefined && rows.length === total}
 						onOpen={open}
 					/>
 					{rows?.length === 0 && (

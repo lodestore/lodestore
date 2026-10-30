@@ -12,6 +12,7 @@ use sqlx::Row;
 use super::anomaly;
 use super::open_repository;
 use crate::db::now_ms;
+use crate::find;
 use crate::grpc::dispatch::messages::{LOG_LIMIT, LOG_LIMIT_MESSAGE, clip};
 use crate::state::AppState;
 
@@ -222,6 +223,7 @@ pub async fn forget_snapshot(
                 .execute(&mut *tx)
                 .await?;
             tx.commit().await?;
+            find::cache::remove(&find::cache::dir(&state.config.data_dir), &hex);
             Ok(ForgetOutcome::Blocked { reason: message })
         }
         Err(error) => Ok(ForgetOutcome::Failed {
@@ -236,6 +238,7 @@ async fn drop_row(state: &AppState, repository_id: &str, hex: &str) -> anyhow::R
         .bind(repository_id)
         .execute(&state.db.pool)
         .await?;
+    find::cache::remove(&find::cache::dir(&state.config.data_dir), hex);
     Ok(())
 }
 

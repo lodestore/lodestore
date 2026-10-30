@@ -1,10 +1,11 @@
-import { ChevronsUpDown } from "lucide-react";
+import { ChevronDown, ChevronsUpDown, Server } from "lucide-react";
 import { memo, useState } from "react";
 import { useListRestoreHosts } from "@/api/gen/endpoints";
 import type { RestoreHost } from "@/api/gen/model";
 import { StatusBadge } from "@/components/status-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
 	Command,
 	CommandEmpty,
@@ -20,6 +21,7 @@ import {
 } from "@/components/ui/popover";
 import { copy } from "@/copy";
 import { displayName } from "@/lib/names";
+import { hostCount } from "@/lib/plural";
 
 const LIMIT = 50;
 const MAX_LABELS = 2;
@@ -55,25 +57,33 @@ function Status({ host }: { host: RestoreHost }) {
 function HostItem({
 	host,
 	source,
+	checked,
 	onSelect,
 }: {
 	host: RestoreHost;
 	source?: boolean;
+	checked?: boolean;
 	onSelect: (key: string) => void;
 }) {
 	return (
 		<CommandItem
 			value={host.key}
 			onSelect={() => onSelect(host.key)}
+			aria-checked={checked}
 			className="h-10 gap-2"
 		>
-			<bdi className="truncate font-semibold">{displayName(host.hostname)}</bdi>
+			{checked !== undefined && (
+				<Checkbox checked={checked} aria-hidden tabIndex={-1} />
+			)}
+			<bdi className="max-w-3/5 shrink-0 truncate font-semibold">
+				{displayName(host.hostname)}
+			</bdi>
 			{labelText(host)
 				.slice(0, MAX_LABELS)
 				.map((label) => (
 					<code
 						key={label}
-						className="truncate text-sm font-normal text-muted-foreground"
+						className="shrink-100 truncate text-sm font-normal text-muted-foreground"
 					>
 						<bdi>{displayName(label)}</bdi>
 					</code>
@@ -93,6 +103,25 @@ function HostItem({
 export const isRestoreTarget = (host: RestoreHost) =>
 	host.agent && host.host_id != null && host.status !== "revoked";
 
+const selectionSummary = (
+	hosts: RestoreHost[],
+	selected: string[],
+	labels: string[],
+) => {
+	const names = selected.map(
+		(key) => hosts.find((host) => host.key === key)?.hostname,
+	);
+	const parts = [
+		selected.length === 1 && names[0] !== undefined
+			? displayName(names[0])
+			: selected.length > 1
+				? hostCount(selected.length)
+				: null,
+		...labels,
+	].filter((part) => part !== null);
+	return parts.length > 0 ? parts.join(", ") : copy.find.filters.allHosts;
+};
+
 export const HostPicker = memo(function HostPicker({
 	value,
 	onChange,
@@ -100,14 +129,23 @@ export const HostPicker = memo(function HostPicker({
 	sourceKey,
 	invalid,
 	describedBy,
+	selected,
+	selectedLabels = [],
+	onToggleHost,
+	onToggleLabel,
 }: {
 	value?: string;
-	onChange: (key: string) => void;
+	onChange?: (key: string) => void;
 	mode?: "source" | "target";
 	sourceKey?: string;
 	invalid?: boolean;
 	describedBy?: string;
+	selected?: string[];
+	selectedLabels?: string[];
+	onToggleHost?: (key: string) => void;
+	onToggleLabel?: (label: string) => void;
 }) {
+	const multi = onToggleHost !== undefined;
 	const hosts = useListRestoreHosts();
 	const [open, setOpen] = useState(false);
 	const [query, setQuery] = useState("");
@@ -122,9 +160,17 @@ export const HostPicker = memo(function HostPicker({
 	const withAgent = shown.filter((host) => host.agent);
 	const withoutAgent = shown.filter((host) => !host.agent);
 
+	const labelOptions = multi
+		? [...new Set(all.flatMap(labelText))]
+				.filter((label) => normalize(label).includes(normalize(query)))
+				.sort()
+				.slice(0, LIMIT)
+		: [];
+
 	function choose(key: string) {
+		if (multi) return onToggleHost(key);
 		setOpen(false);
-		onChange(key);
+		onChange?.(key);
 	}
 
 	return (
@@ -136,40 +182,53 @@ export const HostPicker = memo(function HostPicker({
 			}}
 		>
 			<PopoverTrigger asChild>
-				<Button
-					type="button"
-					variant="outline"
-					role="combobox"
-					aria-invalid={invalid}
-					aria-describedby={describedBy}
-					aria-label={
-						current
-							? copy.restore.hostPicker.current(displayName(current.hostname))
-							: copy.restore.hostPicker.label
-					}
-					className="w-full justify-between"
-				>
-					{current ? (
-						<>
-							<bdi className="truncate font-semibold">
-								{displayName(current.hostname)}
-							</bdi>
-							<span className="ml-auto flex shrink-0 items-center gap-2">
-								{current.key === sourceKey && (
-									<span className="text-sm font-normal text-muted-foreground">
-										{copy.restore.hostPicker.sourceHost}
-									</span>
-								)}
-								<Status host={current} />
+				{multi ? (
+					<Button type="button" variant="outline" size="sm">
+						<Server aria-hidden />
+						<bdi className="max-w-64 truncate">
+							{selectionSummary(all, selected ?? [], selectedLabels)}
+						</bdi>
+						<ChevronDown aria-hidden />
+					</Button>
+				) : (
+					<Button
+						type="button"
+						variant="outline"
+						role="combobox"
+						aria-invalid={invalid}
+						aria-describedby={describedBy}
+						aria-label={
+							current
+								? copy.restore.hostPicker.current(displayName(current.hostname))
+								: copy.restore.hostPicker.label
+						}
+						className="w-full justify-between"
+					>
+						{current ? (
+							<>
+								<bdi className="truncate font-semibold">
+									{displayName(current.hostname)}
+								</bdi>
+								<span className="ml-auto flex shrink-0 items-center gap-2">
+									{current.key === sourceKey && (
+										<span className="text-sm font-normal text-muted-foreground">
+											{copy.restore.hostPicker.sourceHost}
+										</span>
+									)}
+									<Status host={current} />
+								</span>
+							</>
+						) : (
+							<span className="text-muted-foreground">
+								{copy.restore.hostPicker.choose}
 							</span>
-						</>
-					) : (
-						<span className="text-muted-foreground">
-							{copy.restore.hostPicker.choose}
-						</span>
-					)}
-					<ChevronsUpDown aria-hidden className="size-4 shrink-0 opacity-50" />
-				</Button>
+						)}
+						<ChevronsUpDown
+							aria-hidden
+							className="size-4 shrink-0 opacity-50"
+						/>
+					</Button>
+				)}
 			</PopoverTrigger>
 			<PopoverContent
 				align="start"
@@ -195,6 +254,7 @@ export const HostPicker = memo(function HostPicker({
 										key={host.key}
 										host={host}
 										source={host.key === sourceKey}
+										checked={multi ? selected?.includes(host.key) : undefined}
 										onSelect={choose}
 									/>
 								))}
@@ -206,7 +266,34 @@ export const HostPicker = memo(function HostPicker({
 									{copy.restore.hostPicker.noAgentGroupHint}
 								</p>
 								{withoutAgent.map((host) => (
-									<HostItem key={host.key} host={host} onSelect={choose} />
+									<HostItem
+										key={host.key}
+										host={host}
+										checked={multi ? selected?.includes(host.key) : undefined}
+										onSelect={choose}
+									/>
+								))}
+							</CommandGroup>
+						)}
+						{labelOptions.length > 0 && (
+							<CommandGroup heading={copy.hostPage.cards.labels}>
+								{labelOptions.map((label) => (
+									<CommandItem
+										key={label}
+										value={`label:${label}`}
+										onSelect={() => onToggleLabel?.(label)}
+										aria-checked={selectedLabels.includes(label)}
+										className="h-10 gap-2"
+									>
+										<Checkbox
+											checked={selectedLabels.includes(label)}
+											aria-hidden
+											tabIndex={-1}
+										/>
+										<code className="truncate text-sm">
+											<bdi>{displayName(label)}</bdi>
+										</code>
+									</CommandItem>
 								))}
 							</CommandGroup>
 						)}

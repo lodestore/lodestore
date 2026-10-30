@@ -1,12 +1,16 @@
-import { useQuery } from "@tanstack/react-query";
-import { getRouteApi, Link } from "@tanstack/react-router";
-import { Info } from "lucide-react";
+import { getRouteApi } from "@tanstack/react-router";
+import { Info, Search, Server } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError } from "@/api/fetcher";
 import { useGetSnapshot, useListRestoreHosts } from "@/api/gen/endpoints";
 import { Illustration } from "@/components/brand/illustration";
 import { FileBrowser } from "@/components/restore/file-browser";
+import { FindFile } from "@/components/restore/find/find-file";
 import { HostPicker } from "@/components/restore/host-picker";
+import {
+	NothingToRestore,
+	RetryAlert,
+} from "@/components/restore/restore-states";
 import { SnapshotHeader } from "@/components/restore/snapshot-header";
 import {
 	SnapshotTimeline,
@@ -22,73 +26,23 @@ import {
 } from "@/components/ui/collapsible";
 import {
 	Empty,
-	EmptyContent,
 	EmptyDescription,
 	EmptyHeader,
 	EmptyTitle,
 } from "@/components/ui/empty";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { copy } from "@/copy";
 import { useIsWide } from "@/hooks/use-wide";
 import { formatShortDateTime } from "@/lib/format";
 import { snapshotCount } from "@/lib/plural";
-import { repositoriesQuery } from "@/lib/session";
 import { shortId } from "@/lib/snapshot";
 
 const route = getRouteApi("/_app/restore");
 const REFRESH_MS = 15_000;
 
-function RetryAlert({
-	children,
-	onRetry,
-}: {
-	children: React.ReactNode;
-	onRetry: () => void;
-}) {
-	return (
-		<Alert variant="destructive" role="alert">
-			<AlertDescription className="flex items-center justify-between gap-4">
-				{children}
-				<Button type="button" variant="secondary" size="sm" onClick={onRetry}>
-					{copy.errors.retry}
-				</Button>
-			</AlertDescription>
-		</Alert>
-	);
-}
-
-function NothingToRestore() {
-	const repositories = useQuery(repositoriesQuery);
-	const hasRepository = (repositories.data ?? []).length > 0;
-	return (
-		<Empty className="py-24">
-			<EmptyHeader>
-				<Illustration
-					name="preview-restore"
-					width={320}
-					height={216}
-					className="h-auto w-80 max-w-full"
-				/>
-				<EmptyTitle>{copy.restore.empty.heading}</EmptyTitle>
-				<EmptyDescription>{copy.restore.empty.body}</EmptyDescription>
-			</EmptyHeader>
-			<EmptyContent>
-				<Button asChild>
-					{hasRepository || repositories.isPending ? (
-						<Link to="/policies/new">{copy.restore.empty.createPolicy}</Link>
-					) : (
-						<Link to="/settings/repositories/new">
-							{copy.restore.empty.addRepository}
-						</Link>
-					)}
-				</Button>
-			</EmptyContent>
-		</Empty>
-	);
-}
-
-export function RestoreWorkspace() {
-	const { host, snapshot, path, q } = route.useSearch();
+function ByHostTab() {
+	const { host, snapshot, path, q, select: preselect } = route.useSearch();
 	const navigate = route.useNavigate();
 	const wide = useIsWide();
 	const [pickerOpen, setPickerOpen] = useState(false);
@@ -138,6 +92,7 @@ export function RestoreWorkspace() {
 					snapshot: next.snapshot,
 					path: undefined,
 					q: undefined,
+					select: undefined,
 				}),
 			}),
 		[navigate],
@@ -266,6 +221,7 @@ export function RestoreWorkspace() {
 						path={path ?? ""}
 						q={q}
 						selection={selection}
+						preselect={preselect}
 					/>
 				)}
 			</div>
@@ -339,6 +295,19 @@ export function RestoreWorkspace() {
 	}
 
 	return (
+		<div className="flex flex-col gap-6">
+			<p role="status" aria-live="polite" className="sr-only">
+				{selection.announcement}
+			</p>
+			{main}
+		</div>
+	);
+}
+
+export function RestoreWorkspace() {
+	const { tab } = route.useSearch();
+	const navigate = route.useNavigate();
+	return (
 		<div className="flex flex-col gap-6 pb-8">
 			<div className="flex flex-col gap-1">
 				<h1 data-page-title className="text-2xl font-semibold">
@@ -346,10 +315,35 @@ export function RestoreWorkspace() {
 				</h1>
 				<p className="text-sm text-muted-foreground">{copy.restore.lead}</p>
 			</div>
-			<p role="status" aria-live="polite" className="sr-only">
-				{selection.announcement}
-			</p>
-			{main}
+			<Tabs
+				value={tab ?? "host"}
+				onValueChange={(next) =>
+					void navigate({
+						search: (prev) => ({
+							...prev,
+							tab: next === "find" ? "find" : undefined,
+						}),
+					})
+				}
+				className="gap-6"
+			>
+				<TabsList variant="line">
+					<TabsTrigger value="host">
+						<Server aria-hidden />
+						{copy.restore.tabs.byHost}
+					</TabsTrigger>
+					<TabsTrigger value="find">
+						<Search aria-hidden />
+						{copy.restore.tabs.find}
+					</TabsTrigger>
+				</TabsList>
+				<TabsContent value="host">
+					<ByHostTab />
+				</TabsContent>
+				<TabsContent value="find">
+					<FindFile />
+				</TabsContent>
+			</Tabs>
 		</div>
 	);
 }

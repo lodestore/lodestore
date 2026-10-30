@@ -284,8 +284,10 @@ export function EntriesTable({
 	rows,
 	folder,
 	selection,
+	complete,
 	onOpen,
 }: {
+	complete?: boolean;
 	rows: EntryRow[] | undefined;
 	folder?: SelectedItem;
 	selection: Selection;
@@ -303,6 +305,12 @@ export function EntriesTable({
 		folderCover === undefined &&
 		folderParts !== undefined &&
 		selectedInside(selection.items, folderParts);
+	const everyRow =
+		folderCover === undefined &&
+		complete === true &&
+		rows !== undefined &&
+		rows.length > 0 &&
+		rows.every((row) => selection.items.has(itemOf(row).pathB64));
 	const latest = useRef(rows);
 	latest.current = rows;
 	const { toggle, toggleRange } = selection;
@@ -322,7 +330,9 @@ export function EntriesTable({
 							<Checkbox
 								aria-label={copy.restore.selection.selectAll}
 								checked={
-									folderCover !== undefined || (folderPartly && "indeterminate")
+									folderCover !== undefined ||
+									everyRow ||
+									(folderPartly && "indeterminate")
 								}
 								disabled={
 									folderCover !== undefined &&
@@ -333,7 +343,14 @@ export function EntriesTable({
 										? copy.restore.selection.includedWith(folderCover.display)
 										: undefined
 								}
-								onCheckedChange={() => selection.selectFolder(folder)}
+								onCheckedChange={() => {
+									if (everyRow) {
+										for (const row of rows ?? [])
+											selection.selectFolder(itemOf(row));
+									} else {
+										selection.selectFolder(folder);
+									}
+								}}
 							/>
 						)}
 					</TableHead>

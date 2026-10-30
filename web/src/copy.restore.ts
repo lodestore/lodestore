@@ -4,7 +4,8 @@ import { sentence } from "@/lib/sentence";
 
 export const restore = {
 	title: "Restore",
-	lead: "Pick a host and a snapshot, choose files, then restore them or download an archive.",
+	lead: "Find a file across every host, or pick a host and browse its snapshots.",
+	tabs: { byHost: "By host", find: "Find file" },
 	hostPicker: {
 		label: "Host",
 		current: (host: string) => `Host: ${host}`,

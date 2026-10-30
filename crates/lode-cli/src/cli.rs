@@ -260,6 +260,21 @@ pub enum ServerCommand {
     Gc(GcArgs),
     /// Run an integrity check of a repository on the server; exits 3 when it finds problems
     Check(ServerCheckArgs),
+    /// Find a file by name or glob across the snapshots of every host
+    Find(ServerFindArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ServerFindArgs {
+    /// A name fragment (nginx.conf), a glob for names (*.conf) or a glob for the whole path
+    /// (/etc/nginx/**); case does not matter
+    pub pattern: String,
+    /// Search this host, by name or id; may be repeated; adds up with --label
+    #[arg(long = "host", value_name = "HOST")]
+    pub hosts: Vec<String>,
+    /// Also search hosts with this label; may be repeated, a host must carry all of them
+    #[arg(long = "label", value_name = "KEY=VALUE")]
+    pub labels: Vec<String>,
 }
 
 #[derive(Debug, Args)]

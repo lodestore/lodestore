@@ -57,6 +57,7 @@ const tree: Record<string, EntryItem[]> = {
 		entry("備份 😀.txt"),
 	],
 	"/empty": [],
+	"/solo": [entry("only.txt")],
 	"/big": Array.from({ length: 1300 }, (_, i) =>
 		entry(`big-${String(i + 1).padStart(4, "0")}.log`),
 	),
@@ -142,10 +143,11 @@ function mockBrowser(
 	);
 }
 
-async function openBrowser(path?: string) {
+async function openBrowser(path?: string, select?: string) {
 	useSignedIn();
 	const search = new URLSearchParams({ host: HOST, snapshot: SNAP });
 	if (path) search.set("path", enc(path));
+	if (select) search.set("select", enc(select));
 	const app = renderApp(`/restore?${search}`);
 	await screen.findByRole("heading", { level: 1, name: "Restore" });
 	return app;
@@ -232,6 +234,20 @@ describe("File browser selection", { timeout: 30_000 }, () => {
 		await user.click(all);
 		await announced("1 item selected");
 		expect(all).toBeChecked();
+	});
+
+	it("checks the header when every row of a fully loaded folder is selected", async () => {
+		mockBrowser();
+		const user = userEvent.setup();
+		await openBrowser("/solo", "/solo/only.txt");
+
+		const all = await screen.findByRole("checkbox", {
+			name: "Select all items in this folder",
+		});
+		await waitFor(() => expect(all).toBeChecked());
+		await user.click(all);
+		await announced("Selection cleared");
+		expect(all).not.toBeChecked();
 	});
 
 	it("shows the contents of a selected folder as included", async () => {

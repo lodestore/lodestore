@@ -297,6 +297,53 @@ describe("command palette hosts and repositories", () => {
 		expect(router.state.location.pathname).toBe("/hosts");
 	});
 
+	it("opens Find file with the search field focused", async () => {
+		mockHosts([]);
+		server.use(http.get("/api/v1/restore/hosts", () => HttpResponse.json([])));
+		const { user, router } = await openPalette();
+		await user.click(screen.getByRole("option", { name: "Find file…" }));
+		const field = await screen.findByRole("searchbox", {
+			name: "File name or pattern",
+		});
+		expect(router.state.location.pathname).toBe("/restore");
+		expect(router.state.location.search).toMatchObject({ tab: "find" });
+		await waitFor(() => expect(field).toHaveFocus());
+	});
+
+	it("Find file takes a file-like palette text as the pattern", async () => {
+		mockHosts([]);
+		server.use(
+			http.get("/api/v1/restore/hosts", () => HttpResponse.json([])),
+			http.post("/api/v1/find", () => HttpResponse.json({ id: "find-1" })),
+			http.get(
+				"/api/v1/find/:id",
+				() => new HttpResponse(null, { status: 500 }),
+			),
+		);
+		const { user, dialog, router } = await openPalette();
+		await user.type(within(dialog).getByRole("combobox"), "nginx.conf");
+		await user.click(screen.getByRole("option", { name: "Find file…" }));
+		await waitFor(() =>
+			expect(router.state.location.search).toMatchObject({
+				tab: "find",
+				find: "nginx.conf",
+			}),
+		);
+		expect(
+			await screen.findByRole("searchbox", { name: "File name or pattern" }),
+		).toHaveValue("nginx.conf");
+	});
+
+	it("Find file ignores palette text that is not a file name", async () => {
+		mockHosts([]);
+		server.use(http.get("/api/v1/restore/hosts", () => HttpResponse.json([])));
+		const { user, dialog, router } = await openPalette();
+		await user.type(within(dialog).getByRole("combobox"), "find file");
+		await user.click(screen.getByRole("option", { name: "Find file…" }));
+		await screen.findByRole("searchbox", { name: "File name or pattern" });
+		expect(router.state.location.search).not.toHaveProperty("find");
+	});
+
 	it("opens the new policy page from Create policy", async () => {
 		mockHosts([]);
 		const { user, router } = await openPalette();

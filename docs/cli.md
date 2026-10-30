@@ -52,6 +52,7 @@ An `http://` address that is not on the loopback interface works, but the token 
 | `lode apply -f <file or folder> [--dry-run] [--prune] [--adopt] [--manager NAME] [--yes]` | `policies:read` and `policies:write`, plus `snapshots:delete` when the files set or change `retention` |
 | `lode gc [--dry-run] <repo>`, `lode gc status <repo>`, `lode gc unlock <repo>` (also `lode server gc ...`) | See [Cleanup](#cleanup) |
 | `lode server check <repo> [--level structure\|packs\|restore]` | See [Integrity checks](#integrity-checks) |
+| `lode server find <pattern> [--host HOST]... [--label KEY=VALUE]...` | `snapshots:read`; see [Find a file](#find-a-file) |
 | `lode server restore <snapshot> --host <host> [options]` | `restore`, and `snapshots:read` when `--target` and `--in-place` are not given |
 
 A `<host>` is a host id or a hostname. A hostname is looked up in the host list, which needs `hosts:read`; a token without that scope must pass the id, which `lode server hosts list` shows in the `ID` column. When several hosts share a name, `lode` asks for the id.
@@ -194,6 +195,55 @@ Pack reading check for repository s3://backups/main (direct)
 A server run prints `(server)` instead of `(direct)`, and for `packs` adds how much of the repository has been read in the last 30 days. When problems are found they follow under `Problems`, at most 20 lines and then "and N more.", and notes under `Notes`. With `--json` the command prints the report as one `check` line (`check_report` for the server run) with the complete lists.
 
 The exit code tells a script what happened: 0 when the check passed, 3 when it found problems, 1 when it could not finish. A `packs` or `restore` check that had nothing to read, because the repository has no packs, no snapshots or no files, exits with 0 and prints `Nothing to check` instead of `Passed`; with `--json` the `result` is `nothing_to_check` (the other values are `passed`, `failed` and `stopped`) and `nothing_to_check` gives the reason.
+
+### Find a file
+
+`lode server find <pattern>` looks for a file in every snapshot that is still stored, on every host, including hosts that have no agent. It is the terminal form of the **Find file** tab.
+
+```sh
+lode server find nginx.conf
+lode server find '*.conf' --host web-1 --label role=web
+lode server find '/etc/nginx/**' --json
+```
+
+The pattern is one of three kinds, and case does not matter:
+
+| Pattern | Matches |
+|---------|---------|
+| `nginx.conf` (no `/`, no glob characters) | Names that contain the text |
+| `*.conf`, `nginx.?onf` | Names that match the glob |
+| `/etc/nginx/**`, `*/logs/*.log` | Whole paths that match the glob; `**` crosses folders, `*` does not |
+
+| Option | Meaning |
+|--------|---------|
+| `--host HOST` | Search this host, by name or id, including `agentless:<hostname>` keys; repeat for more. An unknown host exits with code 2 before anything is searched. |
+| `--label KEY=VALUE` | Also search hosts with this label; repeat for more, a host must carry all of them. |
+
+`--host` and `--label` add up: `--host web-1 --label role=web` searches web-1 and every host labelled role=web.
+
+There is no option for a period. Use the **Find file** tab, or `since` and `until` of `POST /api/v1/find`.
+
+The command starts the search, waits for it and prints one row per host and path:
+
+```
+HOST    PATH                    VERSIONS  LAST SEEN            SNAPSHOT
+web-1   /etc/nginx/nginx.conf   3         2026-10-29 12:00:00  4f0c...
+old-box /srv/nginx.conf         1         2026-10-02 03:10:00  9a1d...
+```
+
+`VERSIONS` counts the different contents the file had. `SNAPSHOT` is the full id of the newest snapshot that holds the newest version. Below the table the command prints how to restore the first row. When the host has an agent that is online, this is a ready command:
+
+```
+lode server restore <snapshot> --host web-1 --path /etc/nginx/nginx.conf
+```
+
+For a host without an agent, or with an agent that is offline, it says so and shows the same command with `--host <HOST>`: restore to another host, or download the file from the web interface. The command line has no download.
+
+A search that hits a limit prints `Stopped at N matches.` or `Stopped after N minutes.` on stderr, prints what it found and exits with 0: the result is incomplete, not wrong. Narrow it with `--host`, `--label` or a longer pattern. With no match the command prints `No files match "<pattern>".` and exits with 0.
+
+With `--json` the command prints one `find_session` line after the search ends. It has the fields of the REST `FindSession` (`state`, `stop_reason`, `limit`, `scanned`, `total`, `error`, and so on) and all groups in `groups`, each with its `versions` and their newest snapshots. Scripts check `state` (`done` or `incomplete`) and `stop_reason` (`limit` or `timeout`).
+
+Exit codes: 0 when the search finished or stopped at a limit, 1 when the search failed (the message is the server's) or the network failed, 2 for an unknown host, a label without `=` or an invalid pattern, 13 when the token lacks `snapshots:read`.
 
 ### Restore through the server
 

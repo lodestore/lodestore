@@ -25,7 +25,7 @@ A route that takes a token needs one scope. Routes not listed below work with a 
 | `policies:write` | `POST /api/v1/policies`, `PUT /api/v1/policies/{name}`, `DELETE /api/v1/policies/{name}`, `POST /api/v1/policies/apply`, `PUT /api/v1/repositories/{id}/checks/settings` |
 | `jobs:read` | `GET /api/v1/jobs`, `GET /api/v1/jobs/{id}`, `GET /api/v1/jobs/{id}/events`, `GET /api/v1/repositories/{id}/checks`, `GET /api/v1/repositories/{id}/checks/runs/{run_id}`, `GET /api/v1/repositories/{id}/checks/runs/{run_id}/report`, `POST /api/v1/repositories/{id}/checks/settings/validate` |
 | `jobs:run` | `POST /api/v1/jobs/{id}/cancel`, `POST /api/v1/jobs/{id}/rerun`, `POST /api/v1/policies/{name}/run`, `POST /api/v1/hosts/{id}/run`, `POST /api/v1/repositories/{id}/checks/{level}/run`, `POST /api/v1/repositories/{id}/checks/runs/{run_id}/cancel` |
-| `snapshots:read` | `GET /api/v1/hosts/{id}/snapshots`, `GET /api/v1/restore/hosts`, `GET /api/v1/restore/snapshots`, `GET /api/v1/snapshots/{id}`, `GET /api/v1/snapshots/{id}/entries`, `GET /api/v1/snapshots/{id}/search`, `POST /api/v1/snapshots/{id}/summary` |
+| `snapshots:read` | `GET /api/v1/hosts/{id}/snapshots`, `GET /api/v1/restore/hosts`, `GET /api/v1/restore/snapshots`, `GET /api/v1/snapshots/{id}`, `GET /api/v1/snapshots/{id}/entries`, `GET /api/v1/snapshots/{id}/search`, `POST /api/v1/snapshots/{id}/summary`, `POST /api/v1/find`, `GET /api/v1/find/{id}`, `GET /api/v1/find/{id}/groups/{index}`, `DELETE /api/v1/find/{id}` |
 | `snapshots:delete` | `PUT /api/v1/snapshots/{id}/suspicious`, `DELETE /api/v1/snapshots/{id}` |
 | `restore` | `POST /api/v1/restores`, `POST /api/v1/downloads`, `GET /api/v1/downloads/{id}/archive` |
 | `metrics:read` | `GET /metrics`, see [Metrics](metrics.md) |
@@ -48,6 +48,39 @@ Three requests change or remove a snapshot. Each works with a signed-in administ
 - `DELETE /api/v1/snapshots/{id}` removes any snapshot, marked or not, the same way retention forgets one. The answer is `{"id": "...", "storage_kept": false}` when the manifest was deleted from the repository. When the repository refuses the deletion (for example under Object Lock), the snapshot still leaves the catalog and the restore lists, and the answer is `{"storage_kept": true, "reason": "..."}`. A temporary storage failure answers `502` and keeps the snapshot. An unknown id answers `404`.
 
 Snapshot lists (`GET /api/v1/hosts/{id}/snapshots`, `GET /api/v1/restore/snapshots`, `GET /api/v1/snapshots/{id}`) also report `received_at`, `suspicious` and `policy_deleted`, which is true when the snapshot was made by a policy that no longer exists. `GET /api/v1/hosts/{id}/snapshots` accepts a token with `snapshots:read`.
+
+## Find a file
+
+`POST /api/v1/find` searches the file trees of all live snapshots of all hosts and answers `202` with `{"id": "..."}`. It needs a session or a token with `snapshots:read`.
+
+The body is `{"pattern": "...", "hosts": [], "labels": [], "since": null, "until": null}`. `pattern` holds 1 to 255 characters, case does not matter, and has three modes:
+
+- no `/` and no glob characters: a name fragment, `nginx.conf` matches every file whose name contains it;
+- no `/` but with glob characters (`*`, `?`, `[...]`, `{a,b}`): a glob for file names, `*.conf`;
+- with a `/`: a glob for the whole path, `/etc/nginx/**`; `*` does not cross a `/`, `**` does.
+
+The filters narrow the search. `hosts` lists host keys (an agent id or `agentless:{hostname}`); `labels` lists `key=value` pairs. The two add up (a union): the search covers the snapshots of the hosts in `hosts` and of the hosts whose agent carries all of the `labels`, so a host without an agent is found through `hosts` only; with both empty it covers every host; `since` and `until` are snapshot times in milliseconds, both ends included, and narrow the whole union. `hosts` holds at most 500 keys (repeats count once) and `labels` at most 20. A host key the server does not know, too many hosts or labels, a label without `=` and `since` later than `until` answer `422` with the name of the field in `errors[].path`. At most 8 searches are queued or running at a time; one more answers `429`.
+
+Poll `GET /api/v1/find/{id}`. The answer holds `state`, the progress (`scanned`, `total`, `skipped`), `searched_hosts` (the hosts whose snapshots the search reads), `hosts` (the hosts with a match) and `groups`, one per host and path, each with its versions (distinct contents) and the newest snapshots of each version. `?after=<revision>` returns only the groups that changed since that revision of the session. `GET /api/v1/find/{id}/groups/{index}` returns one group with every snapshot of each version.
+
+`state` is `running`, `done`, `incomplete`, `failed` or `cancelled`. `incomplete` means a limit stopped the search and what it found is kept; `stop_reason` is then `limit` (more files than `max_matches`) or `timeout`. A snapshot that cannot be read, for example because retention or GC removed it during the search, is counted in `skipped` and does not fail the search. So is a snapshot whose tree holds more paths than a search keeps in memory. `gone` compares a file only with later complete snapshots of the same host and source (policy, stdin name or backup paths). The time limit counts from the moment the search starts running, not while it waits for a slot. A failed search reports a generic `error`; the details are in the server log. `DELETE /api/v1/find/{id}` stops a search (`204`, also when it is over already); an unknown id answers `404`.
+
+Searches live in the server's memory. A finished search is forgotten an hour later, and only the 32 newest finished searches are kept. Two searches run at a time.
+
+The limits come from the optional `find` section of `server.yaml`; zero and negative values fail the start:
+
+```yaml
+find:
+  max_matches: 1000
+  timeout_secs: 600
+  cache_max_mb: 1024
+```
+
+`max_matches` is the most files (groups) a search keeps, `timeout_secs` the time one search may take, `cache_max_mb` the size of the path-list cache. The values shown are the defaults.
+
+The first search that walks a snapshot writes its list of files and symlinks to `<data_dir>/find-cache/`, encrypted under the unlock key; any later search, with any pattern, reads that list instead of the bucket. The list goes away with the snapshot, and the least recently used lists are dropped once together they pass `cache_max_mb`. The cache only helps while the working set fits the cap: the snapshots in the search scope, times the files in each. A search over more than fits evicts its own lists as it walks and gains almost nothing from the cache.
+
+To size it, count about 40 bytes per file in a snapshot after compression (a record is roughly 100 bytes before: a path of about 80 bytes, the size, the modification time and a 16-byte content id). So `cache_max_mb` should be at least the number of snapshots in scope times the files in one snapshot times 40 bytes; the default 1 GiB holds about 25 million records, for example 100 snapshots of 250 000 files. The figure is an estimate; the real size depends on how well the paths compress. For a search across the whole fleet without filters, raise `cache_max_mb` or narrow the search by host and period.
 
 ## Retention preview
 

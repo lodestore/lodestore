@@ -9,6 +9,7 @@ import {
 	Monitor,
 	Moon,
 	Plus,
+	Search,
 	Server,
 	ShieldCheck,
 	Sun,
@@ -58,6 +59,8 @@ const EXTRA_PAGES: typeof NAV_ITEMS = [
 ];
 
 const normalize = (value: string) => value.trim().toLocaleLowerCase();
+const looksLikeFile = (value: string) =>
+	/^\S+$/.test(value) && /[.*/]/.test(value);
 
 const STATUS_RANK: Record<Host["status"], number> = {
 	online: 0,
@@ -229,8 +232,21 @@ function PaletteBody({
 		label: string;
 		icon: typeof Eraser;
 		keywords?: string;
+		always?: boolean;
 		run: () => void;
 	}[] = [
+		{
+			label: copy.palette.findFile,
+			icon: Search,
+			always: looksLikeFile(search.trim()),
+			run: go({
+				to: "/restore",
+				search: {
+					tab: "find",
+					find: looksLikeFile(search.trim()) ? search.trim() : undefined,
+				},
+			}),
+		},
 		{
 			label: copy.palette.addHost,
 			icon: Server,
@@ -277,7 +293,8 @@ function PaletteBody({
 		{ label: copy.signOut, icon: LogOut, run: run(signOut) },
 	];
 	const actions = allActions.filter(
-		({ label, keywords }) =>
+		({ label, keywords, always }) =>
+			always ||
 			normalize(label).includes(query) ||
 			(query !== "" &&
 				(keywords ?? "").split(" ").some((word) => word.startsWith(query))),
