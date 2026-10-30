@@ -11,6 +11,7 @@ Lodestore watches the fleet and raises an alert when something needs a person. A
 | Agent offline | warning | The agent has not been connected for longer than the offline threshold (default 15 minutes). | The agent connects. |
 | Check failed | critical | The last finished [integrity check](checks.md) of a repository and level failed or stopped. | The next finished check of that level passes. |
 | Certificate expiring | warning, critical once expired | A certificate expires in fewer days than the certificate threshold (default 14): an agent certificate or the server gRPC certificate. | The certificate is renewed or replaced. |
+| Agent update failed | critical | The latest finished agent self-update of a host was rolled back and the host still runs another version than the target. The alert shows the reason. | The host runs the target version (a later update succeeded or the agent was reinstalled). A revoked host raises none. |
 
 An alert is one object per cause, not per evaluation: it fires once, may remind, and resolves once. Resolved alerts stay in the history.
 
@@ -54,7 +55,7 @@ The durations are `hour`, `day`, `week` and `forever`. The token needs `alerts:w
 
 ## Channels
 
-A channel is a place alerts are sent to. Add them under Settings, Notifications, or define them in the server configuration. Every channel has a list of alert types it receives (all five by default) and an on/off switch. There is no routing by host, label or policy: an alert goes to every enabled channel that has its type checked.
+A channel is a place alerts are sent to. Add them under Settings, Notifications, or define them in the server configuration. Every channel has a list of alert types it receives (all six by default) and an on/off switch. There is no routing by host, label or policy: an alert goes to every enabled channel that has its type checked.
 
 | Type | What it needs |
 |------|---------------|
@@ -104,7 +105,7 @@ notifications:
 | `name` | Required, unique. |
 | `type` | `telegram`, `slack`, `email` or `webhook`. |
 | `enabled` | `true` by default. |
-| `alerts` | List of `backup_failed`, `no_recent_backup`, `agent_offline`, `check_failed`, `certificate_expiring`. All when left out; an empty list is an error. |
+| `alerts` | List of `backup_failed`, `no_recent_backup`, `agent_offline`, `check_failed`, `certificate_expiring`, `agent_update_failed`. All when left out; an empty list is an error. |
 | `bot_token_file`, `chat_id` | Telegram. |
 | `webhook_url_file` | Slack. |
 | `smtp_host`, `port`, `security`, `username`, `password_file`, `from`, `to` | Email. `port` is `587` by default, `security` is `starttls` by default (`tls` for a connection that is encrypted from the start, usually port 465). |
@@ -161,7 +162,7 @@ The webhook sends the format of the Alertmanager webhook receiver, version 4, so
 
 - `status` is `firing` for a new alert and for a reminder, and `resolved` when the cause is gone. A resolved message has the real `endsAt`.
 - `receiver` is the name of the channel. `fingerprint` and `groupKey` stay the same for the whole life of an alert, so a receiver can match a resolved message to the alert it closes.
-- `labels.alertname` is `LodestoreBackupFailed`, `LodestoreNoRecentBackup`, `LodestoreAgentOffline`, `LodestoreCheckFailed` or `LodestoreCertificateExpiring`, the same names as in the [Prometheus rules](metrics.md#importing-the-dashboard-and-the-rules). `severity` is `critical` or `warning`.
+- `labels.alertname` is `LodestoreBackupFailed`, `LodestoreNoRecentBackup`, `LodestoreAgentOffline`, `LodestoreCheckFailed`, `LodestoreCertificateExpiring` or `LodestoreAgentUpdateFailed`, the same names as in the [Prometheus rules](metrics.md#importing-the-dashboard-and-the-rules). `severity` is `critical` or `warning`.
 - Other labels depend on the type and are present only when they apply: `host` and `host_id`, `policy`, `repository` and `level` (a check), `cert` (`agent` or `grpc`).
 - `annotations.summary` is the title shown in the web interface and `annotations.description` its detail line.
 - A test message has `alertname` `LodestoreTest` and severity `info`.

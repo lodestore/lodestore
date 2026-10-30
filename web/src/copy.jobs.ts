@@ -16,7 +16,29 @@ export const jobs = {
 	statusFilterLabel: "Filter by status",
 	allTypes: "All types",
 	kindFilterLabel: "Filter by type",
-	kinds: { backup: "Backups", restore: "Restores", download: "Downloads" },
+	kinds: {
+		backup: "Backups",
+		restore: "Restores",
+		download: "Downloads",
+		agent_update: "Agent update",
+	},
+	agentUpdate: {
+		kind: (from: string, to: string) => `Agent update · ${from} → ${to}`,
+		rolledBack: "Rolled back",
+		cardTitle: "Agent update",
+		from: "From",
+		to: "To",
+		queued: "Queued",
+		started: "Started",
+		finished: "Finished",
+		reason: (reason: string) =>
+			reason
+				? `The update was rolled back: ${reason}`
+				: "The update was rolled back.",
+		cancelledReason: (reason: string) => `Cancelled: ${reason}`,
+		waitingBusy: (host: string) =>
+			`Waiting for the running job on ${host} to finish.`,
+	},
 	restoreLine: (id: string) => `Restore · snapshot ${id}`,
 	downloadLine: (format: string) => `Download · ${format}`,
 	archiveFormat: { tar_gz: "tar.gz", tar_zst: "tar.zst", zip: "zip" },

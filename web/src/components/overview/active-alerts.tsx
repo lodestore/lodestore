@@ -74,6 +74,8 @@ function titleOf(alert: AlertDto, now: number) {
 			return { build: titles.noRecent, link: hostLink };
 		case "agent_offline":
 			return { build: titles.offline, link: hostLink };
+		case "agent_update_failed":
+			return { build: titles.agentUpdateFailed, link: hostLink };
 		case "check_failed": {
 			const level = alert.check_level ?? "";
 			const name =
@@ -119,6 +121,8 @@ function detailOf(alert: AlertDto) {
 			);
 		case "agent_offline":
 			return details.offline(relative(facts.last_seen_at));
+		case "agent_update_failed":
+			return details.agentUpdateFailed(facts.error);
 		case "check_failed":
 			return details.checkFailed(facts.findings ?? 0);
 		default:

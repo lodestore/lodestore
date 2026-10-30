@@ -131,6 +131,23 @@ pub fn evaluate(
             },
         });
     }
+    for failure in &inputs.update_failures {
+        let Some(h) = inputs.hosts.iter().find(|h| h.host_id == failure.host_id) else {
+            continue;
+        };
+        out.push(Candidate {
+            facts: AlertFacts {
+                error: Some(failure.reason.clone()),
+                ..AlertFacts::default()
+            },
+            ..Candidate::for_host(
+                h,
+                AlertType::AgentUpdateFailed,
+                format!("agent_update_failed:{}", h.host_id),
+                Severity::Critical,
+            )
+        });
+    }
     for failure in &inputs.check_failures {
         let level = failure.level.as_str();
         out.push(Candidate {

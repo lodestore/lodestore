@@ -326,3 +326,98 @@ async fn e2e_install_systemd() {
     assert_eq!(code, 0, "{output}");
     assert!(!Path::new(CONF_DIR).exists() && !Path::new(STATE_DIR).exists());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs root, systemd and curl"]
+async fn e2e_install_trust_key() {
+    use std::os::unix::fs::MetadataExt;
+
+    require_root_systemd();
+    let ts = TestServer::start(&Backend::Sqlite).await;
+    std::fs::create_dir_all(&ts.config.agent_dir).unwrap();
+    std::fs::copy(
+        agent_binary(),
+        ts.config
+            .agent_dir
+            .join(format!("lodestore-agent-linux-{}", std::env::consts::ARCH)),
+    )
+    .unwrap();
+    let url = ts.rest_url();
+    let script = ts.dir.path().join("install.sh");
+    std::fs::write(
+        &script,
+        reqwest::get(format!("{url}/install.sh"))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let _cleanup = Cleanup(script);
+
+    let key = ts.dir.path().join("own.pub");
+    std::fs::write(&key, "untrusted comment: own key\nRWQ0\n").unwrap();
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    let api = ts.api().await;
+    let repo = ts.create_local_repository("main").await;
+    let token = api.join_token(&repo, json!([])).await;
+    let (code, output) = run(install_command(
+        &url,
+        "",
+        &format!("--join {token} --trust-key {}", key.display()),
+    ))
+    .await;
+    assert_eq!(code, 0, "{output}");
+
+    let installed = format!("{CONF_DIR}/trusted-keys/own.pub");
+    assert_eq!(mode(&installed), 0o644);
+    let meta = std::fs::metadata(&installed).unwrap();
+    assert_eq!((meta.uid(), meta.gid()), (0, 0));
+    assert_eq!(
+        std::fs::read(&installed).unwrap(),
+        std::fs::read(&key).unwrap()
+    );
+    assert_eq!(mode(&format!("{CONF_DIR}/trusted-keys")), 0o755);
+    let dir = std::fs::metadata(format!("{CONF_DIR}/trusted-keys")).unwrap();
+    assert_eq!((dir.uid(), dir.gid()), (0, 0));
+
+    let guard_unit = "lodestore-agent-update-e2e00000";
+    let armed = Command::new("systemd-run")
+        .args([
+            &format!("--unit={guard_unit}"),
+            "--on-active=300s",
+            "--collect",
+            "/bin/true",
+        ])
+        .status()
+        .unwrap();
+    assert!(armed.success());
+    let timer_active = || {
+        Command::new("systemctl")
+            .args(["is-active", "--quiet", &format!("{guard_unit}.timer")])
+            .status()
+            .unwrap()
+            .success()
+    };
+    assert!(timer_active());
+    let update_dir = format!("{STATE_DIR}/update");
+    std::fs::create_dir_all(&update_dir).unwrap();
+    for file in ["pending.json", "pending.rollback"] {
+        std::fs::write(format!("{update_dir}/{file}"), "{}").unwrap();
+    }
+    std::fs::write(format!("{BIN}.prev"), b"previous").unwrap();
+    let (code, output) = run(install_command(&url, "", "")).await;
+    assert_eq!(code, 0, "{output}");
+    assert!(!timer_active());
+    assert!(!Path::new(&format!("{update_dir}/pending.json")).exists());
+    assert!(!Path::new(&format!("{update_dir}/pending.rollback")).exists());
+    assert!(!Path::new(&format!("{BIN}.prev")).exists());
+
+    std::fs::write(format!("{BIN}.prev"), b"previous").unwrap();
+    let (code, output) = run(install_command(&url, "", "--uninstall")).await;
+    assert_eq!(code, 0, "{output}");
+    assert!(!Path::new(&format!("{BIN}.prev")).exists());
+    assert!(!Path::new(BIN).exists());
+}

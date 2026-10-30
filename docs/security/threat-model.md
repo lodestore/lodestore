@@ -24,7 +24,7 @@ The unlock key comes from `LODESTORE_UNLOCK_KEY` or `LODESTORE_UNLOCK_KEY_FILE`.
 | Only the database (a leaked backup of the catalog, a stolen SQL dump) | Not exposed | Secrets are ciphertext. Host names, schedules and snapshot metadata are visible. A copy of `data_dir` does not reveal file names either as long as the unlock key is not in it (see the auto-generated `unlock.key` above): the search cache is sealed under that key. |
 | Only the unlock key | Not exposed | The key opens nothing without the wrapped values. |
 | The database and the unlock key | **Exposed, for every repository** | This combination yields the master secrets, the S3 credentials and the CA key. Auto-unlock does not protect against it. |
-| The server host with a running process | **Exposed** | Unlocked secrets live in the process memory. |
+| The server host with a running process | **Exposed** | Unlocked secrets live in the process memory. Signed updates keep this attacker from installing a binary through the update path, but a restore job can still write files anywhere on an enrolled host as root, so this is root on those hosts too (see [Agent updates](#agent-updates)). |
 | The bucket only | Not exposed | Data is encrypted under keys derived from the master key, which is never stored in the bucket in the clear. |
 
 The auto-unlock model defends against exactly one thing: a leak of the database on its own. It is not a defence against anyone who can read both the database and the unlock key, and it should not be described or relied on as one.
@@ -51,6 +51,40 @@ An agent holds a writer keyset and a write-only S3 key. It can add data to the r
 - The S3 key is **shared by all agents of a repository**. Revoking a host cuts its gRPC stream at once and the server rejects it with the code `revoked`, but the revoked host still holds the S3 key and can keep writing to the bucket until the key is replaced. Use **Replace agent key** in the repository settings: you enter a new write-only key, the server pushes it to every connected agent, and offline agents receive it when they reconnect. The revocation dialog repeats this warning.
 - Revocation is a denylist on the server, checked on the connection and on every message; there is no CRL or OCSP. The agent logs the error and exits with code 77. The systemd unit lists `RestartPreventExitStatus=77`, so the service stays `failed` and is not restarted. The agent touches no local files. A revoked `agent_id` is never accepted again; the host returns only through `install.sh --force` with a new join token.
 - Agent client certificates are issued by the built-in CA, last 90 days and renew automatically. The agent generates its private key locally and it never leaves the host.
+
+## Agent updates
+
+An agent update replaces the binary of a process that runs as root on the host. The server cannot use this path to hand an agent code, because the agent decides what it runs.
+
+**What the agent trusts.**
+
+- The public key of the project, built into the agent binary, and the `*.pub` files in `/etc/lodestore/trusted-keys` on the host. Nothing else counts as a signer, and the server has no message that adds, replaces or removes a key.
+- A key file counts only when it passes the same ownership test as a hook: the file and the directory belong to the agent's user (root in the systemd unit), are not writable by group or others, and the file is not a symlink and is at most 4 KiB. `install.sh --trust-key` installs a key that way, as `root:root` with mode 0644 in a 0755 directory.
+- The signature covers the binary and a trusted comment, `lodestore-agent <version> <arch>`, under a global signature. The agent checks the SHA-256 the server announced, the signature, that the signed version is the requested one, that the architecture is its own, that the version is newer than the running one, and that the new binary prints its version when started with `version`. It refuses anything else and reports the reason.
+
+**What the server can and cannot do.**
+
+- It can hold updates back by never starting them, or roll out a newer version that a trusted key signed. A rollout of an older signed binary is refused by the agent, so a downgrade is not possible.
+- Through an update it cannot give an agent a key to trust, a binary for another architecture, a binary signed by an unknown key, or a binary of its own making.
+- Only a token or session with the scope `agents:update` starts, pauses, resumes or cancels a rollout. `hosts:write` is not enough.
+
+**A server that is taken over.**
+
+The signature checks stop a compromised server from installing a binary through the update path, and that is the limit of what they do. A server that is taken over holds the repository keys and can start a restore job on any enrolled host. The job runs as root and writes wherever it is told, so the attacker can put files of their choosing anywhere on the host, including the agent binary, `/etc/lodestore/trusted-keys`, `/etc/lodestore/hooks.d` and `agent.yaml`. Treat a server compromise as root on every enrolled host.
+
+**The installer.**
+
+`install.sh` checks the binary only against a SHA-256 served by the same server, so the check shows the download is intact, not who built it. On a server you do not trust, verify the binary with `minisign -V` first.
+
+**Rollback guard.**
+
+The old agent keeps its binary as `lodestore-agent.prev`, writes a record of the update, and arms a transient systemd timer for 120 seconds before the process restarts. If the new version does not connect and report itself in that time, the timer runs the previous binary's `update-rollback`, which puts it back. A new binary that crashes or never connects is therefore rolled back by the timer. The report of the new version and the timer exclude each other: whichever takes the record of the update first decides, so an update confirmed to the server stays in place. If the previous binary has disappeared there is nothing to put back, and the host reports that instead of a rollback.
+
+Running `install.sh` by hand ends the update: it stops the timer and removes the record of the update and `lodestore-agent.prev`. An agent that starts with a version other than the target of the update drops the record as well, so the guard does not replace a binary installed by hand.
+
+**Residual risk.**
+
+If the host reboots inside the two-minute window, the transient timer is lost. The agent that starts afterwards puts the guard back for the rest of the window, or rolls back at once when the window has already run out. The only gap is a reboot in the window combined with a new binary that dies before its start-up code (`on_start`) has run: then nothing re-arms the guard and nothing rolls back. The server still notices. It shows the update as failed once its deadline passes (`rolled_back`, the alert `agent_update_failed`), or, if the report of the switch never reached it, the host appears offline (`agent_offline`). Run `install.sh` on the host to repair it.
 
 ## Join tokens and the setup link
 
@@ -95,8 +129,8 @@ A backup policy can run a script on the host before and after a backup. The serv
 **What the boundary guarantees.**
 
 - The agent runs only a regular file in `/etc/lodestore/hooks.d` that the administrator installed. The file must be owned by the agent's user (root in the systemd unit), must not be a symlink, and must not be writable by group or others. The directory has to meet the same rules. Anything else is refused with `hook_rejected`, and a missing script is `hook_missing`.
-- A compromised server cannot create a script, because `hooks.d` is writable only by root on the host. It can only pick among the scripts that are already there.
-- An inline `command` runs only when `/etc/lodestore/agent.yaml` contains `hooks: { allow_inline: true }`. The server cannot set this flag. The file counts only when it is owned by the agent's user and is not writable by group or others; otherwise the flag is off. `agent.yaml` is separate from `agent.json`, so `install.sh --force` keeps it.
+- A policy cannot create a script: it only names one, and `hooks.d` is writable only by root on the host. Through a policy a compromised server can only pick among the scripts that are already there. A restore job is a different path: it runs as root and can write into `hooks.d`, so this boundary does not hold against a server that is taken over (see [Agent updates](#agent-updates)).
+- An inline `command` runs only when `/etc/lodestore/agent.yaml` contains `hooks: { allow_inline: true }`. A policy cannot set this flag, though a restore job can write the file, as it can `hooks.d`. The file counts only when it is owned by the agent's user and is not writable by group or others; otherwise the flag is off. `agent.yaml` is separate from `agent.json`, so `install.sh --force` keeps it.
 - Arguments reach the script through `execve`, never through a shell. The hook gets an empty environment except `PATH`, `LODESTORE_POLICY`, `LODESTORE_JOB_ID`, `LODESTORE_HOOK_PHASE` and, for the post hook, `LODESTORE_BACKUP_STATUS`. S3 keys, writer keys and proxy settings are not passed. Standard input is `/dev/null`.
 - A hook runs in its own process group. On timeout (one hour by default, set in the policy) or cancel, the group gets SIGTERM and, after 10 seconds, SIGKILL, so child processes end as well.
 

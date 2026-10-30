@@ -1104,6 +1104,56 @@ async fn dispatch_one_active_per_host() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dispatch_waits_for_agent_update() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let host = enroll(&ts, &api, &repo, "host-a").await;
+        let pool = &ts.state().db.pool;
+        let mut agent = Fake::connect_with(&ts, &host, &["update_v1"]).await;
+
+        sqlx::query(
+            "INSERT INTO agent_rollouts (id, target_version, state, canary, wave_size, \
+             pause_after, created_by, created_at) \
+             VALUES ('r1', '99.0.0', 'paused', 0, 10, 5, 'test', $1)",
+        )
+        .bind(now_ms())
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO agent_updates (id, rollout_id, host_id, arch, from_version, \
+             target_version, wave, state, queued_at, assigned_at) \
+             VALUES ('u1', 'r1', $1, 'x86_64', '0.0.1', '99.0.0', 0, 'assigned', $2, $2)",
+        )
+        .bind(&host.id)
+        .bind(now_ms())
+        .execute(pool)
+        .await
+        .unwrap();
+        insert_job(pool, "job-1", &host.id, "manual", "queued", now_ms()).await;
+
+        let others = agent.drain(Duration::from_millis(2500)).await;
+        assert!(others.into_iter().all(|b| is_assign(b).is_none()));
+        assert_eq!(
+            state_of(pool, "job-1").await,
+            "queued",
+            "[{}]",
+            backend.name()
+        );
+
+        sqlx::query("UPDATE agent_updates SET state = 'succeeded' WHERE id = 'u1'")
+            .execute(pool)
+            .await
+            .unwrap();
+        assert_eq!(agent.recv(is_assign).await, "job-1");
+        drop(agent);
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn dispatch_hook_facts_persisted() {
     for backend in backends() {
         let ts = TestServer::start(&backend).await;

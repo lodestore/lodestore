@@ -1,8 +1,13 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import type { Host } from "@/api/gen/model";
+import {
+	agentUpdateStatus,
+	hostUpdate,
+	mockAgentUpdates,
+} from "@/test/agent-update";
 import { renderApp, useSignedIn } from "@/test/app";
 import { server } from "@/test/server";
 
@@ -45,6 +50,8 @@ async function openHosts() {
 	renderApp("/hosts");
 	await screen.findByRole("heading", { name: "Hosts" });
 }
+
+beforeEach(() => mockAgentUpdates(agentUpdateStatus()));
 
 describe("Hosts page", () => {
 	it("lists hosts with status, version and platform", async () => {
@@ -249,7 +256,7 @@ describe("Hosts table", () => {
 		await userEvent.type(screen.getByRole("searchbox"), "env=prod");
 		expect(await screen.findByText("Showing 1-50 of 71")).toBeInTheDocument();
 		for (const row of bodyRows()) {
-			expect(within(row).getByText("env=prod")).toBeInTheDocument();
+			expect(within(row).getAllByText("env=prod").length).toBeGreaterThan(0);
 		}
 
 		await userEvent.click(screen.getByRole("button", { name: "Next" }));
@@ -339,17 +346,29 @@ describe("Hosts table", () => {
 		expect(firstRowName()).toBe("web-1");
 	});
 
-	it("flags an agent version that differs from the server", async () => {
-		mockHosts([makeHost("old-1", { version: "0.0.9" }), makeHost("ok-1")]);
+	it("flags only the agents the server marks outdated", async () => {
+		const old = makeHost("old-1", { version: "0.0.9" });
+		const ok = makeHost("ok-1");
+		mockHosts([old, ok]);
+		mockAgentUpdates(
+			agentUpdateStatus([
+				hostUpdate(old.id, {
+					version: "0.0.9",
+					outdated: true,
+					updatable: true,
+				}),
+				hostUpdate(ok.id),
+			]),
+		);
 		await openHosts();
 		await screen.findByText("old-1");
-		const warning = screen.getAllByRole("img", {
-			name: "Agent version differs from the server (v0.1.0)",
-		});
-		expect(warning).toHaveLength(1);
-		await userEvent.hover(warning[0]);
-		expect(await screen.findByRole("tooltip")).toHaveTextContent(
-			"Agent version differs from the server (v0.1.0)",
+		const table = screen.getByRole("table");
+		expect(await within(table).findAllByText("Outdated")).toHaveLength(1);
+		const row = within(table).getByText("old-1").closest("tr");
+		expect(row).toHaveTextContent("0.0.9");
+		expect(row).toHaveTextContent("Outdated");
+		expect(within(table).getByText("ok-1").closest("tr")).not.toHaveTextContent(
+			"Outdated",
 		);
 	});
 
@@ -460,7 +479,9 @@ describe("Hosts table", () => {
 			makeHost("web-1", { labels: [{ key: "team", value: "Платформа" }] }),
 		]);
 		await openHosts();
-		await userEvent.hover(await screen.findByText("team=Платформа"));
+		await userEvent.hover(
+			await screen.findByRole("button", { name: "team=Платформа" }),
+		);
 		expect(await screen.findByRole("tooltip")).toHaveTextContent(
 			"team=Платформа",
 		);

@@ -13,6 +13,7 @@ service Agent {
   rpc RestorePlan(RestorePlanRequest) returns (stream RestorePlanBatch);
   rpc RefreshPackAccess(RefreshPackAccessRequest) returns (RefreshPackAccessResponse);
   rpc ReadPackRange(ReadPackRangeRequest) returns (stream PackBytes);
+  rpc FetchAgentUpdate(FetchAgentUpdateRequest) returns (stream UpdateChunk);
 }
 
 message Versions {
@@ -72,6 +73,7 @@ message AgentMessage {
     JobEvents job_events = 7;
     JobFinished job_finished = 8;
     JobCreated job_created = 9;
+    UpdateStatus update_status = 10;
   }
 }
 
@@ -107,6 +109,8 @@ message ServerMessage {
     JobSync job_sync = 6;
     JobFinishedAck job_finished_ack = 7;
     JobForget job_forget = 8;
+    UpdateAssign update_assign = 9;
+    UpdateStatusAck update_status_ack = 10;
   }
 }
 
@@ -433,5 +437,47 @@ message ReadPackRangeRequest {
 }
 
 message PackBytes {
+  bytes data = 1;
+}
+
+message UpdateAssign {
+  string update_id = 1;
+  string target_version = 2;
+  string arch = 3;
+  uint64 size = 4;
+  string sha256 = 5;
+}
+
+enum UpdateState {
+  UPDATE_STATE_UNSPECIFIED = 0;
+  UPDATE_STATE_SWITCHING = 1;
+  UPDATE_STATE_CONFIRMED = 2;
+  UPDATE_STATE_ROLLED_BACK = 3;
+  UPDATE_STATE_REJECTED = 4;
+  UPDATE_STATE_BUSY = 5;
+}
+
+message UpdateStatus {
+  string update_id = 1;
+  UpdateState state = 2;
+  string reason = 3;
+}
+
+message UpdateStatusAck {
+  string update_id = 1;
+}
+
+enum UpdateFile {
+  UPDATE_FILE_UNSPECIFIED = 0;
+  UPDATE_FILE_BINARY = 1;
+  UPDATE_FILE_SIGNATURE = 2;
+}
+
+message FetchAgentUpdateRequest {
+  string update_id = 1;
+  UpdateFile file = 2;
+}
+
+message UpdateChunk {
   bytes data = 1;
 }

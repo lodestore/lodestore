@@ -1,5 +1,6 @@
 //! Lodestore server: control plane and catalog.
 
+pub mod agent_update;
 pub mod alerts;
 pub mod api;
 pub mod assets;
@@ -143,7 +144,8 @@ pub async fn serve(config: Config, listeners: Listeners) -> anyhow::Result<Serve
     let janitor = tokio::spawn(auth::session_janitor(state.clone(), stop.clone()));
     let catalog = tokio::spawn(catalog::sync_loop(state.clone(), stop.clone()));
     let find = tokio::spawn(find::janitor(state.clone(), stop.clone()));
-    let mut tasks = vec![rest, grpc, janitor, catalog, find];
+    let agent_update = tokio::spawn(agent_update::rollout::run(state.clone(), stop.clone()));
+    let mut tasks = vec![rest, grpc, janitor, catalog, find, agent_update];
     if state.config.schedule_tick_secs > 0 {
         tasks.push(tokio::spawn(schedule::run(state.clone(), stop.clone())));
         tasks.push(tokio::spawn(maintenance::gc::run(

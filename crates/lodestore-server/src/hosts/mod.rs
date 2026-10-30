@@ -292,11 +292,22 @@ async fn revoke_host(
     _auth: Scoped<HostsWrite>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    let now = now_ms();
+    let mut tx = state.db.pool.begin().await?;
     sqlx::query("UPDATE agents SET status = 'revoked', revoked_at = $1 WHERE id = $2 AND status <> 'revoked'")
-        .bind(now_ms())
+        .bind(now)
         .bind(&id)
-        .execute(&state.db.pool)
+        .execute(&mut *tx)
         .await?;
+    sqlx::query(
+        "UPDATE agent_updates SET state = 'cancelled', reason = 'The host was revoked.', \
+         finished_at = $1 WHERE host_id = $2 AND state IN ('queued', 'assigned')",
+    )
+    .bind(now)
+    .bind(&id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
     let known = sqlx::query("SELECT 1 FROM agents WHERE id = $1")
         .bind(&id)
         .fetch_optional(&state.db.pool)
@@ -327,6 +338,7 @@ async fn revoke_host(
         state.registry.clear_issued(&job_id);
     }
     state.registry.revoke(&id);
+    crate::agent_update::rollout::kick(&state);
     Ok(StatusCode::NO_CONTENT)
 }
 

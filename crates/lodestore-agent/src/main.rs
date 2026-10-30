@@ -4,6 +4,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
+use lodestore_agent::update::switch::Systemd;
 use lodestore_agent::{AgentError, EnrollArgs, NetOptions, Paths, RunArgs};
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
@@ -49,6 +50,12 @@ enum Command {
         dirs: DirArgs,
     },
     Version,
+    UpdateRollback {
+        #[command(flatten)]
+        dirs: DirArgs,
+        #[arg(long)]
+        exe: PathBuf,
+    },
 }
 
 fn read_token() -> Result<String, AgentError> {
@@ -103,6 +110,19 @@ async fn execute(command: Command) -> Result<(), AgentError> {
                 None => lodestore_agent::enroll(args).await?,
             };
             println!("registered as {}", enrolled.agent_id);
+            Ok(())
+        }
+        Command::UpdateRollback { dirs, exe } => {
+            let paths = dirs.paths();
+            let rolled = lodestore_agent::update::guard::rollback(&paths, &exe, &Systemd, |p| {
+                format!(
+                    "The new version did not connect within 2 min. Running {} again.",
+                    p.previous_version
+                )
+            })?;
+            if rolled {
+                println!("rolled back");
+            }
             Ok(())
         }
         Command::Run { dirs } => {

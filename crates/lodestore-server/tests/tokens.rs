@@ -12,10 +12,11 @@ use reqwest::{Client, Method, Response};
 use serde_json::{Value, json};
 use sqlx::Row;
 
-const ALL_SCOPES: [&str; 10] = [
+const ALL_SCOPES: [&str; 11] = [
     "hosts:read",
     "hosts:write",
     "alerts:write",
+    "agents:update",
     "policies:read",
     "policies:write",
     "jobs:read",
@@ -324,6 +325,16 @@ const MATRIX: &[(&str, &str, &str)] = &[
     ("POST", "/api/v1/jobs/nope/rerun", "jobs:run"),
     ("POST", "/api/v1/restores", "restore"),
     ("GET", "/api/v1/hosts", "hosts:read"),
+    ("GET", "/api/v1/agent-updates", "hosts:read"),
+    ("POST", "/api/v1/agent-updates", "agents:update"),
+    ("POST", "/api/v1/agent-updates/nope/pause", "agents:update"),
+    ("POST", "/api/v1/agent-updates/nope/resume", "agents:update"),
+    ("POST", "/api/v1/agent-updates/nope/cancel", "agents:update"),
+    (
+        "POST",
+        "/api/v1/agent-updates/nope/dismiss",
+        "agents:update",
+    ),
     ("GET", "/api/v1/hosts/nope", "hosts:read"),
     ("PUT", "/api/v1/hosts/nope/labels", "hosts:write"),
     ("POST", "/api/v1/hosts/nope/revoke", "hosts:write"),

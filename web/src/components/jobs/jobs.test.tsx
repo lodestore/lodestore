@@ -1456,3 +1456,161 @@ describe("Job page phase 5 additions", () => {
 		expect(text.indexOf("Catch-up")).toBeLessThan(text.indexOf("event 1"));
 	});
 });
+
+const agentUpdate = (
+	over: Partial<NonNullable<JobSummary["agent_update"]>> = {},
+) => ({
+	from_version: "0.1.0",
+	to_version: "0.2.0",
+	rollout_id: "rollout-1",
+	...over,
+});
+
+describe("Agent update jobs", () => {
+	it("lists an update with versions and the rollback reason", async () => {
+		mockJobs(() =>
+			page([
+				makeJob("upd-1", {
+					kind: "agent_update",
+					policy_name: null,
+					policy_exists: false,
+					stats: undefined,
+					agent_update: agentUpdate({ reason: "no hello in 120 s" }),
+					state: "failed",
+					error_code: "agent_update_rolled_back",
+					error_message: "no hello in 120 s",
+				}),
+			]),
+		);
+		await openJobs();
+
+		const table = await screen.findByRole("table");
+		expect(
+			await within(table).findByText("Agent update · 0.1.0 → 0.2.0"),
+		).toBeInTheDocument();
+		expect(within(table).getByText("web-1")).toBeInTheDocument();
+		expect(within(table).getAllByText("Rolled back").length).toBeGreaterThan(0);
+		expect(
+			within(table).getByText("The update was rolled back: no hello in 120 s"),
+		).toBeInTheDocument();
+	});
+
+	it("puts the Agent update type in the URL and the request", async () => {
+		const seen = mockJobs((url) =>
+			url.searchParams.get("kind") === "agent_update"
+				? page([
+						makeJob("upd-1", {
+							kind: "agent_update",
+							policy_name: null,
+							stats: undefined,
+							agent_update: agentUpdate(),
+						}),
+					])
+				: page([makeJob("done-1")]),
+		);
+		const { router } = await openJobs();
+		await screen.findByRole("table");
+
+		await userEvent.click(
+			screen.getByRole("combobox", { name: "Filter by type" }),
+		);
+		await userEvent.click(
+			await screen.findByRole("option", { name: "Agent update" }),
+		);
+
+		await waitFor(() =>
+			expect(router.state.location.search).toMatchObject({
+				kind: "agent_update",
+			}),
+		);
+		await waitFor(() =>
+			expect(seen.at(-1)?.searchParams.get("kind")).toBe("agent_update"),
+		);
+		expect(
+			await screen.findByText("Agent update · 0.1.0 → 0.2.0"),
+		).toBeInTheDocument();
+	});
+
+	const queuedUpdate = (over: Partial<JobSummary> = {}) => ({
+		kind: "agent_update" as const,
+		policy_name: null,
+		policy_exists: false,
+		stats: undefined,
+		agent_update: agentUpdate(),
+		state: "queued" as const,
+		started_at: null,
+		finished_at: null,
+		queue_reason: null,
+		host_online: true,
+		...over,
+	});
+
+	it("does not blame another job for an update waiting its turn", async () => {
+		mockJobs(() => page([makeJob("upd-1", queuedUpdate())]));
+		await openJobs();
+		const table = await screen.findByRole("table");
+		expect(
+			await within(table).findByText("Waiting in the queue"),
+		).toBeInTheDocument();
+		expect(within(table).queryByText(/Waiting for another/)).toBeNull();
+	});
+
+	it("says a job holds the update without calling it a backup", async () => {
+		mockJobs(() =>
+			page([makeJob("upd-1", queuedUpdate({ queue_reason: "host_busy" }))]),
+		);
+		await openJobs();
+		expect(
+			await screen.findByText("Waiting for another job on this host"),
+		).toBeInTheDocument();
+	});
+
+	it("shows no wait notice on the page of an update waiting its turn", async () => {
+		mockJob(makeDetail({ id: "upd-1", ...queuedUpdate() }));
+		await openJob("upd-1");
+		expect(
+			await screen.findByText("Agent update · 0.1.0 → 0.2.0"),
+		).toBeVisible();
+		expect(screen.queryByRole("note")).toBeNull();
+	});
+
+	it("names the running job on the page of a held update", async () => {
+		mockJob(
+			makeDetail({
+				id: "upd-1",
+				...queuedUpdate({ queue_reason: "host_busy" }),
+			}),
+		);
+		await openJob("upd-1");
+		expect(
+			await screen.findByText(
+				"Waiting for the running job on web-1 to finish.",
+			),
+		).toBeVisible();
+	});
+
+	it("shows the rollback reason on the job page without log or cancel", async () => {
+		mockJob(
+			makeDetail({
+				id: "upd-1",
+				kind: "agent_update",
+				policy_name: null,
+				policy_exists: false,
+				stats: undefined,
+				agent_update: agentUpdate({ reason: "failed in /opt/lodestore" }),
+				state: "failed",
+				error_code: "agent_update_rolled_back",
+				error_message: "failed in /opt/lodestore",
+			}),
+		);
+		await openJob("upd-1");
+
+		expect(await screen.findByText("Rolled back")).toBeVisible();
+		expect(screen.getByText("Agent update · 0.1.0 → 0.2.0")).toBeVisible();
+		expect(
+			screen.getByText(/The update was rolled back: failed in/),
+		).toBeVisible();
+		expect(screen.queryByRole("log")).toBeNull();
+		expect(screen.queryByRole("button", { name: "Cancel job" })).toBeNull();
+	});
+});

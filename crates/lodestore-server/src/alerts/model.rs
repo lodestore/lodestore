@@ -136,6 +136,7 @@ pub enum AlertType {
     AgentOffline,
     CheckFailed,
     CertificateExpiring,
+    AgentUpdateFailed,
 }
 
 impl AlertType {
@@ -146,6 +147,7 @@ impl AlertType {
             AlertType::AgentOffline => "agent_offline",
             AlertType::CheckFailed => "check_failed",
             AlertType::CertificateExpiring => "certificate_expiring",
+            AlertType::AgentUpdateFailed => "agent_update_failed",
         }
     }
 
@@ -156,6 +158,7 @@ impl AlertType {
             "agent_offline" => AlertType::AgentOffline,
             "check_failed" => AlertType::CheckFailed,
             "certificate_expiring" => AlertType::CertificateExpiring,
+            "agent_update_failed" => AlertType::AgentUpdateFailed,
             _ => return None,
         })
     }

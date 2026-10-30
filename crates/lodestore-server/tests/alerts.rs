@@ -202,6 +202,42 @@ impl Env {
         .unwrap();
     }
 
+    async fn agent_update(
+        &self,
+        id: &str,
+        host: &str,
+        state: &str,
+        target: &str,
+        reason: Option<&str>,
+        finished_ms: i64,
+    ) {
+        sqlx::query(
+            "INSERT INTO agent_rollouts (id, target_version, state, canary, wave_size, \
+             pause_after, created_by, created_at) VALUES ($1, $2, 'done', 1, 10, 0, 'admin', $3)",
+        )
+        .bind(format!("r-{id}"))
+        .bind(target)
+        .bind(finished_ms)
+        .execute(self.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO agent_updates (id, rollout_id, host_id, arch, from_version, \
+             target_version, wave, state, reason, queued_at, finished_at) \
+             VALUES ($1, $2, $3, 'x86_64', '0.1.0', $4, 0, $5, $6, $7, $7)",
+        )
+        .bind(id)
+        .bind(format!("r-{id}"))
+        .bind(host)
+        .bind(target)
+        .bind(state)
+        .bind(reason)
+        .bind(finished_ms)
+        .execute(self.pool())
+        .await
+        .unwrap();
+    }
+
     async fn check_run(
         &self,
         id: &str,
@@ -801,6 +837,150 @@ async fn alerts_check_not_silenced() {
         let id = env.alert_id("check_failed").await;
         assert_eq!(env.events(&id).await, ["firing"]);
         assert!(env.notified_at(&id).await.is_some());
+        env.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn alerts_agent_update_failed_raises_and_resolves() {
+    for backend in backends() {
+        let env = Env::start(&backend).await;
+        env.host("h1", "web-1").await;
+        let now = now_ms();
+        env.agent_update(
+            "u1",
+            "h1",
+            "rolled_back",
+            "0.2.0",
+            Some("Signature check failed: key not trusted on this host."),
+            now - HOUR,
+        )
+        .await;
+
+        let first = env.tick(now).await;
+        assert_eq!(first.fired, 1, "[{}]", backend.name());
+        let alerts = env.alerts("active").await;
+        assert_eq!(alerts.len(), 1);
+        let alert = &alerts[0];
+        assert_eq!(alert["type"], "agent_update_failed");
+        assert_eq!(alert["severity"], "critical");
+        assert_eq!(alert["title"], "Agent update failed on web-1");
+        assert_eq!(
+            alert["facts"]["error"],
+            "Signature check failed: key not trusted on this host."
+        );
+        let id = alert["id"].as_str().unwrap().to_string();
+        let key: String = sqlx::query("SELECT key FROM alerts WHERE id = $1")
+            .bind(&id)
+            .fetch_one(env.pool())
+            .await
+            .unwrap()
+            .get("key");
+        assert_eq!(key, "agent_update_failed:h1");
+        assert_eq!(env.tick(now + MINUTE).await, Default::default());
+
+        env.agent_update("u2", "h1", "succeeded", "0.2.0", None, now + HOUR)
+            .await;
+        sqlx::query("UPDATE agents SET version = '0.2.0' WHERE id = 'h1'")
+            .execute(env.pool())
+            .await
+            .unwrap();
+        let after = env.tick(now + HOUR + MINUTE).await;
+        assert_eq!(after.resolved, 1);
+        assert!(env.alerts("active").await.is_empty());
+        assert_eq!(env.events(&id).await, ["firing", "resolved"]);
+        env.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn alerts_agent_update_failed_clears_on_target_version() {
+    for backend in backends() {
+        let env = Env::start(&backend).await;
+        env.host("h1", "web-1").await;
+        let now = now_ms();
+        env.agent_update("u1", "h1", "rolled_back", "0.2.0", None, now - HOUR)
+            .await;
+        assert_eq!(env.tick(now).await.fired, 1, "[{}]", backend.name());
+
+        sqlx::query("UPDATE agents SET version = '0.2.0' WHERE id = 'h1'")
+            .execute(env.pool())
+            .await
+            .unwrap();
+        assert_eq!(env.tick(now + MINUTE).await.resolved, 1);
+        assert!(env.alerts("active").await.is_empty());
+        env.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn alerts_agent_update_failed_clears_above_the_target() {
+    for backend in backends() {
+        let env = Env::start(&backend).await;
+        env.host("h1", "web-1").await;
+        let now = now_ms();
+        env.agent_update("u1", "h1", "rolled_back", "0.2.0", None, now - HOUR)
+            .await;
+        assert_eq!(env.tick(now).await.fired, 1, "[{}]", backend.name());
+
+        sqlx::query("UPDATE agents SET version = '0.10.0' WHERE id = 'h1'")
+            .execute(env.pool())
+            .await
+            .unwrap();
+        assert_eq!(env.tick(now + MINUTE).await.resolved, 1);
+        assert!(env.alerts("active").await.is_empty());
+        env.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn alerts_agent_update_failed_stays_on_an_unreadable_version() {
+    for backend in backends() {
+        let env = Env::start(&backend).await;
+        env.host("h1", "web-1").await;
+        let now = now_ms();
+        env.agent_update("u1", "h1", "rolled_back", "0.2.0", None, now - HOUR)
+            .await;
+        assert_eq!(env.tick(now).await.fired, 1, "[{}]", backend.name());
+
+        for version in ["", "custom-build"] {
+            sqlx::query("UPDATE agents SET version = $1 WHERE id = 'h1'")
+                .bind(version)
+                .execute(env.pool())
+                .await
+                .unwrap();
+            assert_eq!(env.tick(now + MINUTE).await.resolved, 0, "{version:?}");
+            assert_eq!(env.alerts("active").await.len(), 1);
+        }
+        env.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn alerts_agent_update_failed_silenced_and_revoked() {
+    for backend in backends() {
+        let env = Env::start(&backend).await;
+        env.host("h1", "web-1").await;
+        env.host("h2", "web-2").await;
+        let now = now_ms();
+        env.agent_update("u1", "h1", "rolled_back", "0.2.0", None, now - HOUR)
+            .await;
+        env.agent_update("u2", "h2", "rolled_back", "0.2.0", None, now - HOUR)
+            .await;
+        sqlx::query("UPDATE agents SET status = 'revoked' WHERE id = 'h2'")
+            .execute(env.pool())
+            .await
+            .unwrap();
+        assert_eq!(env.put_silence("h1").await, 200, "[{}]", backend.name());
+
+        assert_eq!(env.tick(now).await, Default::default());
+        let alerts = env.alerts("active").await;
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0]["silenced"], true);
+        assert_eq!(alerts[0]["host"]["id"], "h1");
+        assert_eq!(env.event_count().await, 0);
+        let id = env.alert_id("agent_update_failed").await;
+        assert_eq!(env.notified_at(&id).await, None);
         env.stop().await;
     }
 }

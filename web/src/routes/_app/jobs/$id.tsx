@@ -14,8 +14,7 @@ import {
 	phaseLabel,
 	retentionRunning,
 } from "@/components/jobs/job-progress";
-import { waitReason } from "@/components/jobs/jobs-table";
-import { StatusBadge } from "@/components/status-badge";
+import { JobStatusBadge, waitReason } from "@/components/jobs/jobs-table";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
 	Breadcrumb,
@@ -48,7 +47,9 @@ const isActive = (state?: string) => state === "queued" || state === "running";
 
 function announcement(job: JobDetail) {
 	const status = copy.jobs.detail.announce[job.state];
-	return job.state === "running" ? `${status}. ${phaseLabel(job)}` : status;
+	return job.state === "running" && job.kind !== "agent_update"
+		? `${status}. ${phaseLabel(job)}`
+		: status;
 }
 
 function NotFound() {
@@ -81,6 +82,17 @@ function Notice({ children }: { children: string }) {
 
 function JobNotices({ job }: { job: JobDetail }) {
 	if (job.kind === "download") return null;
+	if (job.kind === "agent_update") {
+		const reason = job.state === "queued" ? waitReason(job) : undefined;
+		if (reason === undefined) return null;
+		return (
+			<Notice>
+				{reason === "host_offline"
+					? copy.jobs.queueReason.offlineShort(job.hostname)
+					: copy.jobs.agentUpdate.waitingBusy(job.hostname)}
+			</Notice>
+		);
+	}
 	const restore = job.kind === "restore";
 	const d = copy.jobs.detail;
 	const q = copy.jobs.queueReason;
@@ -114,6 +126,12 @@ function JobNotices({ job }: { job: JobDetail }) {
 }
 
 function JobSubline({ job }: { job: JobDetail }) {
+	if (job.kind === "agent_update") {
+		return copy.jobs.agentUpdate.kind(
+			job.agent_update?.from_version ?? "",
+			job.agent_update?.to_version ?? "",
+		);
+	}
 	const info = job.restore ?? job.download;
 	if (job.kind === "restore" || job.kind === "download") {
 		if (!info) return null;
@@ -235,22 +253,24 @@ function JobPage() {
 								>
 									{job.hostname}
 								</h1>
-								<StatusBadge status={job.state} />
+								<JobStatusBadge job={job} />
 							</div>
 							<p className="text-sm text-muted-foreground wrap-anywhere">
 								<JobSubline job={job} />
 							</p>
 						</div>
 						<div className="flex gap-2">
-							{isActive(job.state) && job.kind !== "download" && (
-								<Button
-									variant="outline"
-									className="text-destructive"
-									onClick={() => setCancelling(true)}
-								>
-									{copy.jobs.cancelJob}
-								</Button>
-							)}
+							{isActive(job.state) &&
+								job.kind !== "download" &&
+								job.kind !== "agent_update" && (
+									<Button
+										variant="outline"
+										className="text-destructive"
+										onClick={() => setCancelling(true)}
+									>
+										{copy.jobs.cancelJob}
+									</Button>
+								)}
 							{!isActive(job.state) &&
 								job.kind === "backup" &&
 								job.source !== "cli" &&
@@ -272,11 +292,12 @@ function JobPage() {
 					</div>
 
 					<JobNotices job={job} />
-					{(isActive(job.state) || retentionRunning(job)) && (
-						<JobProgress job={job} onShowWarnings={showWarnings} />
-					)}
+					{job.kind !== "agent_update" &&
+						(isActive(job.state) || retentionRunning(job)) && (
+							<JobProgress job={job} onShowWarnings={showWarnings} />
+						)}
 					<JobCards job={job} />
-					{job.kind !== "download" && (
+					{job.kind !== "download" && job.kind !== "agent_update" && (
 						<JobLog
 							key={job.id}
 							jobId={job.id}

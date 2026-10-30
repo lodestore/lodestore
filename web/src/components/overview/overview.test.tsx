@@ -650,6 +650,12 @@ describe("active alerts", () => {
 				detail: "Renews automatically while the agent is online.",
 				facts: { not_after: now + 8.5 * DAY },
 			}),
+			alertFixture("a6", {
+				type: "agent_update_failed",
+				facts: {
+					error: "Signature check failed: key not trusted on this host.",
+				},
+			}),
 		]);
 		await screen.findByRole("list", { name: HOST_ALERTS });
 
@@ -663,6 +669,9 @@ describe("active alerts", () => {
 		expect(text.get("web-1 is offline")).toBe("Last contact 2 hours ago.");
 		expect(text.get("Agent certificate on web-1 expires in 9 days")).toBe(
 			"Renews automatically while the agent is online.",
+		);
+		expect(text.get("Agent update failed on web-1")).toBe(
+			"Signature check failed: key not trusted on this host.",
 		);
 		expect(
 			within(screen.getByRole("list", { name: HOST_ALERTS })).getAllByRole(

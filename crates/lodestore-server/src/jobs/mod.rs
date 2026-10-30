@@ -165,6 +165,7 @@ pub enum JobKind {
     Download,
     Gc,
     Check,
+    AgentUpdate,
 }
 
 impl JobKind {
@@ -175,6 +176,7 @@ impl JobKind {
             "download" => JobKind::Download,
             "gc" => JobKind::Gc,
             "check" => JobKind::Check,
+            "agent_update" => JobKind::AgentUpdate,
             _ => return None,
         })
     }
@@ -307,6 +309,15 @@ pub struct CheckJobInfo {
 }
 
 #[derive(Serialize, ToSchema)]
+pub struct AgentUpdateInfo {
+    pub from_version: String,
+    pub to_version: String,
+    pub rollout_id: String,
+    /// Why the update was rolled back or cancelled.
+    pub reason: Option<String>,
+}
+
+#[derive(Serialize, ToSchema)]
 pub struct JobBrief {
     pub id: String,
     pub state: JobState,
@@ -355,6 +366,7 @@ pub struct JobSummary {
     pub download: Option<DownloadInfo>,
     pub gc: Option<GcJobInfo>,
     pub check: Option<CheckJobInfo>,
+    pub agent_update: Option<AgentUpdateInfo>,
     pub incomplete: bool,
     pub warnings_total: u64,
     pub errors_total: u64,
@@ -585,7 +597,7 @@ pub(crate) fn summary_from_row(
         });
     let db_kind: String = row.try_get("kind")?;
     let kind = match JobKind::parse(&db_kind) {
-        Some(JobKind::Download | JobKind::Gc | JobKind::Check) | None => {
+        Some(JobKind::Download | JobKind::Gc | JobKind::Check | JobKind::AgentUpdate) | None => {
             return Err(unknown("kind", &db_kind));
         }
         Some(kind) => kind,
@@ -611,6 +623,7 @@ pub(crate) fn summary_from_row(
         download: None,
         gc: None,
         check: None,
+        agent_update: None,
         source: match source.as_str() {
             "manual" => JobSource::Manual,
             "cli" => JobSource::Cli,
@@ -720,6 +733,7 @@ pub(crate) fn download_summary(
         }),
         gc: None,
         check: None,
+        agent_update: None,
         incomplete: false,
         warnings_total: 0,
         errors_total: 0,
@@ -796,6 +810,7 @@ pub(crate) fn gc_summary(row: &AnyRow) -> Result<JobSummary, ApiError> {
         download: None,
         gc: Some(info),
         check: None,
+        agent_update: None,
         incomplete: false,
         warnings_total: 0,
         errors_total: 0,
@@ -862,12 +877,113 @@ pub(crate) fn check_summary(row: &AnyRow) -> Result<JobSummary, ApiError> {
         download: None,
         gc: None,
         check: Some(info),
+        agent_update: None,
         incomplete: false,
         warnings_total: 0,
         errors_total: 0,
         error_code: None,
         error_message: run.error,
     })
+}
+
+pub(crate) const AGENT_UPDATE_COLUMNS: &str = "u.id, u.rollout_id, u.host_id, u.from_version, \
+     u.target_version, u.state, u.reason, u.queued_at, u.assigned_at, u.finished_at, \
+     a.hostname AS hostname";
+
+pub(crate) const AGENT_UPDATE_FROM: &str = "FROM agent_updates u JOIN agents a ON a.id = u.host_id";
+
+pub(crate) fn agent_update_summary(
+    state: &AppState,
+    row: &AnyRow,
+    busy: &HashSet<String>,
+) -> Result<JobSummary, ApiError> {
+    let host_id: String = row.try_get("host_id")?;
+    let db_state: String = row.try_get("state")?;
+    let reason: Option<String> = row.try_get("reason")?;
+    let host_online = state.registry.is_online(&host_id);
+    let job_state = match db_state.as_str() {
+        "queued" => JobState::Queued,
+        "assigned" => JobState::Running,
+        "succeeded" => JobState::Succeeded,
+        "rolled_back" => JobState::Failed,
+        "cancelled" => JobState::Cancelled,
+        other => return Err(unknown("agent update state", other)),
+    };
+    let queue_reason = (db_state == "queued")
+        .then(|| {
+            if !host_online {
+                Some(QueueReason::HostOffline)
+            } else if busy.contains(&host_id) {
+                Some(QueueReason::HostBusy)
+            } else {
+                None
+            }
+        })
+        .flatten();
+    let info = AgentUpdateInfo {
+        from_version: row.try_get("from_version")?,
+        to_version: row.try_get("target_version")?,
+        rollout_id: row.try_get("rollout_id")?,
+        reason: reason.clone(),
+    };
+    Ok(JobSummary {
+        id: row.try_get("id")?,
+        kind: JobKind::AgentUpdate,
+        host_id,
+        hostname: row.try_get("hostname")?,
+        policy_name: None,
+        policy_exists: false,
+        source: JobSource::Manual,
+        origin: JobOrigin::Manual,
+        missed_runs: None,
+        stdin_name: None,
+        state: job_state,
+        phase: None,
+        queued_at: row.try_get("queued_at")?,
+        started_at: row.try_get("assigned_at")?,
+        finished_at: row.try_get("finished_at")?,
+        queue_reason,
+        host_online,
+        progress: None,
+        snapshot_id: None,
+        snapshot_suspicious: false,
+        stats: None,
+        restore: None,
+        restore_result: None,
+        download: None,
+        gc: None,
+        check: None,
+        agent_update: Some(info),
+        incomplete: false,
+        warnings_total: 0,
+        errors_total: 0,
+        error_code: (db_state == "rolled_back").then(|| "agent_update_rolled_back".to_string()),
+        error_message: reason,
+    })
+}
+
+pub async fn load_agent_update(state: &AppState, id: &str) -> Result<Option<JobDetail>, ApiError> {
+    let row = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SELECT {AGENT_UPDATE_COLUMNS} {AGENT_UPDATE_FROM} WHERE u.id = $1"
+    )))
+    .bind(id)
+    .fetch_optional(&state.db.pool)
+    .await?;
+    let Some(row) = row else { return Ok(None) };
+    Ok(Some(JobDetail {
+        summary: agent_update_summary(state, &row, &busy_hosts(state).await?)?,
+        repository_id: String::new(),
+        parent_id: None,
+        error_detail: BTreeMap::new(),
+        caller_uid: None,
+        caller_gid: None,
+        cancel_requested: false,
+        log_seq: 0,
+        log_lines: 0,
+        logs_purged: false,
+        retention: None,
+        limits: None,
+    }))
 }
 
 pub async fn load_download(state: &AppState, id: &str) -> Result<Option<JobDetail>, ApiError> {

@@ -10,10 +10,11 @@ use utoipa_axum::routes;
 
 use super::restore::{RestoreRequest, enqueue_restore};
 use super::{
-    ACTIVE_STATES, ConflictPolicyDto, DOWNLOAD_COLUMNS, JOB_COLUMNS, JOB_FROM, JobDetail, JobKind,
-    JobProgressDto, JobSource, JobState, JobSummary, RunJob, busy_hosts, check_select,
-    check_summary, download_summary, enqueue, gc_select, gc_summary, job_spec, load_download,
-    load_job, summary_from_row,
+    ACTIVE_STATES, AGENT_UPDATE_COLUMNS, AGENT_UPDATE_FROM, ConflictPolicyDto, DOWNLOAD_COLUMNS,
+    JOB_COLUMNS, JOB_FROM, JobDetail, JobKind, JobProgressDto, JobSource, JobState, JobSummary,
+    RunJob, agent_update_summary, busy_hosts, check_select, check_summary, download_summary,
+    enqueue, gc_select, gc_summary, job_spec, load_agent_update, load_download, load_job,
+    summary_from_row,
 };
 use crate::auth::tokens::{JobsRead, JobsRun, RestoreScope, Scoped};
 use crate::browse::AGENTLESS;
@@ -67,7 +68,7 @@ pub struct JobsQuery {
     pub host: Option<String>,
     /// Exact host id.
     pub host_id: Option<String>,
-    /// `backup`, `restore`, `download`, `gc` or `check`.
+    /// `backup`, `restore`, `download`, `gc`, `check` or `agent_update`.
     pub kind: Option<String>,
     /// One-based page number.
     pub page: Option<u64>,
@@ -123,19 +124,29 @@ pub async fn list_jobs(
             "Unknown source \"{source}\"."
         )));
     }
-    let want_jobs = !matches!(kind, Some(JobKind::Download | JobKind::Gc | JobKind::Check));
+    let want_jobs = !matches!(
+        kind,
+        Some(JobKind::Download | JobKind::Gc | JobKind::Check | JobKind::AgentUpdate)
+    );
     let want_downloads = kind.is_none() || kind == Some(JobKind::Download);
     let want_gc = kind.is_none() || kind == Some(JobKind::Gc);
     let want_check = kind.is_none() || kind == Some(JobKind::Check);
+    let want_agent_updates = kind.is_none() || kind == Some(JobKind::AgentUpdate);
 
     let page = query.page.unwrap_or(1).max(1);
     let offset = i64::try_from(page - 1)
         .unwrap_or(i64::MAX)
         .saturating_mul(PAGE_SIZE);
-    let merged = [want_jobs, want_downloads, want_gc, want_check]
-        .iter()
-        .filter(|wanted| **wanted)
-        .count()
+    let merged = [
+        want_jobs,
+        want_downloads,
+        want_gc,
+        want_check,
+        want_agent_updates,
+    ]
+    .iter()
+    .filter(|wanted| **wanted)
+    .count()
         > 1;
     let (sql_offset, sql_limit) = if merged {
         (0, offset.saturating_add(PAGE_SIZE))
@@ -205,6 +216,22 @@ pub async fn list_jobs(
             entries.push((key, Entry::Check(row)));
         }
     }
+    if want_agent_updates {
+        let (count, rows) =
+            fetch_agent_updates(&state, &query, status, sql_limit, sql_offset).await?;
+        total += count;
+        for row in rows {
+            let key = SortKey::new(
+                matches!(
+                    row.try_get::<String, _>("state")?.as_str(),
+                    "queued" | "assigned"
+                ),
+                row.try_get("queued_at")?,
+                row.try_get("id")?,
+            );
+            entries.push((key, Entry::AgentUpdate(row)));
+        }
+    }
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     let skip = if merged { offset as usize } else { 0 };
 
@@ -216,6 +243,7 @@ pub async fn list_jobs(
             Entry::Download(row) => download_summary(&state, row)?.0,
             Entry::Gc(row) => gc_summary(row)?,
             Entry::Check(row) => check_summary(row)?,
+            Entry::AgentUpdate(row) => agent_update_summary(&state, row, &busy)?,
         });
     }
     for item in &mut items {
@@ -247,6 +275,7 @@ enum Entry {
     Download(AnyRow),
     Gc(AnyRow),
     Check(AnyRow),
+    AgentUpdate(AnyRow),
 }
 
 fn place(binds: &mut Vec<String>, value: String) -> String {
@@ -511,6 +540,78 @@ async fn fetch_checks(
     Ok((total, rows))
 }
 
+async fn fetch_agent_updates(
+    state: &AppState,
+    query: &JobsQuery,
+    status: Option<JobState>,
+    limit: i64,
+    offset: i64,
+) -> Result<(i64, Vec<AnyRow>), ApiError> {
+    let mut clauses: Vec<String> = Vec::new();
+    let mut binds: Vec<String> = Vec::new();
+    if let Some(status) = status {
+        clauses.push(
+            match status {
+                JobState::Queued => "u.state = 'queued'",
+                JobState::Running => "u.state = 'assigned'",
+                JobState::Succeeded => "u.state = 'succeeded'",
+                JobState::Failed => "u.state = 'rolled_back'",
+                JobState::Cancelled => "u.state = 'cancelled'",
+                JobState::Waiting
+                | JobState::Warnings
+                | JobState::Interrupted
+                | JobState::NotStarted => "1 = 0",
+            }
+            .to_string(),
+        );
+    }
+    if query.policy.is_some() || query.source.as_deref() == Some("cli") {
+        clauses.push("1 = 0".to_string());
+    }
+    if let Some(host) = query.host.as_deref().filter(|h| !h.is_empty()) {
+        clauses.push(format!(
+            "LOWER(a.hostname) LIKE {} ESCAPE '\\'",
+            place(&mut binds, like_pattern(host))
+        ));
+    }
+    if let Some(host_id) = query.host_id.as_deref().filter(|h| !h.is_empty()) {
+        clauses.push(format!(
+            "u.host_id = {}",
+            place(&mut binds, host_id.to_string())
+        ));
+    }
+    let filter = if clauses.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", clauses.join(" AND "))
+    };
+
+    let mut count = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SELECT COUNT(*) AS n {AGENT_UPDATE_FROM}{filter}"
+    )));
+    for value in &binds {
+        count = count.bind(value.as_str());
+    }
+    let total: i64 = count.fetch_one(&state.db.pool).await?.try_get("n")?;
+
+    let mut select = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SELECT {AGENT_UPDATE_COLUMNS} {AGENT_UPDATE_FROM}{filter} \
+         ORDER BY CASE WHEN u.state IN ('queued', 'assigned') THEN 0 ELSE 1 END, \
+         u.queued_at DESC, u.id DESC LIMIT ${} OFFSET ${}",
+        binds.len() + 1,
+        binds.len() + 2
+    )));
+    for value in &binds {
+        select = select.bind(value.as_str());
+    }
+    let rows = select
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&state.db.pool)
+        .await?;
+    Ok((total, rows))
+}
+
 #[utoipa::path(
     get,
     tag = "Jobs",
@@ -534,9 +635,12 @@ pub async fn get_job(
 async fn job_detail(state: &AppState, id: &str) -> Result<Json<JobDetail>, ApiError> {
     let mut job = match load_job(state, id).await? {
         Some(job) => job,
-        None => load_download(state, id)
-            .await?
-            .ok_or_else(|| ApiError::NotFound("job not found".into()))?,
+        None => match load_download(state, id).await? {
+            Some(job) => job,
+            None => load_agent_update(state, id)
+                .await?
+                .ok_or_else(|| ApiError::NotFound("job not found".into()))?,
+        },
     };
     overlay_live(state, &mut job.summary);
     Ok(Json(job))

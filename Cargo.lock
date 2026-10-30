@@ -2187,6 +2187,8 @@ name = "lodestore-agent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "aws-lc-rs",
+ "blake2",
  "bytes",
  "clap",
  "data-encoding",
@@ -2196,12 +2198,14 @@ dependencies = [
  "libc",
  "lodestore-format",
  "lodestore-proto",
+ "lodestore-testkit",
  "prost",
  "rcgen",
  "reqwest",
  "rustix",
  "rustls",
  "rustls-pki-types",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.11.1",
@@ -2310,6 +2314,7 @@ dependencies = [
  "rust-embed",
  "rustix",
  "rustls-pki-types",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.11.1",
@@ -2341,7 +2346,9 @@ dependencies = [
 name = "lodestore-testkit"
 version = "0.1.0"
 dependencies = [
+ "aws-lc-rs",
  "axum",
+ "blake2",
  "data-encoding",
  "getrandom 0.4.3",
  "reqwest",

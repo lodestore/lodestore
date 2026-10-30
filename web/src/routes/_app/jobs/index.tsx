@@ -46,7 +46,7 @@ const STATES = [
 	"not_started",
 ] as const;
 
-const KINDS = ["backup", "restore", "download"] as const;
+const KINDS = ["backup", "restore", "download", "agent_update"] as const;
 
 const PAGE_SIZE = 50;
 const SEARCH_DEBOUNCE_MS = 300;

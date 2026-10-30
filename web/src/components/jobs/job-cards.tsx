@@ -527,7 +527,49 @@ function resultCard(job: JobDetail) {
 	}
 }
 
+function AgentUpdateCards({ job }: { job: JobDetail }) {
+	const text = copy.jobs.agentUpdate;
+	const info = job.agent_update;
+	const reason = info?.reason?.trim() ?? "";
+	const note =
+		job.state === "failed"
+			? text.reason(reason)
+			: job.state === "cancelled" && reason
+				? text.cancelledReason(reason)
+				: null;
+	return (
+		<div className="grid gap-6 xl:grid-cols-2">
+			<Facts
+				title={text.cardTitle}
+				facts={[
+					[
+						copy.jobs.cards.host,
+						<HostLink id={job.host_id} name={job.hostname} />,
+					],
+					[text.from, info?.from_version],
+					[text.to, info?.to_version],
+					[text.queued, dateTime(job.queued_at)],
+					[text.started, dateTime(job.started_at)],
+					[text.finished, dateTime(job.finished_at)],
+				]}
+			/>
+			{note !== null && (
+				<Alert
+					variant={job.state === "failed" ? "destructive" : "default"}
+					role={job.state === "failed" ? "alert" : "note"}
+					className="self-start wrap-anywhere"
+				>
+					<AlertDescription className="text-current">
+						<TextWithPaths text={note} />
+					</AlertDescription>
+				</Alert>
+			)}
+		</div>
+	);
+}
+
 export function JobCards({ job }: { job: JobDetail }) {
+	if (job.kind === "agent_update") return <AgentUpdateCards job={job} />;
 	const text = outcomeText(job);
 	const result = resultCard(job);
 	return (

@@ -66,6 +66,7 @@ export type JobRow = {
 	download?: JobSummary["download"];
 	gc?: JobSummary["gc"];
 	check?: JobSummary["check"];
+	agent_update?: JobSummary["agent_update"];
 	host_id: string;
 	hostname: string;
 	policy_name?: string | null;
@@ -350,6 +351,27 @@ function GcResult({ job }: { job: JobRow }) {
 	}
 }
 
+function AgentUpdateResult({ job }: { job: JobRow }) {
+	const text = copy.jobs.agentUpdate;
+	switch (job.state) {
+		case "queued":
+			return (
+				<span className="text-sm text-muted-foreground">
+					{queuedHint(job, copy.jobs.queueReason.busyJob)}
+				</span>
+			);
+		case "failed":
+			return (
+				<Truncated
+					text={text.reason(job.error_message?.trim() ?? "")}
+					className="max-w-64 text-sm"
+				/>
+			);
+		default:
+			return <span>{copy.common.dash}</span>;
+	}
+}
+
 function CheckResult({ job }: { job: JobRow }) {
 	const check = job.check;
 	if (!check) return <span>{copy.common.dash}</span>;
@@ -425,6 +447,7 @@ function LockedMark({ gc }: { gc: NonNullable<JobRow["gc"]> }) {
 export function JobResult({ job }: { job: JobRow }) {
 	if (job.kind === "gc") return <GcResult job={job} />;
 	if (job.kind === "check") return <CheckResult job={job} />;
+	if (job.kind === "agent_update") return <AgentUpdateResult job={job} />;
 	if (job.kind === "restore" || job.kind === "download") {
 		return <OtherJobResult job={job} />;
 	}
@@ -554,7 +577,33 @@ function Duration({ job }: { job: JobRow }) {
 	return <span>{copy.common.dash}</span>;
 }
 
+export function JobStatusBadge({
+	job,
+}: {
+	job: Pick<JobRow, "kind" | "state">;
+}) {
+	if (job.kind === "agent_update" && job.state === "failed") {
+		return (
+			<StatusBadge status="failed">
+				{copy.jobs.agentUpdate.rolledBack}
+			</StatusBadge>
+		);
+	}
+	return <StatusBadge status={job.state} />;
+}
+
 function PolicyLine({ job }: { job: JobRow }) {
+	if (job.kind === "agent_update") {
+		const info = job.agent_update;
+		return (
+			<div className="text-sm whitespace-nowrap text-muted-foreground">
+				{copy.jobs.agentUpdate.kind(
+					info?.from_version ?? "",
+					info?.to_version ?? "",
+				)}
+			</div>
+		);
+	}
 	if (job.kind === "restore" || job.kind === "download") {
 		const line =
 			job.kind === "restore"
@@ -674,7 +723,8 @@ export function JobActions({
 	onCancel?: (job: JobRow) => void;
 	onRerun?: (job: JobRow) => void;
 }) {
-	const cancellable = isActive(job) && job.kind !== "download";
+	const cancellable =
+		isActive(job) && job.kind !== "download" && job.kind !== "agent_update";
 	const rerunnable =
 		!isActive(job) &&
 		(job.kind === undefined || job.kind === "backup") &&
@@ -779,7 +829,7 @@ export function JobsTable({
 								}}
 							>
 								<TableCell className={cn("px-4", showHost && SHOW_STATUS)}>
-									<StatusBadge status={job.state} />
+									<JobStatusBadge job={job} />
 								</TableCell>
 								<TableCell className="px-4">
 									{isRepositoryJob(job) ? (
@@ -790,7 +840,7 @@ export function JobsTable({
 												<GcName job={job} />
 											)}
 											<div className="@min-[1024px]:hidden">
-												<StatusBadge status={job.state} />
+												<JobStatusBadge job={job} />
 											</div>
 										</>
 									) : showHost ? (
@@ -810,13 +860,17 @@ export function JobsTable({
 													</Link>
 												)}
 											</Truncated>
-											{showPolicy && <PolicyLine job={job} />}
+											{(showPolicy || job.kind === "agent_update") && (
+												<PolicyLine job={job} />
+											)}
 											<div className="@min-[1024px]:hidden">
-												<StatusBadge status={job.state} />
+												<JobStatusBadge job={job} />
 											</div>
 										</>
 									) : (
-										showPolicy && <PolicyLine job={job} />
+										(showPolicy || job.kind === "agent_update") && (
+											<PolicyLine job={job} />
+										)
 									)}
 								</TableCell>
 								<TableCell className={cn("px-4", SHOW_STARTED)}>

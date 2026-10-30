@@ -25,6 +25,13 @@ groups:
         annotations:
           summary: "{{ $labels.host }} is offline"
           description: "The agent on {{ $labels.host }} has not been connected for 15 minutes."
+      - alert: LodestoreAgentUpdateFailed
+        expr: lodestore_host_agent_update_failed == 1
+        labels:
+          severity: critical
+        annotations:
+          summary: "Agent update failed on {{ $labels.host }}"
+          description: "The last agent update of {{ $labels.host }} was rolled back and the host is not on its target version. The reason is in Jobs, Agent update."
   - name: lodestore-repositories
     rules:
       - alert: LodestoreCheckFailed

@@ -43,6 +43,33 @@ impl Stand {
         .unwrap();
     }
 
+    async fn agent_update(&self, id: &str, host: &str, state: &str, target: &str) {
+        sqlx::query(
+            "INSERT INTO agent_rollouts (id, target_version, state, canary, wave_size, \
+             pause_after, created_by, created_at) VALUES ($1, $2, 'done', 1, 10, 0, 'admin', $3)",
+        )
+        .bind(format!("r-{id}"))
+        .bind(target)
+        .bind(now_ms())
+        .execute(self.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO agent_updates (id, rollout_id, host_id, arch, from_version, \
+             target_version, wave, state, reason, queued_at, finished_at) \
+             VALUES ($1, $2, $3, 'x86_64', '0.1.0', $4, 0, $5, 'rolled back', $6, $6)",
+        )
+        .bind(id)
+        .bind(format!("r-{id}"))
+        .bind(host)
+        .bind(target)
+        .bind(state)
+        .bind(now_ms())
+        .execute(self.pool())
+        .await
+        .unwrap();
+    }
+
     async fn policy(&self, name: &str, host: &str) {
         let yaml = format!(
             "apiVersion: lodestore.io/v1alpha1\nkind: BackupPolicy\nmetadata:\n  name: {name}\n\
@@ -607,6 +634,56 @@ async fn metrics_cert_and_alerts() {
             value(
                 &text,
                 r#"lodestore_alerts_active{type="backup_failed",silenced="false"}"#
+            ),
+            0.0
+        );
+        stand.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn metrics_agent_version_and_update_failed() {
+    for backend in backends() {
+        let stand = Stand::start(&backend).await;
+        stand.agent("h1", "web-1").await;
+        stand.agent("h2", "db-1").await;
+        stand.agent("h3", "gone-1").await;
+        sqlx::query("UPDATE agents SET version = '0.2.0' WHERE id = 'h2'")
+            .execute(stand.pool())
+            .await
+            .unwrap();
+        sqlx::query("UPDATE agents SET status = 'revoked' WHERE id = 'h3'")
+            .execute(stand.pool())
+            .await
+            .unwrap();
+        stand.agent_update("u1", "h1", "rolled_back", "0.2.0").await;
+
+        let text = stand.scrape().await;
+        for (id, host, version) in [("h1", "web-1", "0.1.0"), ("h2", "db-1", "0.2.0")] {
+            let series = format!(
+                r#"lodestore_host_agent_info{{host_id="{id}",host="{host}",version="{version}"}}"#
+            );
+            assert_eq!(value(&text, &series), 1.0, "{text}");
+        }
+        assert!(!text.contains("gone-1"), "{text}");
+        assert_eq!(
+            value(
+                &text,
+                r#"lodestore_host_agent_update_failed{host_id="h1",host="web-1"}"#
+            ),
+            1.0
+        );
+        assert_eq!(
+            value(
+                &text,
+                r#"lodestore_host_agent_update_failed{host_id="h2",host="db-1"}"#
+            ),
+            0.0
+        );
+        assert_eq!(
+            value(
+                &text,
+                r#"lodestore_alerts_active{type="agent_update_failed",silenced="false"}"#
             ),
             0.0
         );

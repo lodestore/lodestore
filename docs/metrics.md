@@ -57,6 +57,7 @@ scrape_configs:
 | `LodestoreBackupFailed` | critical | `lodestore_backup_last_status == 0` |
 | `LodestoreNoRecentBackup` | warning | `lodestore_backup_overdue == 1` |
 | `LodestoreAgentOffline` | warning | `lodestore_host_agent_up == 0` for 15 minutes |
+| `LodestoreAgentUpdateFailed` | critical | `lodestore_host_agent_update_failed == 1` |
 | `LodestoreCheckFailed` | critical | `lodestore_check_last_status == 0` |
 | `LodestoreCertificateExpiring` | warning | an agent or server certificate with fewer than 14 days left |
 
@@ -75,6 +76,8 @@ Every metric is a gauge. A series is absent, not zero, where there is nothing to
 | `lodestore_build_info` | `version` | Always 1; the server version. |
 | `lodestore_hosts` | `state` | Number of hosts in each state: `healthy`, `overdue`, `failed`, `offline`, `not_protected`. All five are always present. |
 | `lodestore_host_agent_up` | `host_id`, `host` | 1 while the agent is connected, 0 otherwise. |
+| `lodestore_host_agent_info` | `host_id`, `host`, `version` | Always 1; the agent version of each host that is not revoked. |
+| `lodestore_host_agent_update_failed` | `host_id`, `host` | 1 while the last agent update of the host rolled back and the host is not on its target version, 0 otherwise. |
 | `lodestore_host_agent_last_seen_timestamp_seconds` | `host_id`, `host` | When the agent was last seen, Unix time. |
 | `lodestore_host_cert_expiry_timestamp_seconds` | `host_id`, `host` | When the agent certificate expires, Unix time. |
 | `lodestore_server_cert_expiry_timestamp_seconds` | `cert` | When the server gRPC certificate expires, Unix time. `cert` is `grpc`. |

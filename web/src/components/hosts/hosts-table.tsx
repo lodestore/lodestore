@@ -1,11 +1,18 @@
 import { Link, useNavigate } from "@tanstack/react-router";
-import { MoreHorizontal, Search, Server, TriangleAlert } from "lucide-react";
+import {
+	CircleArrowUp,
+	MoreHorizontal,
+	Search,
+	Server,
+	TriangleAlert,
+} from "lucide-react";
 import { useState } from "react";
-import type { Host } from "@/api/gen/model";
+import type { AgentUpdateStatus, Host, HostUpdate } from "@/api/gen/model";
 import {
 	Illustration,
 	type IllustrationName,
 } from "@/components/brand/illustration";
+import { AgentVersionCell } from "@/components/hosts/agent-update/agent-version-cell";
 import { TextWithPaths } from "@/components/path-text";
 import { formatRelative } from "@/components/relative-time";
 import { SortButton } from "@/components/sort-button";
@@ -13,6 +20,7 @@ import { StatusBadge } from "@/components/status-badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
 	DropdownMenu,
 	DropdownMenuContent,
@@ -38,6 +46,7 @@ import {
 	TableHeader,
 	TableRow,
 } from "@/components/ui/table";
+import { Toggle } from "@/components/ui/toggle";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import {
 	Tooltip,
@@ -187,37 +196,6 @@ function LabelChips({
 	);
 }
 
-export function VersionCell({
-	version,
-	serverVersion,
-}: {
-	version: string;
-	serverVersion?: string;
-}) {
-	const differs = serverVersion !== undefined && version !== serverVersion;
-	return (
-		<span className="inline-flex items-center gap-1 font-mono">
-			{version}
-			{differs && (
-				<Tooltip>
-					<TooltipTrigger asChild>
-						<span
-							role="img"
-							aria-label={copy.hosts.versionDiffers(serverVersion)}
-							className="text-warning"
-						>
-							<TriangleAlert aria-hidden className="size-4" />
-						</span>
-					</TooltipTrigger>
-					<TooltipContent>
-						{copy.hosts.versionDiffers(serverVersion)}
-					</TooltipContent>
-				</Tooltip>
-			)}
-		</span>
-	);
-}
-
 export function CertificateText({ host }: { host: Host }) {
 	if (host.status === "revoked") return <span>{copy.common.dash}</span>;
 	const remaining = host.cert_not_after - Date.now();
@@ -255,7 +233,7 @@ function SkeletonRows() {
 			<TableCell className="px-4">
 				<Skeleton className="h-5 w-32" />
 			</TableCell>
-			<TableCell className={cn("px-4", SHOW_WIDE)}>
+			<TableCell className="px-4">
 				<Skeleton className="h-4 w-12" />
 			</TableCell>
 			<TableCell className={cn("px-4", SHOW_WIDE)}>
@@ -273,7 +251,12 @@ export function HostsTable({
 	isPending,
 	isError,
 	onRetry,
-	serverVersion,
+	updates,
+	status,
+	selectable = false,
+	selected,
+	onSelect,
+	onSelectAll,
 	onAdd,
 	onEditLabels,
 	onRevoke,
@@ -282,7 +265,12 @@ export function HostsTable({
 	isPending: boolean;
 	isError: boolean;
 	onRetry: () => void;
-	serverVersion?: string;
+	updates?: Map<string, HostUpdate>;
+	status?: AgentUpdateStatus;
+	selectable?: boolean;
+	selected?: Set<string>;
+	onSelect?: (id: string, checked: boolean) => void;
+	onSelectAll?: (ids: string[], checked: boolean) => void;
 	onAdd: () => void;
 	onEditLabels: (host: Host) => void;
 	onRevoke: (host: Host) => void;
@@ -295,14 +283,29 @@ export function HostsTable({
 	const [sort, setSort] = useState<Sort>({ key: "status", dir: "asc" });
 	const [page, setPage] = useState(0);
 
+	const [onlyOutdated, setOnlyOutdated] = useState(false);
+
 	const needle = query.trim().toLowerCase();
+	const isOutdated = (h: Host) => updates?.get(h.id)?.outdated === true;
+	const canSelect = (h: Host) =>
+		selectable && isOutdated(h) && updates?.get(h.id)?.updatable === true;
+	const active = (hosts ?? []).filter((h) => h.status !== "revoked");
+	const outdatedCount = selectable ? active.filter(isOutdated).length : 0;
+	const outdatedOnly = onlyOutdated && outdatedCount > 0;
+	const showSelect = active.some(canSelect);
 	const inFilter = (hosts ?? []).filter((h) =>
-		filter === "revoked" ? h.status === "revoked" : h.status !== "revoked",
+		filter === "revoked"
+			? h.status === "revoked"
+			: h.status !== "revoked" && (!outdatedOnly || isOutdated(h)),
 	);
 	const rows = sortHosts(
 		inFilter.filter((h) => matches(h, needle)),
 		sort,
 	);
+	const selectableIds = rows.filter(canSelect).map((h) => h.id);
+	const pickedCount = selectableIds.filter((id) => selected?.has(id)).length;
+	const allPicked =
+		selectableIds.length > 0 && pickedCount === selectableIds.length;
 	const lastPage = Math.max(0, Math.ceil(rows.length / PAGE_SIZE) - 1);
 	const current = Math.min(page, lastPage);
 	const visible = rows.slice(current * PAGE_SIZE, (current + 1) * PAGE_SIZE);
@@ -351,7 +354,7 @@ export function HostsTable({
 
 	return (
 		<div className="flex flex-col gap-4">
-			<div className="flex items-center justify-between gap-4">
+			<div className="flex flex-wrap items-center justify-between gap-4">
 				<div className="relative w-90 max-w-full">
 					<Search
 						aria-hidden
@@ -369,32 +372,49 @@ export function HostsTable({
 						}}
 					/>
 				</div>
-				<ToggleGroup
-					type="single"
-					variant="outline"
-					size="lg"
-					spacing={0}
-					value={filter}
-					onValueChange={(value) => {
-						if (value === "active" || value === "revoked") {
-							setFilter(value);
-							setPage(0);
-						}
-					}}
-				>
-					<ToggleGroupItem
-						value="active"
-						className="px-4 data-[state=on]:bg-primary-subtle data-[state=on]:text-primary-strong"
+				<div className="flex flex-wrap items-center gap-2">
+					{outdatedCount > 0 && filter === "active" && (
+						<Toggle
+							variant="outline"
+							size="lg"
+							pressed={outdatedOnly}
+							onPressedChange={(on) => {
+								setOnlyOutdated(on);
+								setPage(0);
+							}}
+							className="data-[state=on]:border-primary-strong data-[state=on]:bg-primary-subtle data-[state=on]:text-primary-strong aria-pressed:bg-primary-subtle"
+						>
+							<CircleArrowUp aria-hidden />
+							{copy.agentUpdate.filter(outdatedCount)}
+						</Toggle>
+					)}
+					<ToggleGroup
+						type="single"
+						variant="outline"
+						size="lg"
+						spacing={0}
+						value={filter}
+						onValueChange={(value) => {
+							if (value === "active" || value === "revoked") {
+								setFilter(value);
+								setPage(0);
+							}
+						}}
 					>
-						{copy.hosts.filterActive}
-					</ToggleGroupItem>
-					<ToggleGroupItem
-						value="revoked"
-						className="px-4 data-[state=on]:bg-primary-subtle data-[state=on]:text-primary-strong"
-					>
-						{copy.hosts.filterRevoked}
-					</ToggleGroupItem>
-				</ToggleGroup>
+						<ToggleGroupItem
+							value="active"
+							className="px-4 data-[state=on]:bg-primary-subtle data-[state=on]:text-primary-strong"
+						>
+							{copy.hosts.filterActive}
+						</ToggleGroupItem>
+						<ToggleGroupItem
+							value="revoked"
+							className="px-4 data-[state=on]:bg-primary-subtle data-[state=on]:text-primary-strong"
+						>
+							{copy.hosts.filterRevoked}
+						</ToggleGroupItem>
+					</ToggleGroup>
+				</div>
 			</div>
 
 			{isError && (
@@ -413,6 +433,23 @@ export function HostsTable({
 					<Table>
 						<TableHeader className="bg-muted">
 							<TableRow>
+								{showSelect && (
+									<TableHead className="w-10 px-4">
+										<Checkbox
+											aria-label={copy.agentUpdate.selectAll}
+											checked={
+												allPicked
+													? true
+													: pickedCount > 0
+														? "indeterminate"
+														: false
+											}
+											onCheckedChange={(c) =>
+												onSelectAll?.(selectableIds, c === true)
+											}
+										/>
+									</TableHead>
+								)}
 								<TableHead className="px-4" aria-sort={ariaSort("host")}>
 									<SortButton
 										label={copy.hosts.columns.host}
@@ -446,10 +483,10 @@ export function HostsTable({
 								<TableHead className={cn("px-4", SHOW_PLATFORM)}>
 									{copy.hosts.columns.platform}
 								</TableHead>
-								<TableHead className="px-4">
+								<TableHead className={cn("px-4", SHOW_STATUS)}>
 									{copy.hosts.columns.labels}
 								</TableHead>
-								<TableHead className={cn("px-4", SHOW_WIDE)}>
+								<TableHead className="px-4">
 									{copy.hosts.columns.version}
 								</TableHead>
 								<TableHead className={cn("px-4", SHOW_WIDE)}>
@@ -475,10 +512,28 @@ export function HostsTable({
 											}
 										}}
 									>
+										{showSelect && (
+											<TableCell
+												className="px-4"
+												onClick={(e) => e.stopPropagation()}
+											>
+												{canSelect(host) && (
+													<Checkbox
+														aria-label={copy.agentUpdate.selectHost(
+															host.hostname,
+														)}
+														checked={selected?.has(host.id) === true}
+														onCheckedChange={(c) =>
+															onSelect?.(host.id, c === true)
+														}
+													/>
+												)}
+											</TableCell>
+										)}
 										<TableCell className="px-4">
 											<Truncated
 												text={host.hostname}
-												className="max-w-48 lg:max-w-32 xl:max-w-52"
+												className="max-w-32 @min-[680px]:max-w-48 lg:max-w-32 xl:max-w-52"
 											>
 												<Link
 													to="/hosts/$id"
@@ -488,7 +543,7 @@ export function HostsTable({
 													aria-describedby={
 														host.labels.length > 2 ? restId(host) : undefined
 													}
-													className="block max-w-48 truncate rounded-sm text-left text-base font-semibold lg:max-w-32 xl:max-w-52"
+													className="block max-w-32 truncate rounded-sm text-left text-base font-semibold @min-[680px]:max-w-48 lg:max-w-32 xl:max-w-52"
 												>
 													{host.hostname}
 												</Link>
@@ -502,6 +557,11 @@ export function HostsTable({
 											<div className="@min-[680px]:hidden">
 												<StatusBadge status={host.status} />
 											</div>
+											{host.labels.length > 0 && (
+												<div className="max-w-32 font-mono text-sm whitespace-normal wrap-anywhere text-muted-foreground @min-[680px]:hidden">
+													{host.labels.map(labelText).join(" ")}
+												</div>
+											)}
 										</TableCell>
 										<TableCell className={cn("px-4", SHOW_STATUS)}>
 											<StatusBadge status={host.status} />
@@ -523,7 +583,7 @@ export function HostsTable({
 												</div>
 											)}
 										</TableCell>
-										<TableCell className="px-4">
+										<TableCell className={cn("px-4", SHOW_STATUS)}>
 											<LabelChips
 												host={host}
 												onPick={(text) => {
@@ -532,10 +592,11 @@ export function HostsTable({
 												}}
 											/>
 										</TableCell>
-										<TableCell className={cn("px-4", SHOW_WIDE)}>
-											<VersionCell
+										<TableCell className="px-4">
+											<AgentVersionCell
 												version={host.version}
-												serverVersion={serverVersion}
+												update={updates?.get(host.id)}
+												status={status}
 											/>
 										</TableCell>
 										<TableCell className={cn("px-4", SHOW_WIDE)}>

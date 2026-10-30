@@ -12,6 +12,7 @@ pub fn alertname(kind: AlertType) -> &'static str {
         AlertType::AgentOffline => "LodestoreAgentOffline",
         AlertType::CheckFailed => "LodestoreCheckFailed",
         AlertType::CertificateExpiring => "LodestoreCertificateExpiring",
+        AlertType::AgentUpdateFailed => "LodestoreAgentUpdateFailed",
     }
 }
 
@@ -21,6 +22,7 @@ pub fn title(c: &Candidate, now_ms: i64) -> String {
         AlertType::BackupFailed => format!("Backup failed on {host}"),
         AlertType::NoRecentBackup => format!("No recent backup on {host}"),
         AlertType::AgentOffline => format!("{host} is offline"),
+        AlertType::AgentUpdateFailed => format!("Agent update failed on {host}"),
         AlertType::CheckFailed => format!(
             "{} check failed on {}",
             level_label(c.check_level.as_deref()),
@@ -70,6 +72,11 @@ pub fn detail(c: &Candidate) -> String {
             Some(ms) => format!("Last contact {}.", utc(ms)),
             None => "The agent has not connected yet.".to_string(),
         },
+        AlertType::AgentUpdateFailed => c
+            .facts
+            .error
+            .clone()
+            .unwrap_or_else(|| "The update was rolled back.".to_string()),
         AlertType::CheckFailed => {
             let n = i64::try_from(c.facts.findings.unwrap_or(0)).unwrap_or(i64::MAX);
             if let (0, Some(error)) = (n, c.facts.error.as_deref()) {
@@ -172,6 +179,10 @@ mod tests {
         assert_eq!(
             alertname(AlertType::CertificateExpiring),
             "LodestoreCertificateExpiring"
+        );
+        assert_eq!(
+            alertname(AlertType::AgentUpdateFailed),
+            "LodestoreAgentUpdateFailed"
         );
     }
 

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::{Display, Write};
 
 use anyhow::Context;
@@ -150,6 +150,7 @@ pub async fn render(state: &AppState, now_ms: i64) -> anyhow::Result<String> {
         [(vec![("version", env!("CARGO_PKG_VERSION"))], 1.0)],
     );
     host_series(&mut x, state, &inputs, now_ms, &thresholds);
+    agent_update_series(&mut x, state, &inputs).await?;
     pair_series(&mut x, &inputs, &details, now_ms);
     job_series(&mut x, state, now_ms).await?;
     repository_series(&mut x, state, now_ms).await?;
@@ -205,6 +206,48 @@ fn host_series(
             .iter()
             .map(|h| (host_labels(h), secs(h.cert_not_after_ms))),
     );
+}
+
+async fn agent_update_series(
+    x: &mut Exposition,
+    state: &AppState,
+    inputs: &Inputs,
+) -> anyhow::Result<()> {
+    let rows = sqlx::query("SELECT id, version FROM agents WHERE status <> 'revoked'")
+        .fetch_all(&state.db.pool)
+        .await
+        .context("reading agent versions")?;
+    let mut versions = HashMap::new();
+    for row in &rows {
+        versions.insert(
+            row.try_get::<String, _>("id")?,
+            row.try_get::<String, _>("version")?,
+        );
+    }
+    let hosts = &inputs.hosts;
+    x.family(
+        "lodestore_host_agent_info",
+        "Agent version of the host; always 1.",
+        hosts.iter().filter_map(|h| {
+            let version = versions.get(&h.host_id)?;
+            let mut labels = host_labels(h);
+            labels.push(("version", version.as_str()));
+            Some((labels, 1.0))
+        }),
+    );
+    let failed: HashSet<&str> = inputs
+        .update_failures
+        .iter()
+        .map(|f| f.host_id.as_str())
+        .collect();
+    x.family(
+        "lodestore_host_agent_update_failed",
+        "1 while the last agent update of the host rolled back and the host is not on its target version.",
+        hosts
+            .iter()
+            .map(|h| (host_labels(h), flag(failed.contains(h.host_id.as_str())))),
+    );
+    Ok(())
 }
 
 fn pair_series(
@@ -736,12 +779,13 @@ async fn check_series(x: &mut Exposition, state: &AppState) -> anyhow::Result<()
     Ok(())
 }
 
-const ALERT_TYPES: [AlertType; 5] = [
+const ALERT_TYPES: [AlertType; 6] = [
     AlertType::BackupFailed,
     AlertType::NoRecentBackup,
     AlertType::AgentOffline,
     AlertType::CheckFailed,
     AlertType::CertificateExpiring,
+    AlertType::AgentUpdateFailed,
 ];
 
 async fn alert_series(x: &mut Exposition, state: &AppState, now_ms: i64) -> anyhow::Result<()> {

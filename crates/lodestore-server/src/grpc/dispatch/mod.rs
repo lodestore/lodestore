@@ -98,6 +98,40 @@ async fn gc_gate(state: &AppState, host_id: &str) -> anyhow::Result<GcGate> {
     })
 }
 
+/// Serializes the job claim and the agent update claim of one host: on
+/// Postgres the second claimer waits for this row lock and then sees the
+/// first claim committed.
+pub async fn lock_host(
+    tx: &mut sqlx::Transaction<'_, sqlx::Any>,
+    host_id: &str,
+) -> sqlx::Result<()> {
+    sqlx::query("UPDATE agents SET status = status WHERE id = $1")
+        .bind(host_id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+pub async fn claim_job(
+    tx: &mut sqlx::Transaction<'_, sqlx::Any>,
+    job_id: &str,
+    host_id: &str,
+    now: i64,
+) -> sqlx::Result<bool> {
+    let done = sqlx::query(
+        "UPDATE jobs SET state = 'assigned', assigned_at = $1 WHERE id = $2 AND state = 'queued' \
+         AND NOT EXISTS (SELECT 1 FROM jobs WHERE host_id = $3 AND source = 'manual' \
+         AND state IN ('assigned', 'running')) \
+         AND NOT EXISTS (SELECT 1 FROM agent_updates WHERE host_id = $3 AND state = 'assigned')",
+    )
+    .bind(now)
+    .bind(job_id)
+    .bind(host_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(done.rows_affected() == 1)
+}
+
 pub async fn assign_queued(state: &AppState, only_agent: Option<&str>) -> anyhow::Result<()> {
     let rows = match only_agent {
         Some(agent) => {
@@ -183,19 +217,17 @@ pub async fn assign_queued(state: &AppState, only_agent: Option<&str>) -> anyhow
                 }
             }
         };
-        let claimed = sqlx::query(
-            "UPDATE jobs SET state = 'assigned', assigned_at = $1 WHERE id = $2 AND state = 'queued' \
-             AND NOT EXISTS (SELECT 1 FROM jobs WHERE host_id = $3 AND source = 'manual' \
-             AND state IN ('assigned', 'running'))",
-        )
-        .bind(now_ms())
-        .bind(&job_id)
-        .bind(&host_id)
-        .execute(&state.db.pool)
+        let claimed = async {
+            let mut tx = state.db.pool.begin().await?;
+            lock_host(&mut tx, &host_id).await?;
+            let won = claim_job(&mut tx, &job_id, &host_id, now_ms()).await?;
+            tx.commit().await?;
+            Ok::<_, sqlx::Error>(won)
+        }
         .await;
         match claimed {
-            Ok(done) if done.rows_affected() == 1 => {}
-            Ok(_) => continue,
+            Ok(true) => {}
+            Ok(false) => continue,
             Err(sqlx::Error::Database(db)) if db.is_unique_violation() => continue,
             Err(error) => return Err(error.into()),
         }

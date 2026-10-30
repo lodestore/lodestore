@@ -406,11 +406,14 @@ impl JobHub {
         }
     }
 
+    /// A backup or restore is running.
+    pub fn busy(&self) -> bool {
+        self.lock().jobs.values().any(|e| e.finished.is_none())
+    }
+
     pub async fn wait_idle(&self, timeout: Duration) {
         let deadline = tokio::time::Instant::now() + timeout;
-        while self.lock().jobs.values().any(|e| e.finished.is_none())
-            && tokio::time::Instant::now() < deadline
-        {
+        while self.busy() && tokio::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }

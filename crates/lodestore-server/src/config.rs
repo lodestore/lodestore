@@ -7,6 +7,7 @@ use anyhow::Context;
 use clap::Args;
 use serde::Deserialize;
 
+use crate::agent_update::api::ROLLBACK_AFTER_SECS;
 use crate::alerts::model::AlertType;
 
 pub const DEFAULT_CONFIG_FILE: &str = "/etc/lodestore/server.yaml";
@@ -66,6 +67,8 @@ pub struct Config {
     #[serde(skip)]
     pub find: FindConfig,
     #[serde(skip)]
+    pub agent_updates: AgentUpdateConfig,
+    #[serde(skip)]
     pub grpc_public_address_defaulted: bool,
     #[serde(skip)]
     pub notifications: NotificationsConfig,
@@ -84,6 +87,25 @@ impl Default for FindConfig {
             max_matches: 1000,
             timeout: Duration::from_secs(600),
             cache_max_bytes: 1 << 30,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentUpdateConfig {
+    pub canary: u32,
+    pub wave: u32,
+    pub pause_after: u32,
+    pub health_timeout: Duration,
+}
+
+impl Default for AgentUpdateConfig {
+    fn default() -> Self {
+        AgentUpdateConfig {
+            canary: 2,
+            wave: 10,
+            pause_after: 1,
+            health_timeout: Duration::from_secs(150),
         }
     }
 }
@@ -137,12 +159,13 @@ fn smtp_port() -> u16 {
     587
 }
 
-const ALL_ALERT_TYPES: [AlertType; 5] = [
+const ALL_ALERT_TYPES: [AlertType; 6] = [
     AlertType::BackupFailed,
     AlertType::NoRecentBackup,
     AlertType::AgentOffline,
     AlertType::CheckFailed,
     AlertType::CertificateExpiring,
+    AlertType::AgentUpdateFailed,
 ];
 
 fn nodename() -> String {
@@ -197,6 +220,7 @@ impl Default for Config {
             schedule_tick_secs: crate::schedule::SCHEDULE_TICK.as_secs(),
             metrics_listen: None,
             find: FindConfig::default(),
+            agent_updates: AgentUpdateConfig::default(),
             grpc_public_address_defaulted: true,
             notifications: NotificationsConfig::default(),
         }
@@ -275,6 +299,16 @@ struct FileConfig {
     metrics_listen: Option<SocketAddr>,
     notifications: FileNotifications,
     find: FileFind,
+    agent_updates: FileAgentUpdates,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FileAgentUpdates {
+    canary: Option<i64>,
+    wave: Option<i64>,
+    pause_after: Option<i64>,
+    health_timeout_secs: Option<i64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -285,11 +319,42 @@ struct FileFind {
     cache_max_mb: Option<i64>,
 }
 
-fn positive(key: &str, value: i64) -> anyhow::Result<u64> {
+fn positive_in(section: &str, key: &str, value: i64) -> anyhow::Result<u64> {
     u64::try_from(value)
         .ok()
         .filter(|v| *v > 0)
-        .with_context(|| format!("find.{key} must be greater than zero"))
+        .with_context(|| format!("{section}.{key} must be greater than zero"))
+}
+
+fn positive(key: &str, value: i64) -> anyhow::Result<u64> {
+    positive_in("find", key, value)
+}
+
+fn resolve_agent_updates(file: FileAgentUpdates) -> anyhow::Result<AgentUpdateConfig> {
+    let count = |key: &str, value: i64| -> anyhow::Result<u32> {
+        u32::try_from(positive_in("agent_updates", key, value)?)
+            .with_context(|| format!("agent_updates.{key} is too large"))
+    };
+    let mut updates = AgentUpdateConfig::default();
+    if let Some(v) = file.canary {
+        updates.canary = count("canary", v)?;
+    }
+    if let Some(v) = file.wave {
+        updates.wave = count("wave", v)?;
+    }
+    if let Some(v) = file.pause_after {
+        updates.pause_after = count("pause_after", v)?;
+    }
+    if let Some(v) = file.health_timeout_secs {
+        let secs = positive_in("agent_updates", "health_timeout_secs", v)?;
+        anyhow::ensure!(
+            secs >= ROLLBACK_AFTER_SECS,
+            "agent_updates.health_timeout_secs must be at least {ROLLBACK_AFTER_SECS}, \
+             the time an agent has before it rolls itself back"
+        );
+        updates.health_timeout = Duration::from_secs(secs);
+    }
+    Ok(updates)
 }
 
 fn resolve_find(file: FileFind) -> anyhow::Result<FindConfig> {
@@ -574,6 +639,7 @@ impl Config {
         }
         c.metrics_listen = args.metrics_listen.or(file.metrics_listen);
         c.find = resolve_find(file.find)?;
+        c.agent_updates = resolve_agent_updates(file.agent_updates)?;
         c.notifications.allow_private_targets = file.notifications.allow_private_targets;
         c.notifications.channels = resolve_channels(file.notifications)?;
         c.validate().context("invalid configuration")?;
@@ -818,6 +884,42 @@ mod tests {
         for key in ["max_matches", "timeout_secs", "cache_max_mb"] {
             for value in ["0", "-1"] {
                 let err = chain(load(&format!("find:\n  {key}: {value}"), &[]));
+                assert!(err.contains(key), "{key}: {err}");
+            }
+        }
+    }
+
+    #[test]
+    fn agent_updates_section_parses() {
+        let defaults = load("", &[]).unwrap().agent_updates;
+        assert_eq!(
+            (defaults.canary, defaults.wave, defaults.pause_after),
+            (2, 10, 1)
+        );
+        assert_eq!(defaults.health_timeout, Duration::from_secs(150));
+
+        let c = load(
+            "agent_updates:\n  canary: 3\n  wave: 5\n  pause_after: 1\n  health_timeout_secs: 120",
+            &[],
+        )
+        .unwrap()
+        .agent_updates;
+        assert_eq!((c.canary, c.wave, c.pause_after), (3, 5, 1));
+        assert_eq!(c.health_timeout, Duration::from_secs(120));
+    }
+
+    #[test]
+    fn agent_updates_health_timeout_outlasts_the_agent_timer() {
+        let err = chain(load("agent_updates:\n  health_timeout_secs: 119", &[]));
+        assert!(err.contains("health_timeout_secs"), "{err}");
+        assert!(err.contains("120"), "{err}");
+    }
+
+    #[test]
+    fn agent_updates_section_rejects_zero() {
+        for key in ["canary", "wave", "pause_after", "health_timeout_secs"] {
+            for value in ["0", "-1"] {
+                let err = chain(load(&format!("agent_updates:\n  {key}: {value}"), &[]));
                 assert!(err.contains(key), "{key}: {err}");
             }
         }

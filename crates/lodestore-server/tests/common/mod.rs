@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use lodestore_agent::update::UpdateRuntime;
 use lodestore_agent::{AgentError, EnrollArgs, NetOptions, Paths, RunArgs};
 use lodestore_format::crypto::Entropy;
 use lodestore_format::keys::KdfCost;
@@ -58,7 +59,7 @@ pub fn backends() -> Vec<Backend> {
     all
 }
 
-async fn create_postgres_database(admin_url: &str) -> String {
+pub async fn create_postgres_database(admin_url: &str) -> String {
     sqlx::any::install_default_drivers();
     let name = format!(
         "t_{}",
@@ -394,6 +395,12 @@ pub struct AgentEnv {
 
 impl AgentEnv {
     pub async fn start(backend: &Backend) -> AgentEnv {
+        let mut env = Self::enrolled(backend).await;
+        env.start_agent().await;
+        env
+    }
+
+    pub async fn enrolled(backend: &Backend) -> AgentEnv {
         let ts = TestServer::start(backend).await;
         let api = ts.api().await;
         let repo = ts.create_local_repository("main").await;
@@ -403,7 +410,6 @@ impl AgentEnv {
         ]);
         let mut env = Self::enroll(&ts, api, &repo, "main", "host-e2e", "e2e", labels).await;
         env.server = Some(ts);
-        env.start_agent().await;
         env
     }
 
@@ -475,13 +481,20 @@ impl AgentEnv {
     }
 
     pub async fn start_agent(&mut self) {
+        self.start_agent_with(UpdateRuntime::detect()).await;
+    }
+
+    pub async fn start_agent_with(&mut self, runtime: UpdateRuntime) {
         let shutdown = CancellationToken::new();
-        let handle = tokio::spawn(lodestore_agent::run(RunArgs {
-            paths: self.paths.clone(),
-            net: NetOptions::default(),
-            heartbeat: Duration::from_secs(1),
-            shutdown: shutdown.clone(),
-        }));
+        let handle = tokio::spawn(lodestore_agent::run_with(
+            RunArgs {
+                paths: self.paths.clone(),
+                net: NetOptions::default(),
+                heartbeat: Duration::from_secs(1),
+                shutdown: shutdown.clone(),
+            },
+            runtime,
+        ));
         self.agent = Some((shutdown, handle));
         let (api, host) = (&self.api, &self.host);
         assert!(
@@ -494,6 +507,15 @@ impl AgentEnv {
             .await,
             "the agent never became online"
         );
+    }
+
+    pub async fn wait_agent_exit(&mut self) {
+        let (_, handle) = self.agent.take().expect("the agent is running");
+        tokio::time::timeout(WAIT, handle)
+            .await
+            .expect("the agent exits in time")
+            .unwrap()
+            .expect("the agent exits cleanly");
     }
 
     pub async fn stop_agent(&mut self) {

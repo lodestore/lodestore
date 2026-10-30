@@ -34,6 +34,8 @@ pub enum Scope {
     HostsWrite,
     #[serde(rename = "alerts:write")]
     AlertsWrite,
+    #[serde(rename = "agents:update")]
+    AgentsUpdate,
     #[serde(rename = "policies:read")]
     PoliciesRead,
     #[serde(rename = "policies:write")]
@@ -53,10 +55,11 @@ pub enum Scope {
 }
 
 impl Scope {
-    pub const ALL: [Scope; 11] = [
+    pub const ALL: [Scope; 12] = [
         Scope::HostsRead,
         Scope::HostsWrite,
         Scope::AlertsWrite,
+        Scope::AgentsUpdate,
         Scope::PoliciesRead,
         Scope::PoliciesWrite,
         Scope::JobsRead,
@@ -72,6 +75,7 @@ impl Scope {
             Scope::HostsRead => "hosts:read",
             Scope::HostsWrite => "hosts:write",
             Scope::AlertsWrite => "alerts:write",
+            Scope::AgentsUpdate => "agents:update",
             Scope::PoliciesRead => "policies:read",
             Scope::PoliciesWrite => "policies:write",
             Scope::JobsRead => "jobs:read",
@@ -103,6 +107,7 @@ scope_markers! {
     HostsRead => HostsRead,
     HostsWrite => HostsWrite,
     AlertsWrite => AlertsWrite,
+    AgentsUpdate => AgentsUpdate,
     PoliciesRead => PoliciesRead,
     PoliciesWrite => PoliciesWrite,
     JobsRead => JobsRead,
@@ -420,13 +425,14 @@ mod tests {
         assert_eq!(scope, Scope::MetricsRead);
         assert_eq!(scope.as_str(), "metrics:read");
         assert_eq!(serde_json::to_string(&scope).unwrap(), "\"metrics:read\"");
-        assert_eq!(Scope::ALL.len(), 11);
+        assert_eq!(Scope::ALL.len(), 12);
         let names: Vec<&str> = Scope::ALL.iter().map(|s| s.as_str()).collect();
         let at = names.iter().position(|n| *n == "metrics:read").unwrap();
         assert_eq!(names[at - 1], "jobs:run");
         assert_eq!(names[at + 1], "snapshots:read");
         let alerts = names.iter().position(|n| *n == "alerts:write").unwrap();
         assert_eq!(names[alerts - 1], "hosts:write");
+        assert_eq!(names[alerts + 1], "agents:update");
         for scope in Scope::ALL {
             let parsed: Scope = serde_json::from_str(&format!("\"{}\"", scope.as_str())).unwrap();
             assert_eq!(parsed, scope);

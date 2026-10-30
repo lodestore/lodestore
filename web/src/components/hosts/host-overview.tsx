@@ -1,14 +1,19 @@
-import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { Copy } from "lucide-react";
+import { CircleArrowUp, Copy } from "lucide-react";
 import { type ReactNode, useRef, useState } from "react";
 import { toast } from "sonner";
 import { useFleetHost } from "@/api/gen/endpoints";
 import type { FleetHost, HostDetail, HostMount } from "@/api/gen/model";
+import {
+	AgentVersionCell,
+	blockerReason,
+} from "@/components/hosts/agent-update/agent-version-cell";
+import { UpdateConfirmDialog } from "@/components/hosts/agent-update/update-confirm-dialog";
+import { useRollout } from "@/components/hosts/agent-update/use-rollout";
 import { HostPolicies } from "@/components/hosts/host-policies";
-import { CertificateText, VersionCell } from "@/components/hosts/hosts-table";
+import { CertificateText } from "@/components/hosts/hosts-table";
 import { ActiveAlerts } from "@/components/overview/active-alerts";
-import { PathText } from "@/components/path-text";
+import { PathText, TextWithPaths } from "@/components/path-text";
 import { RelativeTime } from "@/components/relative-time";
 import { StatusBadge } from "@/components/status-badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -27,7 +32,6 @@ import {
 import { copy } from "@/copy";
 import { copyText } from "@/lib/clipboard";
 import { formatBytes, formatDateTime } from "@/lib/format";
-import { infoQuery } from "@/lib/session";
 
 const FILESYSTEMS_SHOWN = 20;
 function formatUptime(seconds: number) {
@@ -235,9 +239,61 @@ function BackupHealthCard({ health }: { health: FleetHost }) {
 	);
 }
 
+const BUSY_ROLLOUT = ["running", "paused"];
+
+function HostAgentVersion({ host }: { host: HostDetail }) {
+	const rollout = useRollout();
+	const [confirming, setConfirming] = useState(false);
+	const { status } = rollout;
+	const update = rollout.byHost.get(host.id);
+	const busy = BUSY_ROLLOUT.includes(status?.rollout?.state ?? "");
+	const canUpdate = update?.outdated && update.updatable && !busy;
+	const reason =
+		update?.outdated && !update.updatable
+			? blockerReason(update, status)
+			: undefined;
+	return (
+		<div className="flex flex-col items-start gap-2">
+			<AgentVersionCell
+				version={host.version}
+				update={update}
+				status={status}
+			/>
+			{canUpdate && status && (
+				<>
+					<Button
+						variant="outline"
+						size="sm"
+						onClick={() => setConfirming(true)}
+					>
+						<CircleArrowUp aria-hidden />
+						{copy.agentUpdate.updateOne}
+					</Button>
+					<UpdateConfirmDialog
+						open={confirming}
+						onOpenChange={setConfirming}
+						status={status}
+						count={1}
+						offline={host.status === "offline" ? 1 : 0}
+						host={host.hostname}
+						pending={rollout.starting}
+						onConfirm={() =>
+							rollout.start({ hosts: [host.id] }, () => setConfirming(false))
+						}
+					/>
+				</>
+			)}
+			{reason && (
+				<span className="text-muted-foreground">
+					<TextWithPaths text={reason} />
+				</span>
+			)}
+		</div>
+	);
+}
+
 export function HostOverview({ host }: { host: HostDetail }) {
 	const d = copy.hosts.details;
-	const info = useQuery(infoQuery);
 	const health = useHostHealth(host.id);
 	return (
 		<div className="flex flex-col gap-6">
@@ -301,11 +357,7 @@ export function HostOverview({ host }: { host: HostDetail }) {
 						],
 						[
 							copy.hosts.columns.version,
-							<VersionCell
-								key="v"
-								version={host.version}
-								serverVersion={info.data?.version}
-							/>,
+							<HostAgentVersion key="v" host={host} />,
 						],
 					]}
 				/>

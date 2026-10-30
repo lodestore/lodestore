@@ -1133,3 +1133,115 @@ async fn jobs_api_snapshot_suspicious_flag() {
         ts.stop().await;
     }
 }
+
+async fn insert_agent_update(
+    ts: &TestServer,
+    id: &str,
+    host: &str,
+    state: &str,
+    reason: Option<&str>,
+    queued_at: i64,
+) {
+    let pool = &ts.state().db.pool;
+    sqlx::query(
+        "INSERT INTO agent_rollouts (id, target_version, state, canary, wave_size, pause_after, \
+         created_by, created_at) VALUES ('rollout-1', '0.2.0', 'paused', 0, 10, 0, 'test', 1) \
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    let finished =
+        matches!(state, "succeeded" | "rolled_back" | "cancelled").then_some(queued_at + 1);
+    sqlx::query(
+        "INSERT INTO agent_updates (id, rollout_id, host_id, arch, from_version, target_version, \
+         wave, state, reason, queued_at, finished_at) \
+         VALUES ($1, 'rollout-1', $2, 'x86_64', '0.1.0', '0.2.0', 0, $3, $4, $5, $6)",
+    )
+    .bind(id)
+    .bind(host)
+    .bind(state)
+    .bind(reason)
+    .bind(queued_at)
+    .bind(finished)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn jobs_api_agent_update_kind() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let host_a = enroll(&ts, &api, &repo, "host-a").await;
+        let host_b = enroll(&ts, &api, &repo, "host-b").await;
+        insert_agent_update(&ts, "upd-ok", &host_a, "succeeded", None, 100).await;
+        insert_agent_update(
+            &ts,
+            "upd-rb",
+            &host_a,
+            "rolled_back",
+            Some("health check failed"),
+            200,
+        )
+        .await;
+        insert_agent_update(&ts, "upd-q", &host_b, "queued", None, 300).await;
+        let backup = insert_job(
+            &ts,
+            NewJob {
+                host: &host_a,
+                policy_name: Some("p1"),
+                source: "manual",
+                state: "succeeded",
+                queued_at: 150,
+            },
+        )
+        .await;
+
+        let (status, page) = get_json(&api, "/api/v1/jobs?kind=agent_update").await;
+        assert_eq!(status, 200);
+        assert_eq!(page["total"], 3, "[{}]", backend.name());
+        assert_eq!(ids(&page), ["upd-q", "upd-rb", "upd-ok"]);
+        let rolled = &page["items"][1];
+        assert_eq!(rolled["kind"], "agent_update");
+        assert_eq!(rolled["state"], "failed");
+        assert_eq!(rolled["error_code"], "agent_update_rolled_back");
+        assert_eq!(rolled["error_message"], "health check failed");
+        assert_eq!(rolled["agent_update"]["from_version"], "0.1.0");
+        assert_eq!(rolled["agent_update"]["to_version"], "0.2.0");
+        assert_eq!(rolled["hostname"], "host-a");
+        assert_eq!(page["items"][0]["state"], "queued");
+        assert_eq!(page["items"][0]["queue_reason"], "host_offline");
+
+        let (_, all) = get_json(&api, "/api/v1/jobs").await;
+        assert_eq!(ids(&all), ["upd-q", "upd-rb", backup.as_str(), "upd-ok"]);
+
+        let (_, other) = get_json(
+            &api,
+            &format!("/api/v1/jobs?kind=agent_update&host_id={host_b}"),
+        )
+        .await;
+        assert_eq!(other["total"], 1);
+        let (_, none) = get_json(&api, "/api/v1/jobs?kind=agent_update&host_id=nope").await;
+        assert_eq!(none["total"], 0);
+        let (_, ok) = get_json(&api, "/api/v1/jobs?kind=agent_update&status=succeeded").await;
+        assert_eq!(ids(&ok), ["upd-ok"]);
+        let (_, by_name) = get_json(&api, "/api/v1/jobs?kind=agent_update&host=HOST-B").await;
+        assert_eq!(ids(&by_name), ["upd-q"]);
+        let (_, policy) = get_json(&api, "/api/v1/jobs?kind=agent_update&policy=p1").await;
+        assert_eq!(policy["total"], 0);
+        let (_, cli) = get_json(&api, "/api/v1/jobs?kind=agent_update&source=cli").await;
+        assert_eq!(cli["total"], 0);
+        let (_, backups) = get_json(&api, "/api/v1/jobs?kind=backup").await;
+        assert_eq!(backups["total"], 1);
+
+        let (status, detail) = get_json(&api, "/api/v1/jobs/upd-rb").await;
+        assert_eq!(status, 200);
+        assert_eq!(detail["kind"], "agent_update");
+        assert_eq!(detail["error_message"], "health check failed");
+        assert_eq!(detail["agent_update"]["rollout_id"], "rollout-1");
+        ts.stop().await;
+    }
+}

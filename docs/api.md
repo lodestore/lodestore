@@ -18,9 +18,10 @@ A route that takes a token needs one scope. Routes not listed below work with a 
 
 | Scope | Routes |
 | --- | --- |
-| `hosts:read` | `GET /api/v1/hosts`, `GET /api/v1/hosts/{id}`, `GET /api/v1/fleet`, `GET /api/v1/fleet/hosts/{id}`, `GET /api/v1/alerts`, `GET /api/v1/alerts/count` |
+| `hosts:read` | `GET /api/v1/hosts`, `GET /api/v1/hosts/{id}`, `GET /api/v1/fleet`, `GET /api/v1/fleet/hosts/{id}`, `GET /api/v1/alerts`, `GET /api/v1/alerts/count`, `GET /api/v1/agent-updates` |
 | `hosts:write` | `PUT /api/v1/hosts/{id}/labels`, `POST /api/v1/hosts/{id}/revoke` |
 | `alerts:write` | `PUT /api/v1/hosts/{id}/silence`, `DELETE /api/v1/hosts/{id}/silence` |
+| `agents:update` | `POST /api/v1/agent-updates`, `POST /api/v1/agent-updates/{id}/pause`, `POST /api/v1/agent-updates/{id}/resume`, `POST /api/v1/agent-updates/{id}/cancel`, `POST /api/v1/agent-updates/{id}/dismiss` |
 | `policies:read` | `GET /api/v1/policies`, `GET /api/v1/policies/{name}`, `POST /api/v1/policies/validate`, `POST /api/v1/policies/{name}/retention-preview`, `GET /api/v1/hosts/{id}/policies` |
 | `policies:write` | `POST /api/v1/policies`, `PUT /api/v1/policies/{name}`, `DELETE /api/v1/policies/{name}`, `POST /api/v1/policies/apply`, `PUT /api/v1/repositories/{id}/checks/settings` |
 | `jobs:read` | `GET /api/v1/jobs`, `GET /api/v1/jobs/{id}`, `GET /api/v1/jobs/{id}/events`, `GET /api/v1/repositories/{id}/checks`, `GET /api/v1/repositories/{id}/checks/runs/{run_id}`, `GET /api/v1/repositories/{id}/checks/runs/{run_id}/report`, `POST /api/v1/repositories/{id}/checks/settings/validate` |
@@ -107,6 +108,27 @@ These routes take a session or a token with the scope shown in the table above. 
 - `GET /api/v1/fleet` returns every host with one state (`failed`, `overdue`, `offline`, `not_protected` or `healthy`), its last successful backup, its worst policy, the last snapshot and whether its alerts are silenced, plus the `totals` per state and the `storage` of all repositories (size in the bucket, logical size, deduplication, when it was counted). `GET /api/v1/fleet/hosts/{id}` returns one host.
 - `GET /api/v1/alerts` lists alerts, newest first. `state` is `active` (the default), `resolved` or `all`; `host_id` keeps one host; `limit` is 1 to 500 (50 by default); `before` is the `id` of the last alert of the previous page. Alerts of silenced hosts stay in the list and are marked `silenced`. `total` counts all matches, not only the page. `GET /api/v1/alerts/count` returns `active` and `unsilenced`.
 - `PUT /api/v1/hosts/{id}/silence` with `{"duration": "hour" | "day" | "week" | "forever"}` silences a host and replaces an earlier silence; `DELETE` lifts it. A revoked host answers `409`.
+
+## Agent updates
+
+An update replaces the agent binary on a host, and the agent runs as root. Starting one therefore needs its own scope, `agents:update`; `hosts:write` is not enough. Reading the state needs `hosts:read`.
+
+- `GET /api/v1/agent-updates` returns the signed versions found in the server's agent directory (`target_version` is the highest; `signed` is `false` when there is none), the `settings` of a rollout and every host with its `version`, `arch`, `outdated`, `updatable` and `state`. For an outdated host that cannot be updated, `blocker` says why: `no_self_update` (the agent predates self-update or does not run under systemd; reinstall it once with `install.sh`), `unsigned` (the agent directory has no readable signature) or `no_binary` (no signed binary of the target version for the host's architecture). `state` is `queued`, `waiting_for_job` (a backup is running), `offline_queued`, `updating` or `rolled_back`, with the `reason` for a rollback and the `target_version` of that update, which stays the same when a newer build appears. `rollout` is the running or paused rollout, or one that finished in the last 24 hours and was not dismissed, with `total`, `updated`, `rolled_back`, `rollbacks_since_resume` (the rollbacks that count towards `pause_after`), the counts per wave and the five latest rollbacks. `pause_reason` says why the server paused it, when something other than rollbacks did; a pause by hand has no reason.
+- `POST /api/v1/agent-updates` starts an update by hand; nothing updates on its own. The body is either `{"hosts": ["<id>", ...]}` or `{"outdated": true}`. It answers `202` with the rollout `id`, the number of `hosts` queued and the number `skipped`. Hosts that are current, revoked, already in an update, without self-update or without a signed binary of the target version for their architecture are skipped. `409` means another update is running or paused; `422` means no signed agent on the server, no host to update, or a body that is neither of the two forms.
+- The first `canary` hosts form wave 0, hosts connected at that moment first; the others follow in blocks of `wave`. No later wave starts before at least one host of wave 0 succeeded. If wave 0 has no host left and none succeeded, the update pauses with `pause_reason`; `resume` then starts the next wave without a canary. The same pause follows when hosts are queued in a later wave and, for `health_timeout_secs` after the start or the last `resume`, wave 0 has no host in progress, no success and no connected host. An update with no later wave does not pause for this; its offline hosts update when they return. After that the server starts the next wave only when no host of the update is still in progress; hosts of an earlier wave that are offline or running a backup do not hold it back and are updated when they come back. It pauses the update when more than `pause_after` hosts have rolled back (since the last `resume`); hosts already in progress finish. It also pauses, with `pause_reason`, when the signed binary of the target for a host's architecture is gone from the agent directory, for example because a newer version replaced it; those hosts stay queued and do not count as rollbacks. Put the binary back and `resume`, or `cancel` and start a new update. A host with a backup or restore running waits for it, and no backup starts on a host while its update is in progress. Set the numbers in `server.yaml`:
+
+```yaml
+agent_updates:
+  canary: 2
+  wave: 10
+  pause_after: 1
+  health_timeout_secs: 150
+```
+
+  All four must be greater than zero, and `health_timeout_secs` at least 120. `health_timeout_secs` is how long the server waits for a switched agent to report in with the new version, and how long a download may make no progress; the agent rolls itself back on its own after 120 seconds.
+- `POST /api/v1/agent-updates/{id}/pause` stops new hosts from starting; `resume` continues, forgets the rollbacks so far and clears `pause_reason`; `cancel` drops the hosts still waiting (hosts already sent the update finish it); `dismiss` hides a finished or cancelled update. A wrong state answers `409`, an unknown id `404`.
+
+An agent trusts only the signing key built into it and the keys installed on its host, so an update cannot add a key to an agent or make it run a binary signed with another one. This covers the update path only; see the [threat model](security/threat-model.md#agent-updates).
 
 ## Integrity checks
 

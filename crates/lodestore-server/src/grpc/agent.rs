@@ -5,10 +5,10 @@ use lodestore_proto::agent::v1::agent_message::Body as AgentBody;
 use lodestore_proto::agent::v1::agent_server::Agent;
 use lodestore_proto::agent::v1::server_message::Body as ServerBody;
 use lodestore_proto::agent::v1::{
-    AgentMessage, Disconnect, DisconnectReason, Heartbeat, HelloAck, PackBytes,
-    ReadPackRangeRequest, RefreshPackAccessRequest, RefreshPackAccessResponse, RenewRequest,
-    RenewResponse, RestorePlanBatch, RestorePlanRequest, S3Credentials, ServerMessage,
-    UpdateS3Credentials,
+    AgentMessage, Disconnect, DisconnectReason, FetchAgentUpdateRequest, Heartbeat, HelloAck,
+    PackBytes, ReadPackRangeRequest, RefreshPackAccessRequest, RefreshPackAccessResponse,
+    RenewRequest, RenewResponse, RestorePlanBatch, RestorePlanRequest, S3Credentials,
+    ServerMessage, UpdateChunk, UpdateS3Credentials,
 };
 use lodestore_proto::{ERROR_REVOKED, ERROR_VERSION_UNSUPPORTED};
 use sqlx::Row;
@@ -76,6 +76,7 @@ fn clip(text: &str) -> String {
 type SessionStream = Pin<Box<dyn Stream<Item = Result<ServerMessage, Status>> + Send>>;
 type RestorePlanStream = Pin<Box<dyn Stream<Item = Result<RestorePlanBatch, Status>> + Send>>;
 type ReadPackRangeStream = Pin<Box<dyn Stream<Item = Result<PackBytes, Status>> + Send>>;
+type FetchAgentUpdateStream = Pin<Box<dyn Stream<Item = Result<UpdateChunk, Status>> + Send>>;
 
 async fn write_seen(state: &AppState, agent_id: &str, heartbeat: Option<&Heartbeat>) {
     let now = now_ms();
@@ -144,6 +145,7 @@ impl Agent for AgentService {
     type SessionStream = SessionStream;
     type RestorePlanStream = RestorePlanStream;
     type ReadPackRangeStream = ReadPackRangeStream;
+    type FetchAgentUpdateStream = FetchAgentUpdateStream;
 
     async fn session(
         &self,
@@ -182,6 +184,14 @@ impl Agent for AgentService {
             tracing::warn!(%error, agent_id, "could not store agent capabilities");
             return Err(Status::unavailable(
                 "the server could not record what this agent supports; reconnect later",
+            ));
+        }
+        if let Err(error) =
+            crate::agent_update::rollout::on_hello(&state, &agent_id, &hello.agent_version).await
+        {
+            tracing::warn!(%error, agent_id, "could not record the agent version");
+            return Err(Status::unavailable(
+                "the server could not record the agent version; reconnect later",
             ));
         }
         let mut guard = state.registry.register(&agent_id, &repository_id);
@@ -223,6 +233,7 @@ impl Agent for AgentService {
             Err(error) => tracing::warn!(%error, %agent_id, "could not load the agent S3 key"),
         }
         crate::grpc::dispatch::messages::session_started(&state, &agent_id, &hello.jobs).await;
+        crate::agent_update::rollout::kick(&state);
         tracing::info!(agent_id = %agent_id, cert_serial = %cert_serial, "agent session started");
 
         tokio::spawn(async move {
@@ -288,6 +299,16 @@ impl Agent for AgentService {
     ) -> Result<Response<Self::ReadPackRangeStream>, Status> {
         let agent_id = peer_agent_id(&request)?;
         let stream = restore::read_pack_range(&self.state, &agent_id, request.into_inner()).await?;
+        Ok(Response::new(Box::pin(stream)))
+    }
+
+    async fn fetch_agent_update(
+        &self,
+        request: Request<FetchAgentUpdateRequest>,
+    ) -> Result<Response<Self::FetchAgentUpdateStream>, Status> {
+        let agent_id = peer_agent_id(&request)?;
+        let stream =
+            crate::agent_update::fetch::fetch(&self.state, &agent_id, request.into_inner()).await?;
         Ok(Response::new(Box::pin(stream)))
     }
 

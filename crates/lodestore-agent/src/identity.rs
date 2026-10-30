@@ -31,6 +31,9 @@ impl Paths {
     pub fn hooks_dir(&self) -> PathBuf {
         self.config_dir.join("hooks.d")
     }
+    pub fn trusted_keys(&self) -> PathBuf {
+        self.config_dir.join("trusted-keys")
+    }
     pub fn identity_json(&self) -> PathBuf {
         self.state_dir.join("identity.json")
     }
@@ -63,6 +66,9 @@ impl Paths {
     }
     pub fn cache_dir(&self) -> PathBuf {
         self.state_dir.join("cache")
+    }
+    pub fn update_dir(&self) -> PathBuf {
+        self.state_dir.join("update")
     }
 }
 

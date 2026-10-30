@@ -6,9 +6,11 @@ use lodestore_proto::agent::v1::agent_client::AgentClient;
 use lodestore_proto::agent::v1::agent_message::Body as AgentBody;
 use lodestore_proto::agent::v1::server_message::Body as ServerBody;
 use lodestore_proto::agent::v1::{
-    AgentMessage, DisconnectReason, Hello, RenewRequest, S3Credentials, Versions,
+    AgentMessage, DisconnectReason, Hello, RenewRequest, S3Credentials, UpdateAssign, UpdateState,
+    UpdateStatus, Versions,
 };
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Channel;
@@ -17,6 +19,11 @@ use crate::config::AgentSettings;
 use crate::connect::channel;
 use crate::identity::{AgentConfig, Identity, Paths, load_pair, replace_pair, write_json_file};
 use crate::jobs::JobHub;
+use crate::update::control::{
+    Action, SWITCHING_WAIT, UpdateControl, deliver, send_switching, status,
+};
+use crate::update::guard::{self, StartAction};
+use crate::update::{UpdateOutcome, UpdateRuntime, apply, fetch};
 use crate::{AgentError, NetOptions, facts, socket, tls};
 
 const BACKOFF_MIN: Duration = Duration::from_secs(1);
@@ -26,6 +33,7 @@ const RENEW_RETRY: Duration = Duration::from_secs(60);
 const MAX_SKEW_SECS: i64 = 300;
 const JOBS_DRAIN: Duration = Duration::from_secs(30);
 pub const CAPABILITIES: [&str; 3] = ["restore_v1", "limits_v1", "gc_v1"];
+const CAP_UPDATE: &str = "update_v1";
 
 pub struct RunArgs {
     pub paths: Paths,
@@ -38,7 +46,30 @@ enum Outcome {
     Shutdown,
     Renewed,
     Replaced,
+    Restart,
     Closed { lived: Duration },
+}
+
+type UpdateDone = (String, UpdateOutcome);
+
+/// The task that downloads and installs an update. A session that ends while
+/// the file is still being downloaded takes the download with it; once the
+/// install has begun the task is left to finish and reports to the session
+/// that is up by then.
+struct UpdateTask {
+    handle: JoinHandle<()>,
+    runtime: UpdateRuntime,
+}
+
+impl Drop for UpdateTask {
+    fn drop(&mut self) {
+        if self.runtime.flight.cancel_download() {
+            self.handle.abort();
+            for temp in apply::temp_files(&self.runtime.exe) {
+                let _ = std::fs::remove_file(temp);
+            }
+        }
+    }
 }
 
 fn jittered(backoff: Duration) -> Duration {
@@ -69,8 +100,28 @@ fn load_identity(paths: &Paths) -> Result<Identity, AgentError> {
     })
 }
 
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
 pub async fn run(args: RunArgs) -> Result<(), AgentError> {
+    run_with(args, UpdateRuntime::detect()).await
+}
+
+pub async fn run_with(args: RunArgs, runtime: UpdateRuntime) -> Result<(), AgentError> {
     let first = load_identity(&args.paths)?;
+    let (paths, started) = (args.paths.clone(), runtime.clone());
+    let start = tokio::task::spawn_blocking(move || guard::on_start(&paths, &started, now_ms()))
+        .await
+        .map_err(anyhow::Error::from)
+        .and_then(|r| r);
+    match start {
+        Ok(StartAction::Restart) => return Ok(()),
+        Ok(StartAction::Continue) => {}
+        Err(error) => tracing::warn!(%error, "the update state could not be checked at start"),
+    }
     let hub = JobHub::open(&args.paths, &first.agent_id)?;
     hub.set_net(args.net.clone());
     let socket_stop = args.shutdown.child_token();
@@ -79,20 +130,25 @@ pub async fn run(args: RunArgs) -> Result<(), AgentError> {
         AgentSettings::load(&args.paths).socket_path(),
         socket_stop.clone(),
     ));
-    let result = run_sessions(&args, &hub).await;
+    let result = run_sessions(&args, &hub, &runtime).await;
     socket_stop.cancel();
     hub.shutdown();
     hub.wait_idle(JOBS_DRAIN).await;
     result
 }
 
-async fn run_sessions(args: &RunArgs, hub: &Arc<JobHub>) -> Result<(), AgentError> {
+async fn run_sessions(
+    args: &RunArgs,
+    hub: &Arc<JobHub>,
+    runtime: &UpdateRuntime,
+) -> Result<(), AgentError> {
     let config = AgentConfig::load(&args.paths)?.ok_or_else(|| {
         AgentError::NotEnrolled(format!("{} is missing", args.paths.agent_json().display()))
     })?;
     let first = load_identity(&args.paths)?;
     tracing::info!(agent_id = %first.agent_id, "agent starting");
 
+    let (done_tx, mut done_rx) = mpsc::channel(1);
     let mut backoff = BACKOFF_MIN;
     loop {
         if args.shutdown.is_cancelled() {
@@ -100,8 +156,22 @@ async fn run_sessions(args: &RunArgs, hub: &Arc<JobHub>) -> Result<(), AgentErro
         }
         let identity = load_identity(&args.paths)?;
         warn_if_expired(&identity);
-        match session_once(args, &config, &identity, hub).await {
-            Ok(Outcome::Shutdown) => return Ok(()),
+        let session = session_once(
+            args,
+            &config,
+            &identity,
+            hub,
+            runtime,
+            &done_tx,
+            &mut done_rx,
+        );
+        // connecting does not watch the token, and a switch must not wait for it
+        let result = tokio::select! {
+            result = session => result,
+            _ = args.shutdown.cancelled() => Ok(Outcome::Shutdown),
+        };
+        match result {
+            Ok(Outcome::Shutdown | Outcome::Restart) => return Ok(()),
             Ok(Outcome::Renewed) => {
                 tracing::info!("certificate renewed; reconnecting");
                 continue;
@@ -192,26 +262,72 @@ async fn channel_for(
     channel(&config.grpc_address, &config.server_name, tls_config, net).await
 }
 
+fn update_message(status: UpdateStatus) -> AgentMessage {
+    AgentMessage {
+        body: Some(AgentBody::UpdateStatus(status)),
+    }
+}
+
+fn spawn_update(
+    args: &RunArgs,
+    channel: Channel,
+    runtime: &UpdateRuntime,
+    hub: &Arc<JobHub>,
+    assign: UpdateAssign,
+    done: mpsc::Sender<UpdateDone>,
+) -> UpdateTask {
+    let (paths, update, hub) = (args.paths.clone(), runtime.clone(), Arc::clone(hub));
+    let shutdown = args.shutdown.clone();
+    let handle = tokio::spawn(async move {
+        let downloaded = fetch::download(channel, &assign, &update.exe).await;
+        if !update.flight.finish_download() {
+            if let Ok((binary, _)) = downloaded {
+                let _ = tokio::fs::remove_file(&binary).await;
+            }
+            return;
+        }
+        let outcome = match downloaded {
+            Ok((binary, signature)) => {
+                let busy = || hub.busy();
+                apply::install_files(&paths, &update, &assign, &binary, &signature, &busy).await
+            }
+            Err(reason) => UpdateOutcome::Rejected(reason),
+        };
+        deliver(&done, assign.update_id, outcome, &shutdown).await;
+    });
+    UpdateTask {
+        handle,
+        runtime: runtime.clone(),
+    }
+}
+
 async fn session_once(
     args: &RunArgs,
     config: &AgentConfig,
     identity: &Identity,
     hub: &Arc<JobHub>,
+    runtime: &UpdateRuntime,
+    done_tx: &mpsc::Sender<UpdateDone>,
+    done_rx: &mut mpsc::Receiver<UpdateDone>,
 ) -> Result<Outcome, AgentError> {
     let paths = &args.paths;
     let channel = channel_for(paths, config, &args.net).await?;
 
     let (tx, rx) = mpsc::channel::<AgentMessage>(8);
     let jobs = hub.session_reset();
+    let mut capabilities = CAPABILITIES.map(String::from).to_vec();
+    if runtime.enabled {
+        capabilities.push(CAP_UPDATE.to_string());
+    }
     tx.send(AgentMessage {
         body: Some(AgentBody::Hello(Hello {
             versions: Some(Versions {
                 min: PROTOCOL_VERSION,
                 max: PROTOCOL_VERSION,
             }),
-            agent_version: env!("CARGO_PKG_VERSION").to_string(),
+            agent_version: runtime.version.clone(),
             jobs,
-            capabilities: CAPABILITIES.map(String::from).to_vec(),
+            capabilities,
         })),
     })
     .await
@@ -246,6 +362,21 @@ async fn session_once(
     };
     tracing::info!(agent_id = %identity.agent_id, "connected to the server");
 
+    let mut control = UpdateControl::load(paths, Arc::clone(&runtime.flight));
+    let mut _update_task: Option<UpdateTask> = None;
+    let (report_paths, report_runtime) = (paths.clone(), runtime.clone());
+    let report =
+        tokio::task::spawn_blocking(move || guard::after_connect(&report_paths, &report_runtime))
+            .await
+            .map_err(anyhow::Error::from)?;
+    if let Some(report) = report
+        && tx.send(update_message(report)).await.is_err()
+    {
+        return Ok(Outcome::Closed {
+            lived: Duration::ZERO,
+        });
+    }
+
     let mut ticker = tokio::time::interval(args.heartbeat);
     let started = tokio::time::Instant::now();
     let renew_timer = tokio::time::sleep(renew_delay(identity, server_now));
@@ -270,6 +401,28 @@ async fn session_once(
                     return Ok(Outcome::Closed { lived: started.elapsed() });
                 }
             }
+            Some((update_id, outcome)) = done_rx.recv() => {
+                control.finish();
+                _update_task = None;
+                let reply = match outcome {
+                    UpdateOutcome::Switched => {
+                        send_switching(
+                            &tx,
+                            status(&update_id, UpdateState::Switching, ""),
+                            SWITCHING_WAIT,
+                        )
+                        .await;
+                        return Ok(Outcome::Restart);
+                    }
+                    UpdateOutcome::Rejected(reason) => {
+                        status(&update_id, UpdateState::Rejected, &reason)
+                    }
+                    UpdateOutcome::Busy => status(&update_id, UpdateState::Busy, ""),
+                };
+                if tx.send(update_message(reply)).await.is_err() {
+                    return Ok(Outcome::Closed { lived: started.elapsed() });
+                }
+            }
             _ = hub.changed() => {
                 for message in hub.outbound() {
                     if tx.send(message).await.is_err() {
@@ -287,6 +440,31 @@ async fn session_once(
                         } else {
                             Ok(Outcome::Closed { lived: started.elapsed() })
                         };
+                    }
+                    Some(ServerBody::UpdateStatusAck(ack)) => control.on_ack(paths, &ack.update_id),
+                    Some(ServerBody::UpdateAssign(assign)) => {
+                        let action = if runtime.enabled {
+                            control.on_assign(&assign, hub.busy())
+                        } else {
+                            Action::Reply(status(
+                                &assign.update_id,
+                                UpdateState::Rejected,
+                                "Self-update is not available on this host.",
+                            ))
+                        };
+                        match action {
+                            Action::Ignore => {}
+                            Action::Reply(reply) => {
+                                if tx.send(update_message(reply)).await.is_err() {
+                                    return Ok(Outcome::Closed { lived: started.elapsed() });
+                                }
+                            }
+                            Action::Start => {
+                                _update_task = Some(spawn_update(
+                                    args, channel.clone(), runtime, hub, assign, done_tx.clone(),
+                                ));
+                            }
+                        }
                     }
                     Some(ServerBody::UpdateS3Credentials(update)) => {
                         if let Some(key) = update.credentials {

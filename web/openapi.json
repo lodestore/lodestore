@@ -212,6 +212,327 @@
         }
       }
     },
+    "/api/v1/agent-updates": {
+      "get": {
+        "tags": [
+          "Hosts"
+        ],
+        "summary": "Show which agents are outdated and how an update is going",
+        "description": "The signed agent versions on this server, the version, architecture and update state of every host, and the current or just finished rollout with its waves and latest rollbacks.",
+        "operationId": "agent_update_status",
+        "responses": {
+          "200": {
+            "description": "The update status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentUpdateStatus"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "bearer": [
+              "hosts:read"
+            ]
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "Hosts"
+        ],
+        "summary": "Start updating agents",
+        "description": "Give `hosts` to update those hosts or `outdated: true` to update every outdated host. Only hosts that are behind, not revoked, support self-update and have a signed binary of the target version for their architecture are queued; the rest are counted as skipped. The first hosts form the canary wave, connected hosts first, and the others follow in waves. The token needs the `agents:update` scope; `hosts:write` is not enough.",
+        "operationId": "start_rollout",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartRollout"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "The update started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RolloutStarted"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Another update is running or paused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "No signed target, no host to update or a bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          },
+          {
+            "bearer": [
+              "agents:update"
+            ]
+          }
+        ]
+      }
+    },
+    "/api/v1/agent-updates/{id}/cancel": {
+      "post": {
+        "tags": [
+          "Hosts"
+        ],
+        "summary": "Cancel an update",
+        "description": "Hosts still waiting are dropped. Hosts that already got the update finish it.",
+        "operationId": "cancel_rollout",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Update id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The update is cancelled"
+          },
+          "404": {
+            "description": "Unknown update",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The update is already over",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          },
+          {
+            "bearer": [
+              "agents:update"
+            ]
+          }
+        ]
+      }
+    },
+    "/api/v1/agent-updates/{id}/dismiss": {
+      "post": {
+        "tags": [
+          "Hosts"
+        ],
+        "summary": "Hide a finished update",
+        "description": "A finished update shows for a day; dismissing it hides it at once.",
+        "operationId": "dismiss_rollout",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Update id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The update is hidden"
+          },
+          "404": {
+            "description": "Unknown update",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The update is still going",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          },
+          {
+            "bearer": [
+              "agents:update"
+            ]
+          }
+        ]
+      }
+    },
+    "/api/v1/agent-updates/{id}/pause": {
+      "post": {
+        "tags": [
+          "Hosts"
+        ],
+        "summary": "Pause an update",
+        "description": "Nothing new is sent to hosts while it is paused. Updates already sent finish.",
+        "operationId": "pause_rollout",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Update id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The update is paused"
+          },
+          "404": {
+            "description": "Unknown update",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The update is not running",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          },
+          {
+            "bearer": [
+              "agents:update"
+            ]
+          }
+        ]
+      }
+    },
+    "/api/v1/agent-updates/{id}/resume": {
+      "post": {
+        "tags": [
+          "Hosts"
+        ],
+        "summary": "Continue a paused update",
+        "description": "Rollbacks so far no longer count towards the pause threshold. When the update paused because no canary host updated, the next waves start without one.",
+        "operationId": "resume_rollout",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Update id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The update continues"
+          },
+          "404": {
+            "description": "Unknown update",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The update is not paused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          },
+          {
+            "bearer": [
+              "agents:update"
+            ]
+          }
+        ]
+      }
+    },
     "/api/v1/alerts": {
       "get": {
         "tags": [
@@ -1634,7 +1955,7 @@
           {
             "name": "kind",
             "in": "query",
-            "description": "`backup`, `restore`, `download`, `gc` or `check`.",
+            "description": "`backup`, `restore`, `download`, `gc`, `check` or `agent_update`.",
             "required": false,
             "schema": {
               "type": "string"
@@ -5620,6 +5941,40 @@
           }
         }
       },
+      "AgentBinaryDto": {
+        "type": "object",
+        "required": [
+          "arch",
+          "size",
+          "signed"
+        ],
+        "properties": {
+          "arch": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "signed": {
+            "type": "boolean"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The version in the signature; empty when the file has no readable one."
+          }
+        }
+      },
       "AgentPolicy": {
         "type": "object",
         "required": [
@@ -5632,6 +5987,83 @@
           },
           "minio_commands": {
             "type": "string"
+          }
+        }
+      },
+      "AgentUpdateInfo": {
+        "type": "object",
+        "required": [
+          "from_version",
+          "to_version",
+          "rollout_id"
+        ],
+        "properties": {
+          "from_version": {
+            "type": "string"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the update was rolled back or cancelled."
+          },
+          "rollout_id": {
+            "type": "string"
+          },
+          "to_version": {
+            "type": "string"
+          }
+        }
+      },
+      "AgentUpdateStatus": {
+        "type": "object",
+        "required": [
+          "agent_dir",
+          "signed",
+          "binaries",
+          "settings",
+          "hosts"
+        ],
+        "properties": {
+          "agent_dir": {
+            "type": "string"
+          },
+          "binaries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentBinaryDto"
+            }
+          },
+          "hosts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HostUpdate"
+            }
+          },
+          "rollout": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Rollout",
+                "description": "The running or paused rollout, or one that finished in the last 24 hours and was not dismissed."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "settings": {
+            "$ref": "#/components/schemas/RolloutSettings"
+          },
+          "signed": {
+            "type": "boolean"
+          },
+          "target_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The highest signed version in the agent directory."
           }
         }
       },
@@ -5894,7 +6326,8 @@
           "no_recent_backup",
           "agent_offline",
           "check_failed",
-          "certificate_expiring"
+          "certificate_expiring",
+          "agent_update_failed"
         ]
       },
       "Alerts": {
@@ -9281,6 +9714,95 @@
           "revoked"
         ]
       },
+      "HostUpdate": {
+        "type": "object",
+        "required": [
+          "id",
+          "hostname",
+          "version",
+          "arch",
+          "outdated",
+          "updatable"
+        ],
+        "properties": {
+          "arch": {
+            "type": "string"
+          },
+          "blocker": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/HostUpdateBlocker",
+                "description": "Why an outdated host cannot be updated; empty otherwise."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "hostname": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "outdated": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/HostUpdateState"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "target_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The version this host's update goes to; a rollout keeps it when a newer build appears."
+          },
+          "updatable": {
+            "type": "boolean"
+          },
+          "update_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "HostUpdateBlocker": {
+        "type": "string",
+        "enum": [
+          "no_self_update",
+          "unsigned",
+          "no_binary"
+        ]
+      },
+      "HostUpdateState": {
+        "type": "string",
+        "enum": [
+          "queued",
+          "waiting_for_job",
+          "offline_queued",
+          "updating",
+          "rolled_back"
+        ]
+      },
       "IoniceClass": {
         "type": "string",
         "enum": [
@@ -9470,7 +9992,8 @@
           "restore",
           "download",
           "gc",
-          "check"
+          "check",
+          "agent_update"
         ]
       },
       "JobOrigin": {
@@ -9682,6 +10205,16 @@
           "errors_total"
         ],
         "properties": {
+          "agent_update": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AgentUpdateInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "check": {
             "oneOf": [
               {
@@ -11384,6 +11917,241 @@
           "skipped"
         ]
       },
+      "Rollout": {
+        "type": "object",
+        "required": [
+          "id",
+          "target_version",
+          "state",
+          "canary",
+          "wave",
+          "pause_after",
+          "created_by",
+          "created_at",
+          "total",
+          "updated",
+          "rolled_back",
+          "rollbacks_since_resume",
+          "waves",
+          "rollbacks"
+        ],
+        "properties": {
+          "canary": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "created_by": {
+            "type": "string"
+          },
+          "finished_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "id": {
+            "type": "string"
+          },
+          "pause_after": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "pause_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the server paused it, when something other than rollbacks did."
+          },
+          "rollbacks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RolloutRollback"
+            },
+            "description": "The latest rollbacks, newest first."
+          },
+          "rollbacks_since_resume": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Rollbacks that count towards `pause_after`.",
+            "minimum": 0
+          },
+          "rolled_back": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "state": {
+            "$ref": "#/components/schemas/RolloutState"
+          },
+          "target_version": {
+            "type": "string"
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "updated": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "wave": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "waves": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RolloutWave"
+            }
+          }
+        }
+      },
+      "RolloutRollback": {
+        "type": "object",
+        "required": [
+          "update_id",
+          "host_id",
+          "hostname"
+        ],
+        "properties": {
+          "finished_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "host_id": {
+            "type": "string"
+          },
+          "hostname": {
+            "type": "string"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "update_id": {
+            "type": "string"
+          }
+        }
+      },
+      "RolloutSettings": {
+        "type": "object",
+        "required": [
+          "canary",
+          "wave",
+          "pause_after",
+          "rollback_after_secs"
+        ],
+        "properties": {
+          "canary": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "pause_after": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "rollback_after_secs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How long a switched agent has to come back before it rolls itself back.",
+            "minimum": 0
+          },
+          "wave": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "RolloutStarted": {
+        "type": "object",
+        "required": [
+          "id",
+          "hosts",
+          "skipped"
+        ],
+        "properties": {
+          "hosts": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Hosts queued for the update.",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string"
+          },
+          "skipped": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Hosts left out: current, revoked, not able to update or already in an update.",
+            "minimum": 0
+          }
+        }
+      },
+      "RolloutState": {
+        "type": "string",
+        "enum": [
+          "running",
+          "paused",
+          "done",
+          "cancelled"
+        ]
+      },
+      "RolloutWave": {
+        "type": "object",
+        "required": [
+          "wave",
+          "total",
+          "updated",
+          "rolled_back",
+          "waiting"
+        ],
+        "properties": {
+          "rolled_back": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "updated": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "waiting": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "wave": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
       "RunJob": {
         "type": "object",
         "required": [
@@ -11507,6 +12275,7 @@
           "hosts:read",
           "hosts:write",
           "alerts:write",
+          "agents:update",
           "policies:read",
           "policies:write",
           "jobs:read",
@@ -12017,6 +12786,28 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          }
+        }
+      },
+      "StartRollout": {
+        "type": "object",
+        "properties": {
+          "hosts": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Update these hosts."
+          },
+          "outdated": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Update every outdated host that can be updated."
           }
         }
       },

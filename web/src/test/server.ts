@@ -16,6 +16,22 @@ export const emptyFleet = {
 };
 
 export const server = setupServer(
+	http.get("/api/v1/agent-updates", () =>
+		HttpResponse.json({
+			agent_dir: "/usr/share/lodestore/agents",
+			binaries: [],
+			signed: true,
+			target_version: null,
+			settings: {
+				canary: 2,
+				wave: 10,
+				pause_after: 1,
+				rollback_after_secs: 120,
+			},
+			hosts: [],
+			rollout: null,
+		}),
+	),
 	http.get("/api/v1/catalog", () => HttpResponse.json([])),
 	http.get("/api/v1/fleet", () =>
 		HttpResponse.json({ ...emptyFleet, generated_at: Date.now() }),

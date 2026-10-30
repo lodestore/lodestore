@@ -338,6 +338,9 @@ async fn handle(state: &AppState, agent_id: &str, body: AgentBody) -> anyhow::Re
             let job_id = m.job_id.clone();
             insert_cli_job(state, agent_id, &job_id, &m).await?;
         }
+        AgentBody::UpdateStatus(m) => {
+            crate::agent_update::rollout::on_status(state, agent_id, m).await?;
+        }
         _ => {}
     }
     Ok(())

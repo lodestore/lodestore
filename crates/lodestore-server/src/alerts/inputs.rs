@@ -7,6 +7,7 @@ use serde_json::Value;
 use sqlx::Row;
 
 use super::model::{HostFacts, PairFacts, SnapshotFacts, overdue_limit};
+use crate::agent_update::reached;
 use crate::maintenance::check::CheckLevel;
 use crate::policies::matching::AgentRow;
 use crate::state::AppState;
@@ -16,6 +17,7 @@ pub struct Inputs {
     pub hosts: Vec<HostFacts>,
     pub server_cert: Option<(i64, bool)>,
     pub check_failures: Vec<CheckFailure>,
+    pub update_failures: Vec<UpdateFailure>,
     pub unreadable_policies: Vec<String>,
 }
 
@@ -29,6 +31,14 @@ pub struct CheckFailure {
     pub findings: u64,
     pub error: Option<String>,
     pub finished_at: i64,
+}
+
+/// A host whose latest finished self-update was rolled back and which still runs another version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateFailure {
+    pub host_id: String,
+    pub hostname: String,
+    pub reason: String,
 }
 
 struct Agent {
@@ -103,12 +113,46 @@ pub async fn gather(state: &AppState, now_ms: i64) -> anyhow::Result<Inputs> {
         }
     };
     let check_failures = check_failures(state).await?;
+    let update_failures = update_failures(state).await?;
     Ok(Inputs {
         hosts,
         server_cert,
         check_failures,
+        update_failures,
         unreadable_policies,
     })
+}
+
+pub(crate) async fn update_failures(state: &AppState) -> anyhow::Result<Vec<UpdateFailure>> {
+    let rows = sqlx::query(
+        "SELECT u.host_id, u.reason, u.target_version, a.hostname, a.version \
+         FROM agent_updates u JOIN agents a ON a.id = u.host_id JOIN ( \
+             SELECT host_id, MAX(finished_at) AS at FROM agent_updates \
+             WHERE state IN ('succeeded', 'rolled_back') AND finished_at IS NOT NULL \
+             GROUP BY host_id \
+         ) l ON l.host_id = u.host_id AND l.at = u.finished_at \
+         WHERE u.state = 'rolled_back' AND a.status <> 'revoked' \
+         ORDER BY a.hostname, u.host_id",
+    )
+    .fetch_all(&state.db.pool)
+    .await
+    .context("reading the last agent updates")?;
+    let mut out: Vec<UpdateFailure> = Vec::new();
+    for row in &rows {
+        let host_id: String = row.try_get("host_id")?;
+        let version: String = row.try_get("version")?;
+        let target: String = row.try_get("target_version")?;
+        if reached(&version, &target) || out.iter().any(|seen| seen.host_id == host_id) {
+            continue;
+        }
+        let reason: Option<String> = row.try_get("reason")?;
+        out.push(UpdateFailure {
+            host_id,
+            hostname: row.try_get("hostname")?,
+            reason: reason.unwrap_or_else(|| "The update was rolled back.".into()),
+        });
+    }
+    Ok(out)
 }
 
 async fn check_failures(state: &AppState) -> anyhow::Result<Vec<CheckFailure>> {

@@ -4,3 +4,4 @@
 pub mod connect_proxy;
 pub mod fault_proxy;
 pub mod minio;
+pub mod minisign;

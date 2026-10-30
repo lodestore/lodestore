@@ -1,3 +1,4 @@
+import { agentUpdate } from "@/copy.agentUpdate";
 import { catalog } from "@/copy.catalog";
 import { checks } from "@/copy.checks";
 import { find } from "@/copy.find";
@@ -13,6 +14,7 @@ import { user } from "@/copy.user";
 import { sentence } from "@/lib/sentence";
 
 export const copy = {
+	agentUpdate,
 	catalog,
 	checks,
 	find,
@@ -343,8 +345,6 @@ export const copy = {
 		status: { online: "Online", offline: "Offline", revoked: "Revoked" },
 		lastSeen: (relative: string) => `Last seen ${relative}`,
 		showAllFilesystems: (n: number) => `Show all ${n} filesystems`,
-		versionDiffers: (serverVersion: string) =>
-			`Agent version differs from the server (v${serverVersion})`,
 		expired: "Expired",
 		editLabels: "Edit labels",
 		saveLabels: "Save labels",

@@ -37,6 +37,9 @@ Usage: curl --proto '=https' --tlsv1.2 -fsSL <server>/install.sh | sh -s -- --jo
   --force          forget the local identity and register this host again; the previous
                    agent id is kept when the server does not know it
   --from-github    download the agent from GitHub releases instead of the server
+  --trust-key <file>
+                   install a public key the agent trusts for updates, for your own
+                   builds; the file name must end in .pub, repeat the option for more keys
   --uninstall      stop and remove the agent service and binary
   --purge          with --uninstall, also remove /etc/lodestore and /var/lib/lodestore
   --help           show this help
@@ -175,9 +178,25 @@ restore_identity() {
   rmdir "$backup"
 }
 
+install_trust_keys() {
+  [ -n "$trust_keys" ] || return 0
+  install -d -m 0755 -o root -g root "$CONF_DIR/trusted-keys"
+  old_ifs=$IFS
+  IFS=$nl
+  for file in $trust_keys; do
+    install -m 0644 -o root -g root "$file" "$CONF_DIR/trusted-keys/$(basename "$file")"
+  done
+  IFS=$old_ifs
+}
+
+clear_pending_update() {
+  systemctl stop 'lodestore-agent-update-*.timer' 'lodestore-agent-update-*.service' </dev/null >/dev/null 2>&1 || true
+  rm -f "$STATE_DIR/update/pending.json" "$STATE_DIR/update/pending.rollback" "$BIN.prev"
+}
+
 uninstall() {
   systemctl disable --now lodestore-agent </dev/null >/dev/null 2>&1 || true
-  rm -f "$UNIT" "$BIN"
+  rm -f "$UNIT" "$BIN" "$BIN.prev"
   systemctl daemon-reload </dev/null || true
   if [ "$purge" = 1 ]; then
     rm -rf "$CONF_DIR" "$STATE_DIR"
@@ -192,6 +211,9 @@ main() {
   github=0
   remove=0
   insecure=0
+  trust_keys=
+  nl='
+'
   while [ $# -gt 0 ]; do
     case $1 in
       --join)
@@ -204,6 +226,15 @@ main() {
       --purge) purge=1; shift ;;
       --from-github) github=1; shift ;;
       --insecure) insecure=1; shift ;;
+      --trust-key)
+        [ $# -ge 2 ] || die "--trust-key needs a readable .pub file"
+        case $2 in
+          *.pub) [ -f "$2" ] && [ -r "$2" ] || die "--trust-key needs a readable .pub file: $2" ;;
+          *) die "--trust-key needs a readable .pub file: $2" ;;
+        esac
+        trust_keys=$trust_keys$2$nl
+        shift 2
+        ;;
       --help | -h) usage; exit 0 ;;
       *) usage >&2; die "unknown option $1" ;;
     esac
@@ -236,7 +267,9 @@ main() {
   getent group lodestore >/dev/null 2>&1 || groupadd --system lodestore
   [ -d "$CONF_DIR/hooks.d" ] || install -d -m 0700 -o root -g root "$CONF_DIR/hooks.d"
   install -m 0755 "$tmp/agent" "$BIN.new"
+  clear_pending_update
   mv "$BIN.new" "$BIN"
+  install_trust_keys
   write_env_file
   write_unit
   systemctl daemon-reload </dev/null

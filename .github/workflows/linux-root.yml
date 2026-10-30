@@ -26,4 +26,5 @@ jobs:
       - run: scripts/test-linux.sh --root fidelity_root_
       - run: scripts/test-linux.sh --root backup_root_
       - run: BINS=lodestore-agent PKG=lodestore-server scripts/test-linux.sh --root e2e_install_
+      - run: BINS=lodestore-agent PKG=lodestore-agent scripts/test-linux.sh --root update_systemd_
       - run: cargo nextest run -p lodestore-format --run-ignored only -E 'test(/^s3_/)'

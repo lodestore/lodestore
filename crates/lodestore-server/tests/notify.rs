@@ -20,12 +20,13 @@ const MINUTE: i64 = 60_000;
 const HOUR: i64 = 60 * MINUTE;
 const DAY: i64 = 24 * HOUR;
 
-const ALL_TYPES: [AlertType; 5] = [
+const ALL_TYPES: [AlertType; 6] = [
     AlertType::BackupFailed,
     AlertType::NoRecentBackup,
     AlertType::AgentOffline,
     AlertType::CheckFailed,
     AlertType::CertificateExpiring,
+    AlertType::AgentUpdateFailed,
 ];
 
 #[derive(Clone)]
@@ -172,6 +173,28 @@ impl Env {
         .bind(now_ms() - 30 * DAY)
         .bind(now_ms() + 300 * DAY)
         .bind(now_ms() + 200 * HOUR)
+        .execute(self.pool())
+        .await
+        .unwrap();
+    }
+
+    async fn rolled_back_update(&self, host: &str, reason: &str, finished_ms: i64) {
+        sqlx::query(
+            "INSERT INTO agent_rollouts (id, target_version, state, canary, wave_size, \
+             pause_after, created_by, created_at) VALUES ('r1', '0.2.0', 'done', 1, 10, 0, 'admin', $1)",
+        )
+        .bind(finished_ms)
+        .execute(self.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO agent_updates (id, rollout_id, host_id, arch, from_version, \
+             target_version, wave, state, reason, queued_at, finished_at) \
+             VALUES ('u1', 'r1', $1, 'x86_64', '0.1.0', '0.2.0', 0, 'rolled_back', $2, $3, $3)",
+        )
+        .bind(host)
+        .bind(reason)
+        .bind(finished_ms)
         .execute(self.pool())
         .await
         .unwrap();
@@ -559,6 +582,51 @@ async fn notify_slack_and_webhook_bearer() {
                 .any(|(_, _, error)| error.as_deref() == Some("HTTP 400")),
             "{deliveries:?}"
         );
+        env.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn notify_agent_update_failed_filter() {
+    for backend in backends() {
+        let wanted = Stub::start().await;
+        let other = Stub::start().await;
+        let env = Env::start(
+            &backend,
+            vec![
+                only(
+                    webhook("wanted", &wanted.url("/h"), None),
+                    &[AlertType::AgentUpdateFailed],
+                ),
+                only(
+                    webhook("other", &other.url("/h"), None),
+                    &[AlertType::BackupFailed],
+                ),
+            ],
+        )
+        .await;
+        env.host("h1", "web-1").await;
+        env.rolled_back_update("h1", "Health check failed.", now_ms() - HOUR)
+            .await;
+        env.tick(now_ms()).await;
+
+        let hits = wanted.hits();
+        assert_eq!(hits.len(), 1, "[{}]", backend.name());
+        let body = hits[0].json();
+        assert_eq!(
+            body["groupLabels"]["alertname"],
+            "LodestoreAgentUpdateFailed"
+        );
+        assert_eq!(body["commonLabels"]["severity"], "critical");
+        assert_eq!(
+            body["commonAnnotations"]["summary"],
+            "Agent update failed on web-1"
+        );
+        assert_eq!(
+            body["commonAnnotations"]["description"],
+            "Health check failed."
+        );
+        assert!(other.hits().is_empty());
         env.stop().await;
     }
 }

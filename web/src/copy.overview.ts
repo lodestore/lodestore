@@ -147,6 +147,7 @@ export const overview = {
 			backupFailed: (host: string) => `Backup failed on ${host}`,
 			noRecent: (host: string) => `No recent backup on ${host}`,
 			offline: (host: string) => `${host} is offline`,
+			agentUpdateFailed: (host: string) => `Agent update failed on ${host}`,
 			checkFailed: (level: string, repository: string) =>
 				`${level} check failed on ${repository}`,
 			expiresIn: (name: string, days: number) =>
@@ -177,6 +178,8 @@ export const overview = {
 					: "The agent has not connected yet.",
 			checkFailed: (n: number) =>
 				`${problemCount(n)} found. Open the report in Integrity checks.`,
+			agentUpdateFailed: (error?: string | null) =>
+				`${error ? sentenceEnd(error) : "The update was rolled back"}.`,
 		},
 		silence: {
 			trigger: "Silence alerts",

@@ -12,10 +12,11 @@ pub mod session;
 pub mod socket;
 pub mod tls;
 pub mod token;
+pub mod update;
 
 pub use enroll::{EnrollArgs, Enrolled, enroll, enroll_with_previous};
 pub use identity::Paths;
-pub use session::{RunArgs, run};
+pub use session::{RunArgs, run, run_with};
 
 pub const EXIT_ALREADY_ENROLLED: u8 = 3;
 pub const EXIT_REVOKED: u8 = 77;

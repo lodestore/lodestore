@@ -78,6 +78,44 @@ async fn install_script_prepares_hooks_and_socket() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn install_script_trust_key_rejects_non_pub() {
+    let ts = TestServer::start(&Backend::Sqlite).await;
+    let body = reqwest::get(format!("{}/install.sh", ts.rest_url()))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    for needle in [
+        "--trust-key",
+        "trusted-keys",
+        "install -m 0644 -o root -g root",
+        r#"rm -f "$UNIT" "$BIN" "$BIN.prev""#,
+    ] {
+        assert!(body.contains(needle), "install.sh lacks {needle}");
+    }
+
+    let own = ts.dir.path().join("own.key");
+    std::fs::write(&own, "key").unwrap();
+    let missing = ts.dir.path().join("missing.pub");
+    for file in [own, missing] {
+        let mut sh = Command::new("sh")
+            .args(["-s", "--", "--trust-key"])
+            .arg(&file)
+            .stdin(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        sh.stdin.take().unwrap().write_all(body.as_bytes()).unwrap();
+        let out = sh.wait_with_output().unwrap();
+        assert!(!out.status.success());
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("readable .pub file"), "{stderr}");
+    }
+    ts.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn install_script_refuses_plain_http_without_insecure() {
     let ts = TestServer::start(&Backend::Sqlite).await;
     let body = reqwest::get(format!("{}/install.sh", ts.rest_url()))
@@ -162,6 +200,29 @@ async fn install_unknown_arch_404() {
         }
         ts.stop().await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn install_script_clears_a_pending_update_before_replacing_the_binary() {
+    let ts = TestServer::start(&Backend::Sqlite).await;
+    let body = reqwest::get(format!("{}/install.sh", ts.rest_url()))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    for needle in [
+        "'lodestore-agent-update-*.timer' 'lodestore-agent-update-*.service'",
+        r#"rm -f "$STATE_DIR/update/pending.json" "$STATE_DIR/update/pending.rollback" "$BIN.prev""#,
+    ] {
+        assert!(body.contains(needle), "install.sh lacks {needle}");
+    }
+    let clear = body
+        .find("\n  clear_pending_update\n")
+        .expect("clears the pending update");
+    let replace = body.find(r#"mv "$BIN.new" "$BIN""#).expect("replaces");
+    assert!(clear < replace, "cleared before the binary is replaced");
+    ts.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

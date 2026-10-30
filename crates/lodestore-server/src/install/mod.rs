@@ -17,7 +17,7 @@ use tokio_util::io::ReaderStream;
 use crate::config::Config;
 use crate::state::AppState;
 
-const ARCHES: [(&str, &str); 2] = [
+pub(crate) const ARCHES: [(&str, &str); 2] = [
     ("x86_64", "lodestore-agent-linux-x86_64"),
     ("aarch64", "lodestore-agent-linux-aarch64"),
 ];
@@ -113,7 +113,7 @@ async fn agent_binary(State(state): State<AppState>, UrlPath(name): UrlPath<Stri
         .into_response()
 }
 
-async fn checksum(path: PathBuf) -> Option<String> {
+pub(crate) async fn checksum(path: PathBuf) -> Option<String> {
     tokio::task::spawn_blocking(move || checksum_blocking(&path))
         .await
         .ok()
