@@ -1,0 +1,33 @@
+---
+interface Props {
+	title: string;
+	description: string;
+}
+
+const { title, description } = Astro.props;
+const canonical = new URL(Astro.url.pathname, Astro.site);
+---
+
+<!doctype html>
+<html lang="en" class="js">
+	<head>
+		<meta charset="utf-8" />
+		<script is:inline>
+			document.documentElement.classList.add('js');
+			try {
+				const t = localStorage.getItem('starlight-theme');
+				document.documentElement.dataset.theme = t === 'dark' ? 'dark' : 'light';
+			} catch {
+				document.documentElement.dataset.theme = 'light';
+			}
+		</script>
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>{title}</title>
+		<meta name="description" content={description} />
+		<link rel="canonical" href={canonical} />
+		<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+	</head>
+	<body>
+		<slot />
+	</body>
+</html>

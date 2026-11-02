@@ -188,7 +188,7 @@ crate=$(cargo metadata --locked --no-deps --format-version 1 |
   jq -r '.packages[] | select(.name == "lodestore-server") | .version')
 chart_version=$(sed -n 's/^version: *"\{0,1\}\([^"]*\)"\{0,1\} *$/\1/p' deploy/helm/lodestore/Chart.yaml)
 chart_app=$(sed -n 's/^appVersion: *"\{0,1\}\([^"]*\)"\{0,1\} *$/\1/p' deploy/helm/lodestore/Chart.yaml)
-page=$(sed -n 's/^export LODESTORE_VERSION=//p' docs/src/content/docs/quickstart.md)
+page=$(sed -n 's/^export LODESTORE_VERSION=//p' docs/src/content/docs/docs/quickstart.md)
 
 [ "$crate" = "$version" ] || die "lodestore-server is $crate, tag is $version"
 [ "$chart_version" = "$version" ] || die "Chart.yaml version is '$chart_version', tag is $version"
