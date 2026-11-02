@@ -169,7 +169,7 @@ html:not(.js) .pane+.pane{margin-top:48px}
 .fld .lbl{display:block;font-size:13px;font-weight:600;margin-bottom:4px}
 .fld .in{height:36px;border:1px solid var(--input);border-radius:8px;background:var(--card);display:flex;align-items:center;padding:0 12px;font-size:14px}
 .fld .in.hl{box-shadow:0 0 0 2px var(--primary-strong)}
-.pol-yaml{position:absolute;inset:24px;background:var(--ink);color:var(--ink-fg);border-radius:10px;padding:16px;font:400 13px/1.7 "JetBrains Mono",monospace;white-space:pre;opacity:0;transform:rotateY(8deg) translateX(16px);transition:opacity 500ms,transform 500ms cubic-bezier(.22,1,.36,1);overflow:hidden}
+.pol-yaml{position:absolute;inset:24px;background:var(--ink);color:var(--ink-fg);border-radius:10px;padding:12px 16px;font:400 13px/1.7 "JetBrains Mono",monospace;white-space:pre;opacity:0;transform:rotateY(8deg) translateX(16px);transition:opacity 500ms,transform 500ms cubic-bezier(.22,1,.36,1);overflow:hidden}
 .pol-yaml .k{color:#97a3ba}
 .pol-yaml .v{color:#c6f24e}
 .pol-yaml .hl{background:#0c3a52;display:inline-block;width:100%}

@@ -15,6 +15,7 @@ const yaml = `<span class="k">apiVersion:</span> lodestore.io/v1alpha1
 <span class="k">metadata:</span>
   <span class="k">name:</span> <span class="v">etc-and-home</span>
 <span class="k">spec:</span>
+  <span class="k">repository:</span> <span class="v">main</span>
   <span class="k">paths:</span> [<span class="v">/etc</span>, <span class="v">/home</span>]
 <span class="hl">  <span class="k">schedule:</span>
     <span class="k">cron:</span> <span class="v">30 2 * * *</span>
@@ -142,7 +143,7 @@ const alerts = [
 						<div class="fld"><span class="lbl">Name</span><div class="in">etc-and-home</div></div>
 						<div class="fld"><span class="lbl">Paths</span><div class="in mono">/etc, /home</div></div>
 						<div class="fld"><span class="lbl">Schedule</span><div class="in hl mono">30 2 * * *  ·  Europe/Kyiv</div></div>
-						<div class="fld"><span class="lbl">Keep</span><div class="in">last 3, daily 7, weekly 4, monthly 6</div></div>
+						<div class="fld"><span class="lbl">Keep</span><div class="in">daily 7</div></div>
 					</div>
 				</div>
 				<div class="pol-yaml" set:html={yaml} />

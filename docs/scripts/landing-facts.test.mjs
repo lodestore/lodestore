@@ -94,6 +94,7 @@ test('Policies as code YAML keys exist in the policies guide', () => {
 	const yaml = textOf(landing().match(/<div class="pol-yaml"[^>]*>([\s\S]*?)<\/div>/)?.[1] ?? '');
 	const rows = yaml.split('\n').filter((l) => /^\s*[A-Za-z]+:/.test(l));
 	assert.ok(rows.length >= 6);
+	for (const key of ['repository', 'paths']) assert.ok(rows.some((r) => r.trim().startsWith(`${key}:`)), `${key}: is missing from the sample`);
 	for (const row of rows) {
 		const [, key, value] = row.trim().match(/^([A-Za-z]+):\s*(.*)$/);
 		assert.ok(guide.includes(`${key}:`), `${key}: is not in the policies guide`);
