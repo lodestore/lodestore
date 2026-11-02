@@ -106,7 +106,7 @@ const alerts = [
 			<div>
 				<h3>A taken-over host <span class="em">cannot erase its history.</span></h3>
 				<p>
-					On S3-compatible storage each agent holds its own key without delete permission. Deletion and cleanup run only on
+					On S3-compatible storage the key the agents write with has no delete permission. Deletion and cleanup run only on
 					the server, in two phases with a wait longer than the longest backup.
 				</p>
 				<p>It works with S3 Object Lock, so even the server cannot remove data before its time.</p>
