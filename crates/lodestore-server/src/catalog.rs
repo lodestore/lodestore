@@ -1129,6 +1129,12 @@ fn stored_skipped(json: Option<&str>) -> Vec<SkippedSnapshot> {
 
 async fn statuses(state: &AppState) -> anyhow::Result<Vec<CatalogStatus>> {
     let repositories = list_repositories(state).await?;
+    // Phases first: a run writes catalog_state before it reports done, so the
+    // reads below can only be newer than the phase, never older.
+    let mut shown: HashMap<String, Option<CatalogStatus>> = repositories
+        .iter()
+        .map(|repo| (repo.id.clone(), state.catalog.shown(&repo.id)))
+        .collect();
     let mut stored = HashMap::new();
     for row in sqlx::query(
         "SELECT repository_id, last_sync_at, last_error, skipped_json FROM catalog_state",
@@ -1159,7 +1165,7 @@ async fn statuses(state: &AppState) -> anyhow::Result<Vec<CatalogStatus>> {
         .into_iter()
         .map(|repo| {
             let stored = stored.remove(&repo.id);
-            let mut status = state.catalog.shown(&repo.id).unwrap_or_else(|| {
+            let mut status = shown.remove(&repo.id).flatten().unwrap_or_else(|| {
                 let mut idle = CatalogStatus::new(&repo.id, CatalogPhase::Idle);
                 if let Some((_, error, skipped)) = &stored {
                     idle.error.clone_from(error);
