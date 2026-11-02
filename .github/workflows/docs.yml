@@ -15,13 +15,14 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: docs-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   build:
     runs-on: ubuntu-latest
+    concurrency:
+      group: docs-build-${{ github.ref }}
+      cancel-in-progress: true
+    env:
+      PUBLIC_LIVE_DEMO_URL: ${{ vars.PUBLIC_LIVE_DEMO_URL }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -34,27 +35,45 @@ jobs:
           node-version: 24
       - run: pnpm --dir docs install --frozen-lockfile
       - run: pnpm --dir docs build
+      - run: pnpm --dir docs check
       - name: No CI markers in built pages
         run: "! grep -rlE 'ci:(run-server|setup-link|install-agent|restore-without-server)' docs/dist"
+      - if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: site-dist
+          path: docs/dist
+          if-no-files-found: error
+          retention-days: 7
 
   deploy:
     needs: build
-    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && vars.SITE_DEPLOY == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+    environment: site
+    concurrency:
+      group: site-deploy
+      cancel-in-progress: false
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
-          persist-credentials: false
-      - uses: withastro/action@a8b97df764791eb61fbf3338ef713b0e61ae05c5
-        with:
-          path: docs
-          node-version: 24
-      - id: deployment
-        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346
+          name: site-dist
+          path: dist
+      - name: Upload with rrsync
+        env:
+          SITE_DEPLOY_KEY: ${{ secrets.SITE_DEPLOY_KEY }}
+          SITE_HOST: ${{ secrets.SITE_HOST }}
+          SITE_KNOWN_HOSTS: lodestore-site ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILoIKdeeSIq368StjY1S3xHwSoUpwLgDx1z6G0Wr11Rk
+        run: |
+          set -eu
+          : "${SITE_HOST:?}"
+          install -m 600 /dev/null key
+          printf '%s\n' "$SITE_DEPLOY_KEY" > key
+          printf '%s\n' "$SITE_KNOWN_HOSTS" > known_hosts
+          rsync -rlt --delete-after --delay-updates --chmod=D755,F644 \
+            -e "ssh -i key -o IdentitiesOnly=yes -o BatchMode=yes -o HostKeyAlias=lodestore-site -o UserKnownHostsFile=known_hosts -o StrictHostKeyChecking=yes" \
+            dist/ "lodestore-site@${SITE_HOST}:."
+          rm -f key
