@@ -34,7 +34,7 @@ Lodestore is built around one promise: **a restore needs only the bucket and a k
 ## How it fits together
 
 - **The agent** runs on each host. It registers with a one-time join token, receives its own client certificate, keeps an outbound connection to the server and needs no inbound ports.
-- **The server** manages and catalogs. It schedules backups, keeps snapshot metadata, sends alerts and serves the web interface. It never sits in the data path.
+- **The server** manages and catalogs. It schedules backups, keeps snapshot metadata, sends alerts and serves the web interface. Backups never pass through it.
 - **Your storage** holds the data. The agent writes to it directly: AWS S3, MinIO, Ceph and other S3-compatible storage, or a local or network folder.
 
 Data is deduplicated across the snapshots and hosts of a repository, compressed, then encrypted with XChaCha20-Poly1305 before it leaves the host. File names are not readable in the bucket either; [a test](/docs/security/how-we-test/#what-the-bucket-looks-like-from-outside) searches every object, names included, for recognizable content. The server runs as a Docker image, a static binary or a Helm chart, with SQLite by default and PostgreSQL for production.
