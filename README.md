@@ -4,7 +4,7 @@
 
 # Lodestore
 
-**Centralized, encrypted backup for Linux hosts. Your data goes straight to your own storage, and a restore needs only the repository and a password.**
+**Centralized, encrypted backup for your server fleet. Your data goes straight to your own storage, and a restore needs only the repository and a password.**
 
 [![ci](https://github.com/lodestore/lodestore/actions/workflows/ci.yml/badge.svg)](https://github.com/lodestore/lodestore/actions/workflows/ci.yml)
 [![License: Apache-2.0 and AGPL-3.0](https://img.shields.io/badge/license-Apache--2.0%20%2F%20AGPL--3.0-blue)](#license)
