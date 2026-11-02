@@ -793,7 +793,8 @@ mod tests {
         let outdated = |v: &str| assess(v, "x86_64", true, None, &[]).outdated;
         assert!(!outdated(&server.to_string()));
         assert!(!outdated(&Version::new(server.major + 1, 0, 0).to_string()));
-        assert!(outdated(&format!("{server}-rc.1")));
+        let lowest_pre = format!("{}.{}.{}-0", server.major, server.minor, server.patch);
+        assert!(outdated(&lowest_pre));
         assert!(outdated("not a version"));
     }
 }

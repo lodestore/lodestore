@@ -23,7 +23,7 @@ Set the address of the machine that runs the server and the release to install. 
 
 ```sh
 export LODESTORE_HOST=192.0.2.10
-export LODESTORE_VERSION=0.1.0
+export LODESTORE_VERSION=0.1.0-rc.1
 ```
 
 ## Start the server
