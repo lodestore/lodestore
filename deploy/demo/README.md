@@ -2,7 +2,7 @@
 
 A real Lodestore server on your own host, three agents in containers and MinIO, backing up synthetic data on a schedule. Visitors open the web interface without a password, read hosts and snapshots, and download an archive of a snapshot. Everything that writes is refused by the server (`LODESTORE_DEMO_MODE=true`).
 
-The stand is deployed by hand. CI has no access to the stand. The host name and domain come from `.env`, nothing is baked into the files. The `lodestore.dev` site on the same host is deployed separately, by CI over SSH with a key that can only write to the site directory (see [`deploy/site/README.md`](../site/README.md)).
+The stand is deployed by hand. CI has no access to the stand. The host name and domain come from `.env`, nothing is baked into the files.
 
 No SLA and no external monitoring: `restart: unless-stopped` and the container health checks are all there is. There is no reset: retention (`keepLast: 6`, `keepDaily: 3` every 30 minutes) and the daily cleanup cycle keep the size flat.
 
