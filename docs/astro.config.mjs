@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import starlight from '@astrojs/starlight';
 import { defineConfig } from 'astro/config';
 import starlightLinksValidator from 'starlight-links-validator';
+import { cspMeta } from './scripts/csp-meta.mjs';
 
 const CI_MARKER = /<!--\s*ci:[a-z-]+\s*-->\n?/g;
 
@@ -70,6 +71,7 @@ export default defineConfig({
 				{ label: 'ADR', items: [{ autogenerate: { directory: 'docs/adr' } }] },
 			],
 		}),
+		cspMeta(),
 		stripCiMarkers,
 	],
 });

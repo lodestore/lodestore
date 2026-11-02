@@ -6,12 +6,21 @@ fail() {
   exit 1
 }
 
-[ $# -eq 1 ] || fail "usage: $0 <dist>"
+name=lodestore-site-test
+serve=0
+if [ "${1:-}" = "--stop" ]; then
+  docker rm -f "$name" >/dev/null 2>&1 || true
+  exit 0
+fi
+if [ "${1:-}" = "--serve" ]; then
+  serve=1
+  shift
+fi
+[ $# -eq 1 ] || fail "usage: $0 [--serve] <dist> | $0 --stop"
 [ -f "$1/index.html" ] || fail "$1 has no index.html, build the site first"
 
 here=$(cd "$(dirname "$0")" && pwd)
 dist=$(cd "$1" && pwd)
-name=lodestore-site-test
 tmp=$(mktemp -d)
 trap 'docker rm -f "$name" >/dev/null 2>&1 || true; rm -rf "$tmp"' EXIT
 
@@ -85,3 +94,10 @@ grep -q ' 301' <<<"$plain" || fail "http is not a 301"
 grep -qiE '^location: https://lodestore.dev/\r?$' <<<"$plain" || fail "http does not redirect to https"
 
 echo "site config ok"
+
+if [ "$serve" = 1 ]; then
+  trap 'rm -rf "$tmp"' EXIT
+  trap 'docker rm -f "$name" >/dev/null 2>&1 || true; exit 0' INT TERM
+  echo "serving https://lodestore.dev:18443/"
+  while docker ps -q -f "name=^${name}$" | grep -q .; do sleep 1; done
+fi
