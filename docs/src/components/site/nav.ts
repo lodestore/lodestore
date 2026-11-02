@@ -3,8 +3,11 @@ import { getCollection } from 'astro:content';
 export const GITHUB_URL = 'https://github.com/lodestore/lodestore';
 export const liveDemoUrl: string | undefined = import.meta.env.PUBLIC_LIVE_DEMO_URL || undefined;
 
-export async function hasBlog(): Promise<boolean> {
-	return (await getCollection('blog')).length > 0;
+let blog: Promise<boolean> | undefined;
+
+export function hasBlog(): Promise<boolean> {
+	blog ??= getCollection('blog').then((posts) => posts.length > 0);
+	return blog;
 }
 
 export async function navItems(): Promise<{ label: string; href: string }[]> {

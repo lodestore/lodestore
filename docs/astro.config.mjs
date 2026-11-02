@@ -30,6 +30,8 @@ export default defineConfig({
 		starlight({
 			title: 'Lodestore',
 			disable404Route: true,
+			logo: { src: './src/assets/mark.svg' },
+			favicon: '/favicon.svg',
 			plugins: [
 				starlightLinksValidator({
 					exclude: ({ link }) =>
@@ -48,7 +50,8 @@ export default defineConfig({
 			],
 			customCss: ['./src/styles/tokens.css', './src/styles/custom.css'],
 			components: {
-				ThemeProvider: './src/components/starlight/ThemeProvider.astro',
+				SocialIcons: './src/components/starlight/SocialIcons.astro',
+				ThemeProvider:'./src/components/starlight/ThemeProvider.astro',
 				ThemeSelect: './src/components/starlight/ThemeSelect.astro',
 			},
 			sidebar: [
