@@ -45,12 +45,13 @@
 .st.ok{color:var(--success)}
 .st.run{color:var(--primary-strong)}
 .st.neu{color:var(--muted-foreground)}
-.demo .tbl tr.new{display:none}
-.demo .tbl tr.new.show{display:table-row;animation:rowin 500ms cubic-bezier(.22,1,.36,1)}
+.demo .tbl tr.new{visibility:hidden}
+.demo .tbl tr.new.show{visibility:visible;animation:rowin 500ms cubic-bezier(.22,1,.36,1)}
+#dst{position:relative}
 @keyframes rowin{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
 .spin{animation:spin 1s linear infinite;transform-origin:center}
 @keyframes spin{to{transform:rotate(360deg)}}
-.bar{display:block;width:96px;height:6px;border-radius:3px;background:var(--muted);overflow:hidden;margin-top:6px}
+.bar{position:absolute;left:14px;bottom:4px;width:96px;height:4px;border-radius:2px;background:var(--muted);overflow:hidden}
 .bar i{display:block;height:100%;width:0;background:var(--primary-strong);transition:width 2800ms linear}
 
 .d-modal-bg{position:absolute;inset:0;background:color-mix(in srgb,var(--foreground) 18%,transparent);opacity:0;pointer-events:none;transition:opacity 250ms}
@@ -69,6 +70,7 @@
 #cursor{position:absolute;left:70%;top:85%;width:22px;height:22px;z-index:20;pointer-events:none;opacity:0;transition:left 700ms cubic-bezier(.4,0,.2,1),top 700ms cubic-bezier(.4,0,.2,1);filter:drop-shadow(0 2px 2px rgb(0 0 0/.25))}
 .demo.live #cursor{opacity:1}
 @media(max-width:767px){.demo .hide-xs{display:none}.demo-head{font-size:19px}}
+@media(max-width:480px){#dsub{min-height:2lh}}
 
 .panel{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:24px;box-shadow:0 24px 48px -32px rgb(11 18 32/.25)}
 .term{background:var(--ink);color:var(--ink-fg);border:1px solid var(--ink-border);border-radius:12px;overflow:hidden;text-align:left}
