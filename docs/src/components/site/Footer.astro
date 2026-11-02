@@ -1,0 +1,56 @@
+---
+import { GITHUB_URL, hasBlog, liveDemoUrl } from './nav';
+
+const blog = await hasBlog();
+---
+
+<footer class="site-footer">
+	<div class="wrap">
+		<div>
+			<a class="logo" href="/">
+				<svg viewBox="0 0 32 32" aria-hidden="true"
+					><path
+						fill="#070A12"
+						d="M16 2.8L27.43 9.4L27.43 22.6L16 29.2L4.57 22.6L4.57 9.4Z"
+						stroke="#38E1FF"
+						stroke-width="2.2"
+						stroke-linejoin="round"></path><path
+						fill="#38E1FF"
+						d="M16 6.4L18 14L25.6 16L18 18L16 25.6L14 18L6.4 16L14 14Z"></path><path
+						fill="#C6F24E"
+						d="M16 12.4L16.9 15.1L19.6 16L16.9 16.9L16 19.6L15.1 16.9L12.4 16L15.1 15.1Z"></path></svg
+				>Lodestore
+			</a>
+			<p class="blurb">
+				Centralized, encrypted backup for Linux hosts. Agent, format and CLI under Apache-2.0, server under AGPL-3.0.
+			</p>
+		</div>
+		<div>
+			<h4>Product</h4>
+			<ul>
+				<li><a href="/docs/quickstart/">Quickstart</a></li>
+				{liveDemoUrl && <li><a href={liveDemoUrl}>Live demo</a></li>}
+				<li><a href={`${GITHUB_URL}/releases`}>Releases</a></li>
+				<li><a href={`${GITHUB_URL}/blob/main/CHANGELOG.md`}>Changelog</a></li>
+			</ul>
+		</div>
+		<div>
+			<h4>Docs</h4>
+			<ul>
+				<li><a href="/docs/install/docker/">Install</a></li>
+				<li><a href="/docs/guides/policies/">Policies</a></li>
+				<li><a href="/docs/recipes/restore-without-server/">Restore without the server</a></li>
+				<li><a href="/docs/reference/cli/">CLI reference</a></li>
+			</ul>
+		</div>
+		<div>
+			<h4>Trust</h4>
+			<ul>
+				<li><a href="/docs/security/threat-model/">Threat model</a></li>
+				<li><a href="/docs/security/how-we-test/">How we test</a></li>
+				<li><a href={`${GITHUB_URL}/blob/main/SECURITY.md`}>Security policy</a></li>
+				{blog && <li><a href="/blog/">Blog</a></li>}
+			</ul>
+		</div>
+	</div>
+</footer>

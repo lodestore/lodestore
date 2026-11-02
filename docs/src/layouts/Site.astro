@@ -1,5 +1,6 @@
 ---
 import onest from '../assets/fonts/onest-latin-wght-normal.woff2?url';
+import Footer from '../components/site/Footer.astro';
 import Header from '../components/site/Header.astro';
 import '../styles/tokens.css';
 import '../styles/site.css';
@@ -14,7 +15,7 @@ const canonical = new URL(Astro.url.pathname, Astro.site);
 ---
 
 <!doctype html>
-<html lang="en" class="js">
+<html lang="en">
 	<head>
 		<meta charset="utf-8" />
 		<script is:inline>
@@ -36,5 +37,19 @@ const canonical = new URL(Astro.url.pathname, Astro.site);
 	<body>
 		<Header />
 		<slot />
+		<Footer />
+		<script>
+			const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+			const io = new IntersectionObserver(
+				(entries) =>
+					entries.forEach((e) => {
+						if (!e.isIntersecting) return;
+						e.target.classList.add('in');
+						io.unobserve(e.target);
+					}),
+				{ rootMargin: '0px 0px -10% 0px' },
+			);
+			document.querySelectorAll('.rise, .kt').forEach((el) => (reduce ? el.classList.add('in') : io.observe(el)));
+		</script>
 	</body>
 </html>

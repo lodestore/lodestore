@@ -29,6 +29,7 @@ export default defineConfig({
 	integrations: [
 		starlight({
 			title: 'Lodestore',
+			disable404Route: true,
 			plugins: [
 				starlightLinksValidator({
 					exclude: ({ link }) =>
