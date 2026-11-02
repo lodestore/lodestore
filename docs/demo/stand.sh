@@ -77,10 +77,36 @@ mc_script() {
   dc --profile seed run --rm -T --no-deps --entrypoint bash seed -s
 }
 
+addhost_start() {
+  dc --profile addhost up -d agent-4
+}
+
+addhost_token() {
+  [ -n "${1:-}" ] || fail "addhost-token needs the join token"
+  dc --profile seed run --rm -T --no-deps -e JOIN_TOKEN="$1" --entrypoint bash seed \
+    -c 'umask 077; printf "%s\n" "$JOIN_TOKEN" >/seed/join-demo-app-01.token'
+}
+
+render() {
+  trap down EXIT
+  cd "$here"
+  prepare
+  node capture.ts wizard
+  seed_stand
+  node capture.ts fleet
+  node capture.ts clips light
+  down
+  seed_stand
+  node capture.ts clips dark
+}
+
 case "${1:-}" in
   up) prepare ;;
   seed) seed_stand ;;
   down) down ;;
   mc) mc_script ;;
-  *) echo "usage: stand.sh up|seed|down|mc|render" >&2; exit 2 ;;
+  addhost-start) addhost_start ;;
+  addhost-token) addhost_token "${2:-}" ;;
+  render) render ;;
+  *) echo "usage: stand.sh up|seed|down|mc|addhost-start|addhost-token|render" >&2; exit 2 ;;
 esac
