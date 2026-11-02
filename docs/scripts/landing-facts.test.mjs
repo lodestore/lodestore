@@ -1,0 +1,158 @@
+import assert from 'node:assert/strict';
+import { existsSync, readFileSync } from 'node:fs';
+import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
+
+const here = (path) => fileURLToPath(new URL(path, import.meta.url));
+
+const ENTITIES = { quot: '"', apos: "'", amp: '&', lt: '<', gt: '>', nbsp: ' ' };
+
+function decode(s) {
+	return s.replace(/&(#x[0-9a-f]+|#[0-9]+|quot|apos|amp|lt|gt|nbsp);/gi, (_, e) => {
+		if (e[0] !== '#') return ENTITIES[e.toLowerCase()];
+		const hex = e[1].toLowerCase() === 'x';
+		return String.fromCodePoint(Number.parseInt(e.slice(hex ? 2 : 1), hex ? 16 : 10));
+	});
+}
+
+function textOf(html) {
+	return decode(
+		html
+			.replace(/<(script|style)\b[\s\S]*?<\/\1>/gi, '')
+			.replace(/<\/(div|p|li|tr|h[1-6]|pre|caption)>|<br\s*\/?>/gi, '\n')
+			.replace(/<[^>]+>/g, ''),
+	);
+}
+
+function landing() {
+	const file = here('../dist/index.html');
+	assert.ok(existsSync(file), 'docs/dist/index.html is missing: run "pnpm --dir docs build" first');
+	return readFileSync(file, 'utf8');
+}
+
+function source(name) {
+	for (const ext of ['md', 'mdx']) {
+		const file = here(`../src/content/docs/docs/${name}.${ext}`);
+		if (existsSync(file)) return readFileSync(file, 'utf8');
+	}
+	throw new Error(`no source page for docs/${name} (.md or .mdx)`);
+}
+
+function element(html, tag, id) {
+	const m = html.match(new RegExp(`<${tag}\\b[^>]*\\bid="${id}"[^>]*>([\\s\\S]*?)</${tag}>`));
+	assert.ok(m, `<${tag} id="${id}"> not found in dist/index.html`);
+	return m[1];
+}
+
+function fences(md) {
+	return [...md.matchAll(/```[a-z]*\n([\s\S]*?)```/g)].map((m) => m[1].trim());
+}
+
+test('entity decoding is a single pass', () => {
+	assert.equal(decode('&quot;a&quot; &amp;lt; &#39;b&#x27; &#47;'), `"a" &lt; 'b' /`);
+});
+
+test('Docker tab equals the quickstart server command', () => {
+	const qs = source('quickstart');
+	const version = qs.match(/^export LODESTORE_VERSION=(.+)$/m)?.[1];
+	const host = qs.match(/^export LODESTORE_HOST=.+$/m)?.[0];
+	const block = qs.match(/<!-- ci:run-server -->\n```sh\n([\s\S]*?)```/)?.[1];
+	assert.ok(version && host && block, 'quickstart no longer has the version, the host or the ci:run-server block');
+	const expected = `${host}\n${block.trim().replaceAll('$LODESTORE_VERSION', version)}`;
+	assert.equal(textOf(element(landing(), 'pre', 'inst-docker')).trim(), expected);
+});
+
+test('Binary and Helm tabs are fenced blocks of the install pages', () => {
+	const html = landing();
+	for (const [id, page] of [
+		['inst-binary', 'install/binary'],
+		['inst-helm', 'install/helm'],
+	]) {
+		const shown = textOf(element(html, 'pre', id)).trim();
+		assert.ok(shown.length > 0, `${id} is empty`);
+		assert.ok(fences(source(page)).includes(shown), `${id} is not a fenced block of ${page}`);
+	}
+});
+
+test('recovery terminal commands come from the restore recipe', () => {
+	const recipe = source('recipes/restore-without-server');
+	const lines = textOf(element(landing(), 'pre', 'tty'))
+		.split('\n')
+		.filter((l) => l.startsWith('$ '))
+		.map((l) => l.slice(2));
+	assert.ok(lines.length > 0, 'no command lines in the terminal');
+	for (const line of lines) {
+		const name = line.match(/^export ([A-Z_]+)=/)?.[1];
+		if (name) assert.ok(recipe.includes(`export ${name}=`), `${name} is not exported in the recipe`);
+		else assert.ok(recipe.includes(line), `not in the recipe: ${line}`);
+	}
+	assert.ok(lines.some((l) => l.startsWith('lode ')));
+});
+
+test('Policies as code YAML keys exist in the policies guide', () => {
+	const guide = source('guides/policies');
+	const yaml = textOf(landing().match(/<div class="pol-yaml"[^>]*>([\s\S]*?)<\/div>/)?.[1] ?? '');
+	const rows = yaml.split('\n').filter((l) => /^\s*[A-Za-z]+:/.test(l));
+	assert.ok(rows.length >= 6);
+	for (const row of rows) {
+		const [, key, value] = row.trim().match(/^([A-Za-z]+):\s*(.*)$/);
+		assert.ok(guide.includes(`${key}:`), `${key}: is not in the policies guide`);
+		if (value && !value.startsWith('[')) assert.ok(guide.includes(`${key}: ${value}`), `${key}: ${value} differs`);
+	}
+});
+
+test('hero modal command has the shape of the quickstart agent command', () => {
+	const qs = source('quickstart');
+	const real = qs.match(/<!-- ci:install-agent -->\n```sh\n(.+)\n```/)?.[1];
+	assert.ok(real?.startsWith('curl -fsSL'));
+	const shown = textOf(landing()).match(/curl -fsSL [^\n]*--join[^\n]*/)?.[0];
+	assert.ok(shown, 'no join command on the page');
+	assert.ok(shown.startsWith('curl -fsSL'));
+	assert.ok(shown.includes('| sudo sh -s -- '));
+	assert.ok(real.includes('| sudo sh -s -- ') && real.includes('--join'));
+});
+
+test('trust line makes no air-gapped claim', () => {
+	const text = textOf(landing());
+	assert.ok(!/air-gapped/i.test(text), 'air-gapped is back');
+	assert.ok(text.includes('Open source, control plane included'));
+	assert.ok(text.includes('Self-hosted'));
+});
+
+const PRODUCTS = [
+	['restic', 'restic'],
+	['plakar', 'Plakar'],
+	['bareos', 'Bareos'],
+];
+
+const compareMd = (id) => readFileSync(here(`../src/content/compare/${id}.md`), 'utf8');
+
+test('comparison cells are quoted from the compare pages', () => {
+	const section = element(landing(), 'section', 'compare');
+	const table = section.match(/<table class="cmp"[\s\S]*?<\/table>/)?.[0];
+	assert.ok(table, 'no comparison table');
+	const mds = PRODUCTS.map(([id]) => compareMd(id));
+	const rows = [...table.match(/<tbody>[\s\S]*<\/tbody>/)[0].matchAll(/<tr>([\s\S]*?)<\/tr>/g)];
+	assert.ok(rows.length >= 4);
+	for (const [, row] of rows) {
+		const cells = [...row.matchAll(/<(?:th|td)\b[^>]*>([\s\S]*?)<\/(?:th|td)>/g)].map((m) => textOf(m[1]).trim());
+		assert.equal(cells.length, 5, `row has ${cells.length} cells: ${cells[0]}`);
+		assert.ok(mds.some((md) => md.includes(cells[1])), `Lodestore cell not in any compare page: ${cells[1]}`);
+		PRODUCTS.forEach(([id], i) => assert.ok(mds[i].includes(cells[i + 2]), `${id} cell not in ${id}.md: ${cells[i + 2]}`));
+	}
+});
+
+test('comparison caption carries the Checked on date of each page', () => {
+	const text = textOf(element(landing(), 'section', 'compare'));
+	const seen = new Set(text.match(/\d{4}-\d{2}-\d{2}/g));
+	const expected = new Set();
+	for (const [id, name] of PRODUCTS) {
+		const facts = compareMd(id).split(/^## Facts we checked$/m)[1]?.split(/^## /m)[0] ?? '';
+		const dates = [...facts.matchAll(/\|\s*(\d{4}-\d{2}-\d{2})\s*\|\s*$/gm)].map((m) => m[1]).sort();
+		assert.ok(dates.length > 0, `${id}.md has no Checked on dates`);
+		const latest = dates.at(-1);
+		expected.add(latest);
+		assert.ok(text.includes(`${name} on ${latest}`), `caption lacks "${name} on ${latest}"`);
+	}
+	assert.deepEqual([...seen].sort(), [...expected].sort());
+});

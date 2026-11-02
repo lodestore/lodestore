@@ -1,0 +1,98 @@
+---
+import { getCollection } from 'astro:content';
+
+const check = 'm5 12 5 5 9-10';
+const products = [
+	{ id: 'restic', name: 'restic' },
+	{ id: 'plakar', name: 'Plakar' },
+	{ id: 'bareos', name: 'Bareos' },
+];
+
+const entries = await getCollection('compare');
+function checkedOn(id: string): string {
+	const body = entries.find((e) => e.id === id)?.body ?? '';
+	const facts = body.split(/^## Facts we checked$/m)[1]?.split(/^## /m)[0] ?? '';
+	const dates = [...facts.matchAll(/\|\s*(\d{4}-\d{2}-\d{2})\s*\|\s*$/gm)].map((m) => m[1]).sort();
+	const latest = dates.at(-1);
+	if (!latest) throw new Error(`Compare.astro: compare/${id}.md has no date in its "Facts we checked" table`);
+	return latest;
+}
+const dated = products.map((p) => `${p.name} on ${checkedOn(p.id)}`);
+const caption = `Checked against each project's own documentation: ${dated.slice(0, -1).join(', ')}, ${dated.at(-1)}.`;
+
+const rows = [
+	{
+		label: 'Shape',
+		us: 'One server binary and an agent on each host',
+		restic: 'A command-line program that runs when you start it',
+		plakar: 'Command-line engine, ISC license',
+		bareos: 'Director, a File Daemon on each client, a Storage Daemon and a PostgreSQL catalog',
+	},
+	{
+		label: 'Protection from a compromised host',
+		yes: true,
+		us: 'Agent key without delete rights on S3-compatible storage; deletion is server-only',
+		restic: 'Append-only mode is provided by the backend, for example rest-server',
+		plakar: 'The Plakar website states that on object-lock storage backups are immutable',
+		bareos: 'tape and WORM media can support ransomware-resilient strategies',
+	},
+	{
+		label: 'Platforms',
+		us: 'Linux, x86_64 and arm64',
+		restic: 'Linux, macOS, FreeBSD, OpenBSD, Windows',
+		plakar: 'Linux, macOS, Windows, FreeBSD',
+		bareos: 'Linux, Windows, macOS, FreeBSD',
+	},
+	{
+		label: 'License',
+		us: 'Apache-2.0 (agent, format, CLI), AGPL-3.0 (server)',
+		restic: 'BSD-2-Clause',
+		plakar: 'ISC license',
+		bareos: 'GNU AGPLv3',
+	},
+];
+---
+
+<section class="wrap" id="compare">
+	<div class="sec-head rise">
+		<h2>How it compares</h2>
+		<p>{caption}</p>
+	</div>
+	<div class="cmp-scroll rise">
+		<table class="cmp">
+			<thead>
+				<tr><th></th><th class="us">Lodestore 0.1</th><th>restic</th><th>Plakar (community)</th><th>Bareos</th></tr>
+			</thead>
+			<tbody>
+				{
+					rows.map((r) => (
+						<tr>
+							<th scope="row">{r.label}</th>
+							<td class="us">
+								{r.yes ? (
+									<span class="yes">
+										<svg class="icon" viewBox="0 0 24 24"><path d={check} /></svg>
+										{r.us}
+									</span>
+								) : (
+									r.us
+								)}
+							</td>
+							<td>{r.restic}</td>
+							<td>{r.plakar}</td>
+							<td>{r.bareos}</td>
+						</tr>
+					))
+				}
+			</tbody>
+		</table>
+	</div>
+	<p class="small muted cmp-links">
+		<a class="more" href="/compare/restic/">vs restic</a> &nbsp;·&nbsp; <a class="more" href="/compare/plakar/">vs Plakar</a>
+		&nbsp;·&nbsp; <a class="more" href="/compare/bareos/">vs Bareos</a>
+	</p>
+	<p class="small muted cmp-links">
+		The Plakar column is the community edition. Its separate, commercial Control Plane adds a full web interface and
+		centralized scheduling.
+	</p>
+</section>
