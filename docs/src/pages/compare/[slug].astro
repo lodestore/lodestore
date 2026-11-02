@@ -1,6 +1,7 @@
 ---
 import { getCollection, render } from 'astro:content';
 import Site from '../../layouts/Site.astro';
+import '../../styles/compare.css';
 
 export async function getStaticPaths() {
 	const entries = await getCollection('compare');
@@ -15,7 +16,7 @@ const [lead, rival] = entry.data.title.split(' vs ');
 <Site title={entry.data.title} description={entry.data.description}>
 	<main>
 		<header class="cmp-hero">
-			<div class="wrap measure-wide rise">
+			<div class="wrap rise">
 				<h1>{lead} vs <span class="em">{rival}</span></h1>
 				<p class="lead">{entry.data.description}</p>
 			</div>
