@@ -1,0 +1,140 @@
+---
+import { restoreScript } from '../../scripts/typing';
+
+const host = 'M3 4h18v7H3zM3 13h18v7H3zM7 7.5h.01M7 16.5h.01';
+const agents = [
+	{ y: 74, name: 'web-eu-01' },
+	{ y: 164, name: 'pg-main-01' },
+	{ y: 254, name: 'files-02' },
+];
+const packets = [
+	{ path: 'p1', begin: '0s' },
+	{ path: 'p2', begin: '0.8s' },
+	{ path: 'p3', begin: '1.6s' },
+	{ path: 'p1', begin: '1.2s' },
+];
+---
+
+<section class="sec-pad wrap" id="arch">
+	<div class="sec-head rise">
+		<h2>The server can go down.<br /><span class="em">Your restores stay.</span></h2>
+		<p>
+			The server schedules, catalogs and alerts. It never sits in the data path, so losing it costs you the dashboard, not
+			your backups.
+		</p>
+	</div>
+	<div class="arch">
+		<div class="panel rise lost" id="archp">
+			<div class="seg" role="group" aria-label="Scenario">
+				<button type="button" aria-pressed="false" data-s="day"
+					><svg class="icon" viewBox="0 0 24 24"
+						><circle cx="12" cy="12" r="4"></circle><path
+							d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"
+						></path></svg
+					>Every day</button
+				><button type="button" aria-pressed="true" data-s="lost"
+					><svg class="icon" viewBox="0 0 24 24"
+						><path d="M10.3 3.9 2.4 17.5A2 2 0 0 0 4.1 20.5h15.8a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"></path><path
+							d="M12 9v4M12 17h.01"></path></svg
+					>Server lost</button
+				>
+			</div>
+			<svg
+				class="diagram"
+				viewBox="0 0 860 420"
+				role="img"
+				aria-label="Agents send encrypted data to your storage; if the server is lost, lode restores from storage with a key"
+			>
+				<defs>
+					<marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+						<path d="M0 0L10 5L0 10z" fill="var(--primary-strong)"></path>
+					</marker>
+				</defs>
+				<g class="srv">
+					<path class="ctl" d="M330 62 C 280 62 260 100 230 104"></path>
+					<path class="ctl" d="M330 62 C 290 90 260 190 230 194"></path>
+					<path class="ctl" d="M330 62 C 300 140 270 280 230 284"></path>
+					<path class="ctl" d="M530 62 C 600 62 640 120 650 150"></path>
+					<rect class="box" x="330" y="24" width="200" height="76" rx="12"></rect>
+					<text class="t" x="350" y="56">Lodestore server</text>
+					<text class="ts" x="350" y="78">schedules, catalog, alerts</text>
+				</g>
+				<path class="dead x" d="M500 34l20 20M520 34l-20 20"></path>
+				<g class="badge-off">
+					<rect x="404" y="0" width="72" height="22" rx="11" fill="var(--destructive)"></rect>
+					<text x="440" y="15" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">Offline</text>
+				</g>
+				<g>
+					{
+						agents.map((a) => (
+							<>
+								<rect class="box" x="40" y={a.y} width="190" height="60" rx="10" />
+								<g transform={`translate(56,${a.y + 18})`}>
+									<path class="ic" d={host} />
+								</g>
+								<text class="t" x="92" y={a.y + 27}>
+									{a.name}
+								</text>
+								<text class="ts" x="92" y={a.y + 46}>
+									agent
+								</text>
+							</>
+						))
+					}
+				</g>
+				<path id="p1" class="data" marker-end="url(#ah)" d="M230 104 C 420 104 460 180 618 196"></path>
+				<path id="p2" class="data" marker-end="url(#ah)" d="M230 194 C 420 194 460 206 618 210"></path>
+				<path id="p3" class="data" marker-end="url(#ah)" d="M230 284 C 420 284 460 236 618 224"></path>
+				<text class="ts" x="318" y="166">encrypted, deduplicated</text>
+				<g class="pkts">
+					{
+						packets.map((p) => (
+							<rect class="pk" width="10" height="10" rx="2" x="-5" y="-5">
+								<animateMotion dur="2.4s" begin={p.begin} repeatCount="indefinite">
+									<mpath href={`#${p.path}`} />
+								</animateMotion>
+							</rect>
+						))
+					}
+				</g>
+				<rect class="box-ink" x="620" y="150" width="210" height="120" rx="14"></rect>
+				<g transform="translate(640,170)"><path class="ic" d="M4 11h16v10H4zM8 11V7a4 4 0 0 1 8 0v4"></path></g>
+				<text class="t" x="676" y="188">Your storage</text>
+				<text class="ts" x="640" y="222">S3-compatible bucket</text>
+				<text class="ts" x="640" y="242">or a local or NFS folder</text>
+				<path class="star" d="M806 156l3 9 9 3-9 3-3 9-3-9-9-3 9-3z"></path>
+				<g class="rst">
+					<path class="data rst-path" marker-end="url(#ah)" d="M725 272 C 725 340 640 362 548 362"></path>
+					<rect class="box-ink" x="330" y="324" width="216" height="76" rx="12"></rect>
+					<g transform="translate(346,342)"
+						><path class="ic" d="M4 15a4 4 0 1 0 8 0a4 4 0 1 0 -8 0M11 12l9-9M17 6l3 3"></path></g
+					>
+					<text class="t" x="380" y="356">lode restore</text>
+					<text class="ts" x="380" y="378">storage + password or key</text>
+				</g>
+			</svg>
+			<p class="arch-cap" id="archcap" aria-live="polite">
+				The server is gone. Any Linux machine with lode, the bucket and your password or recovery key restores every
+				snapshot.
+			</p>
+		</div>
+		<div class="term term-tall rise d1">
+			<div class="term-bar"><b></b><b></b><b></b><span>any Linux machine</span></div>
+			<pre id="tty">{
+				restoreScript.map(([kind, text]) =>
+					kind === 'c' ? (
+						<div><span class="c">{text}</span></div>
+					) : kind === 'o' ? (
+						<div>{text}</div>
+					) : (
+						<div><span class="p">$ </span>{text}</div>
+					),
+				)
+			}<div><span class="p">$ </span><span class="cur"></span></div></pre>
+		</div>
+	</div>
+</section>
+
+<script>
+	import '../../scripts/arch-scene';
+</script>
