@@ -142,17 +142,10 @@ test('comparison cells are quoted from the compare pages', () => {
 	}
 });
 
-test('comparison caption carries the Checked on date of each page', () => {
+test('the comparison section has no checked-on line and no edition sentence', () => {
 	const text = textOf(element(landing(), 'section', 'compare'));
-	const seen = new Set(text.match(/\d{4}-\d{2}-\d{2}/g));
-	const expected = new Set();
-	for (const [id, name] of PRODUCTS) {
-		const facts = compareMd(id).split(/^## Facts we checked$/m)[1]?.split(/^## /m)[0] ?? '';
-		const dates = [...facts.matchAll(/\|\s*(\d{4}-\d{2}-\d{2})\s*\|\s*$/gm)].map((m) => m[1]).sort();
-		assert.ok(dates.length > 0, `${id}.md has no Checked on dates`);
-		const latest = dates.at(-1);
-		expected.add(latest);
-		assert.ok(text.includes(`${name} on ${latest}`), `caption lacks "${name} on ${latest}"`);
-	}
-	assert.deepEqual([...seen].sort(), [...expected].sort());
+	assert.ok(!/Checked against/i.test(text), 'the checked-on line is back');
+	assert.ok(!/\d{4}-\d{2}-\d{2}/.test(text), 'a date is back in the comparison section');
+	assert.ok(!/commercial Control Plane/i.test(text), 'the edition sentence is back');
+	assert.ok(text.includes('Plakar (community)'));
 });

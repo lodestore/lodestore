@@ -6,6 +6,8 @@ import { defineConfig } from 'astro/config';
 import starlightLinksValidator from 'starlight-links-validator';
 import { cspMeta } from './scripts/csp-meta.mjs';
 
+const site = process.env.SITE_URL ?? 'https://lodestore.dev';
+
 const CI_MARKER = /<!--\s*ci:[a-z-]+\s*-->\n?/g;
 
 const stripCiMarkers = {
@@ -25,7 +27,7 @@ const stripCiMarkers = {
 };
 
 export default defineConfig({
-	site: process.env.SITE_URL ?? 'https://lodestore.dev',
+	site,
 	build: { inlineStylesheets: 'never' },
 	integrations: [
 		starlight({
@@ -34,6 +36,7 @@ export default defineConfig({
 			logo: { src: './src/assets/mark.svg' },
 			favicon: '/favicon.svg',
 				head: [
+					{ tag: 'meta', attrs: { property: 'og:image', content: new URL('/og.png', site).href } },
 					{
 						tag: 'link',
 						attrs: { rel: 'alternate', type: 'application/rss+xml', title: 'Lodestore blog', href: '/blog/rss.xml' },

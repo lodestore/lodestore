@@ -84,7 +84,12 @@ const github =
 	const setOpen = (open: boolean) => {
 		menu?.setAttribute('aria-expanded', String(open));
 		pill?.classList.toggle('open', open);
+		if (open) document.querySelector<HTMLElement>('#site-nav a')?.focus();
 	};
 	menu?.addEventListener('click', () => setOpen(menu.getAttribute('aria-expanded') !== 'true'));
-	document.addEventListener('keydown', (e) => e.key === 'Escape' && setOpen(false));
+	document.addEventListener('keydown', (e) => {
+		if (e.key !== 'Escape' || menu?.getAttribute('aria-expanded') !== 'true') return;
+		setOpen(false);
+		menu.focus();
+	});
 </script>
