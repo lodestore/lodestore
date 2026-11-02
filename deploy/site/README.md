@@ -2,7 +2,7 @@
 
 The static site at `https://lodestore.dev` (landing page, docs, comparisons, blog), built from `docs/` with Astro and served by the host's native nginx from `/opt/lodestore.dev/public`. The directory belongs to the `lodestore-site` user; nginx only reads it.
 
-Unlike the demo stand, which is deployed by hand, the site is deployed by CI. On every push to `main` that touches `docs/**`, the `deploy` job in `.github/workflows/docs.yml` uploads the built site over SSH. The key it uses can only run `rrsync` in write-only mode on the site directory: no shell, no read access, nothing outside `/opt/lodestore.dev/public`.
+Unlike the demo stand, which is deployed by hand, the site is deployed by CI. On every push to `main` that touches `docs/**`, the `deploy` job in `.github/workflows/docs.yml` uploads the built site over SSH. The key it uses can only run `rrsync` in write-only mode on the site directory, with symlinks neutralized: no shell, no read access, nothing outside `/opt/lodestore.dev/public`, and at most 1 GiB of disk.
 
 Deploys are off until the repository variable `SITE_DEPLOY` is `true`, so the workflow can be merged before the host is ready.
 
@@ -20,37 +20,57 @@ Run as an administrator on the host. Nothing in this repository does it for you.
 
 1. DNS: `A` (and `AAAA`, if the host has IPv6) records for `lodestore.dev` and `www.lodestore.dev` pointing at `<host>`.
 
-2. A user that owns the site directory and receives the uploads. The shell must be `/bin/sh`, not `nologin`: sshd runs the forced command through the login shell.
+2. rsync with the fixes for CVE-2024-12084 to CVE-2024-12088: rsync 3.4.0 or newer, or a distribution build whose changelog lists them. `/usr/bin/rrsync` must accept `-munge-links` (`rrsync -h`); Ubuntu 22.04 ships no `/usr/bin/rrsync` and is not supported.
+
+3. A user that receives the uploads. It has no home directory and cannot edit its own keys. The shell must be `/bin/sh`, not `nologin`: sshd runs the forced command through the login shell.
 
    ```sh
-   sudo adduser --system --group --shell /bin/sh --home /home/lodestore-site lodestore-site
-   sudo install -d -o lodestore-site -g lodestore-site -m 755 /opt/lodestore.dev/public
-   sudo install -d -o lodestore-site -g lodestore-site -m 700 /home/lodestore-site/.ssh
+   sudo adduser --system --group --shell /bin/sh --no-create-home --home /nonexistent lodestore-site
+   ```
+
+4. The site directory on its own 1 GiB filesystem, so uploads cannot fill the shared disk (the built site is about 6 MB):
+
+   ```sh
+   sudo fallocate -l 1G /var/lib/lodestore-site.img
+   sudo mkfs.ext4 -q /var/lib/lodestore-site.img
+   sudo install -d -m 755 /opt/lodestore.dev/public
+   echo '/var/lib/lodestore-site.img /opt/lodestore.dev/public ext4 loop,nodev,nosuid,noexec 0 2' | sudo tee -a /etc/fstab
+   sudo mount /opt/lodestore.dev/public
+   sudo chown lodestore-site:lodestore-site /opt/lodestore.dev/public
    ```
 
    Keep the site directory free of anything that is not part of the build: every deploy deletes the rest.
 
-3. The deploy key. Generate it on your own machine, never on the host, and keep the private half out of chats and logs:
+5. The deploy key. Generate it on your own machine, never on the host, and keep the private half out of chats and logs:
 
    ```sh
    ssh-keygen -t ed25519 -N '' -C lodestore-site-deploy -f ./lodestore-site-deploy
    ```
 
-   Only the public half goes to the host, as one line in `/home/lodestore-site/.ssh/authorized_keys` (mode 600, owner `lodestore-site`):
+   Only the public half goes to the host, as one line in `/etc/ssh/authorized_keys/lodestore-site` (`sudo install -d -m 755 /etc/ssh/authorized_keys` first), owned by root with mode 644, so the deploy user cannot change it:
 
    ```
-   restrict,command="/usr/bin/rrsync -wo /opt/lodestore.dev/public" ssh-ed25519 AAAA… lodestore-site-deploy
+   restrict,command="/usr/bin/rrsync -wo -munge-links /opt/lodestore.dev/public" ssh-ed25519 AAAA… lodestore-site-deploy
    ```
 
-   `restrict` turns off the pty, port, agent and X11 forwarding. `rrsync -wo` allows rsync to write inside the site directory and nothing else.
+   and sshd reads keys for this user only from there. Append to `/etc/ssh/sshd_config`, then `sudo sshd -t && sudo systemctl reload ssh`:
 
-4. The certificate. certbot on this host uses the nginx authenticator, so the HTTP block has to be live first. Install the config without the HTTPS blocks, or temporarily with a self-signed certificate, then:
+   ```
+   Match User lodestore-site
+       AuthorizedKeysFile /etc/ssh/authorized_keys/%u
+       DisableForwarding yes
+       PermitTTY no
+   ```
+
+   `restrict` turns off the pty, port, agent and X11 forwarding. `rrsync -wo` allows rsync to write inside the site directory and nothing else; `-munge-links` stores any uploaded symlink as a dead link, and nginx refuses to follow symlinks at all (`disable_symlinks on`).
+
+6. The certificate. certbot on this host uses the nginx authenticator, so the HTTP block has to be live first. Install the config without the HTTPS blocks, or temporarily with a self-signed certificate, then:
 
    ```sh
    sudo certbot certonly --nginx -d lodestore.dev -d www.lodestore.dev
    ```
 
-5. nginx:
+7. nginx. First check that another server block on the host is the `default_server` for ports 80 and 443 (`sudo nginx -T | grep default_server`), so this config never answers for unknown names:
 
    ```sh
    sudo install -m 644 deploy/site/lodestore-site-headers.conf /etc/nginx/snippets/lodestore-site-headers.conf
@@ -125,7 +145,7 @@ Expect the three security headers, `immutable` on the `_astro` file and a 301 fr
 
 ## Old address
 
-The old GitHub Pages address stops being rebuilt once the deploy job replaces the Pages job. After `lodestore.dev` answers, publish the redirect stubs for it once:
+The old GitHub Pages address stops being rebuilt once the deploy job replaces the Pages job. The stub workflow runs only from `main`; also keep the `github-pages` environment limited to `main` (Settings → Environments → github-pages → Deployment branches), so no other branch can publish there. After `lodestore.dev` answers, publish the redirect stubs for it once:
 
 ```sh
 gh workflow run pages-redirects.yml --ref main
@@ -137,7 +157,9 @@ Every old docs page and every comparison gets a page with a canonical link, a me
 
 Stop deploying: `gh variable set SITE_DEPLOY --body false`. The site that is already live stays.
 
-Revoke the key: delete its line from `/home/lodestore-site/.ssh/authorized_keys` on the host, then remove the secret with `gh secret delete SITE_DEPLOY_KEY --env site`. If the key leaked, the worst case is a replaced site, not access to the host.
+Revoke the key: delete its line from `/etc/ssh/authorized_keys/lodestore-site` on the host, then remove the secret with `gh secret delete SITE_DEPLOY_KEY --env site`. If the key leaked, the worst case is a replaced site, not access to the host: it cannot get a shell, read files, follow symlinks or use more than the 1 GiB site filesystem.
+
+Re-running an old `docs` workflow run deploys that run's build over a newer one. Run the latest `main` instead: `gh workflow run docs.yml --ref main`.
 
 ## Check the config locally
 
@@ -146,4 +168,4 @@ pnpm --dir docs build
 deploy/site/test-config.sh docs/dist
 ```
 
-The script needs Docker and uses the local ports 18081 and 18443. It prints `site config ok` when `nginx -t` passes and the headers, cache rules, gzip, trailing-slash redirect, 404 page and both redirects behave.
+The script needs Docker and uses the local ports 18081 and 18443. It prints `site config ok` when `nginx -t` passes and the headers, cache rules, gzip, trailing-slash redirect, 404 page and both redirects behave, a symlink out of the site directory and dot paths are not served, and the redirects carry HSTS and a fixed host.

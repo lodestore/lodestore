@@ -29,13 +29,18 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=lodestore.dev' \
   fail "could not create a test certificate"
 chmod 644 "$tmp/privkey.pem" "$tmp/fullchain.pem"
 
+site="$tmp/site"
+cp -R "$dist" "$site"
+ln -s /etc/nginx/nginx.conf "$site/leak.txt"
+mkdir -p "$site/.~tmp~" && printf 'partial\n' >"$site/.~tmp~/stale.html"
+
 docker rm -f "$name" >/dev/null 2>&1 || true
 docker run -d --name "$name" \
   -p 127.0.0.1:18081:80 -p 127.0.0.1:18443:443 \
   -v "$here/nginx.conf:/etc/nginx/conf.d/lodestore.dev.conf:ro" \
   -v "$here/lodestore-site-headers.conf:/etc/nginx/snippets/lodestore-site-headers.conf:ro" \
   -v "$tmp:/etc/letsencrypt/live/lodestore.dev:ro" \
-  -v "$dist:/opt/lodestore.dev/public:ro" \
+  -v "$site:/opt/lodestore.dev/public:ro" \
   nginx:1.24-alpine >/dev/null || fail "could not start the nginx container"
 
 docker exec "$name" nginx -t >/dev/null 2>&1 || {
@@ -88,6 +93,14 @@ curl_site https://lodestore.dev:18443/no-such-page/ | cmp -s - "$dist/404.html" 
 www=$(curl_site -D - -o /dev/null https://www.lodestore.dev:18443/)
 grep -q ' 301' <<<"$www" || fail "www is not a 301"
 grep -qiE '^location: https://lodestore.dev/\r?$' <<<"$www" || fail "www does not redirect to https://lodestore.dev/"
+
+grep -qi '^strict-transport-security:' <<<"$www" || fail "www redirect has no HSTS header"
+
+[ "$(status https://lodestore.dev:18443/leak.txt)" != 200 ] || fail "a symlink out of the site directory is served"
+[ "$(status 'https://lodestore.dev:18443/.~tmp~/stale.html')" = 404 ] || fail "a dot path is served"
+
+fixed=$(curl -s -H 'Host: www.lodestore.dev' -D - -o /dev/null http://127.0.0.1:18081/x)
+grep -qiE '^location: https://lodestore.dev/x\r?$' <<<"$fixed" || fail "http redirect does not go straight to https://lodestore.dev"
 
 plain=$(curl -s -H 'Host: lodestore.dev' -D - -o /dev/null http://127.0.0.1:18081/)
 grep -q ' 301' <<<"$plain" || fail "http is not a 301"
