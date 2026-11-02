@@ -35,7 +35,7 @@ setup() {
   curl -fsS "$base/healthz" >/dev/null
 
   local token
-  token=$(docker logs lodestore 2>&1 | sed -n 's/.*setup?token=\([A-Za-z0-9_-]*\).*/\1/p' | head -n 1)
+  token=$(docker logs lodestore 2>&1 | sed -n '/setup?token=/{s/.*setup?token=\([A-Za-z0-9_-]*\).*/\1/p;q;}')
   [ -n "$token" ] || { echo "vhs failed: no setup token in the server log" >&2; return 1; }
   api POST /api/v1/setup "$(jq -n --arg t "$token" --arg p "$admin_password" \
     '{token: $t, username: "admin", password: $p}')" >/dev/null
