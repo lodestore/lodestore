@@ -1,8 +1,8 @@
 ---
 title: Lodestore vs restic
-description: How Lodestore, a backup server with agents, compares with restic, a command-line backup program. Facts are taken from restic's own documentation. No speed figures.
+description: How Lodestore, a backup server with agents, compares with restic, a command-line backup program. Facts are taken from restic's own documentation.
 ---
-restic is a command-line backup program. Lodestore is a server with an agent on each host. Both store encrypted, deduplicated snapshots; they differ in who runs the backups and where the control sits. The restic facts on this page come from its documentation, version 0.19.1, read on 2026-11-02. It contains no speed or resource numbers, because we have not measured them.
+restic is a command-line backup program. Lodestore is a server with an agent on each host. Both store encrypted, deduplicated snapshots; they differ in who runs the backups and where the control sits.
 
 ## Why teams pick Lodestore
 

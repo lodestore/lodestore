@@ -1,8 +1,8 @@
 ---
 title: Lodestore vs Plakar
-description: How Lodestore, a self-hosted backup server with agents, compares with Plakar and its commercial Control Plane. Facts are taken from Plakar's own documentation. No speed figures.
+description: How Lodestore, a self-hosted backup server with agents, compares with Plakar and its commercial Control Plane. Facts are taken from Plakar's own documentation.
 ---
-Plakar is an open-source backup engine with a command-line client, and a separate commercial product, Plakar Control Plane, for managing backups across an organization. Lodestore is a self-hosted server with an agent on each host. The Plakar facts on this page come from its README and documentation, community version 1.1.8, read on 2026-11-01. It contains no speed or resource numbers, because we have not measured them.
+Plakar is an open-source backup engine with a command-line client, and a separate commercial product, Plakar Control Plane, for managing backups across an organization. Lodestore is a self-hosted server with an agent on each host.
 
 Two products carry the Plakar name, so the table below separates them where the answer differs.
 

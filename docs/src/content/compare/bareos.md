@@ -1,8 +1,8 @@
 ---
 title: Lodestore vs Bareos
-description: How Lodestore, a backup server built around S3-compatible object storage, compares with Bareos. Facts are taken from Bareos's own documentation. No speed figures.
+description: How Lodestore, a backup server built around S3-compatible object storage, compares with Bareos. Facts are taken from Bareos's own documentation.
 ---
-Bareos is a backup system for networks of computers, a fork of Bacula 5.2 started in 2010. Lodestore is a newer system built around S3-compatible object storage. The Bareos facts on this page come from its documentation for version 25, read on 2026-11-01. It contains no speed or resource numbers, because we have not measured them.
+Bareos is a backup system for networks of computers, a fork of Bacula 5.2 started in 2010. Lodestore is a newer system built around S3-compatible object storage.
 
 ## Why teams pick Lodestore
 
