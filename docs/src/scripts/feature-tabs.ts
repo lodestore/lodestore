@@ -111,12 +111,12 @@ if (section && list && tabs.length === panes.length) {
 			([e]) => {
 				seen = e.isIntersecting;
 				sync();
-				if (e.intersectionRatio >= 0.3 && first) {
+				if (e.isIntersecting && first) {
 					first = false;
 					show(0);
 				}
 			},
-			{ threshold: [0, 0.3] },
+			{ rootMargin: '0px 0px -30% 0px' },
 		).observe(section);
 	}
 }
