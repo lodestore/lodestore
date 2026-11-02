@@ -15,8 +15,20 @@ repo_name=demo
 policy_name=demo
 agents="demo-web-01 demo-db-01 demo-files-01"
 jar=$(mktemp)
+hdr=$(mktemp)
 csrf=
-trap 'rm -f "$jar"' EXIT
+trap 'rm -f "$jar" "$hdr"' EXIT
+
+# With an https public URL the server marks its cookies Secure, and curl drops
+# Secure cookies over the plain http of the backend network, so keep them here.
+save_cookies() {
+  local line
+  while IFS= read -r line; do
+    { grep -v "^${line%%=*}=" "$jar" || true; } >"$jar.new"
+    printf '%s\n' "$line" >>"$jar.new"
+    mv "$jar.new" "$jar"
+  done < <(tr -d '\r' <"$hdr" | sed -n 's/^[Ss]et-[Cc]ookie: *\([^;]*\).*/\1/p')
+}
 
 fail() {
   echo "seed failed: $*" >&2
@@ -36,15 +48,13 @@ wait_for() {
 }
 
 api() {
-  local method=$1 path=$2 body=${3:-}
-  if [ -n "$body" ]; then
-    curl -sS --fail-with-body -X "$method" -b "$jar" -c "$jar" \
-      -H "x-csrf-token: $csrf" -H 'content-type: application/json' \
-      --data "$body" "$base$path"
-  else
-    curl -sS --fail-with-body -X "$method" -b "$jar" -c "$jar" \
-      -H "x-csrf-token: $csrf" "$base$path"
-  fi
+  local method=$1 path=$2 body=${3:-} rc=0
+  local args=(-sS --fail-with-body -X "$method" -D "$hdr"
+    -H "Cookie: $(paste -sd ';' "$jar")" -H "x-csrf-token: $csrf")
+  [ -z "$body" ] || args+=(-H 'content-type: application/json' --data "$body")
+  curl "${args[@]}" "$base$path" || rc=$?
+  save_cookies
+  return "$rc"
 }
 
 random_hex() {
