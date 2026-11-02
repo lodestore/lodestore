@@ -193,3 +193,31 @@ html:not(.js) .pane+.pane{margin-top:48px}
 	.diagram .pkts{display:none}
 	.tab .prog{display:none}
 }
+
+.inst{display:grid;gap:32px;align-items:start}
+.inst>*{min-width:0}
+@media(min-width:1024px){.inst{grid-template-columns:5fr 7fr;gap:64px}}
+.inst h2{font-size:34px;line-height:1.1;letter-spacing:-.02em}
+@media(min-width:1024px){.inst h2{font-size:44px}}
+.inst ol{list-style:none;padding:0;margin-top:24px;display:grid;gap:16px;counter-reset:s}
+.inst li{display:grid;grid-template-columns:32px 1fr;gap:12px;align-items:start;counter-increment:s}
+.inst li::before{content:counter(s);display:flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:50%;background:var(--primary-subtle);color:var(--primary-strong);font-weight:600;font-size:14px}
+.inst li b{display:block}
+.inst li span{color:var(--muted-foreground);font-size:15px}
+.itabs{display:flex;gap:4px;padding:8px 8px 0;border-bottom:1px solid var(--ink-border);align-items:flex-start}
+.itl{display:flex;gap:4px}
+.itabs [role=tab]{height:36px;padding:0 14px;border:0;background:transparent;color:var(--ink-muted);font:600 13px Onest,sans-serif;border-bottom:2px solid transparent;cursor:pointer}
+.itabs [role=tab][aria-selected=true]{color:var(--ink-fg);border-bottom-color:#38e1ff}
+.term .copy{margin-left:auto;display:inline-flex;justify-content:center;gap:6px;align-items:center;height:28px;min-width:84px;padding:0 10px;border-radius:6px;border:1px solid #3a4660;background:transparent;color:var(--ink-fg);font:600 12px Onest,sans-serif;cursor:pointer}
+.ipanes{display:grid;grid-template-columns:minmax(0,1fr)}
+.ipane{grid-area:1/1;visibility:hidden}
+.ipane.on{visibility:visible}
+html:not(.js) .itabs{display:none}
+html:not(.js) .ipane{grid-area:auto;visibility:visible}
+html:not(.js) .ipane::before{content:attr(data-label);display:block;color:var(--ink-muted)}
+.stor{margin-top:32px}
+.stor>p:first-child{font-size:14px;font-weight:600;margin-bottom:12px}
+.stor .plat{margin-top:16px;font-size:14px;color:var(--muted-foreground)}
+.sch{display:flex;flex-wrap:wrap;gap:8px}
+.sch span{display:inline-flex;align-items:center;gap:8px;height:36px;padding:0 14px;border-radius:999px;border:1px solid var(--border);background:var(--card);font-size:14px;font-weight:600}
+.sch svg{width:16px;height:16px;color:var(--primary-strong)}
