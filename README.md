@@ -14,7 +14,10 @@
 
 ![A terminal recording: start the server with one docker run, install the agent on a host with the join token, run the policy and list the first snapshot](./docs/src/assets/media/install-first-backup.gif)
 
-![The Lodestore overview: three protected hosts with their last successful backup and size](./docs/assets/overview.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./docs/src/assets/media/overview.dark.webp">
+  <img src="./docs/src/assets/media/overview.light.webp" alt="The Lodestore overview: protected hosts with the time and size of their last successful backup">
+</picture>
 
 ## What is Lodestore
 
