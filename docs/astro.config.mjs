@@ -32,6 +32,12 @@ export default defineConfig({
 			disable404Route: true,
 			logo: { src: './src/assets/mark.svg' },
 			favicon: '/favicon.svg',
+				head: [
+					{
+						tag: 'link',
+						attrs: { rel: 'alternate', type: 'application/rss+xml', title: 'Lodestore blog', href: '/blog/rss.xml' },
+					},
+				],
 			plugins: [
 				starlightLinksValidator({
 					exclude: ({ link }) =>

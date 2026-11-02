@@ -1,0 +1,47 @@
+---
+import { getCollection } from 'astro:content';
+import ThemeImage from '../../components/site/ThemeImage.astro';
+import Site from '../../layouts/Site.astro';
+import '../../styles/blog.css';
+
+const posts = (await getCollection('blog')).sort((a, b) => b.data.pubDate.valueOf() - a.data.pubDate.valueOf());
+const fmt = new Intl.DateTimeFormat('en-US', { dateStyle: 'medium', timeZone: 'UTC' });
+---
+
+<Site title="Blog: Lodestore" description="Release notes and technical writing from the Lodestore project.">
+	<main class="blog-list wrap">
+		<header class="blog-head rise">
+			<h1 class="d">From the blog</h1>
+			<p class="lead">Releases and the reasoning behind how Lodestore protects a restore.</p>
+			<a class="more" href="/blog/rss.xml">
+				<svg class="icon" viewBox="0 0 24 24"><path d="M4 11a9 9 0 0 1 9 9M4 4a16 16 0 0 1 16 16"></path><circle cx="5" cy="19" r="1"></circle></svg>
+				RSS feed
+			</a>
+		</header>
+		<div class="posts">
+			{
+				posts.map((post, i) => (
+					<a class:list={['post', 'rise', i % 2 === 1 && 'd1']} href={`/blog/${post.id}/`}>
+						<div class="ph">
+							<ThemeImage
+								light={post.data.coverLight}
+								dark={post.data.coverDark}
+								alt={post.data.coverAlt}
+								widths={[480, 720]}
+								sizes="(min-width: 768px) 480px, 90vw"
+							/>
+						</div>
+						<div class="t">
+							<small>
+								<time datetime={post.data.pubDate.toISOString()}>{fmt.format(post.data.pubDate)}</time>
+								{post.data.tags[0] && ` · ${post.data.tags[0]}`}
+							</small>
+							<h2>{post.data.title}</h2>
+							<p>{post.data.description}</p>
+						</div>
+					</a>
+				))
+			}
+		</div>
+	</main>
+</Site>

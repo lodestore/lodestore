@@ -1,0 +1,44 @@
+---
+import { getCollection, render } from 'astro:content';
+import ThemeImage from '../../components/site/ThemeImage.astro';
+import Site from '../../layouts/Site.astro';
+import '../../styles/blog.css';
+
+export async function getStaticPaths() {
+	const posts = await getCollection('blog');
+	return posts.map((post) => ({ params: { slug: post.id }, props: { post } }));
+}
+
+const { post } = Astro.props;
+const { Content } = await render(post);
+const fmt = new Intl.DateTimeFormat('en-US', { dateStyle: 'long', timeZone: 'UTC' });
+---
+
+<Site title={`${post.data.title}: Lodestore`} description={post.data.description}>
+	<main class="blog-post wrap">
+		<article class="read">
+			<a class="more back" href="/blog/">
+				<svg class="icon" viewBox="0 0 24 24"><path d="M19 12H5M11 6l-6 6 6 6"></path></svg>
+				Blog
+			</a>
+			<h1 class="d">{post.data.title}</h1>
+			<p class="meta small muted">
+				<time datetime={post.data.pubDate.toISOString()}>{fmt.format(post.data.pubDate)}</time>
+				{post.data.tags.map((tag) => <span class="tag">{tag}</span>)}
+				<a href="/blog/rss.xml">RSS</a>
+			</p>
+			<div class="cover">
+				<ThemeImage
+					light={post.data.coverLight}
+					dark={post.data.coverDark}
+					alt={post.data.coverAlt}
+					widths={[480, 720, 960]}
+					sizes="(min-width: 768px) 68ch, 92vw"
+				/>
+			</div>
+			<div class="prose">
+				<Content />
+			</div>
+		</article>
+	</main>
+</Site>
