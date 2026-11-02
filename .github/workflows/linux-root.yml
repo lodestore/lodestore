@@ -1,7 +1,10 @@
 name: linux-root
 
 on:
+  pull_request:
+    branches: [main]
   workflow_dispatch:
+  workflow_call:
   schedule:
     - cron: "0 3 * * 1"
 
@@ -10,21 +13,27 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
 
 jobs:
   linux-root:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
       - name: Install the pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          cache-on-failure: true
       - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8
         with:
           tool: nextest@0.9.148
       - run: sudo apt-get install -y acl
-      - run: scripts/test-linux.sh --root fidelity_root_
-      - run: scripts/test-linux.sh --root backup_root_
-      - run: BINS=lodestore-agent PKG=lodestore-server scripts/test-linux.sh --root e2e_install_
-      - run: BINS=lodestore-agent PKG=lodestore-agent scripts/test-linux.sh --root update_systemd_
-      - run: cargo nextest run -p lodestore-format --run-ignored only -E 'test(/^s3_/)'
+      - run: scripts/test-linux.sh --root fidelity_root_ --no-fail-fast
+      - run: scripts/test-linux.sh --root backup_root_ --no-fail-fast
+      - run: BINS=lodestore-agent PKG=lodestore-server scripts/test-linux.sh --root e2e_install_ --no-fail-fast
+      - run: BINS=lodestore-agent PKG=lodestore-agent scripts/test-linux.sh --root update_systemd_ --no-fail-fast
+      - run: cargo nextest run -p lodestore-format --run-ignored only --no-fail-fast -E 'test(/^s3_/)'

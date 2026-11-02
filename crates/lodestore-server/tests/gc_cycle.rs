@@ -222,6 +222,13 @@ async fn run_cycle(api: &Api, repo: &str) -> String {
 
 /// Steps until the cycle stops advancing and returns how it stopped.
 async fn steps(ts: &TestServer, id: &str, now_ms: i64) -> StepOutcome {
+    // The API spawns a driver too (unlock, resume), and two steppers publish over each other.
+    let _no_driver = loop {
+        match ts.state().gc.claim(id) {
+            Some(guard) => break guard,
+            None => tokio::time::sleep(Duration::from_millis(20)).await,
+        }
+    };
     loop {
         match step(ts.state(), id, now_ms).await.unwrap() {
             StepOutcome::Advanced(_) => {}
@@ -232,6 +239,11 @@ async fn steps(ts: &TestServer, id: &str, now_ms: i64) -> StepOutcome {
 
 async fn after_pause(ts: &TestServer, id: &str) -> i64 {
     wait_state(ts, id, "waiting").await;
+    // The driver takes one more step after `waiting`, and would race the test's own steps.
+    assert!(
+        wait_until(WAIT, || async { ts.state().gc.claim(id).is_some() }).await,
+        "the cycle driver never stopped"
+    );
     cycle(ts, id).await.delete_after.unwrap() + 1_000
 }
 
@@ -523,7 +535,9 @@ async fn marked_packs(api: &Api, repo: &str, id: &str) -> Vec<String> {
 async fn finish_ok(ts: &TestServer, id: &str, later: i64, before: u64, b: &Backed, c: &Backed) {
     assert_eq!(
         steps(ts, id, later).await,
-        StepOutcome::Finished(lodestore_server::maintenance::gc::GcState::Done)
+        StepOutcome::Finished(lodestore_server::maintenance::gc::GcState::Done),
+        "{:?}",
+        cycle(ts, id).await.error
     );
     assert!(packs_size(ts, "main") < before, "packs/ did not shrink");
     assert!(lock_files(ts, "main").is_empty(), "locks/ must be empty");
@@ -1241,7 +1255,9 @@ async fn finish_ok_keeping_locks(
 ) {
     assert_eq!(
         steps(ts, id, later).await,
-        StepOutcome::Finished(lodestore_server::maintenance::gc::GcState::Done)
+        StepOutcome::Finished(lodestore_server::maintenance::gc::GcState::Done),
+        "{:?}",
+        cycle(ts, id).await.error
     );
     assert!(packs_size(ts, "main") < before, "packs/ did not shrink");
     assert_restores(ts, "main", b).await;

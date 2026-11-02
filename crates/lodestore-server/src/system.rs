@@ -14,6 +14,7 @@ use crate::state::AppState;
 #[derive(Serialize, ToSchema)]
 pub struct ServerStatus {
     pub setup_required: bool,
+    pub demo_mode: bool,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -23,6 +24,7 @@ pub struct ServerInfo {
     pub public_url: String,
     pub grpc_public_address: String,
     pub agent_arches: Vec<String>,
+    pub demo_mode: bool,
 }
 
 #[utoipa::path(
@@ -36,6 +38,7 @@ pub struct ServerInfo {
 async fn status(State(state): State<AppState>) -> Result<Json<ServerStatus>, ApiError> {
     Ok(Json(ServerStatus {
         setup_required: admin_count(&state).await? == 0,
+        demo_mode: state.config.demo_mode,
     }))
 }
 
@@ -67,6 +70,7 @@ async fn info(
             .into_iter()
             .map(str::to_string)
             .collect(),
+        demo_mode: state.config.demo_mode,
     }))
 }
 

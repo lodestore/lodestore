@@ -14,8 +14,9 @@ use lodestore_format::index::{hex32, parse_hex32};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use tokio::runtime::Handle;
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::{self, error::TrySendError};
 use tokio_stream::wrappers::ReceiverStream;
+use tokio_util::sync::CancellationToken;
 use tower_http::set_header::SetResponseHeaderLayer;
 use utoipa::ToSchema;
 use utoipa_axum::router::OpenApiRouter;
@@ -32,9 +33,15 @@ use crate::error::{ApiError, ErrorBody};
 use crate::state::AppState;
 
 pub const TICKET_TTL_MS: i64 = 60_000;
+const UNUSED_LINK_KEPT_MS: i64 = 3_600_000;
+const MAX_ITEMS_JSON: usize = 256 * 1024;
 const CHUNK: usize = 64 * 1024;
 const BACKLOG: usize = 16;
 const PROGRESS_EVERY: Duration = Duration::from_secs(1);
+const STALL_POLL: Duration = Duration::from_millis(20);
+const FAILURE_PATIENCE: Duration = Duration::from_secs(5);
+const REAP_GRACE: Duration = Duration::from_secs(60);
+const RUNNING_LIMIT: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Deserialize, ToSchema)]
 pub struct DownloadBody {
@@ -109,8 +116,16 @@ fn file_name(hostname: &str, snapshot_id: &str, format: ArchiveFormat) -> String
 async fn create_download(
     State(state): State<AppState>,
     auth: Scoped<RestoreScope>,
-    Json(body): Json<DownloadBody>,
+    Json(mut body): Json<DownloadBody>,
 ) -> Result<(StatusCode, Json<DownloadCreated>), ApiError> {
+    body.items.sort_unstable();
+    body.items.dedup();
+    let items_json = serde_json::to_string(&body.items).map_err(anyhow::Error::from)?;
+    if items_json.len() > MAX_ITEMS_JSON {
+        return Err(ApiError::Validation(
+            "This selection is too large. Select whole folders instead of single files.".into(),
+        ));
+    }
     decode_items(&body.items)?;
     let (repository_id, snapshot) = snapshot_repository(&state, &body.snapshot_id).await?;
     let mut source = reader(&state, &repository_id).await.map_err(read_error)?;
@@ -132,7 +147,7 @@ async fn create_download(
     .bind(host_id)
     .bind(&hostname)
     .bind(&snapshot_id)
-    .bind(serde_json::to_string(&body.items).map_err(anyhow::Error::from)?)
+    .bind(items_json)
     .bind(format_name(body.format))
     .bind(auth.actor())
     .bind(now_ms())
@@ -153,6 +168,8 @@ struct ChannelWriter {
     buf: Vec<u8>,
     sent: u64,
     closed: bool,
+    deadline: Option<Instant>,
+    timed_out: bool,
     report: Report,
 }
 
@@ -188,15 +205,48 @@ impl Report {
 }
 
 impl ChannelWriter {
+    fn expired(&mut self) -> bool {
+        if self.deadline.is_some_and(|d| Instant::now() >= d) {
+            self.timed_out = true;
+        }
+        self.timed_out
+    }
+
+    fn push(&mut self, chunk: Bytes) -> io::Result<()> {
+        if self.deadline.is_none() {
+            return self
+                .tx
+                .blocking_send(Ok(chunk))
+                .map_err(|_| io::ErrorKind::BrokenPipe.into());
+        }
+        let mut chunk = chunk;
+        loop {
+            match self.tx.try_send(Ok(chunk)) {
+                Ok(()) => return Ok(()),
+                Err(TrySendError::Closed(_)) => return Err(io::ErrorKind::BrokenPipe.into()),
+                Err(TrySendError::Full(Ok(back))) => {
+                    if self.expired() {
+                        return Err(io::ErrorKind::TimedOut.into());
+                    }
+                    chunk = back;
+                    std::thread::sleep(STALL_POLL);
+                }
+                Err(TrySendError::Full(Err(_))) => {
+                    return Err(io::Error::other("the download stream failed"));
+                }
+            }
+        }
+    }
+
     fn send_buf(&mut self) -> io::Result<()> {
         if self.buf.is_empty() {
             return Ok(());
         }
         let chunk = Bytes::from(std::mem::replace(&mut self.buf, Vec::with_capacity(CHUNK)));
         let len = chunk.len() as u64;
-        if self.tx.blocking_send(Ok(chunk)).is_err() {
-            self.closed = true;
-            return Err(io::ErrorKind::BrokenPipe.into());
+        if let Err(error) = self.push(chunk) {
+            self.closed = !self.timed_out;
+            return Err(error);
         }
         self.sent += len;
         self.report.sent(self.sent);
@@ -209,6 +259,9 @@ impl Write for ChannelWriter {
         if self.closed {
             return Err(io::ErrorKind::BrokenPipe.into());
         }
+        if self.expired() {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
         self.buf.extend_from_slice(data);
         if self.buf.len() >= CHUNK {
             self.send_buf()?;
@@ -218,6 +271,21 @@ impl Write for ChannelWriter {
 
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+/// Fails the response stream so the client doesn't take a cut archive for a
+/// whole one. A full channel gets `patience` to drain, then the stalled client
+/// gets nothing: it must not hold this thread past the download deadline.
+fn send_failure(tx: &mpsc::Sender<io::Result<Bytes>>, message: &str, patience: Duration) {
+    let until = Instant::now() + patience;
+    let mut item = Err(io::Error::other(message.to_string()));
+    while let Err(TrySendError::Full(back)) = tx.try_send(item) {
+        if Instant::now() >= until {
+            return;
+        }
+        item = back;
+        std::thread::sleep(STALL_POLL);
     }
 }
 
@@ -285,30 +353,71 @@ async fn download_archive(
                 .into(),
         ));
     }
+    // The server drops this future when the client leaves or `TimeoutLayer`
+    // fires. In its own task the claim always ends in `finish` or the streaming
+    // thread, and the signal still stops a start that waits on slow storage.
+    let cancelled = CancellationToken::new();
+    let _cancel_on_drop = cancelled.clone().drop_guard();
+    tokio::spawn(claim_and_start(state, id, cancelled))
+        .await
+        .map_err(|e| ApiError::Internal(e.into()))?
+}
+
+async fn claim_and_start(
+    state: AppState,
+    id: String,
+    cancelled: CancellationToken,
+) -> Result<Response, ApiError> {
     let now = now_ms();
+    let max_running = if state.config.demo_mode {
+        state.config.demo.max_downloads
+    } else {
+        i64::MAX
+    };
     let claimed = sqlx::query(
         "UPDATE downloads SET state = 'running', started_at = $1 \
-         WHERE id = $2 AND state = 'pending' AND created_at > $3",
+         WHERE id = $2 AND state = 'pending' AND created_at > $3 \
+         AND (SELECT COUNT(*) FROM downloads WHERE state = 'running') < $4",
     )
     .bind(now)
     .bind(&id)
     .bind(now - TICKET_TTL_MS)
+    .bind(max_running)
     .execute(&state.db.pool)
     .await?
     .rows_affected()
         == 1;
     if !claimed {
+        if state.config.demo_mode && link_is_fresh(&state, &id, now).await? {
+            return Err(ApiError::RateLimited);
+        }
         return Err(ApiError::NotFound(
             "This download link was already used or expired.".into(),
         ));
     }
-    match start(&state, &id).await {
-        Ok(response) => Ok(response),
-        Err(error) => {
-            finish(&state, &id, 0, Some("read_failed")).await;
-            Err(error)
+    tokio::select! {
+        started = start(&state, &id) => {
+            if started.is_err() {
+                finish(&state, &id, 0, Some("read_failed")).await;
+            }
+            started
+        }
+        () = cancelled.cancelled() => {
+            finish(&state, &id, 0, Some("client_closed")).await;
+            Err(ApiError::Conflict("The download request was cancelled.".into()))
         }
     }
+}
+
+async fn link_is_fresh(state: &AppState, id: &str, now: i64) -> Result<bool, sqlx::Error> {
+    Ok(sqlx::query(
+        "SELECT 1 AS one FROM downloads WHERE id = $1 AND state = 'pending' AND created_at > $2",
+    )
+    .bind(id)
+    .bind(now - TICKET_TTL_MS)
+    .fetch_optional(&state.db.pool)
+    .await?
+    .is_some())
 }
 
 async fn start(state: &AppState, id: &str) -> Result<Response, ApiError> {
@@ -336,6 +445,10 @@ async fn start(state: &AppState, id: &str) -> Result<Response, ApiError> {
     let handle = Handle::current();
     let task_state = state.clone();
     let task_id = id.to_string();
+    let deadline = state
+        .config
+        .demo_mode
+        .then(|| Instant::now() + state.config.demo.download_timeout);
     std::thread::Builder::new()
         .name(format!("download-{id}"))
         .spawn(move || {
@@ -344,6 +457,8 @@ async fn start(state: &AppState, id: &str) -> Result<Response, ApiError> {
                 buf: Vec::with_capacity(CHUNK),
                 sent: 0,
                 closed: false,
+                deadline,
+                timed_out: false,
                 report: Report {
                     state: task_state.clone(),
                     id: task_id.clone(),
@@ -362,7 +477,14 @@ async fn start(state: &AppState, id: &str) -> Result<Response, ApiError> {
                 )
             }));
             let failure = match result {
-                Ok(Ok(_)) => out.send_buf().err().map(|_| "client_closed"),
+                Ok(Ok(_)) => out.send_buf().err().map(|_| {
+                    if out.timed_out {
+                        "timed_out"
+                    } else {
+                        "client_closed"
+                    }
+                }),
+                Ok(Err(_)) if out.timed_out => Some("timed_out"),
                 Ok(Err(_)) if out.closed => Some("client_closed"),
                 Ok(Err(error)) => {
                     tracing::warn!(%error, download = %task_id, "building the archive failed");
@@ -370,10 +492,14 @@ async fn start(state: &AppState, id: &str) -> Result<Response, ApiError> {
                 }
                 Err(_) => Some("read_failed"),
             };
-            if failure == Some("read_failed") {
-                let _ = out
-                    .tx
-                    .blocking_send(Err(io::Error::other("the archive failed")));
+            match failure {
+                Some("timed_out") => {
+                    send_failure(&out.tx, "the download took too long", Duration::ZERO);
+                }
+                Some("read_failed") => {
+                    send_failure(&out.tx, "the archive failed", FAILURE_PATIENCE);
+                }
+                _ => {}
             }
             let sent = out.sent;
             drop(out);
@@ -393,6 +519,37 @@ async fn start(state: &AppState, id: &str) -> Result<Response, ApiError> {
         .header(header::CACHE_CONTROL, "no-store")
         .body(Body::from_stream(ReceiverStream::new(rx)))
         .map_err(|e| ApiError::Internal(e.into()))
+}
+
+/// Frees `running` rows that nothing will finish, such as a failed `finish`.
+/// A long download outside the demo has no deadline of its own: past the limit
+/// its row stops holding GC, and the stream keeps going.
+pub async fn reap_stale(state: &AppState) -> Result<u64, sqlx::Error> {
+    let limit = if state.config.demo_mode {
+        state.config.demo.download_timeout + REAP_GRACE
+    } else {
+        RUNNING_LIMIT
+    };
+    let now = now_ms();
+    let reaped = sqlx::query(
+        "UPDATE downloads SET state = 'interrupted', error_code = 'timed_out', finished_at = $1 \
+         WHERE state = 'running' AND started_at < $2",
+    )
+    .bind(now)
+    .bind(now.saturating_sub(i64::try_from(limit.as_millis()).unwrap_or(i64::MAX)))
+    .execute(&state.db.pool)
+    .await?;
+    Ok(reaped.rows_affected())
+}
+
+/// Jobs lists an unused link as not started for `UNUSED_LINK_KEPT_MS`, then the
+/// row goes.
+pub async fn purge_unused_links(state: &AppState) -> Result<u64, sqlx::Error> {
+    let purged = sqlx::query("DELETE FROM downloads WHERE state = 'pending' AND created_at < $1")
+        .bind(now_ms() - TICKET_TTL_MS - UNUSED_LINK_KEPT_MS)
+        .execute(&state.db.pool)
+        .await?;
+    Ok(purged.rows_affected())
 }
 
 pub async fn interrupt_running(state: &AppState) -> Result<(), sqlx::Error> {
@@ -433,6 +590,38 @@ pub fn routes() -> OpenApiRouter<AppState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn full_channel() -> (
+        mpsc::Sender<io::Result<Bytes>>,
+        mpsc::Receiver<io::Result<Bytes>>,
+    ) {
+        let (tx, rx) = mpsc::channel(1);
+        tx.try_send(Ok(Bytes::new())).unwrap();
+        (tx, rx)
+    }
+
+    #[test]
+    fn a_stalled_client_cannot_hold_the_failure_report() {
+        let (tx, _rx) = full_channel();
+        let (done, returned) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            send_failure(&tx, "failed", Duration::from_millis(50));
+            done.send(()).unwrap();
+        });
+        assert!(returned.recv_timeout(Duration::from_secs(2)).is_ok());
+    }
+
+    #[test]
+    fn a_draining_client_gets_the_failure() {
+        let (tx, mut rx) = full_channel();
+        let sender = std::thread::spawn(move || {
+            send_failure(&tx, "failed", Duration::from_secs(30));
+        });
+        std::thread::sleep(STALL_POLL * 2);
+        assert!(rx.blocking_recv().unwrap().is_ok());
+        assert!(rx.blocking_recv().unwrap().is_err());
+        sender.join().unwrap();
+    }
 
     #[test]
     fn file_name_uses_sanitized_host_and_short_snapshot_id() {

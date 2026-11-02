@@ -37,8 +37,8 @@ if [ "$(uname -s)" = Linux ] && ! command -v orb >/dev/null 2>&1; then
     exec cargo nextest run --locked -p "$pkg" "$@"
   fi
   target=$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')
-  trap 'sudo chown -R "$(id -u):$(id -g)" "$target"' EXIT
-  sudo --preserve-env=PATH,CARGO_HOME,RUSTUP_HOME,CARGO_TARGET_DIR,LODE_GENERATE_FIXTURES,CI \
+  trap 'sudo chown -R "$(id -u):$(id -g)" "$target" "${CARGO_HOME:-$HOME/.cargo}" "${RUSTUP_HOME:-$HOME/.rustup}"' EXIT
+  sudo --preserve-env=PATH,CARGO_HOME,RUSTUP_HOME,CARGO_TARGET_DIR,CARGO_INCREMENTAL,CARGO_PROFILE_DEV_DEBUG,LODE_GENERATE_FIXTURES,CI \
     env HOME=/root CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" \
     cargo nextest run --locked -p "$pkg" --run-ignored all "$@"
   exit

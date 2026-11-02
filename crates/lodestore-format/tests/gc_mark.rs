@@ -408,6 +408,30 @@ fn gc_mark_repack_threshold() {
 }
 
 #[test]
+fn gc_mark_fixed_pack_overhead_is_not_sparse() {
+    let id = blob(1, 0);
+    let mut s = Synth::new(&[], Some(0));
+    s.shards.shards.push((
+        [1; 32],
+        pb::IndexShard {
+            packs: vec![record(1, &[id])],
+            supersedes: Vec::new(),
+        },
+    ));
+    s.live.insert(id, BLOB_TYPE_DATA);
+    s.listing.push(ListEntry {
+        size: (PACK_PREFIX_LEN + BLOB_LEN as usize + 200) as u64,
+        ..listing(1, Some(0))
+    });
+    let o = PlanOptions {
+        repack_below_pct: 50,
+        ..opts()
+    };
+    let p = s.plan(&o);
+    assert!(p.repack.is_empty() && p.delete.is_empty());
+}
+
+#[test]
 fn gc_mark_repack_limit_lowest_first() {
     let s = Synth::new(&[3, 1, 2], Some(0));
     let o = PlanOptions {

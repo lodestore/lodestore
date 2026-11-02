@@ -64,6 +64,9 @@ pub struct Config {
     pub agent_cert_lifetime_secs: i64,
     pub schedule_tick_secs: u64,
     pub metrics_listen: Option<SocketAddr>,
+    pub demo_mode: bool,
+    #[serde(skip)]
+    pub demo: DemoConfig,
     #[serde(skip)]
     pub find: FindConfig,
     #[serde(skip)]
@@ -72,6 +75,21 @@ pub struct Config {
     pub grpc_public_address_defaulted: bool,
     #[serde(skip)]
     pub notifications: NotificationsConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct DemoConfig {
+    pub download_timeout: Duration,
+    pub max_downloads: i64,
+}
+
+impl Default for DemoConfig {
+    fn default() -> Self {
+        DemoConfig {
+            download_timeout: Duration::from_secs(120),
+            max_downloads: 2,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -219,6 +237,8 @@ impl Default for Config {
             agent_cert_lifetime_secs: 7_776_000,
             schedule_tick_secs: crate::schedule::SCHEDULE_TICK.as_secs(),
             metrics_listen: None,
+            demo_mode: false,
+            demo: DemoConfig::default(),
             find: FindConfig::default(),
             agent_updates: AgentUpdateConfig::default(),
             grpc_public_address_defaulted: true,
@@ -271,6 +291,8 @@ pub struct ConfigArgs {
     pub agent_cert_lifetime_secs: Option<i64>,
     #[arg(long, env = "LODESTORE_METRICS_LISTEN")]
     pub metrics_listen: Option<SocketAddr>,
+    #[arg(long, env = "LODESTORE_DEMO_MODE", value_parser = clap::builder::BoolishValueParser::new())]
+    pub demo_mode: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -297,6 +319,7 @@ struct FileConfig {
     join_token_ttl_secs: Option<i64>,
     agent_cert_lifetime_secs: Option<i64>,
     metrics_listen: Option<SocketAddr>,
+    demo_mode: Option<bool>,
     notifications: FileNotifications,
     find: FileFind,
     agent_updates: FileAgentUpdates,
@@ -638,6 +661,7 @@ impl Config {
             c.agent_cert_lifetime_secs = v;
         }
         c.metrics_listen = args.metrics_listen.or(file.metrics_listen);
+        c.demo_mode = args.demo_mode.or(file.demo_mode).unwrap_or(false);
         c.find = resolve_find(file.find)?;
         c.agent_updates = resolve_agent_updates(file.agent_updates)?;
         c.notifications.allow_private_targets = file.notifications.allow_private_targets;
@@ -863,6 +887,29 @@ mod tests {
             err.contains("metrics_listen") || err.contains("invalid socket address"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn demo_mode_defaults_off_and_follows_args_over_file() {
+        assert!(!load("", &[]).unwrap().demo_mode);
+        assert!(load("demo_mode: true", &[]).unwrap().demo_mode);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("server.yaml");
+        std::fs::write(&path, "demo_mode: true").unwrap();
+        let off = Config::from_args(ConfigArgs {
+            config: Some(path),
+            demo_mode: Some(false),
+            ..ConfigArgs::default()
+        })
+        .unwrap();
+        assert!(!off.demo_mode);
+        let on = Config::from_args(ConfigArgs {
+            demo_mode: Some(true),
+            ..ConfigArgs::default()
+        })
+        .unwrap();
+        assert!(on.demo_mode);
     }
 
     #[test]

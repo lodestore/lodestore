@@ -29,9 +29,8 @@ struct Client {
 impl Client {
     fn connect(path: &Path) -> Client {
         let stream = UnixStream::connect(path).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(120)))
-            .unwrap();
+        // macOS refuses this once the agent has already replied and closed.
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(120)));
         Client {
             read: BufReader::new(stream.try_clone().unwrap()),
             write: stream,

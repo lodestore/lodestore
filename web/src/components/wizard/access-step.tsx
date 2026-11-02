@@ -1,5 +1,5 @@
 import { keepPreviousData } from "@tanstack/react-query";
-import { CircleAlert, Info, Plus, TriangleAlert, X } from "lucide-react";
+import { CircleAlert, Info } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useAgentPolicy } from "@/api/gen/endpoints";
 import { CapabilityChecklist } from "@/components/capability-checklist";
@@ -24,7 +24,6 @@ import {
 	type CheckState,
 	checkRows,
 	type Draft,
-	isExperimental,
 	type KeyPair,
 	runningRows,
 } from "./draft";
@@ -235,103 +234,6 @@ function S3Fields({
 	);
 }
 
-function ExperimentalFields({
-	draft,
-	onChange,
-	disabled,
-}: {
-	draft: Draft;
-	onChange: Patch;
-	disabled: boolean;
-}) {
-	const [shown, setShown] = useState(false);
-	const rows = draft.options;
-	const set = (index: number, patch: Partial<(typeof rows)[number]>) =>
-		onChange({
-			options: rows.map((row, i) => (i === index ? { ...row, ...patch } : row)),
-		});
-
-	return (
-		<>
-			<Alert className="text-warning">
-				<TriangleAlert aria-hidden />
-				<AlertTitle>{text.experimentalHeading}</AlertTitle>
-				<AlertDescription>{text.experimentalBody}</AlertDescription>
-			</Alert>
-			<FieldGroup>
-				{rows.map((row, index) => (
-					<div key={index} className="flex items-end gap-2">
-						<Field>
-							<FieldLabel htmlFor={`option-key-${index}`}>
-								{text.optionKey}
-							</FieldLabel>
-							<Input
-								id={`option-key-${index}`}
-								className="font-mono"
-								autoComplete="off"
-								autoCapitalize="off"
-								spellCheck={false}
-								disabled={disabled}
-								value={row.key}
-								onChange={(event) => set(index, { key: event.target.value })}
-							/>
-						</Field>
-						<Field>
-							<FieldLabel htmlFor={`option-value-${index}`}>
-								{text.optionValue}
-							</FieldLabel>
-							<Input
-								id={`option-value-${index}`}
-								className="font-mono"
-								type={shown ? "text" : "password"}
-								autoComplete="off"
-								spellCheck={false}
-								disabled={disabled}
-								value={row.value}
-								onChange={(event) => set(index, { value: event.target.value })}
-							/>
-						</Field>
-						<Button
-							type="button"
-							variant="ghost"
-							size="icon"
-							aria-label={text.removeOption}
-							disabled={disabled || rows.length === 1}
-							onClick={() =>
-								onChange({ options: rows.filter((_, i) => i !== index) })
-							}
-						>
-							<X aria-hidden />
-						</Button>
-					</div>
-				))}
-				<div className="flex flex-wrap gap-2">
-					<Button
-						type="button"
-						variant="secondary"
-						size="sm"
-						disabled={disabled}
-						onClick={() =>
-							onChange({ options: [...rows, { key: "", value: "" }] })
-						}
-					>
-						<Plus aria-hidden />
-						{text.addOption}
-					</Button>
-					<Button
-						type="button"
-						variant="outline"
-						size="sm"
-						onClick={() => setShown((v) => !v)}
-					>
-						{shown ? text.hideValues : text.showValues}
-					</Button>
-				</div>
-			</FieldGroup>
-		</>
-	);
-}
-
 function PolicyColumn({ draft }: { draft: Draft }) {
 	const target = useDebounced(
 		{ bucket: draft.bucket.trim(), prefix: draft.prefix.trim() },
@@ -428,13 +330,6 @@ export function AccessStep({
 						disabled={running}
 					/>
 				</FieldGroup>
-			)}
-			{isExperimental(draft.backend) && (
-				<ExperimentalFields
-					draft={draft}
-					onChange={onChange}
-					disabled={running}
-				/>
 			)}
 			<section className="flex flex-col gap-4">
 				<div className="flex flex-col gap-1">

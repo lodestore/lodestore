@@ -9,7 +9,7 @@ import {
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import type { ReactNode } from "react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type {
 	FindSession,
 	RestoreHost,
@@ -397,14 +397,20 @@ describe("Find file tab", { timeout: 30_000 }, () => {
 		});
 
 		it("stops polling once the search is done", async () => {
-			useSignedIn();
-			const { calls } = findHandlers([
-				findSession({ state: "done", groups: [findGroup(0)] }),
-			]);
-			renderApp("/restore?tab=find&find=*.conf");
-			await results();
-			await settle(2200);
-			expect(calls.get).toBe(1);
+			vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+			try {
+				useSignedIn();
+				const { calls, afters } = findHandlers(
+					[findSession({ state: "done", groups: [findGroup(0)] })],
+					"find-stops-polling",
+				);
+				renderApp("/restore?tab=find&find=*.conf");
+				await results();
+				await vi.advanceTimersByTimeAsync(2200);
+				expect(calls.get, `after=${afters}`).toBe(1);
+			} finally {
+				vi.useRealTimers();
+			}
 		});
 
 		it("stop() cancels the session and polling ends", async () => {

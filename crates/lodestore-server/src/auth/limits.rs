@@ -17,6 +17,7 @@ use crate::error::{ApiError, ErrorBody};
 const LOGIN_PER_USER_PER_MINUTE: u32 = 5;
 const LOGIN_PER_CLIENT_PER_MINUTE: u32 = 30;
 const SETUP_PER_MINUTE: u32 = 10;
+pub const DEMO_PER_MINUTE: u32 = 30;
 const ENROLL_PER_MINUTE: u32 = 20;
 const WINDOW: Duration = Duration::from_secs(60);
 const PRUNE_ABOVE: usize = 4096;
@@ -69,6 +70,7 @@ pub struct Limits {
     login_user: Arc<Attempts<(IpAddr, String)>>,
     login_client: Arc<Attempts<IpAddr>>,
     setup: Arc<Attempts<IpAddr>>,
+    demo: Arc<Attempts<IpAddr>>,
     enroll: Arc<DefaultKeyedRateLimiter<IpAddr>>,
 }
 
@@ -78,6 +80,7 @@ impl Default for Limits {
             login_user: Arc::new(Attempts::new(LOGIN_PER_USER_PER_MINUTE)),
             login_client: Arc::new(Attempts::new(LOGIN_PER_CLIENT_PER_MINUTE)),
             setup: Arc::new(Attempts::new(SETUP_PER_MINUTE)),
+            demo: Arc::new(Attempts::new(DEMO_PER_MINUTE)),
             enroll: Arc::new(RateLimiter::keyed(Quota::per_minute(
                 NonZeroU32::new(ENROLL_PER_MINUTE).expect("a non-zero quota"),
             ))),
@@ -127,6 +130,10 @@ impl Limits {
 
     pub fn setup_succeeded(&self, ip: IpAddr) {
         self.setup.refund(&bucket(ip));
+    }
+
+    pub fn check_demo(&self, ip: IpAddr) -> Result<(), GuardError> {
+        self.demo.hit(&bucket(ip)).map_err(GuardError::RateLimited)
     }
 
     pub fn check_enroll(&self, ip: IpAddr) -> Result<(), Status> {
@@ -245,6 +252,20 @@ mod tests {
             limits.check_login(admin, "admin").unwrap();
             limits.login_succeeded(admin, "admin");
         }
+    }
+
+    #[test]
+    fn demo_sign_ins_are_limited_per_client_and_never_refunded() {
+        let limits = Limits::default();
+        let visitor = ip("198.51.100.20");
+        for _ in 0..DEMO_PER_MINUTE {
+            limits.check_demo(visitor).unwrap();
+        }
+        assert!(matches!(
+            limits.check_demo(visitor),
+            Err(GuardError::RateLimited(secs)) if (1..=60).contains(&secs)
+        ));
+        limits.check_demo(ip("203.0.113.20")).unwrap();
     }
 
     fn headers(forwarded: &str) -> HeaderMap {

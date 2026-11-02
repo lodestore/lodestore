@@ -1,0 +1,24 @@
+apiVersion: lodestore.io/v1alpha1
+kind: BackupPolicy
+metadata:
+  name: demo
+spec:
+  repository: demo
+  selector:
+    matchLabels:
+      demo: agent
+  paths:
+  - /agent/data
+  schedule:
+    cron: "*/30 * * * *"
+    timezone: UTC
+    jitter: 2m
+    catchUpWindow: 6h
+  retention:
+    keepLast: 6
+    keepDaily: 3
+  limits:
+    uploadRate: 20MiB/s
+    maxRuntime: 1h
+  alerts:
+    maxAge: 3h

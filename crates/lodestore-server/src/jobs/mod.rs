@@ -671,6 +671,7 @@ fn download_error_message(code: &str) -> &'static str {
     match code {
         "client_closed" => "The browser closed the connection before the download finished.",
         "server_restarted" => "The server restarted during the download.",
+        "timed_out" => "The download took longer than this server allows.",
         _ => "The archive could not be read from storage.",
     }
 }

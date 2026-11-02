@@ -34,11 +34,14 @@ for target in "${targets[@]}"; do
   if [ "$server" = 1 ]; then
     cargo zigbuild --release --locked --target "$target" -p lodestore-server --features embed-ui
     cp "target/$target/release/lodestore-server" "$out/lodestore-server-linux-$arch"
+    cargo zigbuild --release --locked --target "$target" -p lode-cli
+    cp "target/$target/release/lode" "$out/lode-linux-$arch"
   fi
 done
 
+shopt -s nullglob
 status=0
-for bin in "$out"/lodestore-*-linux-*; do
+for bin in "$out"/lodestore-*-linux-* "$out"/lode-linux-*; do
   if file "$bin" | grep -q 'statically linked'; then
     echo "ok: $bin"
   else

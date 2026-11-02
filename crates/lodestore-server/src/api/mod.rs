@@ -22,8 +22,8 @@ use utoipa_axum::router::OpenApiRouter;
 use crate::error::ErrorBody;
 use crate::state::AppState;
 use crate::{
-    agent_update, alerts, assets, auth, browse, catalog, download, find, fleet, hosts, install,
-    jobs, maintenance, notify, policies, repos, system,
+    agent_update, alerts, assets, auth, browse, catalog, demo, download, find, fleet, hosts,
+    install, jobs, maintenance, notify, policies, repos, system,
 };
 
 mod docs;
@@ -94,6 +94,7 @@ impl utoipa::Modify for Security {
 fn api_router() -> OpenApiRouter<AppState> {
     OpenApiRouter::with_openapi(ApiDoc::openapi())
         .merge(auth::routes())
+        .merge(demo::routes())
         .merge(system::routes())
         .merge(hosts::routes())
         .merge(repos::routes())
@@ -181,6 +182,11 @@ async fn json_errors(request: Request, next: Next) -> Response {
 
 pub fn router(state: AppState) -> Router {
     let (router, _) = api_router().split_for_parts();
+    let router = if state.config.demo_mode {
+        router.route_layer(axum::middleware::from_fn(demo::guard))
+    } else {
+        router
+    };
     router
         .merge(docs::routes())
         .layer(header(CACHE_CONTROL, "no-store"))

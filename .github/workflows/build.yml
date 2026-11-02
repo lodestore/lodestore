@@ -2,6 +2,7 @@ name: build
 
 on:
   workflow_dispatch:
+  workflow_call:
   schedule:
     - cron: "17 3 * * 1"
 
@@ -10,6 +11,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
   KIND_VERSION: v0.33.0
   KIND_SHA256: aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d
 
@@ -18,10 +21,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
       - name: Install the pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - run: rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          cache-on-failure: true
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.12"
@@ -49,10 +56,21 @@ jobs:
           retention-days: 7
 
   docker-kind:
+    needs: [musl]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - run: docker build -f deploy/docker/Dockerfile -t lodestore:ci .
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: musl
+          path: dist
+      - run: scripts/image-context.sh dist ctx
+      - run: >-
+          docker buildx build -f deploy/docker/Dockerfile.dist
+          --platform linux/amd64 --provenance=false --sbom=false
+          --load -t lodestore:ci ctx
       - run: scripts/smoke-docker.sh lodestore:ci
       - name: Install kind
         run: |
@@ -102,10 +120,16 @@ jobs:
       LODESTORE_TEST_POSTGRES_URL: postgres://postgres:lodestore@127.0.0.1:5432/postgres
       LODESTORE_TEST_REQUIRE_POSTGRES: "1"
     steps:
+      - name: Free disk space
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/share/boost
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
       - name: Install the pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          cache-on-failure: true
       - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8
         with:
           tool: nextest@0.9.148
@@ -113,28 +137,14 @@ jobs:
         with:
           path: target/test-bin
           key: test-bin-minio-RELEASE.2025-09-07T16-13-09Z-mc-RELEASE.2025-08-13T08-35-41Z
-      - run: cargo nextest run -p lodestore-server
-
-  web:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: web
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with:
-          node-version: "24"
-      - run: corepack enable
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm build
-      - run: pnpm test
-      - run: pnpm lint
+      - run: cargo nextest run -p lodestore-server --no-fail-fast
 
   helm:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
       - run: helm lint deploy/helm/lodestore --set grpc.publicAddress=lodestore.example:8443 --set unlockKey=ci-render-only
       - run: helm template lodestore deploy/helm/lodestore --set grpc.publicAddress=lodestore.example:8443 --set unlockKey=ci-render-only
 
@@ -142,6 +152,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
       - name: Install the pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8

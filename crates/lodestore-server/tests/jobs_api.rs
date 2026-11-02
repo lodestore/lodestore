@@ -1,8 +1,12 @@
 mod common;
 
-use common::{Api, TestServer, backends};
+use common::{Api, Backend, TestServer, backends};
 use lodestore_agent::{EnrollArgs, NetOptions};
 use serde_json::{Value, json};
+
+async fn server(backend: &Backend) -> TestServer {
+    TestServer::start_with(backend, |c| c.schedule_tick_secs = 0).await
+}
 
 async fn enroll(ts: &TestServer, api: &Api, repo: &str, hostname: &str) -> String {
     let token = api.join_token(repo, json!([])).await;
@@ -70,7 +74,7 @@ async fn post_json(api: &Api, path: &str) -> (u16, Value) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn jobs_api_list_filters_and_order() {
     for backend in backends() {
-        let ts = TestServer::start(&backend).await;
+        let ts = server(&backend).await;
         let api = ts.api().await;
         let repo = ts.create_local_repository("main").await;
         let hosts = [
@@ -168,7 +172,7 @@ async fn jobs_api_list_filters_and_order() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn jobs_api_detail_fields() {
     for backend in backends() {
-        let ts = TestServer::start(&backend).await;
+        let ts = server(&backend).await;
         let api = ts.api().await;
         let repo = ts.create_local_repository("main").await;
         let busy = enroll(&ts, &api, &repo, "host-busy").await;
@@ -323,7 +327,7 @@ async fn jobs_api_detail_fields() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn jobs_api_events_after_and_level() {
     for backend in backends() {
-        let ts = TestServer::start(&backend).await;
+        let ts = server(&backend).await;
         let api = ts.api().await;
         let repo = ts.create_local_repository("main").await;
         let host = enroll(&ts, &api, &repo, "host-a").await;
@@ -393,7 +397,7 @@ async fn jobs_api_events_after_and_level() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn jobs_api_cancel_queued_and_running() {
     for backend in backends() {
-        let ts = TestServer::start(&backend).await;
+        let ts = server(&backend).await;
         let api = ts.api().await;
         let repo = ts.create_local_repository("main").await;
         let host = enroll(&ts, &api, &repo, "host-a").await;
@@ -449,7 +453,7 @@ async fn jobs_api_cancel_queued_and_running() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn jobs_api_rerun() {
     for backend in backends() {
-        let ts = TestServer::start(&backend).await;
+        let ts = server(&backend).await;
         let api = ts.api().await;
         let repo = ts.create_local_repository("main").await;
         let host = enroll(&ts, &api, &repo, "host-a").await;
@@ -665,7 +669,7 @@ async fn seed_mixed(ts: &TestServer, host: &str, repo: &str) -> Vec<String> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn jobs_api_merges_downloads_and_restores() {
     for backend in backends() {
-        let ts = TestServer::start(&backend).await;
+        let ts = server(&backend).await;
         let api = ts.api().await;
         let repo = ts.create_local_repository("main").await;
         let host = enroll(&ts, &api, &repo, "host-a").await;
@@ -685,7 +689,7 @@ async fn jobs_api_merges_downloads_and_restores() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn jobs_api_kind_filter() {
     for backend in backends() {
-        let ts = TestServer::start(&backend).await;
+        let ts = server(&backend).await;
         let api = ts.api().await;
         let repo = ts.create_local_repository("main").await;
         let host = enroll(&ts, &api, &repo, "host-a").await;
@@ -734,7 +738,7 @@ async fn jobs_api_kind_filter() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn jobs_api_download_detail_and_refusals() {
     for backend in backends() {
-        let ts = TestServer::start(&backend).await;
+        let ts = server(&backend).await;
         let api = ts.api().await;
         let repo = ts.create_local_repository("main").await;
         let now = lodestore_server::db::now_ms();
@@ -781,7 +785,7 @@ async fn jobs_api_download_detail_and_refusals() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn jobs_api_agentless_download_host() {
     for backend in backends() {
-        let ts = TestServer::start(&backend).await;
+        let ts = server(&backend).await;
         let api = ts.api().await;
         let repo = ts.create_local_repository("main").await;
         let agent = enroll(&ts, &api, &repo, "host-a").await;
@@ -887,7 +891,7 @@ async fn single_host(ts: &TestServer) -> (Api, String) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn jobs_api_origin_and_missed_runs() {
     for backend in backends() {
-        let ts = TestServer::start(&backend).await;
+        let ts = server(&backend).await;
         let (api, host) = single_host(&ts).await;
         seed_job(
             &ts,
@@ -935,7 +939,7 @@ async fn jobs_api_origin_and_missed_runs() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn jobs_api_retention_result() {
     for backend in backends() {
-        let ts = TestServer::start(&backend).await;
+        let ts = server(&backend).await;
         let (api, host) = single_host(&ts).await;
         let kept = "a".repeat(64);
         let gone = "b".repeat(64);
@@ -985,7 +989,7 @@ async fn jobs_api_limits_in_detail() {
     use prost::Message;
 
     for backend in backends() {
-        let ts = TestServer::start(&backend).await;
+        let ts = server(&backend).await;
         let (api, host) = single_host(&ts).await;
         let limited = JobSpec {
             limits: Some(Limits {
@@ -1052,7 +1056,7 @@ async fn jobs_api_upload_speed_in_progress() {
     use lodestore_server::grpc::dispatch::live::LiveProgress;
 
     for backend in backends() {
-        let ts = TestServer::start(&backend).await;
+        let ts = server(&backend).await;
         let (api, host) = single_host(&ts).await;
         let id = insert_job(
             &ts,
@@ -1093,7 +1097,7 @@ async fn jobs_api_upload_speed_in_progress() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn jobs_api_snapshot_suspicious_flag() {
     for backend in backends() {
-        let ts = TestServer::start(&backend).await;
+        let ts = server(&backend).await;
         let (api, host) = single_host(&ts).await;
         let odd = "c".repeat(64);
         let fine = "d".repeat(64);
@@ -1128,7 +1132,7 @@ async fn jobs_api_snapshot_suspicious_flag() {
         assert_eq!(flag("odd"), true, "{}", backend.name());
         assert_eq!(flag("fine"), false);
         assert_eq!(flag("bare"), false);
-        assert_eq!(page["total"], 3);
+        assert_eq!(page["total"], 3, "{}", page["items"]);
         assert_eq!(job_detail(&api, "odd").await["snapshot_suspicious"], true);
         ts.stop().await;
     }
@@ -1172,7 +1176,7 @@ async fn insert_agent_update(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn jobs_api_agent_update_kind() {
     for backend in backends() {
-        let ts = TestServer::start(&backend).await;
+        let ts = server(&backend).await;
         let api = ts.api().await;
         let repo = ts.create_local_repository("main").await;
         let host_a = enroll(&ts, &api, &repo, "host-a").await;

@@ -1,0 +1,11 @@
+FROM gcr.io/distroless/static-debian12:nonroot
+ARG TARGETARCH
+COPY linux-${TARGETARCH}/lodestore-server /usr/local/bin/lodestore-server
+COPY agents/ /usr/share/lodestore/agents/
+COPY --chown=65532:65532 rootfs/var/lib/lodestore /var/lib/lodestore
+LABEL org.opencontainers.image.source="https://github.com/lodestore/lodestore"
+ENV LODESTORE_DATA_DIR=/var/lib/lodestore
+USER 65532:65532
+EXPOSE 8080 8443
+HEALTHCHECK CMD ["/usr/local/bin/lodestore-server", "healthcheck"]
+ENTRYPOINT ["/usr/local/bin/lodestore-server", "serve"]

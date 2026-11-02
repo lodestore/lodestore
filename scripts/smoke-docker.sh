@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-image=${1:?usage: smoke-docker.sh <image>}
+image=${1:?usage: smoke-docker.sh <image> [--signed]}
+signed=0
+case "${2:-}" in
+  "") ;;
+  --signed) signed=1 ;;
+  *) echo "usage: smoke-docker.sh <image> [--signed]" >&2; exit 2 ;;
+esac
+root=$(cd "$(dirname "$0")/.." && pwd)
 suffix=$$
 volume=lodestore-smoke-$suffix
 name=lodestore-smoke-$suffix
@@ -75,7 +82,17 @@ fi
 docker cp "$name:/usr/share/lodestore/agents" "$workdir/agents"
 docker cp "$name:/usr/local/bin/lodestore-server" "$workdir/lodestore-server"
 for bin in "$workdir"/agents/* "$workdir/lodestore-server"; do
+  case "$bin" in *.minisig) continue ;; esac
   file "$bin" | grep -q 'statically linked' || fail "$bin is not statically linked"
 done
+
+if [ "$signed" = 1 ]; then
+  for arch in x86_64 aarch64; do
+    bin=$workdir/agents/lodestore-agent-linux-$arch
+    [ -f "$bin.minisig" ] || fail "no signature next to the $arch agent"
+    minisign -V -p "$root/crates/lodestore-agent/keys/project.pub" -m "$bin" >/dev/null ||
+      fail "signature of the $arch agent does not verify"
+  done
+fi
 
 echo "smoke ok"

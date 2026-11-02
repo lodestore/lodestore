@@ -13,6 +13,15 @@ use sha2::{Digest, Sha256};
 pub const MINIO_RELEASE: &str = "RELEASE.2025-09-07T16-13-09Z";
 pub const MC_RELEASE: &str = "RELEASE.2025-08-13T08-35-41Z";
 
+const MINIO_SHA256_LINUX_AMD64: &str =
+    "7c5bd8512c6e966455b1d198209358b2d191c77a83ab377c4073281065fb855f";
+const MINIO_SHA256_LINUX_ARM64: &str =
+    "5c83cd2cf151717ba0243f73e1c7802ff36e272b67144bdd7f1f7d684fd6f03d";
+const MC_SHA256_LINUX_AMD64: &str =
+    "01f866e9c5f9b87c2b09116fa5d7c06695b106242d829a8bb32990c00312e891";
+const MC_SHA256_LINUX_ARM64: &str =
+    "14c8c9616cfce4636add161304353244e8de383b2e2752c0e9dad01d4c27c12c";
+
 struct Asset {
     url: String,
     file: String,
@@ -31,8 +40,8 @@ fn platform() -> &'static str {
 fn minio_asset() -> Asset {
     let p = platform();
     let sha256 = match p {
-        "linux-amd64" => "7c5bd8512c6e966455b1d198209358b2d191c77a83ab377c4073281065fb855f",
-        "linux-arm64" => "5c83cd2cf151717ba0243f73e1c7802ff36e272b67144bdd7f1f7d684fd6f03d",
+        "linux-amd64" => MINIO_SHA256_LINUX_AMD64,
+        "linux-arm64" => MINIO_SHA256_LINUX_ARM64,
         _ => "7c3b3039b76e55a1b80935848ed83998d5e8d317374f87851f46a019ff5c0aa4",
     };
     let file = format!("minio.{p}.{MINIO_RELEASE}");
@@ -46,8 +55,8 @@ fn minio_asset() -> Asset {
 fn mc_asset() -> Asset {
     let p = platform();
     let sha256 = match p {
-        "linux-amd64" => "01f866e9c5f9b87c2b09116fa5d7c06695b106242d829a8bb32990c00312e891",
-        "linux-arm64" => "14c8c9616cfce4636add161304353244e8de383b2e2752c0e9dad01d4c27c12c",
+        "linux-amd64" => MC_SHA256_LINUX_AMD64,
+        "linux-arm64" => MC_SHA256_LINUX_ARM64,
         _ => "a877fd0c183409da9f20f9d6e1811987298bbbca1aa03428eebdffba79fb9445",
     };
     let file = format!("mc.{p}.{MC_RELEASE}");
@@ -165,12 +174,23 @@ impl MinioServer {
     pub async fn start() -> Self {
         let minio = fetch(&minio_asset()).await;
         let mc = fetch(&mc_asset()).await;
+        let mut last = String::new();
+        for _ in 0..5 {
+            match Self::launch(&minio, &mc).await {
+                Ok(server) => return server,
+                Err(e) => last = e,
+            }
+        }
+        panic!("minio did not start on a free port: {last}");
+    }
 
+    async fn launch(minio: &Path, mc: &Path) -> Result<Self, String> {
+        let mc = mc.to_path_buf();
         let data = tempfile::tempdir().expect("data dir");
         let mc_config = tempfile::tempdir().expect("mc config dir");
         let (port, console) = (free_port(), free_port());
         let (root_user, root_password) = (random_hex(8), random_hex(16));
-        let child = Command::new(&minio)
+        let child = Command::new(minio)
             .arg("server")
             .arg(data.path())
             .args(["--address", &format!("127.0.0.1:{port}")])
@@ -191,7 +211,7 @@ impl MinioServer {
             root_user,
             root_password,
         };
-        server.wait_ready().await;
+        server.wait_ready().await?;
         let (endpoint, user, password) = (
             server.endpoint.clone(),
             server.root_user.clone(),
@@ -207,23 +227,26 @@ impl MinioServer {
                 Err(e) if e.contains("not initialized") && Instant::now() < deadline => {
                     tokio::time::sleep(Duration::from_millis(200)).await;
                 }
+                Err(e) if e.contains("does not exist in our records") => {
+                    return Err(format!("another server answers on {endpoint}: {e}"));
+                }
                 Err(e) => panic!("mc alias set: {e:?}"),
             }
         }
-        server
+        Ok(server)
     }
 
-    async fn wait_ready(&mut self) {
+    async fn wait_ready(&mut self) -> Result<(), String> {
         let url = format!("{}/minio/health/ready", self.endpoint);
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             if let Ok(Some(status)) = self.child.try_wait() {
-                panic!("minio exited during startup: {status}");
+                return Err(format!("minio exited during startup: {status}"));
             }
             if let Ok(r) = reqwest::get(&url).await
                 && r.status().is_success()
             {
-                return;
+                return Ok(());
             }
             assert!(Instant::now() < deadline, "minio did not become ready");
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -411,5 +434,48 @@ impl Drop for MinioServer {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pins_env_matches_constants() {
+        let pins = include_str!("../../../scripts/pins.env");
+        let expected = [
+            ("MINIO_RELEASE", MINIO_RELEASE),
+            ("MC_RELEASE", MC_RELEASE),
+            ("MINIO_SHA256_LINUX_AMD64", MINIO_SHA256_LINUX_AMD64),
+            ("MINIO_SHA256_LINUX_ARM64", MINIO_SHA256_LINUX_ARM64),
+            ("MC_SHA256_LINUX_AMD64", MC_SHA256_LINUX_AMD64),
+            ("MC_SHA256_LINUX_ARM64", MC_SHA256_LINUX_ARM64),
+        ];
+        let entries: Vec<(&str, &str)> = pins
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| l.split_once('=').expect("KEY=VALUE line"))
+            .collect();
+        assert_eq!(
+            entries.len(),
+            expected.len(),
+            "pins.env has unexpected lines"
+        );
+        for (key, value) in expected {
+            assert!(
+                entries.contains(&(key, value)),
+                "scripts/pins.env disagrees with minio.rs on {key}"
+            );
+        }
+
+        let dockerfile = include_str!("../../../deploy/demo/minio/Dockerfile");
+        for (key, value) in entries {
+            let line = format!("ARG {key}={value}");
+            assert!(
+                dockerfile.lines().any(|l| l == line),
+                "deploy/demo/minio/Dockerfile disagrees with scripts/pins.env on {key}"
+            );
+        }
     }
 }

@@ -28,6 +28,11 @@ export const copy = {
 	user,
 	hostBackup,
 	snapshots,
+	demo: {
+		notAvailable: "Not available in the demo.",
+		banner:
+			"This is a public demo with synthetic data. Saving changes is turned off. You can still download an archive.",
+	},
 	nav: {
 		overview: "Overview",
 		hosts: "Hosts",
@@ -239,11 +244,9 @@ export const copy = {
 		completed: "completed",
 	},
 	backend: {
-		s3: "S3-compatible storage. AWS S3, MinIO, Ceph, R2 and others.",
+		s3: "S3-compatible storage such as AWS S3, MinIO or Ceph.",
 		local: "Local folder. A path both the server and the agent can see.",
 		experimental: "Experimental",
-		moreBackends:
-			"More backends (experimental): Azure Blob, Google Cloud Storage, SFTP, WebDAV. These are not covered by our storage tests.",
 		twoKeys:
 			"Two keys. The server key has full access and manages the repository. The agent key can only write, so a compromised host cannot delete backups.",
 	},
@@ -508,6 +511,7 @@ export const copy = {
 	errors: {
 		list: (what: "hosts" | "repositories") =>
 			`Couldn't load ${what}. Check that the server is reachable, then retry.`,
+		page: "Couldn't open Lodestore. Check that the server is reachable, then retry.",
 		retry: "Retry loading",
 		submit: (action: string, serverMessage?: string) =>
 			`Couldn't ${action}. ${sentence(serverMessage)}Try again.`,

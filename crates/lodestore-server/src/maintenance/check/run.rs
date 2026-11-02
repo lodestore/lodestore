@@ -91,6 +91,9 @@ pub(super) async fn until_done<F: Future>(
     progress: &Mutex<CheckProgress>,
     work: F,
 ) -> anyhow::Result<Option<F::Output>> {
+    if db::cancel_requested(state, run_id).await? {
+        return Ok(None);
+    }
     tokio::pin!(work);
     let mut tick = tokio::time::interval(PROGRESS_PERIOD);
     loop {

@@ -39,6 +39,7 @@ pub const MIN_PASSWORD_CHARS: usize = 12;
 pub const MAX_PASSWORD_CHARS: usize = 1024;
 pub const MAX_USERNAME_CHARS: usize = 64;
 const SESSION_DAYS: i64 = 7;
+const SESSION_LIFETIME: Duration = Duration::from_secs(7 * 86_400);
 const SESSION_MAX_DAYS: i64 = 30;
 const DAY_MS: i64 = 86_400_000;
 const SESSION_TOUCH_MS: i64 = 3_600_000;
@@ -124,7 +125,7 @@ pub async fn purge_expired_sessions(state: &AppState) -> Result<u64, sqlx::Error
 }
 
 pub async fn session_janitor(state: AppState, stop: CancellationToken) -> anyhow::Result<()> {
-    let mut tick = tokio::time::interval(Duration::from_secs(3600));
+    let mut tick = tokio::time::interval(Duration::from_secs(60));
     loop {
         tokio::select! {
             _ = stop.cancelled() => return Ok(()),
@@ -134,6 +135,16 @@ pub async fn session_janitor(state: AppState, stop: CancellationToken) -> anyhow
             Ok(0) => {}
             Ok(n) => tracing::debug!(removed = n, "expired sessions removed"),
             Err(error) => tracing::warn!(%error, "removing expired sessions failed"),
+        }
+        match crate::download::reap_stale(&state).await {
+            Ok(0) => {}
+            Ok(n) => tracing::warn!(reaped = n, "stale downloads marked interrupted"),
+            Err(error) => tracing::warn!(%error, "reaping stale downloads failed"),
+        }
+        match crate::download::purge_unused_links(&state).await {
+            Ok(0) => {}
+            Ok(n) => tracing::debug!(removed = n, "unused download links removed"),
+            Err(error) => tracing::warn!(%error, "removing unused download links failed"),
         }
     }
 }
@@ -284,6 +295,15 @@ pub async fn insert_session(
     user_id: &str,
     password_hash: &str,
 ) -> Result<Option<String>, ApiError> {
+    insert_session_for(state, user_id, password_hash, SESSION_LIFETIME).await
+}
+
+pub(crate) async fn insert_session_for(
+    state: &AppState,
+    user_id: &str,
+    password_hash: &str,
+    lifetime: Duration,
+) -> Result<Option<String>, ApiError> {
     let cookie_value = random_token();
     let now = now_ms();
     let inserted = sqlx::query(
@@ -294,7 +314,7 @@ pub async fn insert_session(
     .bind(user_id)
     .bind(random_token())
     .bind(now)
-    .bind(now + SESSION_DAYS * DAY_MS)
+    .bind(now + i64::try_from(lifetime.as_millis()).unwrap_or(i64::MAX / 2))
     .bind(password_hash)
     .execute(&state.db.pool)
     .await?;
@@ -307,7 +327,17 @@ pub(crate) async fn start_session(
     user_id: &str,
     password_hash: &str,
 ) -> Result<CookieJar, ApiError> {
-    let cookie_value = insert_session(state, user_id, password_hash)
+    start_session_for(state, jar, user_id, password_hash, SESSION_LIFETIME).await
+}
+
+pub(crate) async fn start_session_for(
+    state: &AppState,
+    jar: CookieJar,
+    user_id: &str,
+    password_hash: &str,
+    lifetime: Duration,
+) -> Result<CookieJar, ApiError> {
+    let cookie_value = insert_session_for(state, user_id, password_hash, lifetime)
         .await?
         .ok_or(ApiError::Unauthorized)?;
     let cookie = Cookie::build((SESSION_COOKIE, cookie_value))
@@ -315,7 +345,9 @@ pub(crate) async fn start_session(
         .same_site(SameSite::Strict)
         .secure(state.config.public_url.starts_with("https://"))
         .path("/")
-        .max_age(time::Duration::days(SESSION_DAYS))
+        .max_age(time::Duration::seconds(
+            i64::try_from(lifetime.as_secs()).unwrap_or(i64::MAX / 2),
+        ))
         .build();
     Ok(jar.add(cookie))
 }

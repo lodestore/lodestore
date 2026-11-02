@@ -806,6 +806,23 @@ async fn metrics_listen_without_auth() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn metrics_listen_stays_closed_in_demo() {
+    let addr = free_addr();
+    let ts = TestServer::start_with(&backends().remove(0), |c| {
+        c.schedule_tick_secs = 0;
+        c.demo_mode = true;
+        c.metrics_listen = Some(addr);
+    })
+    .await;
+    let refused = reqwest::get(format!("http://{addr}/metrics")).await;
+    assert!(
+        refused.is_err_and(|e| e.is_connect()),
+        "the metrics listener is open"
+    );
+    ts.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn metrics_listen_off_by_default() {
     let (handle, _dir) = serve_direct(None).await;
     assert_eq!(handle.metrics_addr, None);

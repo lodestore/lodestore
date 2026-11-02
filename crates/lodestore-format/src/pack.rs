@@ -26,6 +26,8 @@ pub const ENTRY_LEN: usize = 45;
 const TRAILER_LEN: usize = 4 + 6;
 const HEADER_OVERHEAD: usize = crate::crypto::NONCE_LEN + crate::crypto::TAG_LEN;
 
+pub const PACK_FIXED_LEN: usize = PACK_PREFIX_LEN + HEADER_OVERHEAD + TRAILER_LEN;
+
 pub const PACK_TARGET_SIZE: usize = 32 << 20;
 pub const PACK_MAX_SIZE: usize = 64 << 20;
 pub const MAX_DATA_ULEN: usize = 4 << 20;

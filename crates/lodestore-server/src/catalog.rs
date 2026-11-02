@@ -37,6 +37,7 @@ pub mod retention;
 use self::actions::{SuspicionDto, suspicion_from_row};
 
 const SYNC_INTERVAL: Duration = Duration::from_secs(300);
+const SYNC_START_DELAY: Duration = Duration::from_secs(60);
 const PAGE_SIZE: i64 = 50;
 pub(crate) const SNAPSHOT_PREFIX: &str = "snapshots/";
 const VANISH_GRACE_MS: i64 = 3_600_000;
@@ -449,6 +450,42 @@ impl CatalogJobs {
         (status, rx)
     }
 
+    fn in_flight(&self, repository_id: &str) -> Option<watch::Receiver<Option<Outcome>>> {
+        let jobs = self.lock();
+        let job = jobs.get(repository_id)?;
+        job.status.running().then(|| job.outcome.clone())
+    }
+
+    /// Registers a run that stays in flight until the returned guard is released.
+    #[doc(hidden)]
+    pub async fn hold(&self, repository_id: &str) -> HeldRun {
+        loop {
+            if let Some(mut going) = self.in_flight(repository_id) {
+                let _ = going.wait_for(Option::is_some).await;
+                continue;
+            }
+            let mut jobs = self.lock();
+            if jobs.get(repository_id).is_some_and(|j| j.status.running()) {
+                continue;
+            }
+            let (tx, rx) = watch::channel(None);
+            jobs.insert(
+                repository_id.to_string(),
+                Job {
+                    status: CatalogStatus::new(repository_id, CatalogPhase::Listing),
+                    outcome: rx,
+                    quiet: true,
+                    shown: None,
+                },
+            );
+            return HeldRun {
+                jobs: self.clone(),
+                repository_id: repository_id.to_string(),
+                done: tx,
+            };
+        }
+    }
+
     fn finish(&self, repository_id: &str, outcome: &Outcome) {
         self.update(repository_id, |status| {
             status.finished_at = Some(now_ms());
@@ -460,6 +497,25 @@ impl CatalogJobs {
                 }
             }
         });
+    }
+}
+
+#[doc(hidden)]
+pub struct HeldRun {
+    jobs: CatalogJobs,
+    repository_id: String,
+    done: watch::Sender<Option<Outcome>>,
+}
+
+impl HeldRun {
+    pub fn release(self, added: u64) {
+        let outcome = Ok(SyncReport {
+            added,
+            skipped: 0,
+            total: 0,
+        });
+        self.jobs.finish(&self.repository_id, &outcome);
+        self.done.send_replace(Some(outcome));
     }
 }
 
@@ -825,6 +881,14 @@ async fn record_state(
 }
 
 pub async fn sync_repository(state: &AppState, repository_id: &str) -> anyhow::Result<SyncReport> {
+    // A run already going may have listed the bucket before this call, so wait it out and join a later one.
+    let mut earlier_added = 0;
+    if let Some(mut going) = state.catalog.in_flight(repository_id)
+        && let Ok(outcome) = going.wait_for(Option::is_some).await
+        && let Some(Ok(report)) = outcome.as_ref()
+    {
+        earlier_added = report.added;
+    }
     let (_, mut done) = state.catalog.start(state, repository_id, true);
     let outcome = done
         .wait_for(Option::is_some)
@@ -832,11 +896,17 @@ pub async fn sync_repository(state: &AppState, repository_id: &str) -> anyhow::R
         .context("the catalog rebuild was dropped")?
         .clone()
         .context("the catalog rebuild has no outcome")?;
-    Ok(outcome?)
+    let report = outcome?;
+    Ok(SyncReport {
+        added: report.added + earlier_added,
+        ..report
+    })
 }
 
 pub async fn sync_loop(state: AppState, stop: CancellationToken) -> anyhow::Result<()> {
-    let mut tick = tokio::time::interval(SYNC_INTERVAL);
+    // The first pass waits: a server that just started may be having a repository connected.
+    let first = tokio::time::Instant::now() + SYNC_START_DELAY;
+    let mut tick = tokio::time::interval_at(first, SYNC_INTERVAL);
     loop {
         tokio::select! {
             _ = stop.cancelled() => return Ok(()),

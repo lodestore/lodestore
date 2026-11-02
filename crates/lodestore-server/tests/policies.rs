@@ -162,7 +162,7 @@ async fn set_facts(ts: &TestServer, host: &str, facts: Value) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn policies_create_run_lists_queued_job() {
     for backend in backends() {
-        let ts = TestServer::start(&backend).await;
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
         let http = Http::login(&ts).await;
         let repo = ts.create_local_repository("main").await;
         let host = enroll(&ts, &http, &repo, "host-a", prod()).await;

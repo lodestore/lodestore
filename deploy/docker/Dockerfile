@@ -6,7 +6,7 @@ RUN pnpm install --frozen-lockfile
 COPY web ./
 RUN pnpm build
 
-FROM rust:1.99-bookworm AS builder
+FROM rust:1.99.0-bookworm AS builder
 ARG TARGETARCH
 ARG ZIGLANG_VERSION=0.17.0
 ARG ZIGBUILD_VERSION=0.23.4

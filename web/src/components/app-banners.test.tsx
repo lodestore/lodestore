@@ -46,6 +46,26 @@ describe("banners", () => {
 		expect(screen.queryByText(UNLOCK)).not.toBeInTheDocument();
 	});
 
+	it("shows a demo notice on every app page with no way to close it", async () => {
+		useSignedIn({ info: { demo_mode: true } });
+		const { router } = renderApp("/overview");
+		const notice = await screen.findByText(/This is a public demo/);
+		expect(notice).toBeInTheDocument();
+		expect(screen.queryByRole("button", { name: /dismiss/i })).toBeNull();
+
+		server.use(http.get("/api/v1/restore/hosts", () => HttpResponse.json([])));
+		await router.navigate({ to: "/restore" });
+		await screen.findByRole("heading", { level: 1, name: "Restore" });
+		expect(screen.getByText(/This is a public demo/)).toBeInTheDocument();
+	});
+
+	it("shows no demo notice outside the demo", async () => {
+		useSignedIn();
+		renderApp("/overview");
+		await screen.findByRole("heading", { level: 1 });
+		expect(screen.queryByText(/This is a public demo/)).toBeNull();
+	});
+
 	it("shows no unlock key banner when the key comes from the environment", async () => {
 		useSignedIn({ info: { unlock_key_source: "env" } });
 		renderApp("/overview");

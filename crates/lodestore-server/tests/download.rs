@@ -8,12 +8,17 @@ use std::time::Duration;
 use common::{Api, TestServer, backends, wait_until};
 use data_encoding::BASE64URL_NOPAD;
 use lodestore_format::index::hex32;
+use lodestore_format::keys::MasterKey;
 use lodestore_format::repo::Repository;
 use lodestore_format::store::LocalFsStore;
 use lodestore_format::writer::{BackupOptions, Writer};
+use lodestore_server::auth::session_janitor;
 use lodestore_server::catalog::ingest_snapshot;
+use lodestore_server::db::now_ms;
+use lodestore_server::repos::db::{AccessKey, NewRepository, RepoLocation, create_repository};
 use serde_json::{Value, json};
 use sqlx::Row;
+use tokio_util::sync::CancellationToken;
 
 const PASSWORD: &[u8] = b"test-password";
 const MIB: usize = 1 << 20;
@@ -388,6 +393,192 @@ async fn download_running_marked_interrupted_on_restart() {
     }
 }
 
+async fn insert_download(
+    ts: &TestServer,
+    id: &str,
+    repository: &str,
+    snapshot: &str,
+    state: &str,
+    (created_at, started_at): (i64, Option<i64>),
+) {
+    sqlx::query(
+        "INSERT INTO downloads (id, repository_id, hostname, snapshot_id, items_json, format, \
+         started_by, state, created_at, started_at) \
+         VALUES ($1, $2, 'host-a', $3, $4, 'tar_gz', 'admin', $5, $6, $7)",
+    )
+    .bind(id)
+    .bind(repository)
+    .bind(snapshot)
+    .bind(json!([b64(b"/file")]).to_string())
+    .bind(state)
+    .bind(created_at)
+    .bind(started_at)
+    .execute(&ts.state().db.pool)
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn download_cancelled_before_streaming_leaves_no_running_row() {
+    for backend in backends() {
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+        let api = ts.api().await;
+        let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", silent.local_addr().unwrap());
+        let held = tokio::spawn(async move {
+            let mut connections = Vec::new();
+            while let Ok((connection, _)) = silent.accept().await {
+                connections.push(connection);
+            }
+        });
+        let repo = create_repository(
+            ts.state(),
+            NewRepository {
+                name: "silent".to_string(),
+                location: RepoLocation {
+                    backend: "s3".to_string(),
+                    options: BTreeMap::from([
+                        ("bucket".to_string(), "silent".to_string()),
+                        ("endpoint".to_string(), endpoint),
+                    ]),
+                },
+                experimental: false,
+                format_repo_id: [1; 16],
+                config_hash: [2; 32],
+                master: MasterKey::from_bytes([3; 32]),
+                server_slot_secret: None,
+                server_creds: Some(AccessKey {
+                    access_key_id: "server".to_string(),
+                    secret_access_key: "server-secret".to_string(),
+                }),
+                agent_creds: None,
+            },
+        )
+        .await
+        .unwrap();
+        let id = "d-cancelled";
+        let snapshot = "0".repeat(64);
+        insert_download(&ts, id, &repo, &snapshot, "pending", (now_ms(), None)).await;
+
+        let url = format!("/api/v1/downloads/{id}/archive");
+        let mut request = Box::pin(api.get(&url));
+        tokio::select! {
+            response = &mut request => panic!("silent storage answered: {}", response.status()),
+            () = wait_state(&ts, id, "running") => {}
+        }
+        drop(request);
+
+        wait_state(&ts, id, "interrupted").await;
+        assert_eq!(
+            row(&ts, id).await.2.as_deref(),
+            Some("client_closed"),
+            "[{}]",
+            backend.name()
+        );
+        held.abort();
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn janitor_frees_running_downloads_past_their_deadline() {
+    let hour = 3_600_000;
+    for (demo, kept, reaped) in [
+        (false, now_ms() - hour, now_ms() - 25 * hour),
+        (true, now_ms() - 1000, now_ms() - hour),
+    ] {
+        for backend in backends() {
+            let ts = TestServer::start_with(&backend, |c| {
+                c.schedule_tick_secs = 0;
+                c.demo_mode = demo;
+                c.demo.download_timeout = Duration::from_secs(120);
+            })
+            .await;
+            let seeded = seed(&ts, 0).await;
+            for (id, started) in [("d-kept", kept), ("d-reaped", reaped)] {
+                insert_download(
+                    &ts,
+                    id,
+                    &seeded.repo,
+                    &seeded.snapshot,
+                    "running",
+                    (started, Some(started)),
+                )
+                .await;
+            }
+
+            let stop = CancellationToken::new();
+            let janitor = tokio::spawn(session_janitor(ts.state().clone(), stop.clone()));
+            wait_state(&ts, "d-reaped", "interrupted").await;
+            assert_eq!(row(&ts, "d-reaped").await.2.as_deref(), Some("timed_out"));
+            assert_eq!(row(&ts, "d-kept").await.0, "running", "demo {demo}");
+            stop.cancel();
+            janitor.await.unwrap().unwrap();
+            ts.stop().await;
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn janitor_deletes_links_left_unused() {
+    let hour = 3_600_000;
+    for backend in backends() {
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+        let seeded = seed(&ts, 0).await;
+        for (id, created) in [("d-recent", now_ms()), ("d-old", now_ms() - 2 * hour)] {
+            insert_download(
+                &ts,
+                id,
+                &seeded.repo,
+                &seeded.snapshot,
+                "pending",
+                (created, None),
+            )
+            .await;
+        }
+
+        let stop = CancellationToken::new();
+        let janitor = tokio::spawn(session_janitor(ts.state().clone(), stop.clone()));
+        let pool = ts.state().db.pool.clone();
+        let deleted = wait_until(Duration::from_secs(10), || {
+            let pool = pool.clone();
+            async move {
+                sqlx::query("SELECT 1 AS one FROM downloads WHERE id = 'd-old'")
+                    .fetch_optional(&pool)
+                    .await
+                    .unwrap()
+                    .is_none()
+            }
+        })
+        .await;
+        assert!(deleted, "[{}] the old link is still stored", backend.name());
+        assert_eq!(row(&ts, "d-recent").await.0, "pending");
+        stop.cancel();
+        janitor.await.unwrap().unwrap();
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn download_stores_each_selected_path_once() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let seeded = seed(&ts, 0).await;
+        let created = create(&api, &seeded, &["b.txt", "docs", "b.txt"], "tar_gz").await;
+        let stored: String = sqlx::query("SELECT items_json FROM downloads WHERE id = $1")
+            .bind(created["id"].as_str().unwrap())
+            .fetch_one(&ts.state().db.pool)
+            .await
+            .unwrap()
+            .try_get("items_json")
+            .unwrap();
+        let items: Vec<String> = serde_json::from_str(&stored).unwrap();
+        assert_eq!(items.len(), 2, "[{}]", backend.name());
+        ts.stop().await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn download_validation() {
     for backend in backends() {
@@ -395,6 +586,9 @@ async fn download_validation() {
         let api = ts.api().await;
         let seeded = seed(&ts, 0).await;
         let item = seeded.item("b.txt");
+        let oversized: Vec<String> = (0..4000)
+            .map(|i| b64(format!("/{i:0>60}").as_bytes()))
+            .collect();
         let cases = [
             (
                 "unknown snapshot",
@@ -429,6 +623,11 @@ async fn download_validation() {
             (
                 "unknown format",
                 json!({"snapshot_id": seeded.snapshot, "items": [item], "format": "rar"}),
+                422,
+            ),
+            (
+                "selection too large to store",
+                json!({"snapshot_id": seeded.snapshot, "items": oversized, "format": "zip"}),
                 422,
             ),
         ];

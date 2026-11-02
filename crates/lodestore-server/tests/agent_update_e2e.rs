@@ -186,11 +186,22 @@ async fn agent_update_installs_a_signed_binary_and_confirms_it() {
         stand.env.start_agent_with(runtime).await;
         stand.wait_state("succeeded").await;
         assert!(
-            stand
-                .switcher
-                .calls()
-                .iter()
-                .any(|c| matches!(c, SwitchCall::Disarm { .. }))
+            wait_until(WAIT, || async {
+                stand
+                    .switcher
+                    .calls()
+                    .iter()
+                    .any(|c| matches!(c, SwitchCall::Disarm { .. }))
+            })
+            .await,
+            "[{}] the agent never disarmed the guard",
+            backend.name()
+        );
+        let pending = stand.env.paths.update_dir().join("pending.json");
+        assert!(
+            wait_until(WAIT, || async { !pending.exists() }).await,
+            "[{}]",
+            backend.name()
         );
         let status = stand.env.json("/api/v1/agent-updates").await;
         let host = status["hosts"]
@@ -201,7 +212,6 @@ async fn agent_update_installs_a_signed_binary_and_confirms_it() {
             .unwrap()
             .clone();
         assert!(host["state"].is_null(), "{host}");
-        assert!(!stand.env.paths.update_dir().join("pending.json").exists());
         stand.env.stop().await;
     }
 }

@@ -23,6 +23,7 @@ export const serverInfo = {
 	public_url: "http://localhost:8080",
 	grpc_public_address: "backup.example.com:8443",
 	agent_arches: ["x86_64"],
+	demo_mode: false,
 };
 
 export function apiError(status: number, code: string, message: string) {
@@ -44,7 +45,7 @@ export function useSignedIn(
 			}),
 		),
 		http.get("/api/v1/server/status", () =>
-			HttpResponse.json({ setup_required: false }),
+			HttpResponse.json({ setup_required: false, demo_mode: false }),
 		),
 		http.get("/api/v1/server/info", () =>
 			HttpResponse.json({ ...serverInfo, ...options.info }),
@@ -61,7 +62,7 @@ export function useSignedOut(setupRequired = false) {
 			apiError(401, "unauthorized", "authentication required"),
 		),
 		http.get("/api/v1/server/status", () =>
-			HttpResponse.json({ setup_required: setupRequired }),
+			HttpResponse.json({ setup_required: setupRequired, demo_mode: false }),
 		),
 	);
 }

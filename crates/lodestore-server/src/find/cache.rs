@@ -327,6 +327,10 @@ fn files(dir: &Path) -> Vec<(PathBuf, String, fs::Metadata)> {
 
 /// Deletes the files used longest ago until the lists fit in `max_bytes`.
 pub fn evict(dir: &Path, max_bytes: u64) {
+    evict_with(dir, max_bytes, |path| fs::remove_file(path));
+}
+
+fn evict_with(dir: &Path, max_bytes: u64, remove: impl Fn(&Path) -> std::io::Result<()>) {
     let mut lists: Vec<_> = files(dir)
         .into_iter()
         .filter(|(_, name, _)| name.ends_with(".bin"))
@@ -338,8 +342,13 @@ pub fn evict(dir: &Path, max_bytes: u64) {
         if total <= max_bytes {
             break;
         }
-        if fs::remove_file(path).is_ok() {
-            total = total.saturating_sub(len);
+        // A list another eviction already removed no longer counts against the budget.
+        match remove(&path) {
+            Ok(()) => total = total.saturating_sub(len),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                total = total.saturating_sub(len);
+            }
+            Err(_) => {}
         }
     }
 }
@@ -547,6 +556,26 @@ mod tests {
         assert!(tmp.path().join("a.bin").exists() && tmp.path().join("c.bin").exists());
         evict(tmp.path(), 0);
         assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn evict_keeps_the_newest_list_when_another_eviction_took_the_oldest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let epoch = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        for (name, age) in [("old", 10), ("new", 20)] {
+            let file = File::create(tmp.path().join(format!("{name}.bin"))).unwrap();
+            file.set_len(100).unwrap();
+            file.set_modified(epoch + Duration::from_secs(age)).unwrap();
+        }
+        evict_with(tmp.path(), 150, |path| {
+            fs::remove_file(path)?;
+            if path.ends_with("old.bin") {
+                return Err(std::io::ErrorKind::NotFound.into());
+            }
+            Ok(())
+        });
+        assert!(!tmp.path().join("old.bin").exists());
+        assert!(tmp.path().join("new.bin").exists());
     }
 
     #[test]

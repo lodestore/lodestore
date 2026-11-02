@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useMatchRoute, useNavigate } from "@tanstack/react-router";
-import { TriangleAlert, X } from "lucide-react";
+import { Info, TriangleAlert, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
@@ -175,6 +175,17 @@ export function RebuildBanner() {
 	));
 }
 
+function DemoBanner() {
+	return (
+		<Alert role="note">
+			<Info aria-hidden />
+			<AlertDescription className="text-foreground">
+				{copy.demo.banner}
+			</AlertDescription>
+		</Alert>
+	);
+}
+
 export function AppBanners() {
 	const info = useQuery(infoQuery);
 	const { dismissed, dismiss } = useDismiss([UNLOCK_KEY, UNENCRYPTED]);
@@ -187,6 +198,7 @@ export function AppBanners() {
 
 	return (
 		<div className="mb-4 flex flex-col gap-4 empty:hidden">
+			{info.data?.demo_mode && <DemoBanner />}
 			{showUnlock && (
 				<Banner
 					dismissLabel={copy.unlockKeyDismiss}

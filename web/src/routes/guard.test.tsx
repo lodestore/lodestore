@@ -2,7 +2,14 @@ import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { afterEach, describe, expect, it } from "vitest";
-import { renderApp, useSignedIn, useSignedOut } from "@/test/app";
+import { apiFetch } from "@/api/fetcher";
+import {
+	apiError,
+	renderApp,
+	repository,
+	useSignedIn,
+	useSignedOut,
+} from "@/test/app";
 import { server } from "@/test/server";
 
 afterEach(() => {
@@ -28,7 +35,7 @@ describe("route guards", () => {
 				),
 			),
 			http.get("/api/v1/server/status", () =>
-				HttpResponse.json({ setup_required: true }),
+				HttpResponse.json({ setup_required: true, demo_mode: false }),
 			),
 		);
 		const { router } = renderApp("/hosts");
@@ -115,7 +122,10 @@ describe("route guards", () => {
 		server.use(
 			http.get("/api/v1/server/status", () => {
 				calls += 1;
-				return HttpResponse.json({ setup_required: false });
+				return HttpResponse.json({
+					setup_required: false,
+					demo_mode: false,
+				});
 			}),
 		);
 		renderApp("/login");
@@ -169,5 +179,139 @@ describe("route guards", () => {
 		expect(stored).not.toContain("hunter2-secret");
 		expect(stored).not.toContain("csrf-secret-value");
 		expect(localStorage.length + sessionStorage.length).toBe(0);
+	});
+});
+
+function useDemo(options: { signedIn: boolean }) {
+	let signedIn = options.signedIn;
+	const calls = { demo: 0 };
+	server.use(
+		http.get("/api/v1/server/status", () =>
+			HttpResponse.json({ setup_required: false, demo_mode: true }),
+		),
+		http.get("/api/v1/auth/session", () =>
+			signedIn
+				? HttpResponse.json({ username: "admin", csrf_token: "csrf-1" })
+				: apiError(401, "unauthorized", "authentication required"),
+		),
+		http.post("/api/v1/auth/demo", () => {
+			calls.demo += 1;
+			signedIn = true;
+			return new HttpResponse(null, { status: 204 });
+		}),
+		http.get("/api/v1/repositories", () => HttpResponse.json([repository])),
+		http.get("/api/v1/server/info", () =>
+			HttpResponse.json({
+				version: "0.1.0",
+				unlock_key_source: "env",
+				public_url: "http://localhost:8080",
+				grpc_public_address: "backup.example.com:8443",
+				agent_arches: ["x86_64"],
+				demo_mode: true,
+			}),
+		),
+	);
+	return calls;
+}
+
+describe("demo mode", () => {
+	it("signs a visitor in without the login form", async () => {
+		const calls = useDemo({ signedIn: false });
+		const { router } = renderApp("/hosts");
+		await waitFor(() => expect(calls.demo).toBe(1));
+		await screen.findByRole("heading", { level: 1 });
+		expect(router.state.location.pathname).toBe("/hosts");
+		expect(
+			screen.queryByRole("button", { name: "Sign in" }),
+		).not.toBeInTheDocument();
+	});
+
+	it("takes /login to /hosts", async () => {
+		const calls = useDemo({ signedIn: false });
+		const { router } = renderApp("/login");
+		await waitFor(() => expect(router.state.location.pathname).toBe("/hosts"));
+		expect(calls.demo).toBe(1);
+	});
+
+	it("does not sign in again when the session is alive", async () => {
+		const calls = useDemo({ signedIn: true });
+		const { router } = renderApp("/login");
+		await waitFor(() => expect(router.state.location.pathname).toBe("/hosts"));
+		expect(calls.demo).toBe(0);
+	});
+
+	it("shows the wait and signs in on retry when the demo sign-in is refused", async () => {
+		const calls = useDemo({ signedIn: false });
+		server.use(
+			http.post(
+				"/api/v1/auth/demo",
+				() =>
+					HttpResponse.text("Too Many Requests", {
+						status: 429,
+						headers: { "Retry-After": "7" },
+					}),
+				{ once: true },
+			),
+		);
+		const { router } = renderApp("/hosts");
+		await screen.findByText("Too many attempts. Try again in 7 seconds.");
+		expect(calls.demo).toBe(0);
+
+		await userEvent.click(
+			screen.getByRole("button", { name: "Retry loading" }),
+		);
+		await waitFor(() => expect(calls.demo).toBe(1));
+		await screen.findByRole("heading", { level: 1 });
+		expect(router.state.location.pathname).toBe("/hosts");
+	});
+
+	it("shows the error state when the demo sign-in fails", async () => {
+		useDemo({ signedIn: false });
+		server.use(
+			http.post("/api/v1/auth/demo", () =>
+				apiError(500, "internal", "database is locked"),
+			),
+		);
+		renderApp("/hosts");
+		await screen.findByText(
+			"Couldn't open Lodestore. Check that the server is reachable, then retry.",
+		);
+		expect(screen.queryByText("database is locked")).toBeNull();
+	});
+
+	it("never calls the demo sign-in outside the demo", async () => {
+		useSignedOut();
+		let calls = 0;
+		server.use(
+			http.post("/api/v1/auth/demo", () => {
+				calls += 1;
+				return new HttpResponse(null, { status: 204 });
+			}),
+		);
+		renderApp("/hosts");
+		await screen.findByRole("button", { name: "Sign in" });
+		expect(calls).toBe(0);
+	});
+
+	it("shows one notice for a refused write and none for other 403s", async () => {
+		useDemo({ signedIn: true });
+		server.use(
+			http.post("/api/v1/blocked", () =>
+				apiError(403, "demo_mode", "Not available in the demo."),
+			),
+			http.post("/api/v1/forbidden", () =>
+				apiError(403, "forbidden", "Forbidden"),
+			),
+		);
+		const { router } = renderApp("/hosts");
+		await waitFor(() => expect(router.state.location.pathname).toBe("/hosts"));
+		const post = (url: string) =>
+			apiFetch({ url, method: "POST" }).catch((error: unknown) => error);
+		await post("/api/v1/forbidden");
+		expect(screen.queryByText("Not available in the demo.")).toBeNull();
+		await post("/api/v1/blocked");
+		await post("/api/v1/blocked");
+		await screen.findByText("Not available in the demo.");
+		expect(screen.getAllByText("Not available in the demo.")).toHaveLength(1);
 	});
 });

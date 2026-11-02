@@ -8,9 +8,10 @@ use lodestore_format::repo::Repository;
 use lodestore_format::snapshot::{open_snapshot, seal_snapshot, snapshot_object_key};
 use lodestore_format::store::{LocalFsStore, put_named};
 use lodestore_format::writer::{BackupOptions, Writer};
-use lodestore_server::catalog::{JobLink, ingest_snapshot};
+use lodestore_server::catalog::{JobLink, ingest_snapshot, sync_repository};
 use serde_json::{Value, json};
 use sqlx::Row;
+use std::task::Poll;
 use std::time::{Duration, UNIX_EPOCH};
 
 const PASSWORD: &[u8] = b"test-password";
@@ -688,6 +689,30 @@ async fn catalog_unknown_ids_404() {
             .await;
         assert_eq!(response.status(), 404, "[{}]", backend.name());
         assert_eq!(api.get("/api/v1/hosts/nope/snapshots").await.status(), 404);
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn catalog_sync_sees_snapshots_written_while_a_run_was_going() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let repo = ts.create_local_repository("main").await;
+        let held = ts.state().catalog.hold(&repo).await;
+        write_snapshot(&ts, "main", "host-a", &[]).await;
+
+        let (state, id) = (ts.state().clone(), repo.clone());
+        let mut sync = Box::pin(sync_repository(&state, &id));
+        std::future::poll_fn(|cx| {
+            assert!(sync.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        held.release(3);
+
+        let report = sync.await.unwrap();
+        assert!(report.added >= 3, "[{}] {report:?}", backend.name());
+        assert_eq!(report.total, 1);
         ts.stop().await;
     }
 }

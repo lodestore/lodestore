@@ -1,13 +1,21 @@
 import { QueryClient } from "@tanstack/react-query";
 import { createRouter, type RouterHistory } from "@tanstack/react-router";
-import { onUnauthorized } from "./api/fetcher";
+import { toast } from "sonner";
+import { onDemoBlocked, onUnauthorized } from "./api/fetcher";
+import { RouteError } from "./components/route-error";
+import { copy } from "./copy";
 import { routeTree } from "./routeTree.gen";
 
 export function createAppRouter(
 	history?: RouterHistory,
 	queryClient = new QueryClient(),
 ) {
-	const router = createRouter({ routeTree, history, context: { queryClient } });
+	const router = createRouter({
+		routeTree,
+		history,
+		context: { queryClient },
+		defaultErrorComponent: RouteError,
+	});
 	onUnauthorized(() => {
 		const { pathname, href } = router.state.location;
 		if (pathname === "/login") return;
@@ -16,6 +24,9 @@ export function createAppRouter(
 			to: "/login",
 			search: { next: href, expired: true },
 		});
+	});
+	onDemoBlocked(() => {
+		toast(copy.demo.notAvailable, { id: "demo-mode" });
 	});
 	return router;
 }

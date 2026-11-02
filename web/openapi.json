@@ -641,6 +641,54 @@
         ]
       }
     },
+    "/api/v1/auth/demo": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Sign in to the public demo",
+        "description": "Only exists on a server started with `demo_mode`; elsewhere it answers 404. Signs in as the administrator without a password for one hour.",
+        "operationId": "auth_demo",
+        "responses": {
+          "204": {
+            "description": "Signed in; the session cookie is set"
+          },
+          "404": {
+            "description": "This server is not a demo",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "No administrator exists yet",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many sign-ins",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ]
+      }
+    },
     "/api/v1/auth/login": {
       "post": {
         "tags": [
@@ -12437,7 +12485,8 @@
           "unlock_key_source",
           "public_url",
           "grpc_public_address",
-          "agent_arches"
+          "agent_arches",
+          "demo_mode"
         ],
         "properties": {
           "agent_arches": {
@@ -12445,6 +12494,9 @@
             "items": {
               "type": "string"
             }
+          },
+          "demo_mode": {
+            "type": "boolean"
           },
           "grpc_public_address": {
             "type": "string"
@@ -12463,9 +12515,13 @@
       "ServerStatus": {
         "type": "object",
         "required": [
-          "setup_required"
+          "setup_required",
+          "demo_mode"
         ],
         "properties": {
+          "demo_mode": {
+            "type": "boolean"
+          },
           "setup_required": {
             "type": "boolean"
           }

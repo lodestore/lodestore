@@ -12,29 +12,10 @@ export function parseStep(value: unknown): Step | undefined {
 	return STEPS.find((step) => step === value);
 }
 
-export const BACKENDS = [
-	"s3",
-	"local",
-	"azblob",
-	"gcs",
-	"sftp",
-	"webdav",
-] as const;
+export const BACKENDS = ["s3", "local"] as const;
 export type Backend = (typeof BACKENDS)[number];
 
-export const EXPERIMENTAL_BACKENDS = [
-	"azblob",
-	"gcs",
-	"sftp",
-	"webdav",
-] as const satisfies readonly Backend[];
-
-export function isExperimental(backend: Backend) {
-	return (EXPERIMENTAL_BACKENDS as readonly Backend[]).includes(backend);
-}
-
 export type KeyPair = { id: string; secret: string };
-export type OptionRow = { key: string; value: string };
 
 export type Draft = {
 	name: string;
@@ -45,7 +26,6 @@ export type Draft = {
 	prefix: string;
 	pathStyle: boolean | null;
 	path: string;
-	options: OptionRow[];
 	serverKey: KeyPair;
 	agentKey: KeyPair;
 };
@@ -65,7 +45,6 @@ export function newDraft(): Draft {
 		prefix: "",
 		pathStyle: null,
 		path: "",
-		options: [{ key: "", value: "" }],
 		serverKey: emptyKey(),
 		agentKey: emptyKey(),
 	};
@@ -74,7 +53,6 @@ export function newDraft(): Draft {
 export function withoutSecrets(draft: Draft): Draft {
 	return {
 		...draft,
-		options: [{ key: "", value: "" }],
 		serverKey: emptyKey(),
 		agentKey: emptyKey(),
 	};
@@ -109,29 +87,19 @@ export function toApiDraft(draft: Draft): RepositoryDraft {
 			},
 		};
 	}
-	if (draft.backend === "local") {
-		put("path", draft.path);
-	} else {
-		for (const row of draft.options) put(row.key.trim(), row.value);
-	}
-	return { name: draft.name, location: { backend: draft.backend, options } };
+	put("path", draft.path);
+	return { name: draft.name, location: { backend: "local", options } };
 }
 
 export function accessReady(draft: Draft) {
-	switch (draft.backend) {
-		case "s3":
-			return (
-				draft.bucket.trim() !== "" &&
-				draft.serverKey.id.trim() !== "" &&
-				draft.serverKey.secret !== "" &&
-				draft.agentKey.id.trim() !== "" &&
-				draft.agentKey.secret !== ""
-			);
-		case "local":
-			return draft.path.trim() !== "";
-		default:
-			return draft.options.some((row) => row.key.trim() !== "");
-	}
+	if (draft.backend === "local") return draft.path.trim() !== "";
+	return (
+		draft.bucket.trim() !== "" &&
+		draft.serverKey.id.trim() !== "" &&
+		draft.serverKey.secret !== "" &&
+		draft.agentKey.id.trim() !== "" &&
+		draft.agentKey.secret !== ""
+	);
 }
 
 export function checkRows(

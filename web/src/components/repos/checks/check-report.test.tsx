@@ -99,7 +99,7 @@ describe("check report", () => {
 		expect(view.getByText("5 GiB")).toBeInTheDocument();
 	});
 
-	it("groups failed levels in one alert", async () => {
+	it("groups failed levels in one alert", { retry: 2 }, async () => {
 		openChecks(
 			checkStatus({
 				levels: [

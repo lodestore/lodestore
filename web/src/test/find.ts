@@ -94,7 +94,8 @@ export function findHandlers(responses: FindSession[], id = "find-1") {
 			calls.bodies.push(await request.json());
 			return HttpResponse.json({ id });
 		}),
-		http.get("/api/v1/find/:id", ({ request }) => {
+		http.get("/api/v1/find/:id", ({ request, params }) => {
+			if (params.id !== id) return new HttpResponse(null, { status: 404 });
 			afters.push(new URL(request.url).searchParams.get("after"));
 			const next = responses[Math.min(calls.get, responses.length - 1)];
 			calls.get += 1;

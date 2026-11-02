@@ -5,7 +5,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use common::{Api, TestServer, WAIT, backends, bearer_client, wait_until};
+use common::{Api, Backend, TestServer, WAIT, backends, bearer_client, wait_until};
 use lodestore_format::crypto::Entropy;
 use lodestore_format::index::{hex32, parse_hex32};
 use lodestore_format::locks::{lock_id_hex, new_lock_id, publish_gc_manifest};
@@ -134,10 +134,14 @@ async fn two_snapshots_one_forgotten(ts: &TestServer, name: &str) {
     age_packs(ts, name);
 }
 
+async fn server(backend: &Backend) -> TestServer {
+    TestServer::start_with(backend, |c| c.schedule_tick_secs = 0).await
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn gc_api_dry_run_reports_freed_space() {
     for backend in backends() {
-        let ts = TestServer::start(&backend).await;
+        let ts = server(&backend).await;
         let api = ts.api().await;
         let repo = ts.create_local_repository("main").await;
         two_snapshots_one_forgotten(&ts, "main").await;
@@ -187,7 +191,7 @@ async fn gc_api_dry_run_reports_freed_space() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn gc_api_dry_run_bucket_unchanged() {
     for backend in backends() {
-        let ts = TestServer::start(&backend).await;
+        let ts = server(&backend).await;
         let api = ts.api().await;
         let repo = ts.create_local_repository("main").await;
         two_snapshots_one_forgotten(&ts, "main").await;
@@ -206,7 +210,7 @@ async fn gc_api_dry_run_bucket_unchanged() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn gc_api_dry_run_single_active() {
     for backend in backends() {
-        let ts = TestServer::start(&backend).await;
+        let ts = server(&backend).await;
         let api = ts.api().await;
         let repo = ts.create_local_repository("main").await;
         insert_cycle(&ts, &repo, "active-cycle", "waiting", 0).await;
@@ -238,7 +242,7 @@ async fn gc_api_dry_run_single_active() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn gc_api_last_failure() {
     for backend in backends() {
-        let ts = TestServer::start(&backend).await;
+        let ts = server(&backend).await;
         let api = ts.api().await;
         let repo = ts.create_local_repository("main").await;
         assert!(status(&api, &repo).await["last_failure"].is_null());
@@ -271,7 +275,7 @@ async fn gc_api_last_failure() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn gc_api_dry_run_beside_waiting_cycle() {
     for backend in backends() {
-        let ts = TestServer::start(&backend).await;
+        let ts = server(&backend).await;
         let api = ts.api().await;
         let repo = ts.create_local_repository("main").await;
         insert_cycle(&ts, &repo, "active-cycle", "waiting", 0).await;
@@ -287,7 +291,7 @@ async fn gc_api_dry_run_beside_waiting_cycle() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn gc_api_dry_run_interrupted_on_restart() {
     for backend in backends() {
-        let mut ts = TestServer::start(&backend).await;
+        let mut ts = server(&backend).await;
         let repo = ts.create_local_repository("main").await;
         insert_cycle(&ts, &repo, "dry-cycle", "marking", 1).await;
         let other = ts.create_local_repository("other").await;
@@ -393,7 +397,7 @@ fn problems(status: &Value) -> Vec<String> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn gc_api_settings_defaults() {
     for backend in backends() {
-        let ts = TestServer::start(&backend).await;
+        let ts = server(&backend).await;
         let api = ts.api().await;
         let repo = ts.create_local_repository("main").await;
 
@@ -423,7 +427,7 @@ async fn gc_api_settings_defaults() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn gc_api_settings_pause_floor() {
     for backend in backends() {
-        let ts = TestServer::start(&backend).await;
+        let ts = server(&backend).await;
         let api = ts.api().await;
         let repo = ts.create_local_repository("main").await;
         let yaml = "apiVersion: lodestore.io/v1alpha1\nkind: BackupPolicy\nmetadata:\n  name: long\n\
@@ -468,7 +472,7 @@ async fn gc_api_settings_pause_floor() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn gc_api_unreadable_policy_raises_the_floor() {
     for backend in backends() {
-        let ts = TestServer::start(&backend).await;
+        let ts = server(&backend).await;
         let api = ts.api().await;
         let repo = ts.create_local_repository("main").await;
         sqlx::query(
@@ -515,7 +519,7 @@ async fn field_errors(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn gc_api_settings_field_errors() {
     for backend in backends() {
-        let ts = TestServer::start(&backend).await;
+        let ts = server(&backend).await;
         let api = ts.api().await;
         let repo = ts.create_local_repository("main").await;
 
@@ -560,7 +564,7 @@ async fn gc_api_settings_field_errors() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn gc_api_settings_validate_preview() {
     for backend in backends() {
-        let ts = TestServer::start(&backend).await;
+        let ts = server(&backend).await;
         let api = ts.api().await;
         let repo = ts.create_local_repository("main").await;
         let path = format!("/api/v1/repositories/{repo}/gc/settings/validate");
@@ -590,7 +594,7 @@ async fn gc_api_settings_validate_preview() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn gc_api_enable_blocked_by_old_agent() {
     for backend in backends() {
-        let ts = TestServer::start(&backend).await;
+        let ts = server(&backend).await;
         let api = ts.api().await;
         let repo = ts.create_local_repository("main").await;
         seed_agent(&ts, &repo, "old", "active", Some(r#"["restore_v1"]"#)).await;
@@ -637,7 +641,7 @@ async fn gc_api_enable_blocked_by_old_agent() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn gc_api_foreign_manifest_reported() {
     for backend in backends() {
-        let ts = TestServer::start(&backend).await;
+        let ts = server(&backend).await;
         let api = ts.api().await;
         let repo = ts.create_local_repository("main").await;
         let gc_id = publish_manifest(&ts, "main").await;
@@ -662,7 +666,7 @@ async fn gc_api_foreign_manifest_reported() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn gc_api_enable_local_ok() {
     for backend in backends() {
-        let ts = TestServer::start(&backend).await;
+        let ts = server(&backend).await;
         let api = ts.api().await;
         let repo = ts.create_local_repository("main").await;
 
@@ -684,7 +688,7 @@ async fn gc_api_enable_local_ok() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn gc_api_settings_scope() {
     for backend in backends() {
-        let ts = TestServer::start(&backend).await;
+        let ts = server(&backend).await;
         let repo = ts.create_local_repository("main").await;
         let url = format!("{}/api/v1/repositories/{repo}/gc/settings", ts.rest_url());
 
@@ -725,7 +729,7 @@ fn kinds(page: &Value) -> Vec<String> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn gc_api_jobs_list_rows() {
     for backend in backends() {
-        let ts = TestServer::start(&backend).await;
+        let ts = server(&backend).await;
         let api = ts.api().await;
         let repo = ts.create_local_repository("main").await;
         insert_cycle(&ts, &repo, "c-done", "done", 1).await;
@@ -764,7 +768,7 @@ async fn gc_api_jobs_list_rows() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn gc_api_jobs_filters() {
     for backend in backends() {
-        let ts = TestServer::start(&backend).await;
+        let ts = server(&backend).await;
         let api = ts.api().await;
         let a = ts.create_local_repository("a").await;
         let b = ts.create_local_repository("b").await;
@@ -808,7 +812,7 @@ async fn gc_api_jobs_filters() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn gc_api_jobs_state_mapping() {
     for backend in backends() {
-        let ts = TestServer::start(&backend).await;
+        let ts = server(&backend).await;
         let api = ts.api().await;
         let repo = ts.create_local_repository("main").await;
         insert_cycle(&ts, &repo, "cycle", "marking", 0).await;
@@ -855,7 +859,7 @@ async fn gc_api_jobs_state_mapping() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn gc_api_jobs_detail_404() {
     for backend in backends() {
-        let ts = TestServer::start(&backend).await;
+        let ts = server(&backend).await;
         let api = ts.api().await;
         let repo = ts.create_local_repository("main").await;
         insert_cycle(&ts, &repo, "cycle", "waiting", 0).await;
@@ -877,7 +881,7 @@ async fn cleanup(api: &Api) -> Value {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn gc_api_repository_list_cleanup_summary() {
     for backend in backends() {
-        let ts = TestServer::start(&backend).await;
+        let ts = server(&backend).await;
         let api = ts.api().await;
         let repo = ts.create_local_repository("main").await;
         assert_eq!(

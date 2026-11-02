@@ -136,7 +136,7 @@ fn check_locks_readable(writer: &Writer<Store>, no_gc_check: bool) -> Result<()>
         return Ok(());
     }
     anyhow::bail!(
-        "cannot read locks/ in the repository (access denied); a cleanup cycle could delete data this backup reuses. Update the key policy (see docs/gc.md) or pass --no-gc-check if no server cleans up this repository."
+        "cannot read locks/ in the repository (access denied); a cleanup cycle could delete data this backup reuses. Update the key policy (see https://lodestore.github.io/lodestore/guides/gc/) or pass --no-gc-check if no server cleans up this repository."
     )
 }
 

@@ -7,7 +7,7 @@ use super::mark::{LiveSet, ShardSet};
 use crate::crypto::BlobId;
 use crate::error::{Error, Result};
 use crate::index::{Index, hex32, parse_hex32};
-use crate::pack::{pack_object_key, parse_entries};
+use crate::pack::{ENTRY_LEN, PACK_FIXED_LEN, pack_object_key, parse_entries};
 use crate::store::ListEntry;
 
 pub const MAX_CANDIDATES: usize = 100_000;
@@ -90,7 +90,7 @@ pub fn plan(
         }
     }
 
-    let mut known: HashMap<BlobId, u8> = HashMap::new();
+    let mut known: HashMap<BlobId, (u8, usize)> = HashMap::new();
     for (shard_id, shard) in &shards.shards {
         for record in &shard.packs {
             let bad = |reason: &str| {
@@ -104,10 +104,9 @@ pub fn plan(
             if known.contains_key(&pack_id) {
                 continue;
             }
-            let blob_type = parse_entries(&record.entries)?
-                .first()
-                .map_or(0, |e| e.blob_type);
-            known.insert(pack_id, blob_type);
+            let entries = parse_entries(&record.entries)?;
+            let blob_type = entries.first().map_or(0, |e| e.blob_type);
+            known.insert(pack_id, (blob_type, entries.len()));
         }
     }
 
@@ -139,7 +138,7 @@ pub fn plan(
 
     let mut dead = Vec::new();
     let mut sparse = Vec::new();
-    for (pack_id, blob_type) in &known {
+    for (pack_id, (blob_type, entry_count)) in &known {
         let Some(entry) = listed.get(pack_id) else {
             continue;
         };
@@ -150,10 +149,13 @@ pub fn plan(
             blob_type: *blob_type,
             modified_ms: entry.modified_ms,
         };
+        let framed = stat
+            .size
+            .saturating_sub((PACK_FIXED_LEN + entry_count * ENTRY_LEN) as u64);
         let candidate = if stat.live_bytes == 0 {
             &mut dead
         } else if u128::from(stat.live_bytes) * 100
-            < u128::from(opts.repack_below_pct) * u128::from(stat.size)
+            < u128::from(opts.repack_below_pct) * u128::from(framed)
         {
             &mut sparse
         } else {

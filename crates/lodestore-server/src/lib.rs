@@ -9,6 +9,7 @@ pub mod browse;
 pub mod catalog;
 pub mod config;
 pub mod db;
+pub mod demo;
 pub mod download;
 pub mod error;
 pub mod find;
@@ -107,6 +108,10 @@ pub async fn serve(config: Config, listeners: Listeners) -> anyhow::Result<Serve
         find: find::FindSessions::new(),
     };
     auth::bootstrap_admin(&state).await?;
+    demo::reset_sessions_on_mode_change(&state).await?;
+    if state.config.demo_mode {
+        tracing::warn!("demo_mode is on: the API is read-only and sign-in needs no password");
+    }
     notify::sync_config_channels(&state).await?;
     download::interrupt_running(&state).await?;
     maintenance::gc::interrupt_dry_runs(&state).await?;
@@ -116,7 +121,11 @@ pub async fn serve(config: Config, listeners: Listeners) -> anyhow::Result<Serve
     let rest_addr = listeners.rest.local_addr()?;
     let grpc_addr = listeners.grpc.local_addr()?;
     let stop = CancellationToken::new();
-    let metrics_listener = match state.config.metrics_listen {
+    let metrics_listen = state
+        .config
+        .metrics_listen
+        .filter(|_| !state.config.demo_mode);
+    let metrics_listener = match metrics_listen {
         Some(addr) => Some(
             TcpListener::bind(addr)
                 .await
@@ -129,7 +138,12 @@ pub async fn serve(config: Config, listeners: Listeners) -> anyhow::Result<Serve
         .map(TcpListener::local_addr)
         .transpose()?;
 
-    let router = api::router(state.clone()).merge(metrics::router(state.clone()));
+    let router = api::router(state.clone());
+    let router = if state.config.demo_mode {
+        router
+    } else {
+        router.merge(metrics::router(state.clone()))
+    };
     let rest_stop = stop.clone();
     let rest = tokio::spawn(async move {
         axum::serve(

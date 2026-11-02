@@ -102,6 +102,13 @@ pub fn open_parts(
 
 pub fn open_draft(draft: &RepositoryDraft) -> Result<Opened, ApiError> {
     let location = format_location(&draft.location);
+    if location.is_experimental() {
+        return Err(ApiError::Validation(format!(
+            "The {} backend is not available in this version. Use S3-compatible storage or a \
+             local folder.",
+            location.backend
+        )));
+    }
     location.validate().map_err(invalid)?;
     let (server_creds, agent_creds) = if location.backend == "s3" {
         match (&draft.server_credentials, &draft.agent_credentials) {

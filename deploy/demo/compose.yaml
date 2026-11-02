@@ -1,0 +1,193 @@
+name: lodestore-demo
+
+x-hardened: &hardened
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  read_only: true
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "3"
+
+x-server-image: &server_image ${LODESTORE_IMAGE:-ghcr.io/lodestore/lodestore:${LODESTORE_VERSION}}
+
+x-agent: &agent
+  <<: *hardened
+  restart: unless-stopped
+  init: true
+  build:
+    context: .
+    dockerfile: agent/Dockerfile
+    args:
+      SERVER_IMAGE: *server_image
+  image: lodestore-demo-agent:${LODESTORE_VERSION}
+  pull_policy: build
+  user: "10001:10001"
+  mem_limit: 384m
+  cpus: 0.35
+  pids_limit: 128
+  tmpfs:
+    - /tmp:size=128m,mode=1777
+  networks:
+    - backend
+  depends_on:
+    lodestore:
+      condition: service_healthy
+    minio:
+      condition: service_healthy
+
+services:
+  lodestore:
+    <<: *hardened
+    image: *server_image
+    restart: unless-stopped
+    mem_limit: 640m
+    cpus: 0.75
+    pids_limit: 256
+    environment:
+      LODESTORE_DEMO_MODE: ${LODESTORE_DEMO_MODE:-false}
+      LODESTORE_PUBLIC_URL: ${DEMO_PUBLIC_URL}
+      LODESTORE_GRPC_PUBLIC_ADDRESS: lodestore:8443
+      LODESTORE_ADMIN_USERNAME: ${DEMO_ADMIN_USERNAME:-demo-admin}
+      LODESTORE_ADMIN_PASSWORD: ${DEMO_ADMIN_PASSWORD}
+      LODESTORE_UNLOCK_KEY_FILE: /run/secrets/unlock_key
+      LODESTORE_TRUSTED_PROXIES: ${DEMO_TRUSTED_PROXIES:-${DEMO_EDGE_SUBNET:-172.30.88.0/24}}
+      LODESTORE_CONFIG: /etc/lodestore/server.yaml
+    configs:
+      - source: server_config
+        target: /etc/lodestore/server.yaml
+    secrets:
+      - unlock_key
+    volumes:
+      - lodestore-data:/var/lib/lodestore
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    ports:
+      - "127.0.0.1:${DEMO_PORT:-18080}:8080"
+    networks:
+      - backend
+      - edge
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/lodestore-server", "healthcheck"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  minio:
+    <<: *hardened
+    build:
+      context: .
+      dockerfile: minio/Dockerfile
+    image: lodestore-demo-minio:${LODESTORE_VERSION}
+    pull_policy: build
+    restart: unless-stopped
+    user: "10001:10001"
+    command: ["server","/data", "--address", ":9000", "--console-address", "127.0.0.1:9001"]
+    environment:
+      HOME: /tmp
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_BROWSER: "off"
+    mem_limit: 384m
+    cpus: 0.5
+    pids_limit: 256
+    volumes:
+      - minio-data:/data
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  agent-1:
+    <<: *agent
+    hostname: agent-1
+    environment:
+      AGENT_NAME: demo-web-01
+      HOME: /agent/state
+    volumes:
+      - agent-1:/agent
+      - seed:/seed
+
+  agent-2:
+    <<: *agent
+    hostname: agent-2
+    environment:
+      AGENT_NAME: demo-db-01
+      HOME: /agent/state
+    volumes:
+      - agent-2:/agent
+      - seed:/seed
+
+  agent-3:
+    <<: *agent
+    hostname: agent-3
+    environment:
+      AGENT_NAME: demo-files-01
+      HOME: /agent/state
+    volumes:
+      - agent-3:/agent
+      - seed:/seed
+
+  seed:
+    <<: *hardened
+    profiles: [seed]
+    image: lodestore-demo-minio:${LODESTORE_VERSION}
+    pull_policy: never
+    user: "10001:10001"
+    entrypoint: ["/usr/local/bin/seed.sh"]
+    environment:
+      HOME: /tmp
+      LODESTORE_URL: http://lodestore:8080
+      MINIO_URL: http://minio:9000
+      LODESTORE_ADMIN_USERNAME: ${DEMO_ADMIN_USERNAME:-demo-admin}
+      LODESTORE_ADMIN_PASSWORD: ${DEMO_ADMIN_PASSWORD}
+      DEMO_REPO_PASSWORD: ${DEMO_REPO_PASSWORD}
+      DEMO_DISK_LIMIT_GB: ${DEMO_DISK_LIMIT_GB:-15}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    mem_limit: 128m
+    cpus: 0.25
+    pids_limit: 64
+    volumes:
+      - seed:/seed
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    networks:
+      - backend
+    depends_on:
+      lodestore:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+networks:
+  backend:
+    internal: true
+  edge:
+    ipam:
+      config:
+        - subnet: ${DEMO_EDGE_SUBNET:-172.30.88.0/24}
+
+volumes:
+  lodestore-data:
+  minio-data:
+  seed:
+  agent-1:
+  agent-2:
+  agent-3:
+
+configs:
+  server_config:
+    file: ./server.yaml
+
+secrets:
+  unlock_key:
+    file: ./secrets/unlock_key

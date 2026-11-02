@@ -592,44 +592,31 @@ async fn wizard_s3_enroll_receives_working_keys() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn wizard_experimental_backend_reports_error() {
+async fn repositories_refuse_backends_agents_cannot_write() {
     each_backend(|backend| async move {
         let ts = TestServer::start(&backend).await;
         let http = Http::login(&ts).await;
 
-        let webdav = json!({
-            "name": "dav",
-            "location": { "backend": "webdav", "options": { "endpoint": ts.rest_url() } },
-        });
-        let checked = http.post("/api/v1/repositories/check", &webdav).await;
-        assert_eq!(checked.status(), 200);
-        let checked = body(checked).await;
-        assert_eq!(checked["checks"][0]["id"], "write");
-        assert_eq!(checked["checks"][0]["status"], "fail");
-        assert!(
-            !checked["checks"][0]["error"]
-                .as_str()
-                .unwrap_or_default()
-                .is_empty()
-        );
-        assert_eq!(checked["blocking"], true);
-        assert_eq!(
-            http.post("/api/v1/repositories/wizard", &webdav)
-                .await
-                .status(),
-            409
-        );
-
-        let azblob = json!({
-            "name": "az",
-            "location": { "backend": "azblob", "options": {} },
-        });
-        assert_eq!(
-            http.post("/api/v1/repositories/check", &azblob)
-                .await
-                .status(),
-            422
-        );
+        for name in ["azblob", "gcs", "sftp", "webdav"] {
+            let draft = json!({
+                "name": "hidden",
+                "location": { "backend": name, "options": { "endpoint": ts.rest_url() } },
+            });
+            let connect = json!({ "draft": draft, "password": "correct horse battery" });
+            for (path, payload) in [
+                ("/api/v1/repositories/check", &draft),
+                ("/api/v1/repositories/wizard", &draft),
+                ("/api/v1/repositories/connect", &connect),
+            ] {
+                let response = http.post(path, payload).await;
+                assert_eq!(response.status(), 422, "{name} at {path}");
+                let message = body(response).await["message"]
+                    .as_str()
+                    .unwrap()
+                    .to_string();
+                assert!(message.contains(name), "{name} at {path}: {message}");
+            }
+        }
         ts.stop().await;
     })
     .await;

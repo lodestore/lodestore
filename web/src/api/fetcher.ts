@@ -39,6 +39,7 @@ type RequestConfig = {
 
 const MUTATING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 const AUTH_PATHS = [
+	"/api/v1/auth/demo",
 	"/api/v1/auth/login",
 	"/api/v1/auth/logout",
 	"/api/v1/auth/session",
@@ -46,6 +47,7 @@ const AUTH_PATHS = [
 
 let csrfToken: string | undefined;
 let unauthorizedHandler: (() => void) | undefined;
+let demoBlockedHandler: (() => void) | undefined;
 
 export function setCsrfToken(token: string | undefined) {
 	csrfToken = token;
@@ -53,6 +55,10 @@ export function setCsrfToken(token: string | undefined) {
 
 export function onUnauthorized(handler: (() => void) | undefined) {
 	unauthorizedHandler = handler;
+}
+
+export function onDemoBlocked(handler: (() => void) | undefined) {
+	demoBlockedHandler = handler;
 }
 
 /** Sends the user to login for a 401 from a request that bypasses apiFetch. */
@@ -110,6 +116,9 @@ export async function apiFetch<T>(
 		);
 		if (response.status === 401 && !AUTH_PATHS.includes(url)) {
 			unauthorizedHandler?.();
+		}
+		if (response.status === 403 && body?.code === "demo_mode") {
+			demoBlockedHandler?.();
 		}
 		throw error;
 	}

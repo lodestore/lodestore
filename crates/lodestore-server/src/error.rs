@@ -18,6 +18,8 @@ pub enum ApiError {
     Csrf,
     #[error("setup required")]
     SetupRequired,
+    #[error("Not available in the demo.")]
+    DemoMode,
     #[error("{0}")]
     NotFound(String),
     #[error("{0}")]
@@ -53,6 +55,7 @@ impl ApiError {
             }
             ApiError::Csrf => (StatusCode::FORBIDDEN, "csrf"),
             ApiError::SetupRequired => (StatusCode::CONFLICT, "setup_required"),
+            ApiError::DemoMode => (StatusCode::FORBIDDEN, "demo_mode"),
             ApiError::NotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
             ApiError::Validation(_) => (StatusCode::UNPROCESSABLE_ENTITY, "validation"),
             ApiError::BadRequest(code, _) => (StatusCode::BAD_REQUEST, code),

@@ -1,0 +1,4 @@
+find:
+  max_matches: 500
+  timeout_secs: 60
+  cache_max_mb: 64

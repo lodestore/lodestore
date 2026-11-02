@@ -2,6 +2,7 @@ import { type QueryClient, queryOptions } from "@tanstack/react-query";
 import { redirect } from "@tanstack/react-router";
 import { ApiError, setCsrfToken } from "@/api/fetcher";
 import {
+	authDemo,
 	getInfoQueryOptions,
 	getListRepositoriesQueryOptions,
 	getSessionQueryOptions,
@@ -45,6 +46,11 @@ export function isSignedOut(error: unknown) {
 	);
 }
 
+async function enterDemo(queryClient: QueryClient) {
+	await authDemo();
+	await queryClient.fetchQuery(sessionQuery);
+}
+
 export async function requireSession(
 	queryClient: QueryClient,
 	location: { href: string },
@@ -54,29 +60,35 @@ export async function requireSession(
 			to: "/login",
 			search: { next: location.href, expired: undefined },
 		});
+	let demo = false;
 	if (queryClient.getQueryData(sessionQuery.queryKey) === undefined) {
 		const status = await queryClient
 			.fetchQuery({ ...statusQuery, staleTime: 0 })
 			.catch(() => null);
 		if (status?.setup_required) throw toLogin();
+		demo = status?.demo_mode === true;
 	}
 	try {
 		await queryClient.ensureQueryData(sessionQuery);
 	} catch (error) {
-		if (isSignedOut(error)) throw toLogin();
-		throw error;
+		if (!isSignedOut(error)) throw error;
+		if (!demo) throw toLogin();
+		await enterDemo(queryClient);
 	}
 }
 
 export async function redirectIfSignedIn(queryClient: QueryClient) {
+	let demo = false;
 	try {
 		const status = await queryClient.fetchQuery(statusQuery);
 		if (status.setup_required) return;
+		demo = status.demo_mode === true;
 	} catch (error) {
 		console.debug("Could not read the server status", error);
 	}
 	const cached = queryClient.getQueryState(sessionQuery.queryKey);
 	if (
+		!demo &&
 		isSignedOut(cached?.error) &&
 		Date.now() - (cached?.errorUpdatedAt ?? 0) < 5_000
 	) {
@@ -84,8 +96,9 @@ export async function redirectIfSignedIn(queryClient: QueryClient) {
 	}
 	try {
 		await queryClient.fetchQuery(sessionQuery);
-	} catch {
-		return;
+	} catch (error) {
+		if (!demo || !isSignedOut(error)) return;
+		await enterDemo(queryClient);
 	}
 	throw redirect({ to: "/hosts" });
 }

@@ -1,0 +1,256 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: scripts/check-version.sh "$TAG" >>"$GITHUB_OUTPUT"
+      - name: Require the tag commit on main
+        run: git merge-base --is-ancestor HEAD origin/main
+      - name: Refuse a version that is already published
+        env:
+          TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: scripts/check-version.sh --unpublished "$TAG"
+
+  ci:
+    needs: meta
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    needs: meta
+    uses: ./.github/workflows/build.yml
+
+  linux-root:
+    needs: meta
+    uses: ./.github/workflows/linux-root.yml
+
+  sign:
+    needs: [meta, ci, build, linux-root]
+    runs-on: ubuntu-latest
+    environment: release-signing
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: musl
+          path: dist
+      - run: scripts/install-minisign.sh
+      - name: Sign the binaries
+        env:
+          MINISIGN_KEY: ${{ secrets.MINISIGN_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: scripts/release-sign.sh dist "$VERSION"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: dist-signed
+          path: dist
+          retention-days: 2
+
+  image:
+    needs: [meta, sign]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: dist-signed
+          path: dist
+      - run: scripts/image-context.sh dist ctx
+      - run: docker buildx create --use
+      - name: Build the candidate images
+        run: |
+          for arch in amd64 arm64; do
+            docker buildx build -f deploy/docker/Dockerfile.dist \
+              --platform "linux/$arch" --provenance=false --sbom=false \
+              --output "type=docker,name=lodestore:candidate-$arch,dest=image-$arch.tar" ctx
+          done
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: candidate-image
+          path: |
+            image-amd64.tar
+            image-arm64.tar
+          retention-days: 2
+
+  smoke:
+    needs: [meta, image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: candidate-image
+          path: candidate
+      - run: docker load -i candidate/image-amd64.tar
+      - run: scripts/install-minisign.sh
+      - run: scripts/smoke-docker.sh lodestore:candidate-amd64 --signed
+
+  smoke-arm64:
+    needs: [meta, image]
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: candidate-image
+          path: candidate
+      - run: docker load -i candidate/image-arm64.tar
+      - run: scripts/install-minisign.sh
+      - run: scripts/smoke-docker.sh lodestore:candidate-arm64 --signed
+
+  quickstart-candidate:
+    needs: [meta, image]
+    uses: ./.github/workflows/quickstart.yml
+    with:
+      dist-artifact: dist-signed
+      image-artifact: candidate-image
+
+  publish:
+    needs: [meta, smoke, smoke-arm64, quickstart-candidate]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      PRERELEASE: ${{ needs.meta.outputs.prerelease }}
+      IMAGE: ghcr.io/lodestore/lodestore
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: dist-signed
+          path: dist-signed
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: candidate-image
+          path: candidate
+      - name: Refuse a version that is already published
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: scripts/check-version.sh --unpublished "v$VERSION"
+      - name: Load the candidate images
+        run: |
+          docker load -i candidate/image-amd64.tar
+          docker load -i candidate/image-arm64.tar
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          scripts/release-notes.sh "$VERSION" >notes.md
+          flags=()
+          if [ "$PRERELEASE" = true ]; then
+            flags=(--prerelease)
+          fi
+          gh release create "v$VERSION" dist-signed/* --draft --verify-tag --notes-file notes.md "${flags[@]}"
+      - name: Push the version images
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          for arch in amd64 arm64; do
+            docker tag "lodestore:candidate-$arch" "$IMAGE:$VERSION-$arch"
+            docker push "$IMAGE:$VERSION-$arch"
+          done
+          docker buildx imagetools create -t "$IMAGE:$VERSION" "$IMAGE:$VERSION-amd64" "$IMAGE:$VERSION-arm64"
+      - name: Push the chart
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          helm package deploy/helm/lodestore --version "$VERSION" --app-version "$VERSION"
+          printf '%s' "$GH_TOKEN" | helm registry login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          helm push "lodestore-$VERSION.tgz" oci://ghcr.io/lodestore/charts
+      - id: channels
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: scripts/check-version.sh --channels "v$VERSION" >>"$GITHUB_OUTPUT"
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LATEST: ${{ steps.channels.outputs.latest }}
+        run: gh release edit "v$VERSION" --draft=false --latest="$LATEST"
+      - name: Move the channel tags
+        env:
+          LATEST: ${{ steps.channels.outputs.latest }}
+          MINOR: ${{ steps.channels.outputs.minor }}
+        run: |
+          tags=()
+          if [ "$MINOR" = true ]; then
+            tags+=(-t "$IMAGE:${VERSION%.*}")
+          fi
+          if [ "$LATEST" = true ]; then
+            tags+=(-t "$IMAGE:latest")
+          fi
+          if [ "${#tags[@]}" -gt 0 ]; then
+            docker buildx imagetools create "${tags[@]}" "$IMAGE:$VERSION"
+          fi
+
+  post-publish:
+    needs: [meta, publish]
+    uses: ./.github/workflows/quickstart.yml
+    with:
+      published-version: ${{ needs.meta.outputs.version }}
+
+  report:
+    needs: [meta, post-publish]
+    if: failure()
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    env:
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create --title "Release $TAG failed" --body "The release workflow failed. Run: $RUN_URL"

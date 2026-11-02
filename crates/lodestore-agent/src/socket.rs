@@ -1,6 +1,6 @@
 //! The agent's local unix socket. It offers one operation, `backup_stdin`: a
 //! user on the host streams data in and the agent writes it to the repository
-//! with its own keys. See `docs/agent/local-socket.md` for the protocol.
+//! with its own keys. See `docs/src/content/docs/reference/local-socket.md` for the protocol.
 
 use std::io::Read;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, PermissionsExt};
@@ -117,10 +117,17 @@ fn read_header(stream: &mut UnixStream) -> Result<StdinHeader, Rejection> {
     Ok(header)
 }
 
-fn handle(hub: &Arc<JobHub>, mut stream: UnixStream, uid: u32, gid: u32) {
+fn handle(hub: &Arc<JobHub>, mut stream: UnixStream, uid: u32, gid: u32, guard: HandlerGuard) {
     match read_header(&mut stream) {
-        Ok(header) => hub.submit_stdin(header, uid, gid, stream),
-        Err(r) => stream::reply_error(&stream, r.code, &r.message),
+        Ok(header) => {
+            hub.submit_stdin(header, uid, gid, stream);
+            drop(guard);
+        }
+        Err(r) => {
+            // Free the slot before the caller can see the connection close.
+            drop(guard);
+            stream::reply_error(&stream, r.code, &r.message);
+        }
     }
 }
 
@@ -220,10 +227,7 @@ pub async fn serve(hub: Arc<JobHub>, path: std::path::PathBuf, shutdown: Cancell
         let guard = HandlerGuard(Arc::clone(&live));
         let spawned = std::thread::Builder::new()
             .name("socket-conn".into())
-            .spawn(move || {
-                let _guard = guard;
-                handle(&hub, stream, cred.uid(), cred.gid());
-            });
+            .spawn(move || handle(&hub, stream, cred.uid(), cred.gid(), guard));
         if let Err(error) = spawned {
             tracing::warn!(%error, "cannot serve a local connection");
         }

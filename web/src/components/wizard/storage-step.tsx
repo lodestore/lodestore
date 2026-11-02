@@ -1,63 +1,18 @@
-import { Check, ChevronDown, Cloud, HardDrive } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
+import { Check, Cloud, HardDrive } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
-	Collapsible,
-	CollapsibleContent,
-	CollapsibleTrigger,
-} from "@/components/ui/collapsible";
-import {
 	Field,
-	FieldContent,
 	FieldDescription,
 	FieldError,
 	FieldGroup,
 	FieldLabel,
-	FieldTitle,
 } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { copy } from "@/copy";
-import {
-	type Backend,
-	type Draft,
-	EXPERIMENTAL_BACKENDS,
-	isExperimental,
-	NAME_PATTERN,
-} from "./draft";
+import { type Backend, type Draft, NAME_PATTERN } from "./draft";
 import { StepCard, StepHeading } from "./parts";
 import { text } from "./text";
-
-function BackendCard({
-	backend,
-	description,
-	experimental = false,
-}: {
-	backend: Backend;
-	description?: string;
-	experimental?: boolean;
-}) {
-	return (
-		<FieldLabel htmlFor={`backend-${backend}`}>
-			<Field orientation="horizontal">
-				<FieldContent>
-					<FieldTitle>
-						{text.backendNames[backend]}
-						{experimental && (
-							<Badge variant="outline" className="border-warning text-warning">
-								{copy.backend.experimental}
-							</Badge>
-						)}
-					</FieldTitle>
-					{description !== undefined && (
-						<FieldDescription>{description}</FieldDescription>
-					)}
-				</FieldContent>
-				<RadioGroupItem value={backend} id={`backend-${backend}`} />
-			</Field>
-		</FieldLabel>
-	);
-}
 
 const TILE_ICONS = { s3: Cloud, local: HardDrive } as const;
 
@@ -66,7 +21,7 @@ function BackendTile({
 	description,
 	selected,
 }: {
-	backend: "s3" | "local";
+	backend: Backend;
 	description: string;
 	selected: boolean;
 }) {
@@ -164,23 +119,7 @@ export function StorageStep({
 							description={text.backendCards.local}
 							selected={draft.backend === "local"}
 						/>
-					</div>{" "}
-					<Collapsible defaultOpen={isExperimental(draft.backend)}>
-						<CollapsibleTrigger asChild>
-							<Button variant="ghost" size="sm" className="-ml-2">
-								<ChevronDown aria-hidden />
-								{text.moreBackends}
-							</Button>
-						</CollapsibleTrigger>
-						<CollapsibleContent className="mt-2 flex flex-col gap-4">
-							<p className="text-sm text-muted-foreground">
-								{text.moreBackendsBody}
-							</p>
-							{EXPERIMENTAL_BACKENDS.map((backend) => (
-								<BackendCard key={backend} backend={backend} experimental />
-							))}
-						</CollapsibleContent>
-					</Collapsible>
+					</div>
 				</RadioGroup>
 			</FieldGroup>
 		</StepCard>

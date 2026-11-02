@@ -672,35 +672,27 @@ describe("repository wizard with S3", () => {
 		expect(bodies[1]).toMatchObject({ password: "wrong password" });
 	});
 
-	it("marks an experimental backend and asks for plain options", async () => {
-		const { calls } = mockS3(s3Result());
-		const user = userEvent.setup();
+	it("offers only the backends agents can write to", async () => {
+		mockS3(s3Result());
 		renderApp("/welcome");
 
-		await user.click(
-			await screen.findByRole("button", { name: /More backends/ }),
-		);
-		expect(screen.getAllByText("Experimental")).toHaveLength(4);
-		await user.click(screen.getByRole("radio", { name: /WebDAV/ }));
-		await user.click(
-			screen.getByRole("button", { name: "Continue to access" }),
-		);
+		await screen.findByRole("button", { name: "Continue to access" });
+		expect(
+			screen.getAllByRole("radio").map((radio) => radio.getAttribute("value")),
+		).toEqual(["s3", "local"]);
+		expect(screen.queryByRole("button", { name: /More backends/ })).toBeNull();
+	});
 
-		expect(await screen.findByText("Experimental backend")).toBeInTheDocument();
-		expect(screen.queryByText("Server key")).not.toBeInTheDocument();
-		await user.type(screen.getByLabelText("Option"), "endpoint");
-		await user.type(screen.getByLabelText("Value"), "https://dav.example.com");
-		await user.click(screen.getByRole("button", { name: "Check storage" }));
-		await screen.findByRole("button", { name: "Continue to recovery key" });
-		expect(calls.check).toEqual([
-			{
-				name: "default",
-				location: {
-					backend: "webdav",
-					options: { endpoint: "https://dav.example.com" },
-				},
-			},
-		]);
+	it("falls back to S3 when a stored draft names a hidden backend", async () => {
+		sessionStorage.setItem(
+			"lodestore.wizard.draft",
+			JSON.stringify({ backend: "webdav", name: "stored" }),
+		);
+		mockS3(s3Result());
+		renderApp("/welcome");
+
+		await screen.findByRole("button", { name: "Continue to access" });
+		expect(screen.getByRole("radio", { name: /S3-compatible/ })).toBeChecked();
 	});
 
 	it("restores non-secret fields after a reload and never stores secrets", async () => {
