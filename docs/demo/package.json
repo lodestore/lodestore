@@ -7,7 +7,7 @@
 		"node": ">=22.23.4"
 	},
 	"scripts": {
-		"render": "bash stand.sh render"
+		"render": "bash stand.sh render && bash vhs-host.sh record"
 	},
 	"devDependencies": {
 		"playwright": "1.64.1"
