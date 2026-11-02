@@ -96,6 +96,7 @@
 .arch>*{min-width:0}
 @media(min-width:1024px){.arch{grid-template-columns:7fr 5fr}}
 #tty{white-space:pre-wrap;word-break:break-all}
+.term-tall{position:relative}
 .term-tall pre{min-height:300px}
 .seg{display:inline-flex;padding:4px;border-radius:10px;background:var(--muted);gap:4px;margin-bottom:16px}
 .seg button{height:36px;padding:0 14px;border:0;border-radius:8px;background:transparent;color:var(--muted-foreground);font:600 14px/1 Onest,sans-serif;cursor:pointer;display:inline-flex;gap:6px;align-items:center}
@@ -132,6 +133,9 @@ html:not(.js) .tabs{display:none}
 .pane.on{display:grid}
 @media(min-width:1024px){.pane{grid-template-columns:5fr 6fr;gap:48px}}
 html:not(.js) .pane{display:grid}
+html.js .tabcard{display:grid}
+html.js .tabcard>.pane{display:grid;grid-area:1/1;visibility:hidden}
+html.js .tabcard>.pane.on{visibility:visible}
 html:not(.js) .pane+.pane{margin-top:48px}
 .tabcard h3{font-size:28px;line-height:1.15;letter-spacing:-.01em;margin-bottom:16px}
 .tabcard p{color:var(--muted-foreground);font-size:17px}
@@ -229,7 +233,7 @@ html:not(.js) .ipane::before{content:attr(data-label);display:block;color:var(--
 .ink-grid>*{min-width:0}
 @media(min-width:1024px){.ink-grid{grid-template-columns:7fr 5fr}}
 .kt{width:100%;border-collapse:separate;border-spacing:0;border:1px solid var(--ink-border);border-radius:16px;overflow:hidden;background:var(--ink-2)}
-.kt caption{text-align:left;padding:0 0 12px;color:var(--ink-muted);font-size:14px;font-weight:600;caption-side:top}
+.kt-title{margin:0 0 12px;color:var(--ink-muted);font-size:14px;font-weight:600}
 .kt th,.kt td{padding:18px 24px;border-bottom:1px solid var(--ink-border);text-align:left;vertical-align:top}
 .kt tr:last-child th,.kt tr:last-child td{border-bottom:0}
 .kt th{font-weight:600;font-size:16px;width:46%}

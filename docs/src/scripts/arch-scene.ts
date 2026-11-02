@@ -13,6 +13,19 @@ const caps = {
 type Scene = keyof typeof caps;
 
 if (panel && tty && cap && svg) {
+	const box = tty.parentElement as HTMLElement;
+	const probe = tty.cloneNode(true) as HTMLElement;
+	probe.removeAttribute('id');
+	probe.setAttribute('aria-hidden', 'true');
+	probe.style.cssText = 'position:absolute;left:0;right:0;visibility:hidden;pointer-events:none;min-height:0;overflow:hidden;white-space:pre-wrap;word-break:break-all';
+	box.append(probe);
+	let width = 0;
+	new ResizeObserver(() => {
+		if (box.clientWidth === width) return;
+		width = box.clientWidth;
+		tty.style.minHeight = `${probe.offsetHeight}px`;
+	}).observe(box);
+
 	let run = 0;
 	const setScene = (scene: Scene) => {
 		panel.classList.toggle('lost', scene === 'lost');

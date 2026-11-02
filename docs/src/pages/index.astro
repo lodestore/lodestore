@@ -14,12 +14,26 @@ import Site from '../layouts/Site.astro';
 import '../styles/landing.css';
 
 const arrow = 'M5 12h14M13 6l6 6-6 6';
+const title = 'Lodestore: back up every Linux host';
+const description =
+	'Centralized backup for your server fleet. Encrypted, deduplicated data goes straight to your storage, and restore works without the server.';
+const data = {
+	'@context': 'https://schema.org',
+	'@type': 'SoftwareApplication',
+	name: 'Lodestore',
+	description,
+	url: new URL('/', Astro.site).href,
+	applicationCategory: 'UtilitiesApplication',
+	operatingSystem: 'Linux',
+	offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
+	license: [`${GITHUB_URL}/blob/main/LICENSE`, `${GITHUB_URL}/blob/main/crates/lodestore-server/LICENSE`],
+	codeRepository: GITHUB_URL,
+	sameAs: [GITHUB_URL],
+};
 ---
 
-<Site
-	title="Lodestore: back up every Linux host"
-	description="Centralized backup for your server fleet. Encrypted, deduplicated data goes straight to your storage, and restore works without the server."
->
+<Site title={title} description={description}>
+	<script type="application/ld+json" set:html={JSON.stringify(data)} />
 	<main>
 		<Hero />
 		<Arch />

@@ -203,6 +203,38 @@ if (!existsSync(sitemapIndex)) {
 	}
 }
 
+const robots = join(dist, 'robots.txt');
+if (!existsSync(robots)) fail('robots.txt', 'missing');
+else if (!/^Sitemap: \S+\/sitemap-index\.xml\s*$/m.test(readFileSync(robots, 'utf8'))) {
+	fail('robots.txt', 'no Sitemap line ending in /sitemap-index.xml');
+}
+for (const name of ['favicon.ico', 'apple-touch-icon.png', 'site.webmanifest']) {
+	if (!existsSync(join(dist, name))) fail(name, 'missing');
+}
+for (const name of ['index.html', 'docs/index.html']) {
+	const file = join(dist, name);
+	if (!existsSync(file)) {
+		fail(name, 'missing');
+		continue;
+	}
+	const html = readFileSync(file, 'utf8');
+	for (const rel of ['apple-touch-icon', 'manifest']) {
+		if (!new RegExp(`rel=["']?${rel}["']?[\\s/>]`).test(html)) fail(name, `no rel="${rel}"`);
+	}
+}
+if (existsSync(indexFile)) {
+	const blocks = [...readFileSync(indexFile, 'utf8').matchAll(/<script type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/g)];
+	if (blocks.length !== 1) {
+		fail('index.html', `${blocks.length} ld+json blocks, expected 1`);
+	} else {
+		try {
+			if (JSON.parse(blocks[0][1])['@type'] !== 'SoftwareApplication') fail('index.html', 'ld+json is not a SoftwareApplication');
+		} catch {
+			fail('index.html', 'ld+json does not parse');
+		}
+	}
+}
+
 if (errors.length > 0) {
 	for (const e of errors) console.error(e);
 	process.exit(1);

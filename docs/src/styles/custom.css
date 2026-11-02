@@ -61,3 +61,11 @@ header.header {
 .site-nav a:hover {
 	color: var(--foreground);
 }
+
+site-search dialog button:is(.pagefind-ui__search-clear, .md\:sl-hidden) {
+	border: 1px solid var(--input);
+	border-radius: 8px;
+}
+site-search dialog button.md\:sl-hidden {
+	padding: 0.5rem 0.875rem;
+}
