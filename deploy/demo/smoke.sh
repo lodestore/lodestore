@@ -14,8 +14,23 @@ fi
 
 workdir=$(mktemp -d)
 jar=$workdir/cookies
+hdr=$workdir/headers
+: >"$jar"
 csrf=
 trap 'rm -rf "$workdir"' EXIT
+
+# With an https public URL the server marks its cookies Secure, and curl drops
+# Secure cookies over plain http (the loopback check), so keep them here.
+ccurl() {
+  local rc=0 line
+  curl -D "$hdr" -H "Cookie: $(paste -sd ';' "$jar")" "$@" || rc=$?
+  while IFS= read -r line; do
+    { grep -v "^${line%%=*}=" "$jar" || true; } >"$jar.new"
+    printf '%s\n' "$line" >>"$jar.new"
+    mv "$jar.new" "$jar"
+  done < <(tr -d '\r' <"$hdr" | sed -n 's/^[Ss]et-[Cc]ookie: *\([^;]*\).*/\1/p')
+  return "$rc"
+}
 
 fail() {
   echo "smoke check failed: $*" >&2
@@ -28,14 +43,14 @@ pass() {
 
 status_of() {
   local method=$1 path=$2 out=$3 body=${4:-}
-  local args=(-sS -o "$out" -w '%{http_code}' -X "$method" -b "$jar" -c "$jar"
+  local args=(-sS -o "$out" -w '%{http_code}' -X "$method"
     -H "Origin: $base" -H "x-csrf-token: $csrf" -H 'content-type: application/json')
   [ -z "$body" ] || args+=(--data "$body")
-  curl "${args[@]}" "$base$path"
+  ccurl "${args[@]}" "$base$path"
 }
 
 get() {
-  curl -fsS -b "$jar" -c "$jar" -H "Origin: $base" "$base$1"
+  ccurl -fsS -H "Origin: $base" "$base$1"
 }
 
 b64url() {
@@ -95,12 +110,12 @@ case "$link" in
   /*) ;;
   *) link=/${link#*://*/} ;;
 esac
-curl -fsS -b "$jar" -c "$jar" -H "Origin: $base" -o "$workdir/archive" "$base$link" || fail "the archive download failed"
+ccurl -fsS -H "Origin: $base" -o "$workdir/archive" "$base$link" || fail "the archive download failed"
 [ -s "$workdir/archive" ] || fail "the downloaded archive is empty"
 tar -tzf "$workdir/archive" >/dev/null || fail "the downloaded archive is not a readable tar.gz"
 pass "archive downloaded, $(wc -c <"$workdir/archive" | tr -d ' ') bytes"
 
-metrics=$(curl -sS -b "$jar" "$base/metrics" -o "$workdir/metrics" -w '%{http_code}')
+metrics=$(ccurl -sS "$base/metrics" -o "$workdir/metrics" -w '%{http_code}')
 if grep -qE '^# (TYPE|HELP)' "$workdir/metrics"; then
   fail "/metrics serves metrics to a demo session (status $metrics)"
 fi

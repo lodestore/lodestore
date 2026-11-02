@@ -16,13 +16,8 @@ x-agent: &agent
   <<: *hardened
   restart: unless-stopped
   init: true
-  build:
-    context: .
-    dockerfile: agent/Dockerfile
-    args:
-      SERVER_IMAGE: *server_image
   image: lodestore-demo-agent:${LODESTORE_VERSION}
-  pull_policy: build
+  pull_policy: never
   user: "10001:10001"
   mem_limit: 384m
   cpus: 0.35
@@ -108,6 +103,12 @@ services:
 
   agent-1:
     <<: *agent
+    build:
+      context: .
+      dockerfile: agent/Dockerfile
+      args:
+        SERVER_IMAGE: *server_image
+    pull_policy: build
     hostname: agent-1
     environment:
       AGENT_NAME: demo-web-01
@@ -153,7 +154,7 @@ services:
       DEMO_DISK_LIMIT_GB: ${DEMO_DISK_LIMIT_GB:-15}
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
-    mem_limit: 128m
+    mem_limit: 256m
     cpus: 0.25
     pids_limit: 64
     volumes:
