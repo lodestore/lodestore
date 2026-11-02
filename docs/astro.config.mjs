@@ -25,9 +25,13 @@ const stripCiMarkers = {
 
 export default defineConfig({
 	site: process.env.SITE_URL ?? 'https://lodestore.dev',
+	build: { inlineStylesheets: 'never' },
 	integrations: [
 		starlight({
 			title: 'Lodestore',
+			disable404Route: true,
+			logo: { src: './src/assets/mark.svg' },
+			favicon: '/favicon.svg',
 			plugins: [
 				starlightLinksValidator({
 					exclude: ({ link }) =>
@@ -44,7 +48,12 @@ export default defineConfig({
 					href: 'https://github.com/lodestore/lodestore',
 				},
 			],
-			customCss: ['./src/styles/custom.css'],
+			customCss: ['./src/styles/tokens.css', './src/styles/custom.css'],
+			components: {
+				SocialIcons: './src/components/starlight/SocialIcons.astro',
+				ThemeProvider:'./src/components/starlight/ThemeProvider.astro',
+				ThemeSelect: './src/components/starlight/ThemeSelect.astro',
+			},
 			sidebar: [
 				{ label: 'Start', items: [{ slug: 'docs/quickstart' }] },
 				{ label: 'Install', items: [{ autogenerate: { directory: 'docs/install' } }] },
