@@ -85,14 +85,14 @@ grep -qi '^content-encoding: gzip' <<<"$zipped" || fail "$css is not gzip-compre
 
 slash=$(curl_site -D - -o /dev/null https://lodestore.dev:18443/docs/quickstart)
 grep -q ' 301' <<<"$slash" || fail "/docs/quickstart is not a 301"
-grep -qiE '^location: .*/docs/quickstart/\r?$' <<<"$slash" || fail "/docs/quickstart does not point to /docs/quickstart/"
+grep -qiE '^location: .*/docs/quickstart/[[:space:]]*$' <<<"$slash" || fail "/docs/quickstart does not point to /docs/quickstart/"
 
 [ "$(status https://lodestore.dev:18443/no-such-page/)" = 404 ] || fail "a missing page is not 404"
 curl_site https://lodestore.dev:18443/no-such-page/ | cmp -s - "$dist/404.html" || fail "404 body is not 404.html"
 
 www=$(curl_site -D - -o /dev/null https://www.lodestore.dev:18443/)
 grep -q ' 301' <<<"$www" || fail "www is not a 301"
-grep -qiE '^location: https://lodestore.dev/\r?$' <<<"$www" || fail "www does not redirect to https://lodestore.dev/"
+grep -qiE '^location: https://lodestore.dev/[[:space:]]*$' <<<"$www" || fail "www does not redirect to https://lodestore.dev/"
 
 grep -qi '^strict-transport-security:' <<<"$www" || fail "www redirect has no HSTS header"
 
@@ -100,11 +100,11 @@ grep -qi '^strict-transport-security:' <<<"$www" || fail "www redirect has no HS
 [ "$(status 'https://lodestore.dev:18443/.~tmp~/stale.html')" = 404 ] || fail "a dot path is served"
 
 fixed=$(curl -s -H 'Host: www.lodestore.dev' -D - -o /dev/null http://127.0.0.1:18081/x)
-grep -qiE '^location: https://lodestore.dev/x\r?$' <<<"$fixed" || fail "http redirect does not go straight to https://lodestore.dev"
+grep -qiE '^location: https://lodestore.dev/x[[:space:]]*$' <<<"$fixed" || fail "http redirect does not go straight to https://lodestore.dev"
 
 plain=$(curl -s -H 'Host: lodestore.dev' -D - -o /dev/null http://127.0.0.1:18081/)
 grep -q ' 301' <<<"$plain" || fail "http is not a 301"
-grep -qiE '^location: https://lodestore.dev/\r?$' <<<"$plain" || fail "http does not redirect to https"
+grep -qiE '^location: https://lodestore.dev/[[:space:]]*$' <<<"$plain" || fail "http does not redirect to https"
 
 echo "site config ok"
 
