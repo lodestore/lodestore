@@ -64,13 +64,22 @@ Run as an administrator on the host. Nothing in this repository does it for you.
 
    `restrict` turns off the pty, port, agent and X11 forwarding. `rrsync -wo` allows rsync to write inside the site directory and nothing else; `-munge` turns on rsync's `--munge-links` on the server side, which stores any uploaded symlink as a dead link, and nginx refuses to follow symlinks at all (`disable_symlinks on`).
 
-6. The certificate. certbot on this host uses the nginx authenticator, so the HTTP block has to be live first. Install the config without the HTTPS blocks, or temporarily with a self-signed certificate, then:
+6. The certificate. nginx will not load `nginx.conf` until `/etc/letsencrypt/live/lodestore.dev/` exists, and certbot's nginx authenticator needs a live HTTP block for both names, so start with a minimal one. First check that another server block on the host is the `default_server` for ports 80 and 443 (`sudo nginx -T | grep default_server`), so this config never answers for unknown names. Then:
 
    ```sh
+   sudo tee /etc/nginx/sites-enabled/lodestore.dev.conf >/dev/null <<'EOF'
+   server {
+       listen 80;
+       listen [::]:80;
+       server_name lodestore.dev www.lodestore.dev;
+       return 404;
+   }
+   EOF
+   sudo nginx -t && sudo systemctl reload nginx
    sudo certbot certonly --nginx -d lodestore.dev -d www.lodestore.dev
    ```
 
-7. nginx. First check that another server block on the host is the `default_server` for ports 80 and 443 (`sudo nginx -T | grep default_server`), so this config never answers for unknown names:
+7. nginx. Replace the bootstrap block with the real config:
 
    ```sh
    sudo install -m 644 deploy/site/lodestore-site-headers.conf /etc/nginx/snippets/lodestore-site-headers.conf
