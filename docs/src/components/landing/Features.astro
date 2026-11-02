@@ -1,0 +1,213 @@
+---
+const tabs = [
+	{ label: 'Deduplicated and encrypted', icon: ['M12 3 4 7.5v9L12 21l8-4.5v-9Z'] },
+	{ label: 'Hosts cannot delete', icon: ['M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Z', 'm5.6 5.6 12.8 12.8'] },
+	{
+		label: 'Policies as code',
+		icon: ['M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z', 'M14 3v6h6M10 13l-2 2 2 2M14 13l2 2-2 2'],
+	},
+	{ label: 'Find any file', icon: ['M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14Z', 'm20 20-3.5-3.5'] },
+	{ label: 'Alerts', icon: ['M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9', 'M10.3 21a1.9 1.9 0 0 0 3.4 0'] },
+];
+const arrow = 'M5 12h14M13 6l6 6-6 6';
+const yaml = `<span class="k">apiVersion:</span> lodestore.io/v1alpha1
+<span class="k">kind:</span> BackupPolicy
+<span class="k">metadata:</span>
+  <span class="k">name:</span> <span class="v">etc-and-home</span>
+<span class="k">spec:</span>
+  <span class="k">paths:</span> [<span class="v">/etc</span>, <span class="v">/home</span>]
+<span class="hl">  <span class="k">schedule:</span>
+    <span class="k">cron:</span> <span class="v">30 2 * * *</span>
+    <span class="k">timezone:</span> <span class="v">Europe/Kyiv</span></span>
+  <span class="k">retention:</span>
+    <span class="k">keepDaily:</span> <span class="v">7</span>`;
+const hits = [
+	{ host: 'web-eu-01', versions: '14 versions', when: 'today 03:00' },
+	{ host: 'web-eu-02', versions: '14 versions', when: 'today 03:02' },
+	{ host: 'ci-runner-03', versions: '3 versions', when: 'Oct 28' },
+];
+const alerts = [
+	{ ch: 'TG', title: 'Backup failed on pg-main-01', sub: 'ops-telegram · pre-backup hook exited with 1' },
+	{ ch: '#', title: 'files-02 is overdue', sub: '#ops-alerts · no successful backup for 36 h' },
+	{ ch: '@', title: 'Resolved: pg-main-01 backed up', sub: 'oncall@example.com · 26 minutes later' },
+];
+---
+
+<section class="wrap" id="feat">
+	<div class="sec-head rise">
+		<h2>Everything a fleet needs.<br /><span class="em">Nothing in the data path.</span></h2>
+		<p>Five things Lodestore does for an ops team, the same on five hosts as on five hundred.</p>
+	</div>
+	<div class="tabs rise paused" role="tablist" id="tabs" aria-label="Features">
+		{
+			tabs.map((t, i) => (
+				<button
+					class="tab"
+					type="button"
+					role="tab"
+					id={`tab-${i}`}
+					aria-controls={`panel-${i}`}
+					aria-selected={i === 0 ? 'true' : 'false'}
+					tabindex={i === 0 ? 0 : -1}
+					data-t={i}
+				>
+					<span class="ti">
+						<svg class="icon" viewBox="0 0 24 24">
+							{t.icon.map((d) => (
+								<path d={d} />
+							))}
+						</svg>
+					</span>
+					{t.label}
+					<i class="prog" />
+				</button>
+			))
+		}
+	</div>
+	<div class="tabcard rise">
+		<div class="pane on" role="tabpanel" id="panel-0" aria-labelledby="tab-0" data-p="0">
+			<div>
+				<h3>Every chunk stored once, <span class="em">sealed on the host.</span></h3>
+				<p>
+					Files are cut into content-defined chunks. A chunk that already exists in the repository is not uploaded again,
+					across snapshots and across hosts.
+				</p>
+				<p>
+					What leaves the host is compressed, then encrypted with XChaCha20-Poly1305. File names are not readable in the
+					bucket either.
+				</p>
+				<a class="more" href="/docs/adr/0003-object-layout/"
+					>How the format works <svg class="icon" viewBox="0 0 24 24"><path d={arrow}></path></svg></a
+				>
+			</div>
+			<div class="viz" id="v0">
+				<div class="dd-row">
+					<span class="who">web-eu-01 Mon</span><span class="hx">A</span><span class="hx">B</span><span class="hx">C</span
+					><span class="hx">D</span>
+				</div>
+				<div class="dd-row">
+					<span class="who">web-eu-01 Tue</span><span class="hx dup" data-d>A</span><span class="hx dup" data-d>B</span
+					><span class="hx dup" data-d>C</span><span class="hx lime">E</span>
+				</div>
+				<div class="dd-row">
+					<span class="who">web-eu-02 Tue</span><span class="hx dup" data-d>A</span><span class="hx dup" data-d>B</span
+					><span class="hx lime">F</span>
+				</div>
+				<div class="dd-arrow">
+					<svg class="icon" viewBox="0 0 24 24"><path d="M12 5v14M6 13l6 6 6-6"></path></svg>stored in your bucket, encrypted
+				</div>
+				<div class="dd-store">
+					{['A', 'B', 'C', 'D', 'E', 'F'].map((c) => <span class="hx st in">{c}</span>)}
+				</div>
+				<p class="dd-note">11 chunks in three snapshots, 6 stored.</p>
+			</div>
+		</div>
+		<div class="pane" role="tabpanel" id="panel-1" aria-labelledby="tab-1" data-p="1">
+			<div>
+				<h3>A taken-over host <span class="em">cannot erase its history.</span></h3>
+				<p>
+					On S3-compatible storage each agent holds its own key without delete permission. Deletion and cleanup run only on
+					the server, in two phases with a wait longer than the longest backup.
+				</p>
+				<p>It works with S3 Object Lock, so even the server cannot remove data before its time.</p>
+				<a class="more" href="/docs/security/threat-model/#agent-credentials"
+					>Threat model <svg class="icon" viewBox="0 0 24 24"><path d={arrow}></path></svg></a
+				>
+			</div>
+			<div class="viz log" id="v1">
+				<div class="in"><span class="who">agent</span>PUT    data/3f/3f9a…c2e   <span class="good">200 OK</span></div>
+				<div class="in"><span class="who">agent</span>PUT    data/8b/8be0…d71   <span class="good">200 OK</span></div>
+				<div class="in"><span class="who">attacker</span>DELETE data/3f/3f9a…c2e   <span class="bad">403 AccessDenied</span></div>
+				<div class="in"><span class="who">attacker</span>GET    data/3f/3f9a…c2e   <span class="bad">403 AccessDenied</span></div>
+				<div class="in"><span class="who">server</span>gc mark   412 unreferenced packs</div>
+				<div class="in"><span class="who">server</span>gc wait   longer than the longest backup</div>
+				<div class="in"><span class="who">server</span>gc check  still unreferenced: 412</div>
+				<div class="in"><span class="who">server</span>gc delete <span class="good">done</span>, dry run available</div>
+			</div>
+		</div>
+		<div class="pane" role="tabpanel" id="panel-2" aria-labelledby="tab-2" data-p="2">
+			<div>
+				<h3>Click it together, <span class="em">or keep it in Git.</span></h3>
+				<p>
+					Schedules in a time zone with jitter and catch-up of missed runs, retention, upload limits. Edit a policy in the
+					interface, or apply the same YAML from your GitOps repository.
+				</p>
+				<a class="more" href="/docs/guides/policies/"
+					>Policies guide <svg class="icon" viewBox="0 0 24 24"><path d={arrow}></path></svg></a
+				>
+			</div>
+			<div class="viz yaml" id="v2">
+				<div class="pol">
+					<div class="pol-form">
+						<div class="fld"><span class="lbl">Name</span><div class="in">etc-and-home</div></div>
+						<div class="fld"><span class="lbl">Paths</span><div class="in mono">/etc, /home</div></div>
+						<div class="fld"><span class="lbl">Schedule</span><div class="in hl mono">30 2 * * *  ·  Europe/Kyiv</div></div>
+						<div class="fld"><span class="lbl">Keep</span><div class="in">last 3, daily 7, weekly 4, monthly 6</div></div>
+					</div>
+				</div>
+				<div class="pol-yaml" set:html={yaml} />
+			</div>
+		</div>
+		<div class="pane" role="tabpanel" id="panel-3" aria-labelledby="tab-3" data-p="3">
+			<div>
+				<h3>One search <span class="em">across every host.</span></h3>
+				<p>
+					Someone deleted a config last week, on a host you don't remember. Search a path or a pattern across the snapshots
+					of the whole fleet, pick the version and restore it to that host or another one.
+				</p>
+				<a class="more" href="/docs/reference/cli/#find-a-file"
+					>Find a file <svg class="icon" viewBox="0 0 24 24"><path d={arrow}></path></svg></a
+				>
+			</div>
+			<div class="viz" id="v3">
+				<div class="srch">
+					<svg class="icon" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg
+					><span id="q">nginx.conf</span><span class="caret"></span>
+				</div>
+				<div class="res">
+					{
+						hits.map((h) => (
+							<div class="in">
+								<span>
+									<b>{h.host}</b> <span class="mono">/etc/nginx/nginx.conf</span>
+								</span>
+								<span class="mono">{h.versions}</span>
+								<span class="mono">{h.when}</span>
+							</div>
+						))
+					}
+				</div>
+			</div>
+		</div>
+		<div class="pane" role="tabpanel" id="panel-4" aria-labelledby="tab-4" data-p="4">
+			<div>
+				<h3>Hear about a failed backup <span class="em">before you need it.</span></h3>
+				<p>
+					Alerts for failed, overdue and offline hosts, failed checks and agent updates. Send them to Telegram, Slack, email
+					or a webhook, and scrape Prometheus metrics.
+				</p>
+				<a class="more" href="/docs/guides/alerts/"
+					>Alerts guide <svg class="icon" viewBox="0 0 24 24"><path d={arrow}></path></svg></a
+				>
+			</div>
+			<div class="viz ntf" id="v4">
+				{
+					alerts.map((a) => (
+						<div class="in">
+							<span class="ch">{a.ch}</span>
+							<p>
+								<b>{a.title}</b>
+								<br />
+								<small>{a.sub}</small>
+							</p>
+						</div>
+					))
+				}
+			</div>
+		</div>
+	</div>
+</section>
+
+<script>
+	import '../../scripts/feature-tabs';
+</script>

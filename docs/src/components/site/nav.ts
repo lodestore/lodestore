@@ -12,7 +12,7 @@ export function hasBlog(): Promise<boolean> {
 
 export async function navItems(): Promise<{ label: string; href: string }[]> {
 	const items = [
-		{ label: 'Product', href: '/' },
+		{ label: 'Product', href: '/#feat' },
 		{ label: 'Docs', href: '/docs/' },
 	];
 	if (await hasBlog()) items.push({ label: 'Blog', href: '/blog/' });

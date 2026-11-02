@@ -1,5 +1,9 @@
 ---
+import Arch from '../components/landing/Arch.astro';
+import Features from '../components/landing/Features.astro';
+import Hero from '../components/landing/Hero.astro';
 import Site from '../layouts/Site.astro';
+import '../styles/landing.css';
 ---
 
 <Site
@@ -7,10 +11,8 @@ import Site from '../layouts/Site.astro';
 	description="Centralized backup for 5 to 500 Linux hosts. Encrypted, deduplicated data goes straight to your storage, and restore works without the server."
 >
 	<main>
-		<h1>Back up every Linux host. Restore without the server.</h1>
-		<p>
-			Lodestore backs up 5 to 500 hosts to your storage, and a restore needs only the bucket and a password.
-		</p>
-		<a href="/docs/quickstart/">Protect a host in 10 minutes</a>
+		<Hero />
+		<Arch />
+		<Features />
 	</main>
 </Site>
