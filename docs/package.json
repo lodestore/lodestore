@@ -9,7 +9,8 @@
 	},
 	"scripts": {
 		"dev": "astro dev",
-		"build": "astro build"
+		"build": "astro build",
+		"check": "node scripts/check-site.mjs dist && node --test scripts/*.test.mjs"
 	},
 	"dependencies": {
 		"@astrojs/starlight": "0.42.8",
