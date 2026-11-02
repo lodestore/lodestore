@@ -31,7 +31,7 @@ pnpm --dir docs build
 pnpm --dir docs check
 ```
 
-The documentation build also checks every internal link. `pnpm --dir docs check` runs on the built site and checks links and anchors, that the pages load nothing from outside, that every light image has its dark pair, the weight budget, the facts on the home page and that every page carries a content security policy meta tag with hashes of its own inline scripts. Inline event handlers (`onclick=` and the like) are not allowed on the site, and the build fails on them.
+The documentation build also checks every internal link. `pnpm --dir docs check` runs on the built site and checks links and anchors, that the pages load nothing from outside, that every light image has its dark pair, the weight budget, the facts on the home page, robots.txt, the icons and the structured data of the home page, and that every page carries a content security policy meta tag with hashes of its own inline scripts. Inline event handlers (`onclick=` and the like) are not allowed on the site, and the build fails on them.
 
 ## Screenshots, clips and the terminal recording
 
@@ -46,6 +46,8 @@ pnpm --dir docs/demo render
 ```
 
 The command starts a demo stand with generated passwords, captures every frame and records the terminal session, then removes the stand. Commit the files it writes to `docs/src/assets/media/`.
+
+The site icons in `docs/public/` are redrawn from the mark with `pnpm --dir docs/demo icons` after the mark changes; commit the files it writes.
 
 ## Sending a change
 

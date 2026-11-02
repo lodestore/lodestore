@@ -37,6 +37,9 @@ export default defineConfig({
 			favicon: '/favicon.svg',
 				head: [
 					{ tag: 'meta', attrs: { property: 'og:image', content: new URL('/og.png', site).href } },
+					{ tag: 'link', attrs: { rel: 'icon', href: '/favicon.ico', sizes: '32x32' } },
+					{ tag: 'link', attrs: { rel: 'apple-touch-icon', href: '/apple-touch-icon.png' } },
+					{ tag: 'link', attrs: { rel: 'manifest', href: '/site.webmanifest' } },
 					{
 						tag: 'link',
 						attrs: { rel: 'alternate', type: 'application/rss+xml', title: 'Lodestore blog', href: '/blog/rss.xml' },
