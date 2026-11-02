@@ -20,7 +20,7 @@ Run as an administrator on the host. Nothing in this repository does it for you.
 
 1. DNS: `A` (and `AAAA`, if the host has IPv6) records for `lodestore.dev` and `www.lodestore.dev` pointing at `<host>`.
 
-2. rsync with the fixes for CVE-2024-12084 to CVE-2024-12088: rsync 3.4.0 or newer, or a distribution build whose changelog lists them. `/usr/bin/rrsync` must accept `-munge-links` (`rrsync -h`); Ubuntu 22.04 ships no `/usr/bin/rrsync` and is not supported.
+2. rsync with the fixes for CVE-2024-12084 to CVE-2024-12088: rsync 3.4.0 or newer, or a distribution build whose changelog lists them. `/usr/bin/rrsync` must accept `-munge` (check with `rrsync -h`); Ubuntu 22.04 ships no `/usr/bin/rrsync` and is not supported.
 
 3. A user that receives the uploads. It has no home directory and cannot edit its own keys. The shell must be `/bin/sh`, not `nologin`: sshd runs the forced command through the login shell.
 
@@ -50,7 +50,7 @@ Run as an administrator on the host. Nothing in this repository does it for you.
    Only the public half goes to the host, as one line in `/etc/ssh/authorized_keys/lodestore-site` (`sudo install -d -m 755 /etc/ssh/authorized_keys` first), owned by root with mode 644, so the deploy user cannot change it:
 
    ```
-   restrict,command="/usr/bin/rrsync -wo -munge-links /opt/lodestore.dev/public" ssh-ed25519 AAAA… lodestore-site-deploy
+   restrict,command="/usr/bin/rrsync -wo -munge /opt/lodestore.dev/public" ssh-ed25519 AAAA… lodestore-site-deploy
    ```
 
    and sshd reads keys for this user only from there. Append to `/etc/ssh/sshd_config`, then `sudo sshd -t && sudo systemctl reload ssh`:
@@ -62,7 +62,7 @@ Run as an administrator on the host. Nothing in this repository does it for you.
        PermitTTY no
    ```
 
-   `restrict` turns off the pty, port, agent and X11 forwarding. `rrsync -wo` allows rsync to write inside the site directory and nothing else; `-munge-links` stores any uploaded symlink as a dead link, and nginx refuses to follow symlinks at all (`disable_symlinks on`).
+   `restrict` turns off the pty, port, agent and X11 forwarding. `rrsync -wo` allows rsync to write inside the site directory and nothing else; `-munge` turns on rsync's `--munge-links` on the server side, which stores any uploaded symlink as a dead link, and nginx refuses to follow symlinks at all (`disable_symlinks on`).
 
 6. The certificate. certbot on this host uses the nginx authenticator, so the HTTP block has to be live first. Install the config without the HTTPS blocks, or temporarily with a self-signed certificate, then:
 
