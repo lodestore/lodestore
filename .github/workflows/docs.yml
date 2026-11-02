@@ -75,5 +75,5 @@ jobs:
           printf '%s\n' "$SITE_DEPLOY_KEY" > key
           printf '%s\n' "$SITE_KNOWN_HOSTS" > known_hosts
           rsync -rt --delete-after --delay-updates --chmod=D755,F644 \
-            -e "ssh -i key -o IdentitiesOnly=yes -o BatchMode=yes -o HostKeyAlias=lodestore-site -o UserKnownHostsFile=known_hosts -o StrictHostKeyChecking=yes" \
+            -e "ssh -i key -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o HostKeyAlias=lodestore-site -o UserKnownHostsFile=known_hosts -o StrictHostKeyChecking=yes" \
             dist/ "lodestore-site@${SITE_HOST}:."
