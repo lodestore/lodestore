@@ -2,11 +2,7 @@
 
 All notable changes to Lodestore are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow [Semantic Versioning](https://semver.org/).
 
-## [0.1.0-rc.1] - 2026-11-02
-
-First release candidate for 0.1.0. The full list of changes is in the 0.1.0 section of [CHANGELOG.md](https://github.com/lodestore/lodestore/blob/main/CHANGELOG.md).
-
-## [0.1.0] - Unreleased
+## [0.1.0] - 2026-11-02
 
 First release.
 
@@ -25,3 +21,7 @@ First release.
 - Signed agent updates. The agent installs an update only after checking its signature against the project key or a key trusted on the host. The server does not verify the signature, it only reads the signature's trusted comment.
 - Detection of suspicious snapshots: a snapshot marked by the anomaly detector or an administrator counts toward no retention rule and is never forgotten.
 - `demo_mode`, a public read-only demonstration for a throwaway server with synthetic data, never for real backups. A demo stand is in `deploy/demo`.
+
+## [0.1.0-rc.1] - 2026-11-02
+
+First release candidate for 0.1.0. The full list of changes is in the 0.1.0 section of [CHANGELOG.md](https://github.com/lodestore/lodestore/blob/main/CHANGELOG.md).
