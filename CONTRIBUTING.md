@@ -28,9 +28,24 @@ pnpm --dir web test
 pnpm --dir web lint
 pnpm --dir docs install --frozen-lockfile
 pnpm --dir docs build
+pnpm --dir docs check
 ```
 
-The documentation build also checks every internal link.
+The documentation build also checks every internal link. `pnpm --dir docs check` runs on the built site and checks links and anchors, that the pages load nothing from outside, that every light image has its dark pair, the weight budget and the facts on the home page.
+
+## Screenshots, clips and the terminal recording
+
+The screenshots, the short clips and the terminal recording in `docs/src/assets/media/` are rendered by hand before a release and committed. CI does not render them.
+
+You need Docker or OrbStack, `brew install vhs webp`, and an OrbStack machine named `lodestore-test` with systemd (the one `scripts/test-linux.sh` uses): the recording installs the agent in it, and the run stops the machine when it ends.
+
+```sh
+pnpm --dir docs/demo install --frozen-lockfile
+pnpm --dir docs/demo exec playwright install chromium
+pnpm --dir docs/demo render
+```
+
+The command starts a demo stand with generated passwords, captures every frame and records the terminal session, then removes the stand. Commit the files it writes to `docs/src/assets/media/`.
 
 ## Sending a change
 

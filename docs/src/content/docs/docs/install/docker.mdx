@@ -3,6 +3,10 @@ title: Running the server with Docker
 description: A permanent Docker deployment of the Lodestore server, with volumes, an unlock key, a reverse proxy and PostgreSQL.
 ---
 
+import ThemeImage from '../../../../components/site/ThemeImage.astro';
+import wizardLight from '../../../../assets/media/wizard.light.webp';
+import wizardDark from '../../../../assets/media/wizard.dark.webp';
+
 The [Quickstart](/docs/quickstart/) starts the server with one `docker run` and plain HTTP. This page covers what you add for a server that stays: HTTPS in front, an unlock key that you keep yourself and a restart policy. Docker is the main way to run the server. For the other ways see [Binary](/docs/install/binary/) and [Helm](/docs/install/helm/).
 
 ## The image
@@ -47,6 +51,11 @@ docker logs lodestore 2>&1 | grep 'setup?token='
 ```
 
 To skip the link, set `LODESTORE_ADMIN_PASSWORD_FILE` to a file that holds the password (at least 12 characters), and `LODESTORE_ADMIN_USERNAME` if you want a name other than `admin`. Mount the file the same way as the unlock key.
+
+<figure>
+  <ThemeImage light={wizardLight} dark={wizardDark} alt="The Access step of the setup wizard, listing what the server key and the agent key were allowed to do in the bucket" widths={[800, 1200]} sizes="(min-width: 50rem) 800px, 100vw" />
+  <figcaption>After you create the administrator, the setup wizard walks through the storage, the access keys, the recovery key and the first host. The Access step checks what each key can do.</figcaption>
+</figure>
 
 To upgrade, remove the container and run the same command with the new version. The state stays in the volume.
 

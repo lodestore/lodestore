@@ -1,6 +1,11 @@
 ---
 title: "Backup policies: schedule, retention, limits and alerts"
 ---
+
+import ThemeImage from '../../../../components/site/ThemeImage.astro';
+import policyLight from '../../../../assets/media/policy.light.webp';
+import policyDark from '../../../../assets/media/policy.dark.webp';
+
 A `BackupPolicy` is one strict YAML document shared by the UI, `lode apply` and CI. This page covers the four blocks that make a policy run on its own and tell you when it does not: `spec.schedule`, `spec.retention`, `spec.limits` and `spec.alerts`. All four are optional. A policy without them runs only when started by hand, keeps every snapshot and uploads without limits. The `apiVersion` stays `lodestore.io/v1alpha1`.
 
 ```yaml
@@ -34,6 +39,11 @@ spec:
 ```
 
 Unknown fields are rejected with the line and column of the typo.
+
+<figure>
+  <ThemeImage light={policyLight} dark={policyDark} alt="The policy form in the web interface, with the YAML of a backup policy next to its schedule and retention" widths={[800, 1200]} sizes="(min-width: 50rem) 800px, 100vw" />
+  <figcaption>The same kind of policy in the web interface. The form and its YAML stay in sync.</figcaption>
+</figure>
 
 ## Durations and rates
 
