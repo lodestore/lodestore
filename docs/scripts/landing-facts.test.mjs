@@ -118,3 +118,41 @@ test('trust line makes no air-gapped claim', () => {
 	assert.ok(text.includes('Open source, control plane included'));
 	assert.ok(text.includes('Self-hosted'));
 });
+
+const PRODUCTS = [
+	['restic', 'restic'],
+	['plakar', 'Plakar'],
+	['bareos', 'Bareos'],
+];
+
+const compareMd = (id) => readFileSync(here(`../src/content/compare/${id}.md`), 'utf8');
+
+test('comparison cells are quoted from the compare pages', () => {
+	const section = element(landing(), 'section', 'compare');
+	const table = section.match(/<table class="cmp"[\s\S]*?<\/table>/)?.[0];
+	assert.ok(table, 'no comparison table');
+	const mds = PRODUCTS.map(([id]) => compareMd(id));
+	const rows = [...table.match(/<tbody>[\s\S]*<\/tbody>/)[0].matchAll(/<tr>([\s\S]*?)<\/tr>/g)];
+	assert.ok(rows.length >= 4);
+	for (const [, row] of rows) {
+		const cells = [...row.matchAll(/<(?:th|td)\b[^>]*>([\s\S]*?)<\/(?:th|td)>/g)].map((m) => textOf(m[1]).trim());
+		assert.equal(cells.length, 5, `row has ${cells.length} cells: ${cells[0]}`);
+		assert.ok(mds.some((md) => md.includes(cells[1])), `Lodestore cell not in any compare page: ${cells[1]}`);
+		PRODUCTS.forEach(([id], i) => assert.ok(mds[i].includes(cells[i + 2]), `${id} cell not in ${id}.md: ${cells[i + 2]}`));
+	}
+});
+
+test('comparison caption carries the Checked on date of each page', () => {
+	const text = textOf(element(landing(), 'section', 'compare'));
+	const seen = new Set(text.match(/\d{4}-\d{2}-\d{2}/g));
+	const expected = new Set();
+	for (const [id, name] of PRODUCTS) {
+		const facts = compareMd(id).split(/^## Facts we checked$/m)[1]?.split(/^## /m)[0] ?? '';
+		const dates = [...facts.matchAll(/\|\s*(\d{4}-\d{2}-\d{2})\s*\|\s*$/gm)].map((m) => m[1]).sort();
+		assert.ok(dates.length > 0, `${id}.md has no Checked on dates`);
+		const latest = dates.at(-1);
+		expected.add(latest);
+		assert.ok(text.includes(`${name} on ${latest}`), `caption lacks "${name} on ${latest}"`);
+	}
+	assert.deepEqual([...seen].sort(), [...expected].sort());
+});

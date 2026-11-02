@@ -1,0 +1,43 @@
+---
+import { getCollection } from 'astro:content';
+import ThemeImage from '../site/ThemeImage.astro';
+import '../../styles/blog.css';
+
+const posts = (await getCollection('blog'))
+	.sort((a, b) => b.data.pubDate.valueOf() - a.data.pubDate.valueOf())
+	.slice(0, 2);
+const fmt = new Intl.DateTimeFormat('en-US', { dateStyle: 'medium', timeZone: 'UTC' });
+---
+
+{
+	posts.length > 0 && (
+		<section class="sec-pad wrap blog-sec" id="from-blog">
+			<div class="sec-head rise">
+				<h2>From the blog</h2>
+			</div>
+			<div class="posts">
+				{posts.map((post, i) => (
+					<a class:list={['post', 'rise', i === 1 && 'd1']} href={`/blog/${post.id}/`}>
+						<div class="ph">
+							<ThemeImage
+								light={post.data.coverLight}
+								dark={post.data.coverDark}
+								alt={post.data.coverAlt}
+								widths={[480, 720]}
+								sizes="(min-width: 768px) 480px, 90vw"
+							/>
+						</div>
+						<div class="t">
+							<small>
+								<time datetime={post.data.pubDate.toISOString()}>{fmt.format(post.data.pubDate)}</time>
+								{post.data.tags[0] && ` · ${post.data.tags[0]}`}
+							</small>
+							<h3>{post.data.title}</h3>
+							<p>{post.data.description}</p>
+						</div>
+					</a>
+				))}
+			</div>
+		</section>
+	)
+}
