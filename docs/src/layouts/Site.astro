@@ -1,4 +1,9 @@
 ---
+import onest from '../assets/fonts/onest-latin-wght-normal.woff2?url';
+import Header from '../components/site/Header.astro';
+import '../styles/tokens.css';
+import '../styles/site.css';
+
 interface Props {
 	title: string;
 	description: string;
@@ -26,8 +31,10 @@ const canonical = new URL(Astro.url.pathname, Astro.site);
 		<meta name="description" content={description} />
 		<link rel="canonical" href={canonical} />
 		<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+		<link rel="preload" as="font" type="font/woff2" href={onest} crossorigin />
 	</head>
 	<body>
+		<Header />
 		<slot />
 	</body>
 </html>
