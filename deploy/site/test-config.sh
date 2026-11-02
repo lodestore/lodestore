@@ -82,6 +82,11 @@ has_header "$asset" Content-Security-Policy "$css"
 
 zipped=$(curl_site -H 'Accept-Encoding: gzip' -D - -o /dev/null "https://lodestore.dev:18443/$css")
 grep -qi '^content-encoding: gzip' <<<"$zipped" || fail "$css is not gzip-compressed"
+grep -qiE '^vary:.*accept-encoding' <<<"$zipped" || fail "$css gzip response has no Vary: Accept-Encoding"
+
+manifest=$(curl_site -D - -o /dev/null https://lodestore.dev:18443/site.webmanifest)
+grep -qiE '^content-type: application/manifest\+json' <<<"$manifest" || fail "site.webmanifest is not application/manifest+json"
+has_header "$manifest" Content-Security-Policy "site.webmanifest"
 
 slash=$(curl_site -D - -o /dev/null https://lodestore.dev:18443/docs/quickstart)
 grep -q ' 301' <<<"$slash" || fail "/docs/quickstart is not a 301"
