@@ -1,0 +1,82 @@
+---
+title: An agent that can write but not read or delete
+description: The key model behind Lodestore - write-only agents, X-Wing and signed updates - and the limits we know about.
+pubDate: 2026-11-02
+tags: [Security]
+coverLight: ../../assets/illustrations/blog-write-only.light.webp
+coverDark: ../../assets/illustrations/blog-write-only.dark.webp
+coverAlt: A host tile on the left sends an arrow to a storage bucket marked with a four-point star on the right; a second arrow from the bucket back to the host is crossed out.
+---
+
+import ThemeImage from '../../components/site/ThemeImage.astro';
+import wizardLight from '../../assets/media/wizard.light.webp';
+import wizardDark from '../../assets/media/wizard.dark.webp';
+
+The Lodestore agent runs as root on every host it protects, so we design as if a host can be taken over. The question is what an attacker who holds the agent's credentials can do to your backups. This post answers it and says where the answer stops. Every claim below links to the page that states it in full: the [threat model](/docs/security/threat-model/), [ADR 0002](/docs/adr/0002-key-model-and-envelope/) and the [agent updates guide](/docs/guides/agent-updates/).
+
+## What the agent holds
+
+An agent holds a writer keyset and a write-only S3 key. It can add data to the repository and it cannot read it back. The key carries no delete permission, and deletion and garbage collection run only on the server ([threat model, Agent credentials](/docs/security/threat-model/#agent-credentials)).
+
+The writer keyset is a file with mode 0600. It holds the repository id, the key that makes blob ids, the key that opens index shards, and the public key packs are sealed to. With it a host can write new packs, index shards and snapshots, and deduplicate against what is already there by reading the index, which shows blob ids, pack ids, offsets and sizes. It cannot read blob contents, file names, directory structure, snapshots or their metadata, because the pack keys and snapshot keys are sealed to a public key whose private half is derived from the master key, and the master key is not in the file. Lodestore's own writer only does create-only writes and has no delete on the write path ([ADR 0002, threat model for writer keys](/docs/adr/0002-key-model-and-envelope/#threat-model-for-writer-keys); [threat model](/docs/security/threat-model/#agent-credentials)).
+
+One thing a writer can do is worth stating: with the blob-id key it can compute the id of any content it already has and check whether the repository contains it. A host that holds a file can learn that the same file is backed up.
+
+## Write-only is not the same as no overwrite
+
+In S3, a `PutObject` on an existing key replaces the object. The AWS policy Lodestore generates therefore ends with a `Deny` on `s3:PutObject` for requests without `If-None-Match`, and Lodestore writes every object with `If-None-Match: *`. Overwrite is refused only where the provider enforces that condition. MinIO rejects the condition key, so on MinIO a stolen agent key can replace any pack, index or snapshot object ([threat model, Agent credentials](/docs/security/threat-model/#agent-credentials)). A compromised host can destroy data that way without ever deleting it. With versioning or Object Lock enabled on the bucket, a replaced object keeps its earlier version and the data can be recovered.
+
+The setup wizard tries this with a throwaway object. It shows **Write-only verified** only when the overwrite is refused, and a warning otherwise.
+
+<figure>
+	<ThemeImage
+		light={wizardLight}
+		dark={wizardDark}
+		alt="The storage check in the setup wizard: writing, listing and conditional write passed; the agent key permissions step warns that the agent key can overwrite objects, and Object Lock is marked as recommended."
+		widths={[720, 1080, 1600]}
+		sizes="(min-width: 768px) 68ch, 92vw"
+	/>
+	<figcaption>The storage check on the demo stand, which uses MinIO: the agent key has no delete rights, but it can overwrite objects, so the wizard warns and points to versioning or Object Lock.</figcaption>
+</figure>
+
+With a local or network folder there is no separate key at all: the agent writes with file permissions and can delete and overwrite. That is why the [quickstart](/docs/quickstart/#why-s3-compatible-storage) recommends S3-compatible storage for data a compromised host must not be able to destroy.
+
+## What an agent sees during a restore
+
+A restore runs on the target agent, and the server decides what that agent receives. The master secret never leaves the server ([threat model, restores](/docs/security/threat-model/#what-an-agent-sees-during-a-restore)). The agent gets a plan of the selection only, the keys of the packs that plan uses, and, on S3, presigned URLs valid for one hour for exactly those packs. A pack key opens the frames of its pack and no other pack, and a request for a pack outside the job's set is refused.
+
+The agent's own S3 key still cannot read packs during a restore ([threat model](/docs/security/threat-model/#what-an-agent-sees-during-a-restore)). A test, `restore_s3_agent_key_cannot_read_packs`, tries a direct `GET` with it and expects a refusal. One residue is accepted and written down: a pack key opens every frame in its pack, not only the chunks the plan names, packs are 32 MiB, the key lives in memory for the job, and the agent has no read access to the bucket.
+
+## The key model
+
+The repository has a random 256-bit master key. Everything else is derived from it with BLAKE3 `derive_key`, with context strings that are fixed forever. Blob ids are keyed BLAKE3 over the plaintext, so two writers compute the same id for the same content and an observer of the bucket learns nothing about it. Blobs are compressed with zstd, then sealed with XChaCha20-Poly1305 under a fresh random key per pack ([ADR 0002](/docs/adr/0002-key-model-and-envelope/#envelope-who-can-read-what)).
+
+The per-pack key is sealed to the repository public key with HPKE and stored in the pack itself. The key encapsulation is X-Wing, a hybrid of X25519 and ML-KEM-768. The reason is in the ADR: a future quantum attacker who records a bucket today still has to break X25519 as well, and a break of the young ML-KEM does not expose the data on its own. Every operation authenticates the repository id and a type label, so an object cannot be moved to another repository or another role. The `hpke` crate is pinned to an exact version, because X-Wing is a draft that has changed and the key derivation from the seed is part of the on-disk format.
+
+The master key is opened by key slots in the bucket. A password slot derives its key with Argon2id (default 64 MiB, 3 passes, 4 lanes, stored in the slot so defaults can rise later), and a recovery slot uses a 32-byte random recovery key that starts with `lode-rk1-`. Slots are independent: changing a password adds a slot and removes the old one, and no data is touched ([ADR 0002, key slots](/docs/adr/0002-key-model-and-envelope/#key-slots)). This is what lets a restore need only the bucket and one secret.
+
+## Signed updates
+
+An agent update replaces the binary of a process that runs as root, and the server cannot use that path to hand an agent code, because the agent decides what it runs ([threat model, Agent updates](/docs/security/threat-model/#agent-updates)).
+
+The agent trusts the project key built into its binary and the `*.pub` files in `/etc/lodestore/trusted-keys` on the host, and nothing else; the server has no message that adds, replaces or removes a key. The minisign signature covers the binary and a trusted comment, `lodestore-agent <version> <arch>`. Before it switches, the agent checks the SHA-256 the server announced, the signature, that the signed version is the one requested, that the architecture is its own, that the version is newer than the running one, and that the new binary prints its version when started with `version`. A downgrade is refused. The server does not verify the signature itself; it only reads the signature's trusted comment ([changelog](https://github.com/lodestore/lodestore/blob/main/CHANGELOG.md)).
+
+The old agent keeps its binary as `lodestore-agent.prev` and arms a 120-second timer before it restarts; if the new version does not connect in time, the timer puts the old one back ([agent updates guide](/docs/guides/agent-updates/#how-an-update-runs)).
+
+## What this does not cover
+
+All of these are written down in the documentation:
+
+- **Overwrite where the storage does not enforce `If-None-Match`.** MinIO is the example above; use versioning or Object Lock ([threat model](/docs/security/threat-model/#agent-credentials)).
+- **The S3 key is shared by all agents of a repository.** A revoked host still holds it and can keep writing until you use **Replace agent key** ([threat model](/docs/security/threat-model/#agent-credentials)).
+- **A local folder lets the agent delete and overwrite** ([threat model](/docs/security/threat-model/#agent-credentials)).
+- **A forged index shard.** A compromised writer can publish a shard that claims blobs it never uploaded, and a later backup of that content from another host would record a snapshot that cannot be restored. A client that can list the packs ignores such records; a write-only credential cannot list them. A verifying check and server-side validation are later work ([ADR 0002, residual risks](/docs/adr/0002-key-model-and-envelope/#residual-risks)).
+- **A server that is taken over.** Signature checks stop it from installing a binary through the update path, and that is the limit of what they do. It holds the repository keys and can start a restore job on any enrolled host, which runs as root and writes wherever it is told. Treat a server compromise as root on every enrolled host ([threat model](/docs/security/threat-model/#agent-updates)).
+
+## How we check it
+
+A test backs up files with recognizable names and contents, then searches every object in the bucket, names included, and nothing may appear. Another uses an S3 user with a write-only policy and checks that it can back up and deduplicate, and that it is refused when it tries to delete or read packs ([how we test data safety](/docs/security/how-we-test/#what-the-bucket-looks-like-from-outside)). Committed fixtures keep old repositories readable after a format or dependency change ([frozen format fixtures](/docs/security/how-we-test/#frozen-format-fixtures)).
+
+The same page lists [what we have not verified](/docs/security/how-we-test/#what-we-have-not-verified). No external audit of the format or the cryptography has been done.
+
+For the rest of the picture, read [the first post](/blog/introducing-lodestore/) or go straight to the [quickstart](/docs/quickstart/).

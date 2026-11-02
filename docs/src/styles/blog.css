@@ -157,9 +157,6 @@
 	line-height: 1.5;
 	color: var(--muted-foreground);
 }
-.prose video {
-	display: block;
-}
 .prose table {
 	width: 100%;
 	border-collapse: collapse;

@@ -11,6 +11,17 @@ coverAlt: A server tile with a dashed outline on the left, a storage bucket with
 import ThemeImage from '../../components/site/ThemeImage.astro';
 import overviewLight from '../../assets/media/overview.light.webp';
 import overviewDark from '../../assets/media/overview.dark.webp';
+import searchLight from '../../assets/media/search.light.webp';
+import searchDark from '../../assets/media/search.dark.webp';
+import ThemeVideo from '../../components/site/ThemeVideo.astro';
+import addHostLight from '../../assets/media/add-host.light.mp4';
+import addHostDark from '../../assets/media/add-host.dark.mp4';
+import addHostPosterLight from '../../assets/media/add-host-poster.light.webp';
+import addHostPosterDark from '../../assets/media/add-host-poster.dark.webp';
+import restoreLight from '../../assets/media/restore.light.mp4';
+import restoreDark from '../../assets/media/restore.dark.mp4';
+import restorePosterLight from '../../assets/media/restore-poster.light.webp';
+import restorePosterDark from '../../assets/media/restore-poster.dark.webp';
 
 Lodestore is a backup system for fleets of Linux hosts. A small agent on each host writes deduplicated, encrypted data straight to your own S3-compatible storage. One server binary schedules the work, keeps the catalog and shows the whole fleet in a web interface. Version 0.1.0 is the first release.
 
@@ -39,6 +50,17 @@ Data is deduplicated across the snapshots and hosts of a repository, compressed,
 	<figcaption>The overview of a demo fleet: one host failed because a folder in its policy does not exist, two are protected.</figcaption>
 </figure>
 
+To protect a host, open **Hosts**, choose **Add host** and run the command it shows as root on the machine. The host appears as online within seconds. Then create a policy for the folders to back up, choose the host and run it; when the job succeeds, the snapshot is in your bucket.
+
+<ThemeVideo
+	light={addHostLight}
+	dark={addHostDark}
+	posterLight={addHostPosterLight}
+	posterDark={addHostPosterDark}
+	label="Adding a host in the Lodestore web interface, from the Add host dialog to a protected host"
+	caption="Adding a host on the demo stand, from the Add host dialog to a protected host. The waiting for the agent is sped up; the clicks run in real time."
+/>
+
 Policies are YAML or a form: cron schedules in an IANA time zone with jitter and catch-up of missed runs, and retention by daily, weekly, monthly, last-N and within-period rules. `lode apply -f` applies them from CI, with `--dry-run` and `--prune`. See [Policies and retention](/docs/guides/policies/).
 
 ## Restore without the server
@@ -60,11 +82,31 @@ The key an agent holds cannot read data, so use the server's key or any other ke
 
 From the web interface you can restore in place, to another host, or as a downloadable archive, and search for a file across the snapshots of all hosts.
 
+<ThemeVideo
+	light={restoreLight}
+	dark={restoreDark}
+	posterLight={restorePosterLight}
+	posterDark={restorePosterDark}
+	label="Restoring a snapshot from the Lodestore web interface into a new folder on the host"
+	caption="Restoring a snapshot into a new folder from the web interface, on the demo stand."
+/>
+
+<figure>
+	<ThemeImage
+		light={searchLight}
+		dark={searchDark}
+		alt="Find file in the Lodestore restore page: a search for a handbook across all hosts lists three files with their versions and the snapshots that contain them."
+		widths={[720, 1080, 1600]}
+		sizes="(min-width: 768px) 68ch, 92vw"
+	/>
+	<figcaption>Find file searches every snapshot that is still kept, here for one file across three demo hosts.</figcaption>
+</figure>
+
 ## What a stolen host can and cannot do
 
 On S3-compatible storage the key an agent holds has no delete rights. Deletion and cleanup run only on the server, and they work with S3 Object Lock and versioning. Cleanup is two-phase: mark, wait longer than the longest backup, check again, then delete, with a dry run always available.
 
-Two limits are worth knowing before you rely on this. Overwrite is refused only where the storage enforces `If-None-Match`; MinIO does not, so use bucket versioning or Object Lock there. And with a local or network folder the agent can delete and overwrite, so prefer object storage for data that a compromised host must not destroy. The details are in the [threat model](/docs/security/threat-model/#agent-credentials).
+Two limits are worth knowing before you rely on this. Overwrite is refused only where the storage enforces `If-None-Match`; MinIO does not, so use bucket versioning or Object Lock there. And with a local or network folder the agent can delete and overwrite, so prefer object storage for data that a compromised host must not destroy. The details are in the [threat model](/docs/security/threat-model/#agent-credentials), and the next post, [An agent that can write but not read or delete](/blog/write-only-agents/), walks through the key model behind it.
 
 ## What 0.1 covers, and what is next
 

@@ -1,0 +1,44 @@
+---
+import type { ImageMetadata } from 'astro';
+
+interface Props {
+	light: string;
+	dark: string;
+	posterLight: ImageMetadata;
+	posterDark: ImageMetadata;
+	label: string;
+	caption?: string;
+}
+
+const { light, dark, posterLight, posterDark, label, caption } = Astro.props;
+---
+
+<figure class="theme-video">
+	<video
+		class="only-light"
+		muted
+		loop
+		playsinline
+		preload="none"
+		aria-label={label}
+		poster={posterLight.src}
+		width={posterLight.width}
+		height={posterLight.height}
+		data-src={light}></video>
+	<video
+		class="only-dark"
+		muted
+		loop
+		playsinline
+		preload="none"
+		aria-label={label}
+		poster={posterDark.src}
+		width={posterDark.width}
+		height={posterDark.height}
+		data-src={dark}></video>
+	{caption && <figcaption>{caption}</figcaption>}
+</figure>
+
+<script>
+	import '../../scripts/theme-video.ts';
+</script>
