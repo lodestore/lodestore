@@ -1,5 +1,6 @@
 //! The second look before anything is deleted.
 
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use super::mark::{LiveSet, MarkOutcome, ShardSet, load_shards, mark};
@@ -62,13 +63,13 @@ async fn open_at<S: BlobStore>(
     pack_keys: &mut HashMap<BlobId, Key32>,
 ) -> Result<()> {
     let name = pack_object_key(&loc.pack_id);
-    if !pack_keys.contains_key(&loc.pack_id) {
-        let prefix = store.get_range(&name, 0..PACK_PREFIX_LEN as u64).await?;
-        let key = parse_prefix(&prefix)?.open_key(keys.hpke_private_key(), keys.repo_id())?;
-        pack_keys.insert(loc.pack_id, key);
-    }
-    let Some(pack_key) = pack_keys.get(&loc.pack_id) else {
-        return Err(Error::Crypto);
+    let pack_key = match pack_keys.entry(loc.pack_id) {
+        Entry::Occupied(known) => known.into_mut(),
+        Entry::Vacant(slot) => {
+            let prefix = store.get_range(&name, 0..PACK_PREFIX_LEN as u64).await?;
+            let key = parse_prefix(&prefix)?.open_key(keys.hpke_private_key(), keys.repo_id())?;
+            slot.insert(key)
+        }
     };
     let start = u64::from(loc.offset);
     let frame = store
