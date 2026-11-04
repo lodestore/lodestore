@@ -409,8 +409,16 @@ async fn connect_existing_repository() {
 
         let after = listing(&store).await;
         assert!(before.is_subset(&after), "no existing object may disappear");
-        assert_eq!(after.len(), before.len() + 1);
+        assert_eq!(after.len(), before.len() + 2);
         assert_eq!(key_slots(&after), 3);
+        assert_eq!(
+            after
+                .difference(&before)
+                .filter(|key| key.starts_with("locks/attest-"))
+                .count(),
+            1,
+            "connecting writes one upgrade marker"
+        );
 
         let id = connected["id"].as_str().unwrap();
         let detail = body(http.get(&format!("/api/v1/repositories/{id}")).await).await;
