@@ -13,7 +13,9 @@ use lodestore_format::crypto::{BlobId, Entropy};
 use lodestore_format::gc::compact::{CompactPlan, Compacted, compact_plan, write_compacted};
 use lodestore_format::gc::mark::load_shards;
 use lodestore_format::gc::sweep::sweep_shards;
+use lodestore_format::index::{index_object_key, rebuild_index};
 use lodestore_format::pb;
+use lodestore_format::store::BlobDelete;
 use prost::Message;
 
 async fn shard_records(fx: &Fx, ids: &[BlobId]) -> Vec<pb::PackRecord> {
@@ -183,4 +185,57 @@ async fn gc_trust_compaction_keeps_unverified_records_apart() {
         pack_ids(&fx, &[l]).await
     );
     assert_eq!(pack_ids(&fx, &done.other).await, pack_ids(&fx, &[p]).await);
+}
+
+async fn lose_index(fx: &Fx, shards: &[BlobId]) {
+    for id in shards {
+        fx.store.delete(&index_object_key(id)).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn gc_trust_rebuild_reindexes_pack_named_only_by_planted_shard() {
+    let fx = Fx::new().await;
+    fx.backup("a", &[("a", 1, 300 << 10)]).await;
+    fx.backup("b", &[("b", 2, 200 << 10)]).await;
+    let real = real_shards(&fx).await;
+    attest(&fx, &real).await;
+    let keys = attacker_keys(&fx.repo);
+    let forged: Vec<_> = open_all_shards(&fx.store, &keys)
+        .await
+        .iter()
+        .flat_map(|(_, s)| s.packs.iter().map(forge_offsets))
+        .collect();
+    plant_shard_where(&fx.store, &keys, forged, Vec::new(), |_| true).await;
+    lose_index(&fx, &real).await;
+
+    let report = rebuild_index(&fx.store, fx.repo.read_keys(), &|_, _| {})
+        .await
+        .unwrap();
+    assert!(report.packs_indexed > 0);
+    assert_eq!(report.packs_indexed, report.packs_scanned);
+    fx.assert_all_restore().await;
+}
+
+#[tokio::test]
+async fn gc_trust_rebuild_does_not_attest() {
+    let fx = Fx::new().await;
+    fx.backup("a", &[("a", 1, 300 << 10)]).await;
+    let real = real_shards(&fx).await;
+    attest(&fx, &real).await;
+    lose_index(&fx, &real).await;
+
+    let report = rebuild_index(&fx.store, fx.repo.read_keys(), &|_, _| {})
+        .await
+        .unwrap();
+    assert!(report.shards_written > 0);
+    let attested = read_attestations(&fx.store, fx.repo.read_keys())
+        .await
+        .unwrap()
+        .shards;
+    let rebuilt = real_shards(&fx).await;
+    assert!(!rebuilt.is_empty());
+    for id in rebuilt {
+        assert!(!attested.contains(&id));
+    }
 }

@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 use prost::Message;
 
+use crate::attest::read_attestations;
 use crate::crypto::{
     BlobId, Entropy, HPKE_ENC_LEN, RepoId, SEALED_KEY_LEN, open_index_shard, seal_index_shard,
 };
@@ -472,8 +473,10 @@ pub struct RebuildReport {
     pub shards_skipped: Vec<(String, String)>,
 }
 
-/// Re-creates index entries for every pack that no shard mentions, reading
-/// only each pack's prefix, trailer and header. Packs are not hashed: a pack
+/// Re-creates index entries for every pack that no attested shard mentions,
+/// reading only each pack's prefix, trailer and header. A shard nobody vouches
+/// for cannot hide a pack from the rebuild, and the shards written here are not
+/// attested: the header of a pack is written by whoever uploaded the pack. Packs are not hashed: a pack
 /// whose bytes differ from its name is only noticed when a blob of it is read.
 /// Packs a running cleanup marked for deletion are left alone: indexing one
 /// of them again would make a shard name a pack that is about to go.
@@ -492,8 +495,26 @@ pub async fn rebuild_index<S: BlobStore>(
         }));
     }
     let doomed = locks.candidate_packs();
+    let attested = read_attestations(store, keys).await?.shards;
     let mut index = Index::default();
-    index.load_all(store, keys.k_idx(), keys.repo_id()).await?;
+    for entry in store.list(INDEX_PREFIX).await? {
+        let Some(shard_id) = entry
+            .key
+            .strip_prefix(INDEX_PREFIX)
+            .and_then(parse_hex32)
+            .filter(|id| attested.contains(id))
+        else {
+            continue;
+        };
+        match index
+            .load_one(store, keys.k_idx(), keys.repo_id(), shard_id)
+            .await
+        {
+            Ok(_) => {}
+            Err(e @ Error::Corrupt { .. }) => index.skipped.push((entry.key, e.to_string())),
+            Err(e) => return Err(e),
+        }
+    }
 
     let mut todo = Vec::new();
     for entry in store.list(PACKS_PREFIX).await? {
