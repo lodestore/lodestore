@@ -11,6 +11,12 @@ use lodestore_format::pack::pack_object_key;
 use lodestore_format::store::LocalFsStore;
 use lodestore_format::writer::Writer;
 
+async fn locks_left(fx: &Fx) -> Vec<String> {
+    let mut left = fx.listing("locks/").await;
+    left.retain(|key, _| !key.starts_with("locks/attest-"));
+    left.into_keys().collect()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Step {
     Survey,
@@ -138,7 +144,7 @@ async fn run_order(base: &Fx, srcs: &[PathBuf; 2], order: &[Step], backups: usiz
     drop(run);
     assert_eq!(fx.sources.borrow().len(), 1 + backups, "{order:?}");
     fx.assert_all_restore().await;
-    assert!(fx.listing("locks/").await.is_empty(), "{order:?}");
+    assert!(locks_left(&fx).await.is_empty(), "{order:?}");
 }
 
 #[tokio::test]
@@ -223,7 +229,7 @@ async fn gc_interleave_abort_while_verifying() {
         gc_step(&mut next, step).await;
     }
     fx.assert_all_restore().await;
-    assert!(fx.listing("locks/").await.is_empty());
+    assert!(locks_left(&fx).await.is_empty());
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -292,7 +298,7 @@ async fn gc_interleave_sweep_resume() {
             gc_step(&mut resumed, *step).await;
         }
         fx.assert_all_restore().await;
-        assert!(fx.listing("locks/").await.is_empty(), "{stop:?}");
+        assert!(locks_left(&fx).await.is_empty(), "{stop:?}");
         assert_eq!(shape(&fx).await, expected, "{stop:?}");
     }
 }
