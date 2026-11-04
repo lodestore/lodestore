@@ -3,6 +3,8 @@
 //! only a cache, so losing the database never makes the server trust shards
 //! planted after the first upgrade.
 
+pub mod verify;
+
 use std::collections::HashSet;
 use std::time::Duration;
 
@@ -111,10 +113,26 @@ pub async fn tick_once(state: &AppState) -> anyhow::Result<()> {
             tracing::warn!(repository = %id, error = %format!("{error:#}"), "attestation upgrade failed");
         }
     }
+    let pending = sqlx::query(
+        "SELECT id FROM jobs WHERE verify_state = 'pending' ORDER BY finished_at LIMIT 32",
+    )
+    .fetch_all(&state.db.pool)
+    .await?;
+    for row in pending {
+        verify::verify_then_retain(state.clone(), row.try_get("id")?).await;
+    }
+    Ok(())
+}
+
+pub async fn resume_interrupted(state: &AppState) -> anyhow::Result<()> {
+    sqlx::query("UPDATE jobs SET verify_state = 'pending' WHERE verify_state = 'running'")
+        .execute(&state.db.pool)
+        .await?;
     Ok(())
 }
 
 pub async fn run(state: AppState, stop: CancellationToken) -> anyhow::Result<()> {
+    resume_interrupted(&state).await?;
     let mut interval =
         tokio::time::interval(Duration::from_secs(state.config.schedule_tick_secs.max(1)));
     loop {

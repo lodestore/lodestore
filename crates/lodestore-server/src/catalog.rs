@@ -48,7 +48,7 @@ const READ_CONCURRENCY: usize = 8;
 pub(crate) const SNAPSHOT_COLUMNS: &str = "id, time_ms, hostname, paths_json, tags_json, \
      policy_name, stdin_name, job_id, parent_id, incomplete, errors_total, warnings_total, \
      stats_json, received_at, suspicious, suspicious_by, suspicious_reason, suspicious_at, \
-     anomaly_json, CAST(CASE WHEN policy_name IS NOT NULL AND NOT EXISTS \
+     anomaly_json, unverified_reason, CAST(CASE WHEN policy_name IS NOT NULL AND NOT EXISTS \
      (SELECT 1 FROM policies p WHERE p.name = snapshots.policy_name) THEN 1 ELSE 0 END AS BIGINT) \
      AS policy_deleted";
 
@@ -975,6 +975,8 @@ pub struct SnapshotItem {
     pub stats: SnapshotStatsDto,
     pub received_at: i64,
     pub suspicious: Option<SuspicionDto>,
+    /// Why the server marked this snapshot unverified: its data failed the server's check after the backup, or the check could not complete within an hour. Null when the snapshot is not marked.
+    pub unverified_reason: Option<String>,
     pub policy_deleted: bool,
 }
 
@@ -1051,6 +1053,7 @@ pub(crate) fn item_from_row(row: &sqlx::any::AnyRow) -> Result<SnapshotItem, Api
         stats: serde_json::from_str(&row.try_get::<String, _>("stats_json")?).map_err(parse)?,
         received_at: row.try_get("received_at")?,
         suspicious: suspicion_from_row(row)?,
+        unverified_reason: row.try_get("unverified_reason")?,
         policy_deleted: row.try_get::<i64, _>("policy_deleted")? != 0,
     })
 }
