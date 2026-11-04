@@ -2,6 +2,14 @@
 
 All notable changes to Lodestore are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- The documentation moved to <https://lodestore.dev/docs/>. The old addresses under `https://lodestore.github.io/lodestore/` redirect to the new pages.
+- The project site with comparisons and a blog is at <https://lodestore.dev>.
+- The `lode` message about access to `locks/` links to the new address of the cleanup guide.
+
 ## [0.1.0] - 2026-11-02
 
 First release.

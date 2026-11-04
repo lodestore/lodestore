@@ -64,31 +64,33 @@ Then:
    lode restore latest --target ./restored
    ```
 
-The quickstart uses plain HTTP so that it works on any network; put the server behind HTTPS for anything beyond a trial. Full walkthrough with the storage keys: <https://lodestore.github.io/lodestore/quickstart/>
+The quickstart uses plain HTTP so that it works on any network; put the server behind HTTPS for anything beyond a trial. Full walkthrough with the storage keys: <https://lodestore.dev/docs/quickstart/>
 
 ## Installation
 
-- **Docker:** the main way to run the server, with volumes, an unlock key and a reverse proxy. [Running the server with Docker](https://lodestore.github.io/lodestore/install/docker/)
-- **Binary:** static Linux binaries for x86_64 and arm64 with minisign signatures, run under systemd. [Installing from release binaries](https://lodestore.github.io/lodestore/install/binary/)
-- **Helm:** the chart is published next to the image in `ghcr.io`. [Deploying with Helm](https://lodestore.github.io/lodestore/install/helm/)
+- **Docker:** the main way to run the server, with volumes, an unlock key and a reverse proxy. [Running the server with Docker](https://lodestore.dev/docs/install/docker/)
+- **Binary:** static Linux binaries for x86_64 and arm64 with minisign signatures, run under systemd. [Installing from release binaries](https://lodestore.dev/docs/install/binary/)
+- **Helm:** the chart is published next to the image in `ghcr.io`. [Deploying with Helm](https://lodestore.dev/docs/install/helm/)
 
 ## Storage
 
-Repositories live on S3-compatible object storage or in a local or network folder. On S3-compatible storage the agent key has no delete rights and Object Lock is available; in a folder the agent can delete and overwrite, so prefer object storage for data that a compromised host must not be able to destroy. See [Agent credentials](https://lodestore.github.io/lodestore/security/threat-model/#agent-credentials).
+Repositories live on S3-compatible object storage or in a local or network folder. On S3-compatible storage the agent key has no delete rights and Object Lock is available; in a folder the agent can delete and overwrite, so prefer object storage for data that a compromised host must not be able to destroy. See [Agent credentials](https://lodestore.dev/docs/security/threat-model/#agent-credentials).
 
 ## Version 0.1 and roadmap
 
-Version 0.1 backs up files and directories on Linux (x86_64 and arm64). Databases are covered by [dumping them in a pre-backup hook](https://lodestore.github.io/lodestore/recipes/database-backup-hook/).
+Version 0.1 backs up files and directories on Linux (x86_64 and arm64). Databases are covered by [dumping them in a pre-backup hook](https://lodestore.dev/docs/recipes/database-backup-hook/).
 
 Planned: Proxmox and Kubernetes backups, and more storage backends.
 
 ## Documentation
 
-- [Quickstart](https://lodestore.github.io/lodestore/quickstart/)
-- [Restore without the server](https://lodestore.github.io/lodestore/recipes/restore-without-server/)
-- [Policies and retention](https://lodestore.github.io/lodestore/guides/policies/), [alerts](https://lodestore.github.io/lodestore/guides/alerts/), [cleanup](https://lodestore.github.io/lodestore/guides/gc/)
-- [Threat model](https://lodestore.github.io/lodestore/security/threat-model/) and [how we test data safety](https://lodestore.github.io/lodestore/security/how-we-test/)
-- Comparisons: [restic](https://lodestore.github.io/lodestore/compare/restic/), [Bareos](https://lodestore.github.io/lodestore/compare/bareos/), [Plakar](https://lodestore.github.io/lodestore/compare/plakar/)
+Everything below lives on the project site, <https://lodestore.dev>, along with the [blog](https://lodestore.dev/blog/).
+
+- [Quickstart](https://lodestore.dev/docs/quickstart/)
+- [Restore without the server](https://lodestore.dev/docs/recipes/restore-without-server/)
+- [Policies and retention](https://lodestore.dev/docs/guides/policies/), [alerts](https://lodestore.dev/docs/guides/alerts/), [cleanup](https://lodestore.dev/docs/guides/gc/)
+- [Threat model](https://lodestore.dev/docs/security/threat-model/) and [how we test data safety](https://lodestore.dev/docs/security/how-we-test/)
+- Comparisons: [restic](https://lodestore.dev/compare/restic/), [Bareos](https://lodestore.dev/compare/bareos/), [Plakar](https://lodestore.dev/compare/plakar/)
 
 ## Contributing and security
 

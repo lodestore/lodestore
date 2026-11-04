@@ -78,4 +78,4 @@ Apache-2.0 crates must never depend on `lodestore-server` or any other AGPL crat
 
 ## Security-sensitive code
 
-Code that touches the repository format, cryptography, keys, deletion and cleanup, restore, agent privileges or authentication gets a closer review, and may take longer to merge. The agent must never gain the ability to delete data: deletion and cleanup are server-only, and must stay compatible with S3 Object Lock. The [threat model](https://lodestore.github.io/lodestore/security/threat-model/) describes the boundaries.
+Code that touches the repository format, cryptography, keys, deletion and cleanup, restore, agent privileges or authentication gets a closer review, and may take longer to merge. The agent must never gain the ability to delete data: deletion and cleanup are server-only, and must stay compatible with S3 Object Lock. The [threat model](https://lodestore.dev/docs/security/threat-model/) describes the boundaries.
