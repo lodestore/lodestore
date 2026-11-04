@@ -21,6 +21,7 @@ snapshots/<hex>              sealed snapshot envelopes
 locks/gc-<32 hex>            GC manifest: packs marked for deletion
 locks/writer-<32 hex>        marker of a running direct writer
 locks/writer-<32 hex>.done   empty; the writer has finished
+locks/attest-<32 hex>        server attestation of index shards (ADR 0005)
 ```
 
 Every object except `config` and those under `locks/` is named by the lowercase hex **BLAKE3 of its exact bytes** (64 characters). A pack lives under a two-character fan-out directory taken from the first two characters of its name. Because names derive from content, a second write of the same object is a no-op, and "already exists" on a create-only write means the identical object is already there.
@@ -40,6 +41,7 @@ The objects under `locks/` coordinate garbage collection with writers. Their nam
 
 - `locks/gc-<id>` is a protobuf `GcManifest` (`version`, `gc_id`, `published`, `candidate_packs` sorted) sealed with XChaCha20-Poly1305 under `k_idx`, additional data `repo_id || "gc-manifest"`. The server publishes it before it deletes anything. A writer reads every manifest when it opens the repository and ignores the records of the listed packs, so it uploads a blob again unless a second location outside the candidates holds it. A manifest that does not authenticate, has an unknown version or whose `gc_id` differs from its name stops the writer.
 - `locks/writer-<id>` is a protobuf `WriterMarker` (`version`, `writer_id`, `hostname`, `started`) sealed the same way with additional data `repo_id || "writer-marker"`. A direct writer creates it before it uploads and creates the empty `locks/writer-<id>.done` when it finishes. A marker without `.done` blocks deletion; one that does not open still counts as open.
+- `locks/attest-<id>` is a server attestation: `0x01 || keyed BLAKE3 MAC || protobuf Attestation`, authenticated under the server key, which writer keys do not contain. The 0.1 readers open only `gc-` and `writer-` objects and skip it. The frame is specified in [ADR 0005](/docs/adr/0005-server-attestations/).
 
 All three are create-only like every other object, and the write path never deletes them.
 
@@ -113,6 +115,8 @@ A file node lists at most (16 MiB - 2 MiB) / 34 data blob ids, about 430 thousan
 ### Frozen fixtures
 
 `crates/lodestore-format/tests/fixtures/v1` holds a repository written by this format (two snapshots, password and recovery key slots, a writer-keys file) and the frozen outputs of its primitives (`vectors.json`). Tests read, restore and re-encode them on every run, so a change that old repositories would not survive fails the build. The directory is append-only: CI rejects a change that modifies, deletes or renames a file in it. A change to the format needs `format_version` 2 and a new `fixtures/v2` next to this one.
+
+`attest-vectors.json` in the same directory fixes the server MAC key, the attestation frame and the sealed provenance bytes for fixed inputs; the format of `locks/attest-*` objects is in [ADR 0005](/docs/adr/0005-server-attestations/).
 
 ## Consequences
 
