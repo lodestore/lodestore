@@ -1,14 +1,17 @@
 //! Repack, verify, compact and sweep over a real repository in a folder.
 
+mod adv_support;
 mod gc_support;
 
 use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::ops::Range;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicIsize, Ordering};
 
 use bytes::Bytes;
 
+use adv_support::{attacker_keys, forge_offsets, open_all_shards, plant_shard, put_junk_pack};
 use gc_support::*;
 use lodestore_format::Error;
 use lodestore_format::crypto::{BLOB_TYPE_DATA, BlobId, Entropy, HPKE_ENC_LEN, SEALED_KEY_LEN};
@@ -16,6 +19,7 @@ use lodestore_format::gc::candidates;
 use lodestore_format::gc::compact::{check_reachable, compact_plan, write_compacted};
 use lodestore_format::gc::mark::load_shards;
 use lodestore_format::gc::sweep::confirm_unreferenced;
+use lodestore_format::gc::verify::verify;
 use lodestore_format::index::{index_object_key, seal_shard};
 use lodestore_format::pack::{PACK_PREFIX_LEN, pack_object_key, parse_entries};
 use lodestore_format::pb;
@@ -397,4 +401,167 @@ async fn gc_compaction_cut_short_hides_nothing() {
         assert!(index.get(&blob, BLOB_TYPE_DATA).is_some());
     }
     fx.assert_all_restore().await;
+}
+
+/// Records every ranged read.
+struct RangeLog<'a> {
+    inner: &'a LocalFsStore,
+    ranges: Mutex<Vec<(String, Range<u64>)>>,
+}
+
+impl BlobStore for RangeLog<'_> {
+    async fn put_if_absent(&self, key: &str, data: Bytes) -> Result<(), BlobError> {
+        self.inner.put_if_absent(key, data).await
+    }
+
+    async fn get(&self, key: &str) -> Result<Bytes, BlobError> {
+        self.inner.get(key).await
+    }
+
+    async fn get_range(&self, key: &str, range: Range<u64>) -> Result<Bytes, BlobError> {
+        self.ranges
+            .lock()
+            .unwrap()
+            .push((key.to_owned(), range.clone()));
+        self.inner.get_range(key, range).await
+    }
+
+    async fn list(&self, prefix: &str) -> Result<Vec<ListEntry>, BlobError> {
+        self.inner.list(prefix).await
+    }
+}
+
+/// A junk pack of the size of `pack` and a shard that gives it the entries
+/// of `pack` with every frame one byte off.
+async fn plant_forged_twin(fx: &Fx, pack: &BlobId) -> BlobId {
+    let keys = attacker_keys(&fx.repo);
+    let size = fx.packs().await[&pack_object_key(pack)];
+    let twin = put_junk_pack(&fx.store, size as usize).await;
+    let mut records = Vec::new();
+    for (_, shard) in open_all_shards(&fx.store, &keys).await {
+        for record in shard.packs {
+            if record.pack_id.as_slice() == pack {
+                let mut forged = forge_offsets(&record);
+                forged.pack_id = twin.to_vec();
+                records.push(forged);
+            }
+        }
+    }
+    assert!(!records.is_empty());
+    plant_shard(&fx.store, &keys, records, Vec::new()).await;
+    twin
+}
+
+#[tokio::test]
+async fn verify_resurrects_when_survivor_does_not_open() {
+    let fx = Fx::new().await;
+    fx.backup("a", &[("a", 1, 200 << 10)]).await;
+    fx.backup("b", &[("b", 2, 200 << 10)]).await;
+    let survey = fx.survey(0).await;
+    let (id, blob_type) = survey
+        .live
+        .iter()
+        .find(|(_, t)| *t == BLOB_TYPE_DATA)
+        .unwrap();
+    let pack = survey.index.get(id, *blob_type).unwrap().pack_id;
+    plant_forged_twin(&fx, &pack).await;
+
+    let candidates = HashSet::from([pack]);
+    let verified = verify(
+        &fx.store,
+        fx.repo.read_keys(),
+        fx.repo.config(),
+        &candidates,
+        &|_, _| {},
+    )
+    .await
+    .unwrap();
+    assert_eq!(verified.resurrected, vec![pack]);
+    assert!(verified.candidates.is_empty());
+}
+
+#[tokio::test]
+async fn verify_deletes_when_survivor_opens() {
+    let fx = Fx::new().await;
+    let a = fx.backup("a", &[SHARED, ("only-a", 2, 200 << 10)]).await;
+    fx.backup("b", &[SHARED, ("only-b", 3, 200 << 10)]).await;
+    fx.forget(&a.snapshot_id).await;
+    let mut cycle = Cycle::new(&fx);
+    cycle.survey(100).await;
+    cycle.repack_publish().await;
+    assert!(!cycle.repack.replaced.is_empty());
+
+    let verified = verify(
+        &fx.store,
+        fx.repo.read_keys(),
+        fx.repo.config(),
+        &cycle.published,
+        &|_, _| {},
+    )
+    .await
+    .unwrap();
+    assert!(verified.resurrected.is_empty());
+    assert_eq!(verified.candidates, cycle.published);
+}
+
+#[tokio::test]
+async fn verify_checks_each_blob_once() {
+    let fx = Fx::new().await;
+    let a = fx.backup("a", &[SHARED, ("only-a", 2, 200 << 10)]).await;
+    fx.backup("b", &[SHARED, ("only-b", 3, 200 << 10)]).await;
+    fx.forget(&a.snapshot_id).await;
+    let mut cycle = Cycle::new(&fx);
+    cycle.survey(100).await;
+    cycle.repack_publish().await;
+    let data_pack = cycle
+        .survey
+        .as_ref()
+        .unwrap()
+        .plan
+        .repack
+        .iter()
+        .find(|p| p.blob_type == BLOB_TYPE_DATA)
+        .map(|p| p.pack_id)
+        .unwrap();
+    let twin = plant_forged_twin(&fx, &data_pack).await;
+    let mut candidates = cycle.published.clone();
+    candidates.insert(twin);
+
+    let log = RangeLog {
+        inner: &fx.store,
+        ranges: Mutex::new(Vec::new()),
+    };
+    let verified = verify(
+        &log,
+        fx.repo.read_keys(),
+        fx.repo.config(),
+        &candidates,
+        &|_, _| {},
+    )
+    .await
+    .unwrap();
+    assert!(verified.resurrected.is_empty());
+
+    let index = load_shards(&fx.store, fx.repo.read_keys())
+        .await
+        .unwrap()
+        .index(&HashSet::new())
+        .unwrap();
+    let ranges = log.ranges.into_inner().unwrap();
+    let mut checked = 0;
+    for (id, blob_type) in verified.live.iter().filter(|(_, t)| *t == BLOB_TYPE_DATA) {
+        for loc in index.locations(id, *blob_type) {
+            if !cycle.repack.new_packs.contains(&loc.pack_id) {
+                continue;
+            }
+            let start = u64::from(loc.offset);
+            let want = (
+                pack_object_key(&loc.pack_id),
+                start..start + u64::from(loc.enc_len),
+            );
+            assert_eq!(ranges.iter().filter(|r| **r == want).count(), 1);
+            checked += 1;
+        }
+    }
+    assert!(checked > 0);
 }
