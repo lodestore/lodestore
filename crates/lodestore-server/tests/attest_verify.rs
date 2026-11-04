@@ -1,0 +1,456 @@
+#[path = "../../lodestore-format/tests/adv_support/mod.rs"]
+mod adv_support;
+mod common;
+
+use std::collections::HashSet;
+use std::path::PathBuf;
+
+use adv_support::{attacker_keys, plant_blobs};
+use common::{AgentEnv, TestServer, WAIT, backends, wait_until};
+use lodestore_format::attest::{ATTEST_PREFIX, put_attestation, read_attestations};
+use lodestore_format::chunker::blob_id;
+use lodestore_format::crypto::{BLOB_TYPE_DATA, BlobId, Entropy};
+use lodestore_format::index::{hex32, parse_hex32};
+use lodestore_format::repo::Repository;
+use lodestore_format::store::LocalFsStore;
+use lodestore_format::verify_snapshot::snapshot_index_refs;
+use lodestore_format::writer::{BackupOptions, Writer};
+use lodestore_server::alerts::inputs::gather;
+use lodestore_server::catalog::open_repository;
+use lodestore_server::catalog::retention::after_backup;
+use lodestore_server::db::now_ms;
+use lodestore_server::maintenance::attest::verify::verify_then_retain;
+use lodestore_server::maintenance::attest::{
+    ensure_upgraded, record_verified, resume_interrupted, tick_once,
+};
+use serde_json::Value;
+use sqlx::Row;
+
+const PASSWORD: &[u8] = b"test-password";
+const HOST: &str = "h1";
+const POLICY: &str = "daily";
+
+struct Env {
+    ts: TestServer,
+    repo: String,
+    store: LocalFsStore,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Plant {
+    None,
+    AfterUpgrade,
+    BeforeUpgrade,
+}
+
+impl Env {
+    async fn new(backend: &common::Backend) -> Env {
+        let ts = TestServer::start_with(backend, |c| c.schedule_tick_secs = 0).await;
+        let repo = ts.create_local_repository("main").await;
+        let store = LocalFsStore::new(ts.local_repo_root("main"));
+        let env = Env { ts, repo, store };
+        env.host().await;
+        env.policy("  retention:\n    keepLast: 1\n").await;
+        env
+    }
+
+    fn pool(&self) -> &sqlx::AnyPool {
+        &self.ts.state().db.pool
+    }
+
+    async fn host(&self) {
+        sqlx::query(
+            "INSERT INTO agents (id, hostname, repository_id, labels_json, os, arch, version, \
+             status, enrolled_at, cert_serial, cert_issued_at, cert_not_after, last_seen_at) \
+             VALUES ($1, $1, $2, '[]', 'linux', 'x86_64', '0.1.0', 'active', $3, 'serial', $3, $4, $3)",
+        )
+        .bind(HOST)
+        .bind(&self.repo)
+        .bind(now_ms() - 3_600_000)
+        .bind(now_ms() + 86_400_000_000)
+        .execute(self.pool())
+        .await
+        .unwrap();
+    }
+
+    async fn policy(&self, extra: &str) {
+        let yaml = format!(
+            "apiVersion: lodestore.io/v1alpha1\nkind: BackupPolicy\nmetadata:\n  name: {POLICY}\n\
+             spec:\n  repository: main\n  selector:\n    hosts: [{HOST}]\n  paths: [/etc]\n{extra}"
+        );
+        let policy = lodestore_policy::parse_yaml(&yaml).unwrap();
+        sqlx::query(
+            "INSERT INTO policies (id, name, repository_id, yaml, spec_json, revision, \
+             created_at, updated_at) VALUES ($1, $1, $2, $3, $4, 1, $5, $5)",
+        )
+        .bind(POLICY)
+        .bind(&self.repo)
+        .bind(&yaml)
+        .bind(serde_json::to_string(&policy).unwrap())
+        .bind(now_ms() - 86_400_000)
+        .execute(self.pool())
+        .await
+        .unwrap();
+    }
+
+    async fn server_keys(&self) -> lodestore_format::keys::ReadKeys {
+        open_repository(self.ts.state(), &self.repo)
+            .await
+            .unwrap()
+            .keys
+    }
+
+    async fn upgrade(&self) {
+        ensure_upgraded(self.ts.state(), &self.repo).await.unwrap();
+    }
+
+    async fn writer_keys(&self) -> (Repository, lodestore_format::keys::WriteKeys) {
+        let repo = Repository::open(&self.store, PASSWORD).await.unwrap();
+        let keys = repo.read_keys().write_keys(repo.config_hash());
+        (repo, keys)
+    }
+
+    fn source(&self, label: &str) -> (PathBuf, Vec<u8>) {
+        let dir = self.ts.dir.path().join(format!("src-{label}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let content = format!("content of {label}, unique to this test").into_bytes();
+        std::fs::write(dir.join("file.txt"), &content).unwrap();
+        (dir, content)
+    }
+
+    async fn snapshot(&self, label: &str, plant: Plant) -> (String, Option<BlobId>) {
+        let (dir, content) = self.source(label);
+        let (repo, keys) = self.writer_keys().await;
+        let mut planted = None;
+        if plant != Plant::None {
+            let id = blob_id(repo.read_keys().k_id(), &content);
+            planted = Some(
+                plant_blobs(&self.store, &attacker_keys(&repo), &[(id, BLOB_TYPE_DATA)]).await,
+            );
+        }
+        if plant == Plant::BeforeUpgrade {
+            self.upgrade().await;
+        }
+        let mut writer = if plant == Plant::BeforeUpgrade {
+            Writer::connect_attested(&self.store, keys, &HashSet::new()).await
+        } else {
+            Writer::connect(&self.store, keys).await
+        }
+        .unwrap();
+        let out = writer
+            .backup(&[dir], BackupOptions::default(), &|_| {})
+            .await
+            .expect("backup");
+        let refs = snapshot_index_refs(&self.store, repo.read_keys(), &out.snapshot_id)
+            .await
+            .unwrap();
+        if let Some(planted) = planted {
+            assert!(refs.contains(&planted), "the writer did not deduplicate");
+        }
+        (hex32(&out.snapshot_id), planted)
+    }
+
+    async fn job(&self, id: &str, snapshot_id: &str, verify_state: &str) {
+        sqlx::query(
+            "INSERT INTO jobs (id, host_id, policy_name, source, state, spec, queued_at, \
+             finished_at, snapshot_id, verify_state) \
+             VALUES ($1, $2, $3, 'schedule', 'succeeded', $4, $5, $5, $6, $7)",
+        )
+        .bind(id)
+        .bind(HOST)
+        .bind(POLICY)
+        .bind(Vec::<u8>::new())
+        .bind(now_ms())
+        .bind(snapshot_id)
+        .bind(verify_state)
+        .execute(self.pool())
+        .await
+        .unwrap();
+    }
+
+    async fn column(&self, job: &str, column: &str) -> Option<String> {
+        sqlx::query(
+            "SELECT state, verify_state, error_code, error_message, retention_json \
+             FROM jobs WHERE id = $1",
+        )
+        .bind(job)
+        .fetch_one(self.pool())
+        .await
+        .unwrap()
+        .try_get(column)
+        .unwrap()
+    }
+
+    async fn events(&self, job: &str, kind: &str) -> Vec<String> {
+        sqlx::query("SELECT message FROM job_events WHERE job_id = $1 AND kind = $2")
+            .bind(job)
+            .bind(kind)
+            .fetch_all(self.pool())
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.try_get("message").unwrap())
+            .collect()
+    }
+
+    async fn snapshot_json(&self, id: &str) -> Value {
+        let response = self
+            .ts
+            .api()
+            .await
+            .get(&format!("/api/v1/snapshots/{id}"))
+            .await;
+        assert_eq!(response.status(), 200);
+        response.json().await.unwrap()
+    }
+
+    async fn attested(&self) -> HashSet<BlobId> {
+        read_attestations(&self.store, &self.server_keys().await)
+            .await
+            .unwrap()
+            .shards
+    }
+
+    async fn verify(&self, job: &str) {
+        verify_then_retain(self.ts.state().clone(), job.to_string()).await;
+    }
+
+    async fn assert_failed(&self, job: &str, snapshot_id: &str) {
+        assert_eq!(self.column(job, "state").await.unwrap(), "failed");
+        assert_eq!(
+            self.column(job, "error_code").await.unwrap(),
+            "verification_failed"
+        );
+        assert_eq!(self.column(job, "verify_state").await.unwrap(), "failed");
+        let events = self.events(job, "verification_failed").await;
+        assert_eq!(events.len(), 1);
+        let snapshot = self.snapshot_json(snapshot_id).await;
+        assert!(
+            snapshot["unverified_reason"]
+                .as_str()
+                .is_some_and(|r| !r.is_empty()),
+            "{snapshot}"
+        );
+        assert_eq!(snapshot["job_id"], job);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn attest_verify_attests_finished_backup() {
+    for backend in backends() {
+        let env = AgentEnv::start(&backend).await;
+        ensure_upgraded(env.ts().state(), &env.repo).await.unwrap();
+        let dir = env.work.path().join("data");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), b"alpha alpha alpha").unwrap();
+        let snapshot_id = env.backup(&[&dir]).await;
+
+        let pool = &env.ts().state().db.pool;
+        let verified = wait_until(WAIT, || async {
+            sqlx::query("SELECT verify_state FROM jobs WHERE snapshot_id = $1")
+                .bind(&snapshot_id)
+                .fetch_one(pool)
+                .await
+                .unwrap()
+                .try_get::<Option<String>, _>("verify_state")
+                .unwrap()
+                .as_deref()
+                == Some("verified")
+        })
+        .await;
+        assert!(verified, "{}", backend.name());
+
+        let source = open_repository(env.ts().state(), &env.repo).await.unwrap();
+        let id: BlobId = parse_hex32(&snapshot_id).unwrap();
+        let refs = snapshot_index_refs(&source.store, &source.keys, &id)
+            .await
+            .unwrap();
+        let attested = read_attestations(&source.store, &source.keys)
+            .await
+            .unwrap()
+            .shards;
+        assert!(!refs.is_empty());
+        assert!(refs.iter().all(|r| attested.contains(r)));
+
+        let job = sqlx::query("SELECT state FROM jobs WHERE snapshot_id = $1")
+            .bind(&snapshot_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert_eq!(job.try_get::<String, _>("state").unwrap(), "succeeded");
+        let snapshot = env.json(&format!("/api/v1/snapshots/{snapshot_id}")).await;
+        assert!(snapshot["unverified_reason"].is_null(), "{snapshot}");
+        env.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn attest_verify_fails_job_deduped_against_planted_shard() {
+    for backend in backends() {
+        let env = Env::new(&backend).await;
+        env.upgrade().await;
+        let (snapshot_id, planted) = env.snapshot("planted", Plant::AfterUpgrade).await;
+        env.job("j1", &snapshot_id, "pending").await;
+
+        env.verify("j1").await;
+
+        env.assert_failed("j1", &snapshot_id).await;
+        assert!(
+            !env.attested().await.contains(&planted.unwrap()),
+            "{}",
+            backend.name()
+        );
+        let reason = env.events("j1", "verification_failed").await.remove(0);
+        assert!(reason.contains("could not verify"));
+        let inputs = gather(env.ts.state(), now_ms()).await.unwrap();
+        let failure = inputs
+            .hosts
+            .iter()
+            .flat_map(|h| &h.pairs)
+            .find(|p| p.policy == POLICY)
+            .and_then(|p| p.last_failure.as_ref());
+        assert!(failure.is_some());
+        env.ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn attest_verify_fails_job_deduped_against_shard_planted_before_upgrade() {
+    for backend in backends() {
+        let env = Env::new(&backend).await;
+        let (snapshot_id, planted) = env.snapshot("before-upgrade", Plant::BeforeUpgrade).await;
+        let planted = planted.unwrap();
+        assert!(env.attested().await.contains(&planted));
+        env.job("j1", &snapshot_id, "pending").await;
+
+        env.verify("j1").await;
+
+        env.assert_failed("j1", &snapshot_id).await;
+        let verified =
+            lodestore_server::maintenance::attest::load_verified(env.ts.state(), &env.repo)
+                .await
+                .unwrap();
+        assert!(!verified.contains(&planted), "{}", backend.name());
+        env.ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn attest_verify_resumes_after_restart() {
+    for backend in backends() {
+        let env = Env::new(&backend).await;
+        env.upgrade().await;
+        let (snapshot_id, _) = env.snapshot("resume", Plant::None).await;
+        let keys = env.server_keys().await;
+        let id: BlobId = parse_hex32(&snapshot_id).unwrap();
+        let refs = snapshot_index_refs(&env.store, &keys, &id).await.unwrap();
+        assert!(!refs.is_empty());
+        record_verified(env.ts.state(), &env.repo, &refs[..1])
+            .await
+            .unwrap();
+        env.job("j1", &snapshot_id, "running").await;
+
+        resume_interrupted(env.ts.state()).await.unwrap();
+        assert_eq!(env.column("j1", "verify_state").await.unwrap(), "pending");
+        tick_once(env.ts.state()).await.unwrap();
+
+        assert_eq!(env.column("j1", "verify_state").await.unwrap(), "verified");
+        let attested = env.attested().await;
+        assert!(
+            refs.iter().all(|r| attested.contains(r)),
+            "{}",
+            backend.name()
+        );
+        env.ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn attest_verify_retention_waits_for_verification() {
+    for backend in backends() {
+        let env = Env::new(&backend).await;
+        env.upgrade().await;
+        let (snapshot_id, _) = env.snapshot("retain", Plant::None).await;
+        env.job("j1", &snapshot_id, "pending").await;
+        assert!(env.column("j1", "retention_json").await.is_none());
+
+        env.verify("j1").await;
+
+        assert_eq!(env.column("j1", "verify_state").await.unwrap(), "verified");
+        assert!(
+            env.column("j1", "retention_json").await.is_some(),
+            "{}",
+            backend.name()
+        );
+        env.ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn attest_verify_skips_unchecked_job_and_keeps_retention() {
+    for backend in backends() {
+        let env = Env::new(&backend).await;
+        env.upgrade().await;
+        let (snapshot_id, _) = env.snapshot("legacy", Plant::None).await;
+        sqlx::query(
+            "INSERT INTO jobs (id, host_id, policy_name, source, state, spec, queued_at, \
+             finished_at, snapshot_id) VALUES ('j0', $1, $2, 'schedule', 'succeeded', $3, $4, $4, $5)",
+        )
+        .bind(HOST)
+        .bind(POLICY)
+        .bind(Vec::<u8>::new())
+        .bind(now_ms())
+        .bind(&snapshot_id)
+        .execute(env.pool())
+        .await
+        .unwrap();
+        env.verify("j0").await;
+        assert!(env.column("j0", "retention_json").await.is_some());
+        after_backup(env.ts.state(), "j0").await.unwrap();
+        env.ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn attest_verify_gives_up_after_retry_window() {
+    for backend in backends() {
+        let env = Env::new(&backend).await;
+        let keys = env.server_keys().await;
+        put_attestation(&env.store, &keys, &[], &[], Vec::new(), &mut Entropy::os())
+            .await
+            .unwrap();
+        assert_eq!(
+            lodestore_format::store::BlobStore::list(&env.store, ATTEST_PREFIX)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        let (snapshot_id, _) = env.snapshot("giveup", Plant::None).await;
+        env.job("j1", &snapshot_id, "pending").await;
+
+        env.verify("j1").await;
+        env.verify("j1").await;
+
+        assert_eq!(env.column("j1", "state").await.unwrap(), "succeeded");
+        assert_eq!(env.column("j1", "verify_state").await.unwrap(), "pending");
+        assert_eq!(env.events("j1", "verification_retry").await.len(), 1);
+
+        sqlx::query(
+            "UPDATE job_events SET at = at - 3600001 WHERE job_id = 'j1' AND kind = 'verification_retry'",
+        )
+        .execute(env.pool())
+        .await
+        .unwrap();
+        env.verify("j1").await;
+
+        env.assert_failed("j1", &snapshot_id).await;
+        let message = env.column("j1", "error_message").await.unwrap();
+        assert!(message.contains("1 hour"), "{message}");
+        assert!(
+            message.contains("refusing to sign its shards again"),
+            "{message}"
+        );
+        env.ts.stop().await;
+    }
+}

@@ -13,6 +13,7 @@ use sqlx::Row;
 use super::live::LiveProgress;
 use crate::catalog::{self, JobLink};
 use crate::db::now_ms;
+use crate::maintenance;
 use crate::state::AppState;
 
 pub(crate) const LOG_LIMIT: i64 = 5000;
@@ -424,14 +425,10 @@ async fn finish(state: &AppState, agent_id: &str, job_id: &str, finished: &JobFi
             return;
         }
         Ok(true) => {
-            let (retention_state, retention_job) = (state.clone(), job_id.to_string());
-            tokio::spawn(async move {
-                if let Err(error) =
-                    catalog::retention::after_backup(&retention_state, &retention_job).await
-                {
-                    tracing::warn!(%error, job_id = %retention_job, "applying retention failed");
-                }
-            });
+            tokio::spawn(maintenance::attest::verify::verify_then_retain(
+                state.clone(),
+                job_id.to_string(),
+            ));
         }
         Ok(false) => {}
     }
@@ -551,14 +548,17 @@ async fn apply_finished(
         Some(reported) => ingest_before_finish(state, agent_id, job_id, &reported).await?,
         None => None,
     };
+    let outcome = outcome_state(f.outcome);
+    let verify_state =
+        (snapshot_id.is_some() && matches!(outcome, "succeeded" | "warnings")).then_some("pending");
     let done = sqlx::query(
         "UPDATE jobs SET state = $1, snapshot_id = $2, parent_id = $3, stats_json = $4, \
          incomplete = $5, errors_total = $6, warnings_total = $7, error_code = $8, \
          error_message = $9, error_detail_json = $10, finished_at = $11, phase = NULL, \
-         progress_json = COALESCE($12, progress_json) \
+         progress_json = COALESCE($12, progress_json), verify_state = $15 \
          WHERE id = $13 AND host_id = $14 AND state IN ('queued', 'assigned', 'running')",
     )
-    .bind(outcome_state(f.outcome))
+    .bind(outcome)
     .bind(&snapshot_id)
     .bind(non_empty(&f.parent_id))
     .bind(stats)
@@ -576,6 +576,7 @@ async fn apply_finished(
     .bind(progress)
     .bind(job_id)
     .bind(agent_id)
+    .bind(verify_state)
     .execute(&state.db.pool)
     .await?;
     if done.rows_affected() != 1 {
