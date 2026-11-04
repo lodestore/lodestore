@@ -9,7 +9,9 @@ use std::collections::{BTreeSet, HashSet};
 use prost::Message;
 use subtle::ConstantTimeEq;
 
-use crate::crypto::{BlobId, Entropy, RepoId, attest_mac};
+use crate::crypto::{
+    BlobId, Entropy, RepoId, attest_mac, open_provenance_body, seal_provenance_body,
+};
 use crate::error::{Error, Result, within_size};
 use crate::fs::now;
 use crate::keys::ReadKeys;
@@ -182,4 +184,65 @@ pub async fn read_attestations<S: BlobStore>(store: &S, keys: &ReadKeys) -> Resu
         }
     }
     Ok(out)
+}
+
+/// What the attestations claim, with no MAC check. Deliberately a different
+/// type from [`AttestedSet`]: it is only fit for an agent-side deduplication
+/// filter, never for a collector, a server check or a reader.
+#[derive(Debug, Clone, Default)]
+pub struct UnverifiedAttestations {
+    pub shards: HashSet<BlobId>,
+    pub markers: BTreeSet<u32>,
+}
+
+/// Reads the `locks/attest-*` objects without a server key. A store that
+/// refuses the listing, a vanished object and a malformed one all count as
+/// "nothing attested".
+pub async fn peek_attestations<S: BlobStore>(store: &S) -> Result<UnverifiedAttestations> {
+    let mut out = UnverifiedAttestations::default();
+    let listed = match store.list(LOCKS_PREFIX).await {
+        Ok(listed) => listed,
+        Err(BlobError::Denied { .. }) => return Ok(out),
+        Err(e) => return Err(e.into()),
+    };
+    for entry in listed {
+        if !entry.key.starts_with(ATTEST_PREFIX) || entry.size > MAX_ATTEST_SIZE {
+            continue;
+        }
+        let bytes = match store.get(&entry.key).await {
+            Ok(bytes) => bytes,
+            Err(BlobError::NotFound | BlobError::Denied { .. }) => continue,
+            Err(e) => return Err(e.into()),
+        };
+        if let Ok(attestation) = peek_attestation(&entry.key, &bytes) {
+            out.shards.extend(shard_ids(&attestation));
+            out.markers.extend(attestation.markers.iter().copied());
+        }
+    }
+    Ok(out)
+}
+
+/// Seals a provenance record for `Attestation.sealed_provenance`.
+pub fn seal_provenance(
+    keys: &ReadKeys,
+    record: &pb::ProvenanceRecord,
+    entropy: &mut Entropy,
+) -> Result<Vec<u8>> {
+    seal_provenance_body(
+        keys.k_srv(),
+        keys.repo_id(),
+        &record.encode_to_vec(),
+        entropy,
+    )
+}
+
+pub fn open_provenance(keys: &ReadKeys, sealed: &[u8]) -> Result<pb::ProvenanceRecord> {
+    let plain = open_provenance_body(keys.k_srv(), keys.repo_id(), sealed)
+        .map_err(|_| Error::corrupt("provenance", "authentication failed"))?;
+    let record = pb::ProvenanceRecord::decode(plain.as_slice())
+        .map_err(|e| Error::corrupt("provenance", format!("undecodable: {e}")))?;
+    if record.snapshot_id.len() != 32 {
+        return Err(Error::corrupt("provenance", "snapshot id must be 32 bytes"));
+    }
+    Ok(record)
 }
