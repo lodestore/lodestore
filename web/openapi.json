@@ -12757,6 +12757,13 @@
             "type": "integer",
             "format": "int64"
           },
+          "unverified_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the server marked this snapshot unverified: its data failed the server's check after the backup, or the check could not complete within an hour. Null when the snapshot is not marked."
+          },
           "warnings_total": {
             "type": "integer",
             "format": "int64",
