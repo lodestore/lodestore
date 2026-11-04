@@ -117,6 +117,7 @@ pub struct Index {
     /// not superseded when they were added; one takes over when the chosen
     /// location is superseded or its pack is gone.
     others: HashMap<(BlobId, u8), Vec<BlobLocation>>,
+    stale: HashMap<(BlobId, u8), Vec<BlobLocation>>,
     shards: HashSet<BlobId>,
     packs: HashMap<BlobId, u64>,
     skipped: Vec<(String, String)>,
@@ -143,6 +144,9 @@ impl Index {
         let mut all = vec![*chosen];
         if let Some(others) = self.others.get(&key) {
             all.extend_from_slice(others);
+        }
+        if let Some(stale) = self.stale.get(&key) {
+            all.extend_from_slice(stale);
         }
         all
     }
@@ -267,28 +271,42 @@ impl Index {
     /// known; a copy in another pack from a current shard is kept aside.
     fn insert(&mut self, key: (BlobId, u8), loc: BlobLocation) {
         let current = self.is_current(&loc);
-        let held_current = match self.map.get(&key) {
+        let held_current = match self.map.get(&key).copied() {
             None => {
                 self.map.insert(key, loc);
                 return;
             }
             Some(held) if held.pack_id == loc.pack_id => {
-                if current && !self.is_current(held) {
+                if current && !self.is_current(&held) {
+                    self.push_stale(key, held);
                     self.map.insert(key, loc);
-                } else if current && !same_extent(held, &loc) {
+                } else if current && !same_extent(&held, &loc) {
                     self.push_other(key, loc);
+                } else if !current && !same_extent(&held, &loc) {
+                    self.push_stale(key, loc);
                 }
                 return;
             }
-            Some(held) => self.is_current(held),
+            Some(held) => self.is_current(&held),
         };
         if !current {
+            self.push_stale(key, loc);
             return;
         }
         if held_current {
             self.push_other(key, loc);
         } else {
-            self.map.insert(key, loc);
+            let held = self.map.insert(key, loc);
+            if let Some(held) = held {
+                self.push_stale(key, held);
+            }
+        }
+    }
+
+    fn push_stale(&mut self, key: (BlobId, u8), loc: BlobLocation) {
+        let alts = self.stale.entry(key).or_default();
+        if !alts.contains(&loc) {
+            alts.push(loc);
         }
     }
 
@@ -303,6 +321,7 @@ impl Index {
     /// shard to a current copy, when one is known.
     fn prefer_current(&mut self, newly: &HashSet<BlobId>) {
         let mut emptied = Vec::new();
+        let mut demoted = Vec::new();
         for (key, loc) in &mut self.map {
             if !newly.contains(&loc.shard) {
                 continue;
@@ -314,11 +333,15 @@ impl Index {
                 .iter()
                 .position(|a| !self.superseded.contains(&a.shard))
             {
+                demoted.push((*key, *loc));
                 *loc = alts.swap_remove(i);
                 if alts.is_empty() {
                     emptied.push(*key);
                 }
             }
+        }
+        for (key, loc) in demoted {
+            self.push_stale(key, loc);
         }
         for key in emptied {
             self.others.remove(&key);
@@ -329,6 +352,10 @@ impl Index {
     /// known copy of the blob.
     fn forget_packs(&mut self, gone: &HashSet<BlobId>) {
         self.others.retain(|_, alts| {
+            alts.retain(|a| !gone.contains(&a.pack_id));
+            !alts.is_empty()
+        });
+        self.stale.retain(|_, alts| {
             alts.retain(|a| !gone.contains(&a.pack_id));
             !alts.is_empty()
         });
@@ -842,6 +869,34 @@ mod tests {
                 index.add_shard(id, shard).unwrap();
             }
             assert_eq!(index.get(&[4; 32], 1).unwrap().pack_id, [11; 32]);
+        }
+    }
+
+    #[test]
+    fn index_locations_keeps_superseded_copy_as_last_resort() {
+        let (legit, forged) = ([1u8; 32], [2u8; 32]);
+        let legit_shard = shard_of(10, 4, &[]);
+        let forged_shard = shifted_shard(11, 4, PACK_PREFIX_LEN as u32 + 300);
+        let forged_shard = pb::IndexShard {
+            supersedes: vec![legit.to_vec()],
+            ..forged_shard
+        };
+        for order in [
+            [(legit, &legit_shard), (forged, &forged_shard)],
+            [(forged, &forged_shard), (legit, &legit_shard)],
+        ] {
+            let mut index = Index::default();
+            index.set_supersedes_trust(SupersedesTrust::Only(HashSet::from([forged])));
+            for (id, shard) in order {
+                index.add_shard(id, shard).unwrap();
+            }
+            assert_eq!(index.get(&[4; 32], 1).unwrap().pack_id, [11; 32]);
+            let packs: Vec<BlobId> = index
+                .locations(&[4; 32], 1)
+                .iter()
+                .map(|l| l.pack_id)
+                .collect();
+            assert_eq!(packs, vec![[11u8; 32], [10u8; 32]]);
         }
     }
 
