@@ -9,8 +9,9 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::config::{self, AEAD_ID_CHACHA20POLY1305, KDF_ID_HKDF_SHA256, KEM_ID_XWING};
 use crate::crypto::{
-    CTX_CDC_SEED, CTX_CHUNK_ID_KEY, CTX_HPKE_IKM, CTX_INDEX_KEY, Entropy, HpkePrivateKey,
-    HpkePublicKey, Key32, NONCE_LEN, RepoId, aead_open, aead_seal, derive_key, key_slot_aad,
+    CTX_CDC_SEED, CTX_CHUNK_ID_KEY, CTX_HPKE_IKM, CTX_INDEX_KEY, CTX_SERVER_MAC, Entropy,
+    HpkePrivateKey, HpkePublicKey, Key32, NONCE_LEN, RepoId, aead_open, aead_seal, derive_key,
+    key_slot_aad,
 };
 use crate::error::{Error, Result};
 use crate::pb;
@@ -96,6 +97,7 @@ pub struct ReadKeys {
     repo_id: RepoId,
     k_id: Key32,
     k_idx: Key32,
+    k_srv: Key32,
     hpke_private: HpkePrivateKey,
     hpke_public: HpkePublicKey,
     cdc_seed: u64,
@@ -105,6 +107,7 @@ impl ReadKeys {
     pub fn derive(master: MasterKey, repo_id: RepoId) -> Self {
         let k_id = derive_key(CTX_CHUNK_ID_KEY, master.as_bytes());
         let k_idx = derive_key(CTX_INDEX_KEY, master.as_bytes());
+        let k_srv = derive_key(CTX_SERVER_MAC, master.as_bytes());
         let ikm = derive_key(CTX_HPKE_IKM, master.as_bytes());
         let (hpke_private, hpke_public) = hpke::kem::XWing::derive_keypair(ikm.as_slice());
         let cdc_seed = cdc_seed(&k_id);
@@ -113,6 +116,7 @@ impl ReadKeys {
             repo_id,
             k_id,
             k_idx,
+            k_srv,
             hpke_private,
             hpke_public,
             cdc_seed,
@@ -138,6 +142,10 @@ impl ReadKeys {
 
     pub fn k_idx(&self) -> &[u8; 32] {
         &self.k_idx
+    }
+
+    pub fn k_srv(&self) -> &[u8; 32] {
+        &self.k_srv
     }
 
     pub fn hpke_private_key(&self) -> &HpkePrivateKey {

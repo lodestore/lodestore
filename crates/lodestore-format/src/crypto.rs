@@ -17,6 +17,8 @@ pub const CTX_HPKE_IKM: &str = "lodestore v1 hpke ikm";
 pub const CTX_CDC_SEED: &str = "lodestore v1 cdc seed";
 pub const CTX_PACK_KEY: &str = "lodestore v1 pack key";
 pub const CTX_SNAPSHOT_KEY: &str = "lodestore v1 snapshot key";
+pub const CTX_SERVER_MAC: &str = "lodestore v1 server mac key";
+pub const CTX_ATTEST_SEAL: &str = "lodestore v1 attestation seal key";
 
 pub const BLOB_TYPE_DATA: u8 = 1;
 pub const BLOB_TYPE_TREE: u8 = 2;
@@ -40,6 +42,8 @@ const AAD_INDEX: &[u8] = b"index";
 const AAD_SNAPSHOT: &[u8] = b"snapshot";
 const AAD_GC_MANIFEST: &[u8] = b"gc-manifest";
 const AAD_WRITER_MARKER: &[u8] = b"writer-marker";
+const ATTEST_MAC_DOMAIN: &[u8] = b"lodestore v1 attestation";
+const AAD_PROVENANCE: &[u8] = b"lodestore v1 provenance";
 
 /// The only source of randomness in the format: master key, pack keys,
 /// nonces, salts and HPKE encapsulation all draw from here, so a test can swap
@@ -359,6 +363,33 @@ pub fn seal_snapshot_body(
 
 pub fn open_snapshot_body(key: &[u8; 32], repo_id: &RepoId, sealed: &[u8]) -> Result<Vec<u8>> {
     aead_open(key, &cat(&[repo_id, AAD_SNAPSHOT]), sealed)
+}
+
+/// Keyed BLAKE3 over the attestation frame: domain, repository, frame byte,
+/// body length and body. Only a holder of `k_srv` can produce it.
+pub fn attest_mac(k_srv: &[u8; 32], repo_id: &RepoId, frame: u8, body: &[u8]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new_keyed(k_srv);
+    hasher.update(ATTEST_MAC_DOMAIN);
+    hasher.update(repo_id);
+    hasher.update(&[frame]);
+    hasher.update(&(body.len() as u64).to_le_bytes());
+    hasher.update(body);
+    *hasher.finalize().as_bytes()
+}
+
+pub fn seal_provenance_body(
+    k_srv: &[u8; 32],
+    repo_id: &RepoId,
+    body: &[u8],
+    entropy: &mut Entropy,
+) -> Result<Vec<u8>> {
+    let key = derive_key(CTX_ATTEST_SEAL, k_srv);
+    aead_seal(&key, &cat(&[repo_id, AAD_PROVENANCE]), body, entropy)
+}
+
+pub fn open_provenance_body(k_srv: &[u8; 32], repo_id: &RepoId, sealed: &[u8]) -> Result<Vec<u8>> {
+    let key = derive_key(CTX_ATTEST_SEAL, k_srv);
+    aead_open(&key, &cat(&[repo_id, AAD_PROVENANCE]), sealed)
 }
 
 pub fn derive_key(context: &str, material: &[u8]) -> Key32 {

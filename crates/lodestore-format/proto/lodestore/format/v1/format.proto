@@ -215,3 +215,27 @@ message WriterMarker {
   bytes hostname = 3;
   Timestamp started = 4;
 }
+
+// Stored as `locks/attest-<32 hex of attest_id>`, framed as `0x01 || keyed
+// BLAKE3 MAC under the server key || this message`. The object name is the
+// random attest_id. Only the MAC authenticates it; `shard_ids` and `markers`
+// are readable without a key, `sealed_provenance` is AEAD-sealed under a
+// subkey of the server key.
+message Attestation {
+  bytes attest_id = 1;
+  Timestamp created = 2;
+  // 32-byte index shard ids, sorted
+  repeated bytes shard_ids = 3;
+  // 1: repository upgrade complete, 2: part of an upgrade
+  repeated uint32 markers = 4;
+  repeated bytes sealed_provenance = 5;
+}
+
+// The plaintext of one `Attestation.sealed_provenance` entry.
+message ProvenanceRecord {
+  bytes snapshot_id = 1;
+  string host_id = 2;
+  string hostname = 3;
+  string job_id = 4;
+  Timestamp verified_at = 5;
+}
