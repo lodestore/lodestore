@@ -21,7 +21,7 @@ test('the meta follows the charset, precedes the first script and hashes both in
 	assert.ok(out.indexOf('<meta charset="utf-8">') < at);
 	assert.ok(at < out.indexOf('<script'));
 	const policy = metas[0][1];
-	assert.match(policy, /^script-src 'self' 'wasm-unsafe-eval' /);
+	assert.match(policy, /^script-src 'self' 'wasm-unsafe-eval' https:\/\/static\.cloudflareinsights\.com /);
 	assert.deepEqual(policy.match(/'sha256-[^']+'/g), [hash(a), hash(b)]);
 	assert.ok(!policy.includes("'unsafe-inline'"));
 });
