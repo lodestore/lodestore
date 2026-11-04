@@ -14,10 +14,12 @@ use crate::crypto::{
 };
 use crate::error::{Error, Result, within_size};
 use crate::fs::now;
+use crate::gc::sweep::sweep_object;
+use crate::index::{INDEX_PREFIX, index_object_key, parse_hex32};
 use crate::keys::ReadKeys;
 use crate::locks::{LOCKS_PREFIX, LockId, lock_id_hex, new_lock_id};
 use crate::pb;
-use crate::store::{BlobError, BlobStore, put_named};
+use crate::store::{BlobDelete, BlobError, BlobPurge, BlobStore, put_named};
 
 pub const ATTEST_PREFIX: &str = "locks/attest-";
 /// Largest attestation read from a listing.
@@ -27,6 +29,9 @@ pub const ATTEST_FRAME_V1: u8 = 1;
 pub const MARKER_LEGACY_SHARDS: u32 = 1;
 /// A part of a repository upgrade.
 pub const MARKER_UPGRADE_PART: u32 = 2;
+/// Most shards one attestation names: at 34 bytes each it stays well under
+/// [`MAX_ATTEST_SIZE`].
+pub const MAX_ATTEST_SHARDS: usize = 262_144;
 
 const MAC_LEN: usize = 32;
 
@@ -136,6 +141,8 @@ pub struct AttestedSet {
     pub markers: BTreeSet<u32>,
     pub sealed_provenance: Vec<Vec<u8>>,
     pub objects: Vec<String>,
+    /// Verified objects whose markers are exactly `[MARKER_UPGRADE_PART]`.
+    pub upgrade_parts: usize,
     /// `locks/attest-*` objects that did not verify, with the reason. They are
     /// ignored; a planted one must not stop the server.
     pub rejected: Vec<(String, String)>,
@@ -174,6 +181,9 @@ pub async fn read_attestations<S: BlobStore>(store: &S, keys: &ReadKeys) -> Resu
             Ok(attestation) => {
                 out.shards.extend(shard_ids(&attestation));
                 out.markers.extend(attestation.markers.iter().copied());
+                if attestation.markers == [MARKER_UPGRADE_PART] {
+                    out.upgrade_parts += 1;
+                }
                 out.sealed_provenance.extend(attestation.sealed_provenance);
                 out.objects.push(entry.key);
             }
@@ -245,4 +255,210 @@ pub fn open_provenance(keys: &ReadKeys, sealed: &[u8]) -> Result<pb::ProvenanceR
         return Err(Error::corrupt("provenance", "snapshot id must be 32 bytes"));
     }
     Ok(record)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UpgradeOutcome {
+    pub already: bool,
+    /// Shards signed by this call.
+    pub attested: usize,
+}
+
+/// Shard ids named in the `index/` listing, from the names alone.
+async fn listed_shards<S: BlobStore>(store: &S) -> Result<BTreeSet<BlobId>> {
+    Ok(store
+        .list(INDEX_PREFIX)
+        .await?
+        .into_iter()
+        .filter_map(|entry| {
+            let id = parse_hex32(entry.key.strip_prefix(INDEX_PREFIX)?)?;
+            (index_object_key(&id) == entry.key).then_some(id)
+        })
+        .collect())
+}
+
+/// Signs the shards of a repository written before attestations existed, once.
+/// The state lives in the bucket: parts carry `[MARKER_UPGRADE_PART]`, and the
+/// last object, written only after every part, carries `MARKER_LEGACY_SHARDS`.
+/// Server only: it needs the master key.
+pub async fn ensure_upgraded<S: BlobStore>(
+    store: &S,
+    keys: &ReadKeys,
+    entropy: &mut Entropy,
+) -> Result<UpgradeOutcome> {
+    upgrade(store, keys, entropy, MAX_ATTEST_SHARDS).await
+}
+
+async fn upgrade<S: BlobStore>(
+    store: &S,
+    keys: &ReadKeys,
+    entropy: &mut Entropy,
+    chunk: usize,
+) -> Result<UpgradeOutcome> {
+    let set = read_attestations(store, keys).await?;
+    if set.incomplete {
+        return Err(Error::InvalidInput(
+            "attestations changed while reading; try again".into(),
+        ));
+    }
+    if set.markers.contains(&MARKER_LEGACY_SHARDS) {
+        return Ok(UpgradeOutcome {
+            already: true,
+            attested: 0,
+        });
+    }
+    if set.objects.len() > set.upgrade_parts {
+        return Err(Error::InvalidInput(
+            "the repository has server attestations but no upgrade marker; \
+             refusing to sign its shards again"
+                .into(),
+        ));
+    }
+    let todo: Vec<BlobId> = listed_shards(store)
+        .await?
+        .into_iter()
+        .filter(|id| !set.shards.contains(id))
+        .collect();
+    for part in todo.chunks(chunk) {
+        put_attestation(
+            store,
+            keys,
+            part,
+            &[MARKER_UPGRADE_PART],
+            Vec::new(),
+            entropy,
+        )
+        .await?;
+    }
+    put_attestation(
+        store,
+        keys,
+        &[],
+        &[MARKER_LEGACY_SHARDS],
+        Vec::new(),
+        entropy,
+    )
+    .await?;
+    Ok(UpgradeOutcome {
+        already: false,
+        attested: todo.len(),
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsolidateOutcome {
+    /// Verified attestation objects read.
+    pub read: usize,
+    pub written: Vec<String>,
+    pub deleted: usize,
+}
+
+/// Replaces the attestation objects with a summary: the shards still in
+/// `index/`, every marker in every part, the sealed provenance untouched. The
+/// summary is written before anything is deleted, and only objects this call
+/// read are deleted. Does nothing until the upgrade has completed. Server only.
+pub async fn consolidate_attestations<S: BlobStore + BlobDelete + BlobPurge>(
+    store: &S,
+    keys: &ReadKeys,
+    dry_run: bool,
+    entropy: &mut Entropy,
+) -> Result<ConsolidateOutcome> {
+    let set = read_attestations(store, keys).await?;
+    if set.incomplete {
+        return Err(Error::InvalidInput(
+            "attestations changed while reading; try again".into(),
+        ));
+    }
+    let mut out = ConsolidateOutcome {
+        read: set.objects.len(),
+        written: Vec::new(),
+        deleted: 0,
+    };
+    if set.objects.len() <= 1 || !set.markers.contains(&MARKER_LEGACY_SHARDS) || dry_run {
+        return Ok(out);
+    }
+    let live = listed_shards(store).await?;
+    let shards: Vec<BlobId> = live
+        .into_iter()
+        .filter(|id| set.shards.contains(id))
+        .collect();
+    let markers: Vec<u32> = set.markers.iter().copied().collect();
+    let mut provenance = Some(set.sealed_provenance);
+    let mut parts = shards.chunks(MAX_ATTEST_SHARDS).collect::<Vec<_>>();
+    if parts.is_empty() {
+        parts.push(&[]);
+    }
+    for part in parts {
+        let key = put_attestation(
+            store,
+            keys,
+            part,
+            &markers,
+            provenance.take().unwrap_or_default(),
+            entropy,
+        )
+        .await?;
+        out.written.push(key);
+    }
+    let mut failed = Vec::new();
+    for key in &set.objects {
+        let swept = sweep_object(store, key, 0).await;
+        out.deleted += usize::from(swept.failed.is_empty());
+        failed.extend(swept.failed);
+    }
+    if let Some((key, reason)) = failed.into_iter().next() {
+        return Err(Error::InvalidInput(format!(
+            "could not delete {key}: {reason}"
+        )));
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use rand_chacha::ChaCha20Rng;
+    use rand_chacha::rand_core::SeedableRng;
+
+    use super::*;
+    use crate::index::hex32;
+    use crate::keys::MasterKey;
+    use crate::store::LocalFsStore;
+
+    #[tokio::test]
+    async fn attest_upgrade_chunks_large_repositories() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = LocalFsStore::new(tmp.path().join("repo"));
+        let keys = ReadKeys::derive(MasterKey::from_bytes([1u8; 32]), [2u8; 16]);
+        let mut entropy = Entropy::from_rng(ChaCha20Rng::from_seed([7u8; 32]));
+        let ids: BTreeSet<BlobId> = (1u8..=5).map(|i| [i; 32]).collect();
+        for id in &ids {
+            store
+                .put_if_absent(&index_object_key(id), bytes::Bytes::from_static(b"x"))
+                .await
+                .unwrap();
+        }
+        let out = upgrade(&store, &keys, &mut entropy, 2).await.unwrap();
+        assert_eq!(out.attested, 5);
+        let mut parts = Vec::new();
+        let mut done = Vec::new();
+        for entry in store.list(LOCKS_PREFIX).await.unwrap() {
+            let bytes = store.get(&entry.key).await.unwrap();
+            let a = open_attestation(keys.k_srv(), keys.repo_id(), &entry.key, &bytes).unwrap();
+            if a.markers == [MARKER_UPGRADE_PART] {
+                assert!(a.shard_ids.len() <= 2);
+                parts.push(a.shard_ids);
+            } else {
+                assert_eq!(a.markers, [MARKER_LEGACY_SHARDS]);
+                assert!(a.shard_ids.is_empty());
+                done.push(a);
+            }
+        }
+        assert_eq!((parts.len(), done.len()), (3, 1));
+        let union: BTreeSet<String> = parts
+            .iter()
+            .flatten()
+            .map(|s| hex32(s.as_slice().try_into().unwrap()))
+            .collect();
+        assert_eq!(union, ids.iter().map(hex32).collect());
+    }
 }
