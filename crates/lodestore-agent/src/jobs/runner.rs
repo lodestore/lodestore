@@ -27,6 +27,7 @@ use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
+use super::own_shards;
 use super::priority;
 use super::throttle::Throttled;
 use super::{JobCtx, failed};
@@ -99,9 +100,13 @@ async fn open_writer_with(
     let store = location
         .open(creds)
         .map_err(|e| format!("cannot open the repository: {e}"))?;
-    Writer::connect(Throttled::new(store, rate, uploaded), keys)
-        .await
-        .map_err(|e| format!("cannot open the repository: {e}"))
+    Writer::connect_attested(
+        Throttled::new(store, rate, uploaded),
+        keys,
+        &own_shards::load(paths),
+    )
+    .await
+    .map_err(|e| format!("cannot open the repository: {e}"))
 }
 
 /// The job's time limit, counted from now; a spec without one gets the default.
@@ -524,6 +529,7 @@ async fn backup(ctx: &JobCtx, spec: &JobSpec, deadline: Deadline) -> JobFinished
             &progress,
         )
         .await;
+    own_shards::record_written(ctx.paths(), &writer);
     match result {
         Ok(outcome) => {
             let id = hex32(&outcome.snapshot_id);
