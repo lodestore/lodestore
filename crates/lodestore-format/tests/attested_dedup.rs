@@ -7,7 +7,7 @@ mod gc_support;
 
 use std::collections::HashSet;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use adv_support::{attacker_keys, open_all_shards, plant_blobs, plant_shard_where};
 use gc_support::{Fx, assert_same_files};
@@ -54,14 +54,14 @@ async fn attested_writer<'a>(
 
 async fn backup(
     w: &mut Writer<&lodestore_format::store::LocalFsStore>,
-    src: &PathBuf,
+    src: &Path,
 ) -> BackupOutcome {
-    w.backup(std::slice::from_ref(src), BackupOptions::default(), &|_| {})
+    w.backup(&[src.to_path_buf()], BackupOptions::default(), &|_| {})
         .await
         .unwrap()
 }
 
-async fn assert_restores(fx: &Fx, out: &BackupOutcome, src: &PathBuf) {
+async fn assert_restores(fx: &Fx, out: &BackupOutcome, src: &Path) {
     let mut reader =
         Reader::open(&fx.store, fx.repo.read_keys().duplicate(), fx.repo.config()).unwrap();
     let target = tempfile::tempdir_in(fx.tmp.path()).unwrap();
