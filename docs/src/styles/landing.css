@@ -279,5 +279,4 @@ html.js .kt.in tr:nth-child(5){transition-delay:480ms}
 @media(min-width:1024px){.final h2{font-size:48px}}
 .final p{margin:16px 0 32px;font-size:18px;color:var(--muted-foreground)}
 .final img{animation:float 6s ease-in-out infinite}
-.final .only-light{mix-blend-mode:multiply}
 @keyframes float{50%{transform:translateY(-10px)}}
