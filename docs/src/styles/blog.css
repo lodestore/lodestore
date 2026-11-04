@@ -61,8 +61,8 @@
 	font-size: 15px;
 }
 
-.blog-post {
-	padding-top: 48px;
+.blog-post.wrap {
+	padding-top: 64px;
 	min-width: 0;
 }
 .read {
