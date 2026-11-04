@@ -8,7 +8,9 @@ use std::collections::{BTreeSet, HashSet};
 
 use adv_support::{attacker_keys, forge_offsets, open_all_shards, plant_shard_where};
 use gc_support::Fx;
-use lodestore_format::attest::{peek_attestations, put_attestation, read_attestations};
+use lodestore_format::attest::{
+    MARKER_LEGACY_SHARDS, peek_attestations, put_attestation, read_attestations,
+};
 use lodestore_format::crypto::{BlobId, Entropy};
 use lodestore_format::gc::compact::{CompactPlan, Compacted, compact_plan, write_compacted};
 use lodestore_format::gc::mark::load_shards;
@@ -64,7 +66,7 @@ async fn attest(fx: &Fx, shards: &[BlobId]) {
         &fx.store,
         fx.repo.read_keys(),
         shards,
-        &[],
+        &[MARKER_LEGACY_SHARDS],
         Vec::new(),
         &mut Entropy::os(),
     )
