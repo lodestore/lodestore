@@ -29,7 +29,7 @@ export function addCspMeta(source, file) {
 	for (const [, attrs, text] of html.matchAll(SCRIPT)) {
 		if (!hasSrc(attrs)) hashes.add(`'sha256-${createHash('sha256').update(text).digest('base64')}'`);
 	}
-	const policy = ["script-src 'self' 'wasm-unsafe-eval'", ...hashes].join(' ');
+	const policy = ["script-src 'self' 'wasm-unsafe-eval' https://static.cloudflareinsights.com", ...hashes].join(' ');
 	const meta = `<meta http-equiv="content-security-policy" content="${policy}">`;
 	const script = html.search(/<script[\s>]/i);
 	const charset = /<meta\s+charset=[^>]*>/i.exec(html);
