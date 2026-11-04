@@ -105,7 +105,12 @@ fn packs_size(ts: &TestServer, name: &str) -> u64 {
 }
 
 fn lock_files(ts: &TestServer, name: &str) -> Vec<PathBuf> {
-    files_under(&ts.local_repo_root(name).join("locks"))
+    let mut files = files_under(&ts.local_repo_root(name).join("locks"));
+    files.retain(|f| {
+        !f.file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with("attest-"))
+    });
+    files
 }
 
 async fn assert_restores(ts: &TestServer, name: &str, snapshot: &Backed) {

@@ -14,18 +14,26 @@ use bytes::Bytes;
 use adv_support::{attacker_keys, forge_offsets, open_all_shards, plant_shard, put_junk_pack};
 use gc_support::*;
 use lodestore_format::Error;
+use lodestore_format::attest::read_attestations;
 use lodestore_format::crypto::{BLOB_TYPE_DATA, BlobId, Entropy, HPKE_ENC_LEN, SEALED_KEY_LEN};
-use lodestore_format::gc::candidates;
 use lodestore_format::gc::compact::{check_reachable, compact_plan, write_compacted};
 use lodestore_format::gc::mark::load_shards;
+use lodestore_format::gc::repack::{RepackOutcome, repack};
 use lodestore_format::gc::sweep::confirm_unreferenced;
 use lodestore_format::gc::verify::verify;
+use lodestore_format::gc::{Survey, candidates};
 use lodestore_format::index::{index_object_key, seal_shard};
 use lodestore_format::pack::{PACK_PREFIX_LEN, pack_object_key, parse_entries};
 use lodestore_format::pb;
 use lodestore_format::store::{BlobError, BlobStore, ListEntry, LocalFsStore, put_named};
 
 const SHARED: (&str, u8, usize) = ("shared", 1, 100 << 10);
+
+async fn locks_left(fx: &Fx) -> Vec<String> {
+    let mut left = fx.listing("locks/").await;
+    left.retain(|key, _| !key.starts_with("locks/attest-"));
+    left.into_keys().collect()
+}
 
 #[tokio::test]
 async fn gc_repack_full_cycle_restores() {
@@ -59,7 +67,7 @@ async fn gc_repack_full_cycle_restores() {
     assert_eq!(fx.sources.borrow().len(), 1);
     assert!(fx.pack_bytes().await < before);
     assert!(fx.packs().await.len() <= packs_before);
-    assert!(fx.listing("locks/").await.is_empty());
+    assert!(locks_left(&fx).await.is_empty());
     assert_eq!(fx.record_shards().await, 1);
 }
 
@@ -564,4 +572,139 @@ async fn verify_checks_each_blob_once() {
         }
     }
     assert!(checked > 0);
+}
+
+/// Two sparse data packs: each holds a blob that a surviving snapshot shares.
+async fn two_sparse_packs() -> Fx {
+    let fx = Fx::new().await;
+    let a = fx.backup("a", &[SHARED, ("only-a", 2, 200 << 10)]).await;
+    fx.backup("b", &[SHARED, ("only-b", 3, 200 << 10)]).await;
+    let c = fx
+        .backup("c", &[("shared-2", 4, 100 << 10), ("only-c", 5, 200 << 10)])
+        .await;
+    fx.backup("d", &[("shared-2", 4, 100 << 10), ("only-d", 6, 200 << 10)])
+        .await;
+    fx.forget(&a.snapshot_id).await;
+    fx.forget(&c.snapshot_id).await;
+    fx
+}
+
+fn forged_shard(shard: &pb::IndexShard, targets: &HashSet<BlobId>) -> pb::IndexShard {
+    pb::IndexShard {
+        packs: shard
+            .packs
+            .iter()
+            .filter(|r| targets.contains(r.pack_id.as_slice()))
+            .map(forge_offsets)
+            .collect(),
+        supersedes: Vec::new(),
+    }
+}
+
+/// Makes the index of the survey believe the frames of `targets` lie one byte
+/// off. With `keep_real` the forged records come first and the real ones stay
+/// as other copies; without it the real records are gone.
+fn forge_survey(survey: &mut Survey, targets: &HashSet<BlobId>, keep_real: bool) {
+    let shards = &mut survey.shards.shards;
+    if keep_real {
+        let forged: Vec<_> = shards
+            .iter()
+            .map(|(id, shard)| (*id, forged_shard(shard, targets)))
+            .filter(|(_, shard)| !shard.packs.is_empty())
+            .map(|(id, shard)| (blake3::hash(&id).into(), shard))
+            .collect();
+        shards.splice(0..0, forged);
+    } else {
+        for (_, shard) in shards.iter_mut() {
+            for record in &mut shard.packs {
+                if targets.contains(record.pack_id.as_slice()) {
+                    *record = forge_offsets(record);
+                }
+            }
+        }
+    }
+    survey.index = survey.shards.index(&HashSet::new()).unwrap();
+}
+
+async fn run_repack(fx: &Fx, survey: &Survey) -> RepackOutcome {
+    repack(
+        &fx.store,
+        fx.repo.read_keys(),
+        survey,
+        &mut Entropy::os(),
+        &|_, _| {},
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn repack_keeps_pack_whose_frame_does_not_open() {
+    let fx = two_sparse_packs().await;
+    let mut survey = fx.survey(100).await;
+    let ids: Vec<BlobId> = survey.plan.repack.iter().map(|p| p.pack_id).collect();
+    assert_eq!(ids.len(), 2);
+    forge_survey(&mut survey, &HashSet::from([ids[0]]), false);
+
+    let out = run_repack(&fx, &survey).await;
+    assert_eq!(out.replaced, vec![ids[1]]);
+    assert_eq!(out.skipped.len(), 1);
+    assert_eq!(out.skipped[0].0, ids[0]);
+    assert!(!out.skipped[0].1.is_empty());
+    assert!(out.shard.is_some());
+}
+
+#[tokio::test]
+async fn repack_uses_other_copy_in_same_pack() {
+    let fx = two_sparse_packs().await;
+    let mut survey = fx.survey(100).await;
+    let ids: HashSet<BlobId> = survey.plan.repack.iter().map(|p| p.pack_id).collect();
+    forge_survey(&mut survey, &ids, true);
+    let (id, blob_type) = survey
+        .live
+        .iter()
+        .find(|(id, t)| {
+            survey
+                .index
+                .get(id, *t)
+                .is_some_and(|l| ids.contains(&l.pack_id))
+        })
+        .unwrap();
+    assert_eq!(survey.index.locations(id, *blob_type).len(), 2);
+
+    let out = run_repack(&fx, &survey).await;
+    assert!(out.skipped.is_empty(), "{:?}", out.skipped);
+    assert_eq!(out.replaced.iter().copied().collect::<HashSet<_>>(), ids);
+}
+
+#[tokio::test]
+async fn repack_skips_unopenable_prefix_and_size_mismatch() {
+    let fx = two_sparse_packs().await;
+    let survey = fx.survey(100).await;
+    let ids: Vec<BlobId> = survey.plan.repack.iter().map(|p| p.pack_id).collect();
+    let path = |id: &BlobId| fx.tmp.path().join("repo").join(pack_object_key(id));
+    let mut garbled = fs::read(path(&ids[0])).unwrap();
+    garbled[..PACK_PREFIX_LEN].fill(0xAB);
+    fs::write(path(&ids[0]), garbled).unwrap();
+    let mut longer = fs::read(path(&ids[1])).unwrap();
+    longer.push(0);
+    fs::write(path(&ids[1]), longer).unwrap();
+
+    let out = run_repack(&fx, &survey).await;
+    assert!(out.replaced.is_empty());
+    assert!(out.shard.is_none());
+    let skipped: HashSet<BlobId> = out.skipped.iter().map(|(id, _)| *id).collect();
+    assert_eq!(skipped, ids.into_iter().collect());
+}
+
+#[tokio::test]
+async fn repack_attests_its_shard() {
+    let fx = two_sparse_packs().await;
+    let survey = fx.survey(100).await;
+    let out = run_repack(&fx, &survey).await;
+    let shard = out.shard.expect("blobs were copied");
+    let attested = read_attestations(&fx.store, fx.repo.read_keys())
+        .await
+        .unwrap();
+    assert!(attested.shards.contains(&shard));
 }
