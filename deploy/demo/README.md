@@ -152,12 +152,23 @@ It ends with `demo ok`. The limiter check needs the direct loopback port; it is 
 
 `proxy/nginx.conf` is a site file for the layout that includes `/etc/nginx/sites-enabled/*.conf` inside the `http` block. It declares its own `limit_req_zone` and `limit_conn_zone` with a `lodestore_demo_` prefix, so it does not clash with zones of other sites. It sets rate limits per IP for sign-in, downloads and the agent binary route, a body limit of 64 KiB and a download timeout above the server's own 120 second deadline, and it sends the visitor address in `X-Forwarded-For` (overwritten, never appended to what the visitor sent). Connections are limited per IP in two zones: 64 for the site, because over HTTP/2 every parallel request of a page counts as one, and 2 for archive downloads. It works with the nginx 1.24 of Ubuntu 24.04: `listen ... http2` is the form that version accepts, newer versions accept it with a deprecation warning.
 
-Replace `demo.example.com` and the certificate paths, make sure the upstream port equals `DEMO_PORT`, then:
+Get the certificate first, because `nginx -t` fails while the files named in `ssl_certificate` do not exist. The nginx authenticator also renews it on its own:
 
 ```sh
-sudo cp proxy/nginx.conf /etc/nginx/sites-enabled/lodestore-demo.conf
+sudo certbot certonly --nginx -d demo.example.com
+```
+
+Then install the site from the example without editing the working copy. Set `DOMAIN` to your domain and `PORT` to `DEMO_PORT`:
+
+```sh
+DOMAIN=demo.mydomain.net
+PORT=18080
+sed -e "s/demo\.example\.com/$DOMAIN/g" -e "s/127\.0\.0\.1:18080/127.0.0.1:$PORT/" proxy/nginx.conf \
+  | sudo tee /etc/nginx/sites-enabled/lodestore-demo.conf >/dev/null
 sudo nginx -t && sudo systemctl reload nginx
 ```
+
+The working copy stays clean, so `git checkout` of a new tag in the Update section goes through.
 
 For another proxy keep the same limits: per-IP rate limits on `/api/v1/auth/demo` and `/api/v1/downloads`, a body limit, download timeouts and a trusted `X-Forwarded-For`. Never route 8443 or 9000 anywhere.
 
@@ -166,10 +177,14 @@ For another proxy keep the same limits: per-IP rate limits on `/api/v1/auth/demo
 Anything that restarts the server with `LODESTORE_DEMO_MODE=false` (seeding, repairs through the API) is a maintenance window. Close the proxy before the restart and open it only after the stack is back with `true`:
 
 ```sh
-sudo rm /etc/nginx/sites-enabled/lodestore-demo.conf && sudo systemctl reload nginx
+sudo mv /etc/nginx/sites-enabled/lodestore-demo.conf /etc/nginx/lodestore-demo.conf.off
+sudo nginx -t && sudo systemctl reload nginx
 # ... maintenance ...
-sudo cp proxy/nginx.conf /etc/nginx/sites-enabled/lodestore-demo.conf && sudo systemctl reload nginx
+sudo mv /etc/nginx/lodestore-demo.conf.off /etc/nginx/sites-enabled/lodestore-demo.conf
+sudo nginx -t && sudo systemctl reload nginx
 ```
+
+Move the installed file aside and back rather than copying the example again: `nginx.conf` includes only `sites-enabled/*` and `conf.d/*.conf`, so a file in `/etc/nginx/` is not read, and the example still has `demo.example.com`.
 
 The server drops every session when the mode changes, but a visitor who still reaches the server while it runs with `false` would face a normal administrator interface for as long as the window lasts.
 
@@ -177,7 +192,13 @@ To reach the interface during the window, use an SSH tunnel to the loopback port
 
 ## Update
 
-Everything in the stack updates together. Update the working copy of `deploy/demo` to the tag of the new version, set `LODESTORE_VERSION` in `.env`, close the proxy (the same rule applies), then:
+Everything in the stack updates together. Update the working copy of `deploy/demo` to the tag of the new version, set `LODESTORE_VERSION` in `.env`, close the proxy (the same rule applies). If the host packages of Docker or containerd were upgraded since the stand last started, restart the rootless daemon of the stand first, as the stand user, or new containers fail with `failed to start shim`:
+
+```sh
+systemctl --user restart docker
+```
+
+The containers come back by their restart policy within seconds. Then:
 
 ```sh
 docker compose pull && docker compose up -d --build

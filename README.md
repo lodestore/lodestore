@@ -10,6 +10,8 @@
 [![License: Apache-2.0 and AGPL-3.0](https://img.shields.io/badge/license-Apache--2.0%20%2F%20AGPL--3.0-blue)](#license)
 [![Latest release](https://img.shields.io/github/v/release/lodestore/lodestore)](https://github.com/lodestore/lodestore/releases)
 
+**[Try the live demo](https://demo.lodestore.dev)**: a read-only server with synthetic data, no sign-up.
+
 </div>
 
 ![A terminal recording: start the server with one docker run, install the agent on a host with the join token, run the policy and list the first snapshot](./docs/src/assets/media/install-first-backup.gif)
