@@ -126,7 +126,7 @@ impl Notes {
 }
 
 /// Whether `e` says the data read is bad, as opposed to the read failing.
-pub(crate) fn is_data_error(e: &Error) -> bool {
+pub fn is_data_error(e: &Error) -> bool {
     matches!(
         e,
         Error::Corrupt { .. } | Error::Crypto | Error::UnsupportedVersion { .. }
