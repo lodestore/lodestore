@@ -4,11 +4,19 @@ All notable changes to Lodestore are recorded here. The format follows [Keep a C
 
 ## [Unreleased]
 
+### Added
+
+- A public read-only demo at <https://demo.lodestore.dev>: three hosts back up synthetic data, and you can browse their snapshots and download one as an archive without signing in.
+
 ### Changed
 
 - The documentation moved to <https://lodestore.dev/docs/>. The old addresses under `https://lodestore.github.io/lodestore/` redirect to the new pages.
 - The project site with comparisons and a blog is at <https://lodestore.dev>.
 - The `lode` message about access to `locks/` links to the new address of the cleanup guide.
+
+### Fixed
+
+- The demo stand template `deploy/demo/env.example` starts from 0.1.0. The proxy steps in `deploy/demo/README.md` get the certificate first, install the site file without editing the working copy and keep it through the maintenance window, and the update steps restart the rootless Docker daemon after a Docker or containerd package upgrade.
 
 ## [0.1.0] - 2026-11-02
 
