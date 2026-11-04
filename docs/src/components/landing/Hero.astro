@@ -1,0 +1,118 @@
+---
+import { liveDemoUrl } from '../site/nav';
+
+const words = ['Linux host.', 'database.', 'file share.', 'Docker host.'];
+const check =
+	'<svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8.5 12 2.5 2.5 4.5-5"/></svg>';
+const hosts = [
+	{ name: 'web-eu-01', role: 'web', last: '3 minutes ago', size: '6.2 GiB' },
+	{ name: 'pg-main-01', role: 'db', last: '22 minutes ago', size: '412 GiB' },
+	{ name: 'files-02', role: 'files', last: '1 hour ago', size: '1.1 TiB' },
+	{ name: 'ci-runner-03', role: 'ci', last: '2 hours ago', size: '88 GiB' },
+];
+---
+
+<section class="hero">
+	<div class="wrap">
+		<div>
+			<h1 class="rise">
+				Back up every <span class="rot" aria-hidden="true"
+					><span class="rot-in" id="rot">{[...words, words[0]].map((w) => <span>{w}</span>)}</span></span
+				><span class="sr-only">Linux host, database, file share and Docker host.</span><br />Restore without the server.
+			</h1>
+			<p class="lead rise d1">
+				<b>Lodestore</b> runs backups for every server in your fleet from one place. Agents encrypt on the host and write straight
+				to <b>your storage</b>, so a restore needs only that storage and your key.
+			</p>
+			<div class="cta-row rise d2">
+				<a class="btn btn-primary" href="/docs/quickstart/"
+					>Protect a host in 10 minutes <svg class="icon" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"></path></svg></a
+				>
+				{liveDemoUrl && <a class="btn btn-outline" href={liveDemoUrl}>Try the live demo</a>}
+			</div>
+			<div class="trust rise d3">
+				<span><Fragment set:html={check} />Open source, control plane included</span>
+				<span><Fragment set:html={check} />Self-hosted</span>
+			</div>
+		</div>
+
+		<div
+			class="demo rise d2"
+			id="demo"
+			role="img"
+			aria-label="The Lodestore overview. A new host is added with one command and its first backup finishes."
+		>
+			<div class="chrome"><b></b><b></b><b></b><span class="url">lodestore.internal/overview</span></div>
+			<div class="demo-body" id="dbody" inert>
+				<div class="demo-top">
+					<div>
+						<div class="demo-title">Overview</div>
+						<div class="demo-head"><Fragment set:html={check} /><span id="dhead">All 5 hosts protected</span></div>
+						<div class="demo-sub" id="dsub">Newest backup just now</div>
+					</div>
+					<button class="d-btn" id="dadd" type="button" tabindex="-1"
+						><svg class="icon" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"></path></svg>Add host</button
+					>
+				</div>
+				<table class="tbl">
+					<thead
+						><tr
+							><th>Host</th><th>Status</th><th class="hide-xs">Last success</th><th class="hide-xs">Size</th></tr
+						></thead
+					>
+					<tbody>
+						{
+							hosts.map((h) => (
+								<tr>
+									<td>
+										<span class="host">{h.name}</span>
+										<span class="lbl">role={h.role}</span>
+									</td>
+									<td>
+										<span class="st ok">
+											<Fragment set:html={check} />
+											Protected
+										</span>
+									</td>
+									<td class="hide-xs">{h.last}</td>
+									<td class="num hide-xs">{h.size}</td>
+								</tr>
+							))
+						}
+						<tr class="new show" id="drow">
+							<td><span class="host">nas-02</span><span class="lbl">role=files</span></td>
+							<td id="dst"
+								><span class="st ok"><Fragment set:html={check} />Protected</span></td
+							>
+							<td class="hide-xs" id="dls">just now</td>
+							<td class="num hide-xs" id="dsz">2.4 TiB</td>
+						</tr>
+					</tbody>
+				</table>
+				<div class="d-modal-bg"></div>
+				<div class="d-modal">
+					<h4>Add a host</h4>
+					<p>Run this as root on the host. The token works once.</p>
+					<div class="d-cmd">
+						<code>curl -fsSL https://lodestore.internal/install.sh | sudo sh -s -- --join lj1_7f3c9ae2</code><button
+							class="d-copy"
+							id="dcopy"
+							type="button"
+							tabindex="-1">Copy</button
+						>
+					</div>
+				</div>
+				<div class="toast" id="dtoast">
+					<Fragment set:html={check} /><span><b>nas-02</b> first backup finished</span>
+				</div>
+				<svg id="cursor" viewBox="0 0 24 24"
+					><path d="M5 3l14 8-6 1.5L10 19z" fill="#0b1220" stroke="#fff" stroke-width="1.5" stroke-linejoin="round"></path></svg
+				>
+			</div>
+		</div>
+	</div>
+</section>
+
+<script>
+	import '../../scripts/hero-demo';
+</script>

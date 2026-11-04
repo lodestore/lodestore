@@ -4,7 +4,7 @@
 
 # Lodestore
 
-**Centralized, encrypted backup for Linux hosts. Your data goes straight to your own storage, and a restore needs only the repository and a password.**
+**Centralized, encrypted backup for your server fleet. Your data goes straight to your own storage, and a restore needs only the repository and a password.**
 
 [![ci](https://github.com/lodestore/lodestore/actions/workflows/ci.yml/badge.svg)](https://github.com/lodestore/lodestore/actions/workflows/ci.yml)
 [![License: Apache-2.0 and AGPL-3.0](https://img.shields.io/badge/license-Apache--2.0%20%2F%20AGPL--3.0-blue)](#license)
@@ -12,11 +12,16 @@
 
 </div>
 
-![The Lodestore overview: three protected hosts with their last successful backup and size](./docs/assets/overview.png)
+![A terminal recording: start the server with one docker run, install the agent on a host with the join token, run the policy and list the first snapshot](./docs/src/assets/media/install-first-backup.gif)
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./docs/src/assets/media/overview.dark.webp">
+  <img src="./docs/src/assets/media/overview.light.webp" alt="The Lodestore overview: protected hosts with the time and size of their last successful backup">
+</picture>
 
 ## What is Lodestore
 
-Lodestore is a backup system for fleets of Linux hosts. A lightweight agent on each host writes deduplicated, encrypted data straight to S3-compatible object storage (AWS S3, MinIO, Ceph and others) or to a local or network folder such as NFS. The server only manages and catalogs, so it never sits in the data path and a restore works without it.
+Lodestore is a backup system for fleets of Linux hosts. A lightweight agent on each host writes deduplicated, encrypted data straight to S3-compatible object storage (AWS S3, MinIO, Ceph and others) or to a local or network folder such as NFS. The server only manages and catalogs, so backups never pass through it and a restore works without it.
 
 - **Restore needs only the repository and a key.** The bucket, plus the repository password or the recovery key, is enough to restore with the `lode` command line, even if the server is gone.
 - **On S3-compatible storage, hosts cannot delete their own backups.** An agent holds a key without delete rights; deletion and cleanup run only on the server, and work with S3 Object Lock and versioning.

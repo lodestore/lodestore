@@ -1,0 +1,19 @@
+---
+import dark from '../assets/illustrations/hosts-empty.dark.webp';
+import light from '../assets/illustrations/hosts-empty.light.webp';
+import ThemeImage from '../components/site/ThemeImage.astro';
+import Site from '../layouts/Site.astro';
+---
+
+<Site title="Page not found: Lodestore" description="This page does not exist. Go to the home page, the docs or the quickstart.">
+	<main class="not-found wrap">
+		<ThemeImage {light} {dark} alt="" widths={[320, 480]} sizes="(min-width: 768px) 320px, 70vw" />
+		<h1 class="d">This page is not here.</h1>
+		<p class="lead">The address may have moved. Start from one of these.</p>
+		<div class="cta-row">
+			<a class="btn btn-primary" href="/docs/quickstart/">Quickstart</a>
+			<a class="btn btn-outline" href="/docs/">Docs</a>
+			<a class="btn btn-outline" href="/">Home</a>
+		</div>
+	</main>
+</Site>

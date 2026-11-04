@@ -1,0 +1,123 @@
+---
+title: Introducing Lodestore 0.1
+description: Central backup for Linux fleets, where a restore needs only the bucket and a key.
+pubDate: 2026-11-02
+tags: [Release]
+coverLight: ../../assets/illustrations/blog-introducing.light.webp
+coverDark: ../../assets/illustrations/blog-introducing.dark.webp
+coverAlt: A server tile with a dashed outline on the left, a storage bucket with a key in the middle, and an arrow from the bucket to a smaller host tile on the right.
+---
+
+import ThemeImage from '../../components/site/ThemeImage.astro';
+import overviewLight from '../../assets/media/overview.light.webp';
+import overviewDark from '../../assets/media/overview.dark.webp';
+import searchLight from '../../assets/media/search.light.webp';
+import searchDark from '../../assets/media/search.dark.webp';
+import ThemeVideo from '../../components/site/ThemeVideo.astro';
+import addHostLight from '../../assets/media/add-host.light.mp4';
+import addHostDark from '../../assets/media/add-host.dark.mp4';
+import addHostPosterLight from '../../assets/media/add-host-poster.light.webp';
+import addHostPosterDark from '../../assets/media/add-host-poster.dark.webp';
+import restoreLight from '../../assets/media/restore.light.mp4';
+import restoreDark from '../../assets/media/restore.dark.mp4';
+import restorePosterLight from '../../assets/media/restore-poster.light.webp';
+import restorePosterDark from '../../assets/media/restore-poster.dark.webp';
+
+Lodestore is a backup system for fleets of Linux hosts. A small agent on each host writes deduplicated, encrypted data straight to your own S3-compatible storage. One server binary schedules the work, keeps the catalog and shows the whole fleet in a web interface. Version 0.1.0 is the first release.
+
+## Why another backup tool
+
+Backing up one host is a solved problem. Backing up fifty is a different one. Someone has to see which hosts failed last night, change a schedule in one place, and find the file a colleague deleted without knowing which host it lived on. And all of it has to hold on the worst day, when the backup server itself is gone.
+
+Lodestore is built around one promise: **a restore needs only the bucket and a key**, the repository password or the recovery key. Not the server, not the agent, not a database.
+
+## How it fits together
+
+- **The agent** runs on each host. It registers with a one-time join token, receives its own client certificate, keeps an outbound connection to the server and needs no inbound ports.
+- **The server** manages and catalogs. It schedules backups, keeps snapshot metadata, sends alerts and serves the web interface. Backups never pass through it.
+- **Your storage** holds the data. The agent writes to it directly: AWS S3, MinIO, Ceph and other S3-compatible storage, or a local or network folder.
+
+Data is deduplicated across the snapshots and hosts of a repository, compressed, then encrypted with XChaCha20-Poly1305 before it leaves the host. File names are not readable in the bucket either; [a test](/docs/security/how-we-test/#what-the-bucket-looks-like-from-outside) searches every object, names included, for recognizable content. The server runs as a Docker image, a static binary or a Helm chart, with SQLite by default and PostgreSQL for production.
+
+<figure>
+	<ThemeImage
+		light={overviewLight}
+		dark={overviewDark}
+		alt="The Lodestore overview of a demo fleet: one of three hosts needs attention, with the reason shown, and two are protected."
+		widths={[720, 1080, 1600]}
+		sizes="(min-width: 768px) 68ch, 92vw"
+	/>
+	<figcaption>The overview of a demo fleet: one host failed because a folder in its policy does not exist, two are protected.</figcaption>
+</figure>
+
+To protect a host, open **Hosts**, choose **Add host** and run the command it shows as root on the machine. The host appears as online within seconds. Then create a policy for the folders to back up, choose the host and run it; when the job succeeds, the snapshot is in your bucket.
+
+<ThemeVideo
+	light={addHostLight}
+	dark={addHostDark}
+	posterLight={addHostPosterLight}
+	posterDark={addHostPosterDark}
+	label="Adding a host in the Lodestore web interface, from the Add host dialog to a protected host"
+	caption="Adding a host on the demo stand, from the Add host dialog to a protected host. The waiting for the agent is sped up; the clicks run in real time."
+/>
+
+Policies are YAML or a form: cron schedules in an IANA time zone with jitter and catch-up of missed runs, and retention by daily, weekly, monthly, last-N and within-period rules. `lode apply -f` applies them from CI, with `--dry-run` and `--prune`. See [Policies and retention](/docs/guides/policies/).
+
+## Restore without the server
+
+The restore path is the part that has to work when everything else does not. All it needs is the `lode` command line, the bucket and a key. Put the password or the recovery key in a file only you can read, point `lode` at the repository, and restore:
+
+```sh
+export AWS_ACCESS_KEY_ID=your-read-access-key
+export AWS_SECRET_ACCESS_KEY=your-read-secret-key
+export AWS_REGION=eu-central-1
+export LODE_REPOSITORY="s3:https://s3.eu-central-1.amazonaws.com/my-bucket"
+export LODE_PASSWORD_FILE=./repository-key
+
+lode snapshots
+lode restore latest --target ./restored
+```
+
+The key an agent holds cannot read data, so use the server's key or any other key with read access to the bucket. A continuous integration job runs the same restore on a clean machine for every pull request. The full recipe, including smaller restores of one file or folder, is in [Restore without the server](/docs/recipes/restore-without-server/).
+
+From the web interface you can restore in place, to another host, or as a downloadable archive, and search for a file across the snapshots of all hosts.
+
+<ThemeVideo
+	light={restoreLight}
+	dark={restoreDark}
+	posterLight={restorePosterLight}
+	posterDark={restorePosterDark}
+	label="Restoring a snapshot from the Lodestore web interface into a new folder on the host"
+	caption="Restoring a snapshot into a new folder from the web interface, on the demo stand."
+/>
+
+<figure>
+	<ThemeImage
+		light={searchLight}
+		dark={searchDark}
+		alt="Find file in the Lodestore restore page: a search for a handbook across all hosts lists three files with their versions and the snapshots that contain them."
+		widths={[720, 1080, 1600]}
+		sizes="(min-width: 768px) 68ch, 92vw"
+	/>
+	<figcaption>Find file searches every snapshot that is still kept, here for one file across three demo hosts.</figcaption>
+</figure>
+
+## What a stolen host can and cannot do
+
+On S3-compatible storage the key an agent holds has no delete rights. Deletion and cleanup run only on the server, and they work with S3 Object Lock and versioning. Cleanup is two-phase: mark, wait longer than the longest backup, check again, then delete, with a dry run always available.
+
+Two limits are worth knowing before you rely on this. Overwrite is refused only where the storage enforces `If-None-Match`; MinIO does not, so use bucket versioning or Object Lock there. And with a local or network folder the agent can delete and overwrite, so prefer object storage for data that a compromised host must not destroy. The details are in the [threat model](/docs/security/threat-model/#agent-credentials), and the next post, [An agent that can write but not read or delete](/blog/write-only-agents/), walks through the key model behind it.
+
+## What 0.1 covers, and what is next
+
+Version 0.1 backs up files and directories on Linux, x86_64 and arm64. Databases are covered by [dumping them in a pre-backup hook](/docs/recipes/database-backup-hook/). Alerts go to Telegram, Slack, email and webhooks, and Prometheus metrics, alert rules and a Grafana dashboard ship with it. Planned, and not built yet: Proxmox and Kubernetes backups, and more storage backends.
+
+We list what the automated checks cover, and what they do not, on [How we test data safety](/docs/security/how-we-test/).
+
+## Licenses
+
+The agent, the repository format, the protocol and the `lode` command line are Apache-2.0. The server is AGPL-3.0-only. Apache-2.0 crates never depend on the server or on any other AGPL crate, and a script in the repository checks it.
+
+## Try it
+
+One command starts the server and one connects a host; the first backup takes about ten minutes. Start with the [quickstart](/docs/quickstart/), and find the source on [GitHub](https://github.com/lodestore/lodestore).

@@ -15,7 +15,7 @@ elif [ "$#" -ne 1 ]; then
   exit 2
 fi
 root=$(cd "$(dirname "$0")/.." && pwd)
-page=$root/docs/src/content/docs/quickstart.md
+page=$root/docs/src/content/docs/docs/quickstart.md
 bin_dir=$root/target/test-bin
 data_dir=/srv/lodestore-quickstart
 

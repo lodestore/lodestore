@@ -1,0 +1,66 @@
+---
+import onest from '../assets/fonts/onest-latin-wght-normal.woff2?url';
+import Footer from '../components/site/Footer.astro';
+import Header from '../components/site/Header.astro';
+import '../styles/tokens.css';
+import '../styles/site.css';
+
+interface Props {
+	title: string;
+	description: string;
+}
+
+const { title, description } = Astro.props;
+const canonical = new URL(Astro.url.pathname, Astro.site);
+const ogImage = new URL('/og.png', Astro.site);
+---
+
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<script is:inline>
+			document.documentElement.classList.add('js');
+			try {
+				const t = localStorage.getItem('starlight-theme');
+				document.documentElement.dataset.theme = t === 'dark' ? 'dark' : 'light';
+			} catch {
+				document.documentElement.dataset.theme = 'light';
+			}
+		</script>
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>{title}</title>
+		<meta name="description" content={description} />
+		<link rel="canonical" href={canonical} />
+		<meta property="og:title" content={title} />
+		<meta property="og:description" content={description} />
+		<meta property="og:type" content="website" />
+		<meta property="og:url" content={canonical} />
+		<meta property="og:image" content={ogImage} />
+		<meta name="twitter:card" content="summary_large_image" />
+		<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+		<link rel="icon" href="/favicon.ico" sizes="32x32" />
+		<link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+		<link rel="manifest" href="/site.webmanifest" />
+		<link rel="alternate" type="application/rss+xml" title="Lodestore blog" href="/blog/rss.xml" />
+		<link rel="preload" as="font" type="font/woff2" href={onest} crossorigin />
+	</head>
+	<body>
+		<Header />
+		<slot />
+		<Footer />
+		<script>
+			const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+			const io = new IntersectionObserver(
+				(entries) =>
+					entries.forEach((e) => {
+						if (!e.isIntersecting) return;
+						e.target.classList.add('in');
+						io.unobserve(e.target);
+					}),
+				{ rootMargin: '0px 0px -10% 0px' },
+			);
+			document.querySelectorAll('.rise, .kt').forEach((el) => (reduce ? el.classList.add('in') : io.observe(el)));
+		</script>
+	</body>
+</html>

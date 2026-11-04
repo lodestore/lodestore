@@ -1,6 +1,6 @@
 //! The agent's local unix socket. It offers one operation, `backup_stdin`: a
 //! user on the host streams data in and the agent writes it to the repository
-//! with its own keys. See `docs/src/content/docs/reference/local-socket.md` for the protocol.
+//! with its own keys. See `docs/src/content/docs/docs/reference/local-socket.md` for the protocol.
 
 use std::io::Read;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, PermissionsExt};

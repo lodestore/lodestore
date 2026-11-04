@@ -1,0 +1,110 @@
+---
+const yes = 'm5 12 5 5 9-10';
+const no = 'M6 6l12 12M18 6 6 18';
+const warn = ['M10.3 3.9 2.4 17.5A2 2 0 0 0 4.1 20.5h15.8a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z', 'M12 9v4M12 17h.01'];
+const arrow = 'M5 12h14M13 6l6 6-6 6';
+const rows = [
+	{
+		cls: 'y',
+		verdict: 'Yes',
+		icon: [yes],
+		what: 'Write new backups',
+		text: 'Its job. New data is encrypted on the host before upload.',
+	},
+	{
+		cls: 'n',
+		verdict: 'No',
+		icon: [no],
+		what: 'Read backups back',
+		text: 'The agent key is write-only. A restore gets short-lived links to the packs of its own job.',
+	},
+	{
+		cls: 'n',
+		verdict: 'No',
+		icon: [no],
+		what: 'Delete a backup',
+		text: 'The key has no delete permission. Deletion runs only on the server and works with S3 Object Lock.',
+	},
+	{
+		cls: 'y',
+		verdict: 'Depends',
+		icon: warn,
+		what: 'Overwrite an object',
+		text: 'Refused where the storage enforces If-None-Match. Where it does not, versioning or Object Lock keeps the earlier version.',
+	},
+	{
+		cls: 'n',
+		verdict: 'No',
+		icon: [no],
+		what: 'Push an unsigned agent build',
+		text: 'An agent installs an update only after checking its minisign signature.',
+	},
+];
+const chips = ['XChaCha20-Poly1305', 'X-Wing', 'BLAKE3', 'Argon2id', 'minisign'];
+---
+
+<section class="ink sec-pad" id="security">
+	<svg class="ink-star" viewBox="0 0 32 32" aria-hidden="true"><path fill="#38E1FF" d="M16 0L19 13L32 16L19 19L16 32L13 19L0 16L13 13Z"></path></svg>
+	<div class="wrap">
+		<div class="sec-head rise">
+			<h2>Built for the day <span class="em">a host is compromised.</span></h2>
+			<p>
+				An agent runs as root on every host. So we designed for one of them being taken over, and wrote down exactly what
+				follows.
+			</p>
+		</div>
+		<p class="kt-title" id="kt-title">What a stolen host key can do</p>
+		<div class="ink-grid">
+			<table class="kt" id="kt" aria-labelledby="kt-title">
+				<tbody>
+					{
+						rows.map((r) => (
+							<tr>
+								<th scope="row">
+									<span class={`vd ${r.cls}`}>
+										<svg class="icon" viewBox="0 0 24 24">
+											{r.icon.map((d) => (
+												<path d={d} />
+											))}
+										</svg>
+										{r.verdict}
+									</span>
+									{r.what}
+								</th>
+								<td>{r.text}</td>
+							</tr>
+						))
+					}
+				</tbody>
+			</table>
+			<div class="ink-side">
+				<div class="ink-card rise">
+					<h3>
+						<svg class="icon" viewBox="0 0 24 24"><path d="M12 3 4 6v6c0 4.5 3.4 8.3 8 9 4.6-.7 8-4.5 8-9V6Z"></path></svg>Post-quantum from day one
+					</h3>
+					<p>
+						Pack keys are sealed with X-Wing, X25519 plus ML-KEM-768. A bucket copied today stays closed if either one breaks.
+					</p>
+					<div class="chips">{chips.map((c) => <span class="chip"><i></i>{c}</span>)}</div>
+				</div>
+				<div class="ink-card rise d1">
+					<h3>
+						<svg class="icon" viewBox="0 0 24 24"><path d="m5 12 5 5 9-10"></path></svg>Tested, not promised
+					</h3>
+					<p>
+						How we test lists the tests behind these claims, from the agent key being refused a read to a restore from the
+						bucket alone.
+					</p>
+					<div class="ink-links">
+						<a class="more" href="/docs/security/threat-model/"
+							>Threat model <svg class="icon" viewBox="0 0 24 24"><path d={arrow}></path></svg></a
+						>
+						<a class="more" href="/docs/security/how-we-test/"
+							>How we test <svg class="icon" viewBox="0 0 24 24"><path d={arrow}></path></svg></a
+						>
+					</div>
+				</div>
+			</div>
+		</div>
+	</div>
+</section>

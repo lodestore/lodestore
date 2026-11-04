@@ -1,0 +1,63 @@
+---
+import authDark from '../assets/illustrations/auth-hero.dark.webp';
+import authLight from '../assets/illustrations/auth-hero.light.webp';
+import Arch from '../components/landing/Arch.astro';
+import Compare from '../components/landing/Compare.astro';
+import Features from '../components/landing/Features.astro';
+import FromBlog from '../components/landing/FromBlog.astro';
+import Hero from '../components/landing/Hero.astro';
+import Install from '../components/landing/Install.astro';
+import Security from '../components/landing/Security.astro';
+import ThemeImage from '../components/site/ThemeImage.astro';
+import { GITHUB_URL } from '../components/site/nav';
+import Site from '../layouts/Site.astro';
+import '../styles/landing.css';
+
+const arrow = 'M5 12h14M13 6l6 6-6 6';
+const title = 'Lodestore: back up every Linux host';
+const description =
+	'Centralized backup for your server fleet. Encrypted, deduplicated data goes straight to your storage, and restore works without the server.';
+const data = {
+	'@context': 'https://schema.org',
+	'@type': 'SoftwareApplication',
+	name: 'Lodestore',
+	description,
+	url: new URL('/', Astro.site).href,
+	applicationCategory: 'UtilitiesApplication',
+	operatingSystem: 'Linux',
+	offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
+	license: [`${GITHUB_URL}/blob/main/LICENSE`, `${GITHUB_URL}/blob/main/crates/lodestore-server/LICENSE`],
+	codeRepository: GITHUB_URL,
+	sameAs: [GITHUB_URL],
+};
+---
+
+<Site title={title} description={description}>
+	<script type="application/ld+json" set:html={JSON.stringify(data)} />
+	<main>
+		<Hero />
+		<Arch />
+		<Features />
+		<Security />
+		<Install />
+		<Compare />
+		<FromBlog />
+		<section class="final">
+			<div class="wrap">
+				<div class="rise">
+					<h2>Protect the first host <span class="em">before your coffee cools.</span></h2>
+					<p>One command for the server, one for the host. Open source, self-hosted, no account.</p>
+					<div class="cta-row">
+						<a class="btn btn-primary" href="/docs/quickstart/"
+							>Start the quickstart <svg class="icon" viewBox="0 0 24 24"><path d={arrow}></path></svg></a
+						>
+						<a class="btn btn-outline" href={GITHUB_URL}>Star on GitHub</a>
+					</div>
+				</div>
+				<div class="rise d1">
+					<ThemeImage light={authLight} dark={authDark} alt="" widths={[480, 720]} sizes="(min-width: 1024px) 480px, 90vw" />
+				</div>
+			</div>
+		</section>
+	</main>
+</Site>

@@ -1,0 +1,11 @@
+---
+import Default from '@astrojs/starlight/components/SocialIcons.astro';
+import { navItems } from '../site/nav';
+
+const items = await navItems();
+---
+
+<nav class="site-nav" aria-label="Site">
+	{items.map((i) => <a href={i.href}>{i.label}</a>)}
+</nav>
+<Default {...Astro.props}><slot /></Default>

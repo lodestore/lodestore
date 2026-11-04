@@ -1,0 +1,206 @@
+.blog-list.wrap {
+	padding-top: 64px;
+	min-width: 0;
+}
+.blog-head {
+	display: grid;
+	gap: 16px;
+	justify-items: start;
+	margin-bottom: 48px;
+}
+
+.posts {
+	display: grid;
+	gap: 24px;
+}
+@media (min-width: 768px) {
+	.posts {
+		grid-template-columns: 1fr 1fr;
+	}
+}
+.post {
+	display: grid;
+	grid-template-rows: auto 1fr;
+	border: 1px solid var(--border);
+	border-radius: 16px;
+	background: var(--card);
+	overflow: hidden;
+	text-decoration: none;
+	transition:
+		transform 200ms var(--ease),
+		box-shadow 200ms;
+}
+.post:hover {
+	transform: translateY(-4px);
+	box-shadow: 0 24px 48px -24px rgb(11 18 32 / 0.3);
+}
+.post .ph {
+	aspect-ratio: 2 / 1;
+	background: var(--primary-subtle);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	overflow: hidden;
+}
+.post .ph img {
+	width: 62%;
+}
+.post .t {
+	padding: 24px;
+}
+.post small {
+	color: var(--muted-foreground);
+}
+.post h2 {
+	font-size: 20px;
+	line-height: 1.25;
+	margin: 8px 0;
+}
+.post p {
+	color: var(--muted-foreground);
+	font-size: 15px;
+}
+
+.blog-post {
+	padding-top: 48px;
+	min-width: 0;
+}
+.read {
+	max-width: 68ch;
+	margin: 0 auto;
+	min-width: 0;
+}
+.read .back {
+	margin-bottom: 24px;
+}
+.read .meta {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px 16px;
+	margin-top: 16px;
+}
+.read .meta a {
+	color: var(--primary-strong);
+}
+.read .tag {
+	padding: 2px 10px;
+	border: 1px solid var(--border);
+	border-radius: 999px;
+	background: var(--card);
+}
+.read .cover {
+	display: flex;
+	justify-content: center;
+	margin: 32px 0 40px;
+	padding: 24px;
+	border-radius: 16px;
+	background: var(--primary-subtle);
+}
+.read .cover img {
+	width: min(100%, 480px);
+}
+
+.prose {
+	font-size: 17px;
+	line-height: 1.7;
+	overflow-wrap: break-word;
+}
+.prose > * + * {
+	margin-top: 1.1em;
+}
+.prose h2 {
+	font-size: 28px;
+	line-height: 1.2;
+	letter-spacing: -0.015em;
+	margin-top: 2em;
+}
+.prose h3 {
+	font-size: 20px;
+	line-height: 1.3;
+	margin-top: 1.6em;
+}
+.prose a {
+	color: var(--primary-strong);
+}
+.prose ul,
+.prose ol {
+	padding-left: 1.4em;
+	display: grid;
+	gap: 0.5em;
+}
+.prose :not(pre) > code {
+	padding: 0.1em 0.35em;
+	border-radius: 6px;
+	background: var(--muted);
+	font-size: 0.88em;
+}
+.prose blockquote {
+	padding-left: 16px;
+	border-left: 3px solid var(--primary);
+	color: var(--muted-foreground);
+}
+.prose figure {
+	margin: 2em 0;
+}
+.prose figure img,
+.prose figure video {
+	width: 100%;
+	height: auto;
+	border: 1px solid var(--border);
+	border-radius: 12px;
+	background: var(--card);
+}
+.prose figcaption {
+	margin-top: 8px;
+	font-size: 14px;
+	line-height: 1.5;
+	color: var(--muted-foreground);
+}
+.prose table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 15px;
+}
+.prose th,
+.prose td {
+	text-align: left;
+	vertical-align: top;
+	padding: 10px 12px;
+	border-bottom: 1px solid var(--border);
+}
+
+.prose .expressive-code {
+	--ec-brdCol: var(--ink-border);
+	--ec-brdRad: 10px;
+	--ec-codeBg: var(--ink);
+	--ec-codeFg: var(--ink-fg);
+	--ec-codeSelBg: #1e2738;
+	--ec-frm-edBg: var(--ink);
+	--ec-frm-edActTabBg: var(--ink-2);
+	--ec-frm-trmTtbBg: var(--ink-2);
+	--ec-frm-trmTtbFg: var(--ink-muted);
+	--ec-frm-trmBg: var(--ink);
+	--ec-uiSelBg: #1e2738;
+	--ec-gtrFg: #5d6a82;
+	--ec-gtrBrdCol: var(--ink-border);
+	--ec-gtrHlFg: var(--ink-muted);
+	--ec-codeFontFml: 'JetBrains Mono', ui-monospace, monospace;
+	--ec-codeFontSize: 13px;
+	--ec-codeLinHt: 1.7;
+	margin: 1.6em 0;
+}
+.prose .expressive-code pre {
+	background: var(--ink);
+}
+.prose .expressive-code .frame {
+	box-shadow: none;
+}
+.prose .expressive-code .ec-line span {
+	color: var(--0) !important;
+}
+.prose .expressive-code code {
+	background: transparent;
+	padding: 0;
+	font-size: inherit;
+}

@@ -1,0 +1,154 @@
+---
+import binaryDoc from '../../content/docs/docs/install/binary.md?raw';
+import helmDoc from '../../content/docs/docs/install/helm.md?raw';
+import quickstart from '../../content/docs/docs/quickstart.md?raw';
+
+function need<T>(value: T | undefined | null, what: string): T {
+	if (value == null || value === '') throw new Error(`Install.astro: ${what} not found in its source page`);
+	return value;
+}
+
+const version = need(quickstart.match(/^export LODESTORE_VERSION=(.+)$/m)?.[1], 'LODESTORE_VERSION in quickstart');
+const host = need(quickstart.match(/^export LODESTORE_HOST=.+$/m)?.[0], 'LODESTORE_HOST in quickstart');
+const server = need(quickstart.match(/<!-- ci:run-server -->\n```sh\n([\s\S]*?)```/)?.[1], 'ci:run-server block');
+const firstBlock = (doc: string, page: string) => need(doc.match(/```sh\n([\s\S]*?)```/)?.[1], `a sh block in ${page}`).trim();
+
+const panes = [
+	{ id: 'docker', label: 'Docker', code: `${host}\n${server.trim().replaceAll('$LODESTORE_VERSION', version)}` },
+	{ id: 'binary', label: 'Binary', code: firstBlock(binaryDoc, 'install/binary') },
+	{ id: 'helm', label: 'Helm', code: firstBlock(helmDoc, 'install/helm') },
+];
+
+const steps = [
+	{ title: 'Start the server', text: 'One container, a static binary or a Helm chart. SQLite by default, PostgreSQL for production.' },
+	{ title: 'Connect your storage', text: 'Create the repository and save the recovery key.' },
+	{ title: 'Add a host', text: 'Copy one command to it. The agent checks the checksum and registers.' },
+	{ title: 'Watch the first backup', text: 'Create a policy and run it. Progress shows under Jobs.' },
+];
+
+const bucket = ['M4 7c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3Z', 'M4 7v10c0 1.7 3.6 3 8 3s8-1.3 8-3V7'];
+const folder = ['M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z'];
+const storage = [
+	{ name: 'AWS S3', icon: bucket },
+	{ name: 'MinIO', icon: bucket },
+	{ name: 'Ceph', icon: bucket },
+	{ name: 'Other S3-compatible', icon: bucket },
+	{ name: 'Local or NFS folder', icon: folder },
+];
+---
+
+<section class="sec-pad wrap" id="install">
+	<div class="inst">
+		<div class="rise">
+			<h2>From zero to the first backup <span class="em">in about ten minutes.</span></h2>
+			<ol>
+				{
+					steps.map((s) => (
+						<li>
+							<div><b>{s.title}</b><span>{s.text}</span></div>
+						</li>
+					))
+				}
+			</ol>
+			<div class="cta-row" style="margin-top:32px">
+				<a class="btn btn-primary" href="/docs/quickstart/"
+					>Read the quickstart <svg class="icon" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"></path></svg></a
+				>
+			</div>
+		</div>
+		<div class="rise d1">
+			<div class="term" id="inst-term">
+				<div class="itabs">
+					<div class="itl" role="tablist" aria-label="Install the server with">
+						{
+							panes.map((p, i) => (
+								<button
+									type="button"
+									role="tab"
+									id={`inst-tab-${p.id}`}
+									aria-controls={`inst-${p.id}`}
+									aria-selected={i === 0 ? 'true' : 'false'}
+									tabindex={i === 0 ? 0 : -1}
+								>
+									{p.label}
+								</button>
+							))
+						}
+					</div>
+					<button type="button" class="copy" id="inst-copy" aria-live="polite">Copy</button>
+				</div>
+				<div class="ipanes">
+					{
+						panes.map((p, i) => (
+							<pre
+								class:list={['ipane', i === 0 && 'on']}
+								id={`inst-${p.id}`}
+								role="tabpanel"
+								aria-labelledby={`inst-tab-${p.id}`}
+								data-label={p.label}
+								tabindex="0">{p.code}</pre>
+						))
+					}
+				</div>
+			</div>
+			<div class="stor">
+				<p>Your storage</p>
+				<div class="sch">
+					{
+						storage.map((s) => (
+							<span>
+								<svg class="icon" viewBox="0 0 24 24">
+									{s.icon.map((d) => (
+										<path d={d} />
+									))}
+								</svg>
+								{s.name}
+							</span>
+						))
+					}
+				</div>
+				<p class="plat">Agents run on Linux (x86_64, arm64) today. Windows and macOS are on the roadmap.</p>
+			</div>
+		</div>
+	</div>
+</section>
+
+<script>
+	const root = document.getElementById('inst-term')!;
+	const tabs = [...root.querySelectorAll<HTMLButtonElement>('[role=tab]')];
+	const panes = [...root.querySelectorAll<HTMLElement>('.ipane')];
+	const copy = document.getElementById('inst-copy') as HTMLButtonElement;
+	let active = 0;
+
+	function select(i: number, focus = false) {
+		active = i;
+		tabs.forEach((t, k) => {
+			t.setAttribute('aria-selected', String(k === i));
+			t.tabIndex = k === i ? 0 : -1;
+		});
+		panes.forEach((p, k) => p.classList.toggle('on', k === i));
+		if (focus) tabs[i].focus();
+	}
+
+	tabs.forEach((t, i) => {
+		t.addEventListener('click', () => select(i));
+		t.addEventListener('keydown', (e) => {
+			const next = { ArrowRight: (i + 1) % tabs.length, ArrowLeft: (i + tabs.length - 1) % tabs.length, Home: 0, End: tabs.length - 1 }[e.key];
+			if (next === undefined) return;
+			e.preventDefault();
+			select(next, true);
+		});
+	});
+
+	let timer: number | undefined;
+	copy.addEventListener('click', async () => {
+		try {
+			await navigator.clipboard.writeText(panes[active].textContent ?? '');
+			copy.textContent = 'Copied';
+		} catch {
+			copy.textContent = 'Press Ctrl+C';
+		}
+		clearTimeout(timer);
+		timer = window.setTimeout(() => (copy.textContent = 'Copy'), 1500);
+	});
+</script>
