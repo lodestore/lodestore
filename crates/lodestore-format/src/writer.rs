@@ -19,6 +19,7 @@ use rustix::fs::{Stat, fstat, readlinkat};
 use rustix::io::Errno;
 
 use crate::Fut;
+use crate::attest::{self, MARKER_LEGACY_SHARDS};
 use crate::chunker::{Chunker, blob_id, check_params};
 use crate::config;
 use crate::crypto::{BLOB_TYPE_DATA, BLOB_TYPE_TREE, BlobId, Entropy};
@@ -26,7 +27,7 @@ use crate::error::{Error, Result};
 use crate::fs::scan::{self, ScanTotals};
 use crate::fs::walk::{CACHEDIR_TAG, ExtentReader, WalkOptions, Walker, data_extents};
 use crate::fs::{conv, hostname, meta, now};
-use crate::index::{Index, index_object_key, seal_shard};
+use crate::index::{Index, SupersedesTrust, index_object_key, seal_shard};
 use crate::keys::WriteKeys;
 use crate::locks;
 use crate::pack::{MAX_TREE_ULEN, PACK_TARGET_SIZE, PackBuilder, pack_object_key, parse_entries};
@@ -203,6 +204,8 @@ pub struct Writer<S: BlobStore> {
     index: Index,
     entropy: Entropy,
     gc_locks_denied: bool,
+    attested: HashSet<BlobId>,
+    written: Vec<BlobId>,
     /// Open packs of the conformance hooks, see [`Writer::put_blob_raw`].
     #[cfg(feature = "test-hooks")]
     raw: [Option<PackBuilder>; 2],
@@ -213,6 +216,15 @@ impl<S: BlobStore> Writer<S> {
     /// loads the index by LIST, which is discovery only: a shard that is not
     /// listed costs deduplication, never correctness.
     pub async fn new(store: S, keys: WriteKeys, config: &pb::Config) -> Result<Self> {
+        Self::open(store, keys, config, None).await
+    }
+
+    async fn open(
+        store: S,
+        keys: WriteKeys,
+        config: &pb::Config,
+        own_shards: Option<&HashSet<BlobId>>,
+    ) -> Result<Self> {
         config::check_write_version(config)?;
         check_params(config.chunker.as_ref())?;
         if config::repo_id_of(config)? != keys.repo_id {
@@ -227,15 +239,30 @@ impl<S: BlobStore> Writer<S> {
             ));
         }
         let gc_locks = locks::read_gc_locks(&store, &keys.k_idx, &keys.repo_id).await?;
+        let peeked = attest::peek_attestations(&store).await?;
         let mut index = Index::default();
+        index.set_supersedes_trust(SupersedesTrust::Only(HashSet::new()));
         index.exclude_packs(gc_locks.candidate_packs());
-        index.load_all(&store, &keys.k_idx, &keys.repo_id).await?;
+        match own_shards {
+            Some(own) if peeked.markers.contains(&MARKER_LEGACY_SHARDS) => {
+                let ordered: BTreeSet<&BlobId> = peeked.shards.union(own).collect();
+                let refs: Vec<Vec<u8>> = ordered.into_iter().map(|id| id.to_vec()).collect();
+                index
+                    .load_refs(&store, &keys.k_idx, &keys.repo_id, &refs)
+                    .await?;
+            }
+            _ => {
+                index.load_all(&store, &keys.k_idx, &keys.repo_id).await?;
+            }
+        }
         Ok(Writer {
             store,
             keys,
             index,
             entropy: Entropy::os(),
             gc_locks_denied: gc_locks.denied,
+            attested: peeked.shards,
+            written: Vec::new(),
             #[cfg(feature = "test-hooks")]
             raw: [None, None],
         })
@@ -252,6 +279,35 @@ impl<S: BlobStore> Writer<S> {
         keys.verify_config(&config_bytes)?;
         let config = config::decode(&config_bytes)?;
         Self::new(store, keys, &config).await
+    }
+
+    /// Like [`Writer::connect`], but once the server has upgraded the
+    /// repository only shards in the attestation list and `own_shards` are
+    /// used for deduplication. The list is read without a MAC check: a filter
+    /// that saves a failed job, not a trust boundary.
+    pub async fn connect_attested(
+        store: S,
+        keys: WriteKeys,
+        own_shards: &HashSet<BlobId>,
+    ) -> Result<Self> {
+        let config_bytes = match store.get("config").await {
+            Ok(bytes) => bytes,
+            Err(BlobError::NotFound) => return Err(Error::NotInitialized),
+            Err(e) => return Err(e.into()),
+        };
+        keys.verify_config(&config_bytes)?;
+        let config = config::decode(&config_bytes)?;
+        Self::open(store, keys, &config, Some(own_shards)).await
+    }
+
+    /// Shards this writer put into the store.
+    pub fn written_shards(&self) -> &[BlobId] {
+        &self.written
+    }
+
+    /// Shards the attestation list named when the writer opened.
+    pub fn attested_shards(&self) -> &HashSet<BlobId> {
+        &self.attested
     }
 
     /// True when the store refused to list or read `locks/`: packs marked for
@@ -915,6 +971,7 @@ impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
             },
         )?;
         self.refs.insert(shard_id);
+        self.w.written.push(shard_id);
         Ok(())
     }
 

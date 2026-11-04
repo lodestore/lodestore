@@ -24,6 +24,7 @@ use crate::socket::StdinHeader;
 use crate::{AgentError, NetOptions, Paths};
 
 pub mod fetch;
+pub(crate) mod own_shards;
 pub mod priority;
 pub mod restore;
 pub mod runner;
