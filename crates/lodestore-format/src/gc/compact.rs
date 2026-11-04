@@ -1,9 +1,12 @@
 //! Replacing the index shards that name deleted packs, and the many small
 //! ones, with a few compact shards.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+
+use prost::Message;
 
 use super::mark::{LiveSet, ShardSet, load_shards};
+use crate::attest::put_attestation;
 use crate::crypto::{BlobId, Entropy};
 use crate::error::{Error, Result};
 use crate::index::{
@@ -20,13 +23,32 @@ pub struct CompactPlan {
     /// The shards the new ones replace.
     pub rewrite: Vec<BlobId>,
     /// What the new shards describe: the packs of `rewrite` that are not
-    /// candidates.
-    pub records: Vec<pb::PackRecord>,
+    /// candidates, by the trust of the shard each record came from. A record
+    /// found in several shards sits in the most trusted group only.
+    /// Records of shards whose frames the server opened.
+    pub verified_records: Vec<pb::PackRecord>,
+    /// Records of shards that are attested but whose frames were not opened.
+    pub attested_records: Vec<pb::PackRecord>,
+    /// Records of shards nobody vouches for.
+    pub other_records: Vec<pb::PackRecord>,
+}
+
+/// The shards a compaction wrote, by what the server may claim about them.
+#[derive(Debug, Clone, Default)]
+pub struct Compacted {
+    pub verified: Vec<BlobId>,
+    pub attested: Vec<BlobId>,
+    pub other: Vec<BlobId>,
+    pub superseding: Option<BlobId>,
 }
 
 impl CompactPlan {
     pub fn is_empty(&self) -> bool {
         self.rewrite.is_empty()
+    }
+
+    pub fn record_count(&self) -> usize {
+        self.verified_records.len() + self.attested_records.len() + self.other_records.len()
     }
 }
 
@@ -49,7 +71,8 @@ fn names_candidate(shard: &pb::IndexShard, candidates: &HashSet<BlobId>) -> bool
 pub fn compact_plan(shards: &ShardSet, candidates: &HashSet<BlobId>) -> CompactPlan {
     let mut plan = CompactPlan::default();
     let mut empty = Vec::new();
-    let mut seen = HashSet::new();
+    let mut order = Vec::new();
+    let mut seen: HashMap<[u8; 32], (u8, pb::PackRecord)> = HashMap::new();
     let mut dirty = false;
     for (id, shard) in &shards.shards {
         if shard.packs.is_empty() {
@@ -62,10 +85,31 @@ pub fn compact_plan(shards: &ShardSet, candidates: &HashSet<BlobId>) -> CompactP
         }
         dirty |= has_candidate;
         plan.rewrite.push(*id);
+        let level = if shards.verified.contains(id) {
+            0
+        } else {
+            u8::from(!shards.attested.contains(id)) + 1
+        };
         for record in &shard.packs {
-            let keep = !is_candidate(candidates, &record.pack_id);
-            if keep && seen.insert(record.pack_id.clone()) {
-                plan.records.push(record.clone());
+            if is_candidate(candidates, &record.pack_id) {
+                continue;
+            }
+            let key = *blake3::hash(&record.encode_to_vec()).as_bytes();
+            match seen.get_mut(&key) {
+                Some(held) => held.0 = held.0.min(level),
+                None => {
+                    order.push(key);
+                    seen.insert(key, (level, record.clone()));
+                }
+            }
+        }
+    }
+    for key in order {
+        if let Some((level, record)) = seen.remove(&key) {
+            match level {
+                0 => plan.verified_records.push(record),
+                1 => plan.attested_records.push(record),
+                _ => plan.other_records.push(record),
             }
         }
     }
@@ -80,7 +124,10 @@ pub fn compact_plan(shards: &ShardSet, candidates: &HashSet<BlobId>) -> CompactP
 /// Writes the new shards, checks that the index they leave behind once the
 /// shards of `plan.rewrite` are gone still places every live blob outside
 /// the candidates, and only then writes one empty shard that supersedes
-/// `plan.rewrite`. Returns the ids of the shards written. Until that last
+/// `plan.rewrite`. Returns the ids of the shards written by group. The
+/// verified and attested groups and the superseding shard are attested in one
+/// object once the last of them is stored; the other group is not, so no
+/// record the server has not vouched for becomes attested. Until that last
 /// shard is stored the old shards keep being preferred, so a compaction cut
 /// short leaves only harmless duplicates. Old shards are left in place.
 pub async fn write_compacted<S: BlobStore>(
@@ -90,16 +137,22 @@ pub async fn write_compacted<S: BlobStore>(
     live: &LiveSet,
     candidates: &HashSet<BlobId>,
     entropy: &mut Entropy,
-) -> Result<Vec<BlobId>> {
-    let mut written = Vec::new();
-    for chunk in plan.records.chunks(REBUILD_SHARD_PACKS) {
-        let (id, bytes) = seal_shard(keys.k_idx(), keys.repo_id(), chunk.to_vec(), entropy)?;
-        put_named(store, &index_object_key(&id), bytes).await?;
-        written.push(id);
+) -> Result<Compacted> {
+    let mut out = Compacted::default();
+    for (records, ids) in [
+        (&plan.verified_records, &mut out.verified),
+        (&plan.attested_records, &mut out.attested),
+        (&plan.other_records, &mut out.other),
+    ] {
+        for chunk in records.chunks(REBUILD_SHARD_PACKS) {
+            let (id, bytes) = seal_shard(keys.k_idx(), keys.repo_id(), chunk.to_vec(), entropy)?;
+            put_named(store, &index_object_key(&id), bytes).await?;
+            ids.push(id);
+        }
     }
     let gone: HashSet<BlobId> = plan.rewrite.iter().copied().collect();
     check_reachable(store, keys, live, candidates, &gone).await?;
-    if !written.is_empty() {
+    if plan.record_count() > 0 {
         let (id, bytes) = seal_shard_superseding(
             keys.k_idx(),
             keys.repo_id(),
@@ -108,9 +161,17 @@ pub async fn write_compacted<S: BlobStore>(
             entropy,
         )?;
         put_named(store, &index_object_key(&id), bytes).await?;
-        written.push(id);
+        let trusted: Vec<BlobId> = out
+            .verified
+            .iter()
+            .chain(&out.attested)
+            .copied()
+            .chain([id])
+            .collect();
+        put_attestation(store, keys, &trusted, &[], Vec::new(), entropy).await?;
+        out.superseding = Some(id);
     }
-    Ok(written)
+    Ok(out)
 }
 
 /// Reads the index back from the bucket, leaving out the shards of `gone`,

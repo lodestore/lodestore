@@ -22,6 +22,9 @@ pub struct ShardSet {
     pub skipped: Vec<(String, String)>,
     /// Shards the server vouches for; only their `supersedes` count.
     pub attested: HashSet<BlobId>,
+    /// Shards whose frames the server opened. The format does not know the
+    /// server's database; `load_shards` leaves it empty and the server fills it.
+    pub verified: HashSet<BlobId>,
 }
 
 pub async fn load_shards<S: BlobStore>(store: &S, keys: &ReadKeys) -> Result<ShardSet> {

@@ -100,7 +100,6 @@ async fn adv_forged_offsets_and_supersedes_gc_keeps_every_snapshot() {
 }
 
 #[tokio::test]
-#[ignore = "compact_plan keeps the first record per pack; unignore with the trust-aware compaction"]
 async fn adv_forged_offsets_survive_compaction_and_sweep() {
     let fx = forged_fleet().await;
     full_cycle(&fx, 100).await;

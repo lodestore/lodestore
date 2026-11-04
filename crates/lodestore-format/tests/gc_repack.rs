@@ -68,7 +68,11 @@ async fn gc_repack_full_cycle_restores() {
     assert!(fx.pack_bytes().await < before);
     assert!(fx.packs().await.len() <= packs_before);
     assert!(locks_left(&fx).await.is_empty());
-    assert_eq!(fx.record_shards().await, 1);
+    assert_eq!(
+        fx.record_shards().await,
+        2,
+        "records of the attested repack shard and the unattested rest stay apart"
+    );
 }
 
 #[tokio::test]
@@ -318,10 +322,16 @@ async fn gc_repack_compaction_merges_small_shards() {
     )
     .await
     .unwrap();
-    assert_eq!(written.len(), 2, "one shard of records and the commit");
+    let records: Vec<_> = [&written.verified, &written.attested, &written.other]
+        .into_iter()
+        .flatten()
+        .copied()
+        .collect();
+    let commit = written.superseding.expect("the commit");
+    assert_eq!(records.len(), 1, "one shard of records and the commit");
 
     let after = unsuperseded(&fx).await;
-    assert_eq!(after, BTreeSet::from([big, written[0], written[1]]));
+    assert_eq!(after, BTreeSet::from([big, records[0], commit]));
     fx.assert_all_restore().await;
 }
 
@@ -382,7 +392,7 @@ async fn gc_compaction_cut_short_hides_nothing() {
         HashSet::from([records[0].pack_id.as_slice().try_into().unwrap()]);
     let shards = load_shards(&fx.store, keys).await.unwrap();
     let plan = compact_plan(&shards, &doomed);
-    assert!(plan.records.len() > 1024, "the compaction needs two shards");
+    assert!(plan.record_count() > 1024, "the compaction needs two shards");
 
     let failing = FailIndexPuts {
         inner: &fx.store,
