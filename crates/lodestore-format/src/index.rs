@@ -97,6 +97,18 @@ pub fn open_shard(
 // ponytail: the whole index lives in one HashMap (~100M blobs is the ceiling,
 // about 10 GB of RAM); the 45-byte sorted records allow binary search over an
 // mmap later without a format change.
+/// Whose `supersedes` lists an [`Index`] honours.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum SupersedesTrust {
+    /// Every shard's, as written; the format-level resolution rule.
+    #[default]
+    All,
+    /// Only the listed shards' (those with a valid attestation). Any other
+    /// shard may come from a holder of write keys and says nothing about
+    /// which records are stale.
+    Only(HashSet<BlobId>),
+}
+
 #[derive(Default)]
 pub struct Index {
     map: HashMap<(BlobId, u8), BlobLocation>,
@@ -109,6 +121,7 @@ pub struct Index {
     skipped: Vec<(String, String)>,
     excluded: HashSet<BlobId>,
     superseded: HashSet<BlobId>,
+    trust: SupersedesTrust,
 }
 
 impl Index {
@@ -116,6 +129,28 @@ impl Index {
     /// type is part of the key.
     pub fn get(&self, id: &BlobId, blob_type: u8) -> Option<&BlobLocation> {
         self.map.get(&(*id, blob_type))
+    }
+
+    /// Every known location of a blob, the chosen one first. Reading tries
+    /// them in order: a shard from a write-key holder can name a pack with
+    /// wrong offsets, and the real record is among the others.
+    pub fn locations(&self, id: &BlobId, blob_type: u8) -> Vec<BlobLocation> {
+        let key = (*id, blob_type);
+        let Some(chosen) = self.map.get(&key) else {
+            return Vec::new();
+        };
+        let mut all = vec![*chosen];
+        if let Some(others) = self.others.get(&key) {
+            all.extend_from_slice(others);
+        }
+        all
+    }
+
+    /// Chooses whose `supersedes` count. Call it before the first
+    /// [`Index::add_shard`].
+    pub fn set_supersedes_trust(&mut self, trust: SupersedesTrust) {
+        debug_assert!(self.shards.is_empty(), "trust set after shards were added");
+        self.trust = trust;
     }
 
     /// `(object key, reason)` of every listed shard [`Index::load_all`] could
@@ -164,6 +199,10 @@ impl Index {
                     .map_err(|_| bad("superseded shard id must be 32 bytes"))
             })
             .collect::<Result<Vec<_>>>()?;
+        let supersedes = match &self.trust {
+            SupersedesTrust::Only(trusted) if !trusted.contains(&shard_id) => Vec::new(),
+            _ => supersedes,
+        };
         let mut staged = Vec::new();
         let mut pack_sizes = Vec::new();
         for pack in &shard.packs {
@@ -235,6 +274,8 @@ impl Index {
             Some(held) if held.pack_id == loc.pack_id => {
                 if current && !self.is_current(held) {
                     self.map.insert(key, loc);
+                } else if current && !same_extent(held, &loc) {
+                    self.push_other(key, loc);
                 }
                 return;
             }
@@ -244,9 +285,16 @@ impl Index {
             return;
         }
         if held_current {
-            self.others.entry(key).or_default().push(loc);
+            self.push_other(key, loc);
         } else {
             self.map.insert(key, loc);
+        }
+    }
+
+    fn push_other(&mut self, key: (BlobId, u8), loc: BlobLocation) {
+        let alts = self.others.entry(key).or_default();
+        if !alts.contains(&loc) {
+            alts.push(loc);
         }
     }
 
@@ -395,6 +443,10 @@ impl Index {
         }
         Ok(())
     }
+}
+
+fn same_extent(a: &BlobLocation, b: &BlobLocation) -> bool {
+    (a.pack_id, a.offset, a.enc_len, a.ulen) == (b.pack_id, b.offset, b.enc_len, b.ulen)
 }
 
 /// The packs `packs/` lists, with their sizes.
@@ -716,5 +768,97 @@ mod tests {
             Index::default().add_shard([1; 32], &shard),
             Err(Error::Corrupt { .. })
         ));
+    }
+
+    fn shifted_shard(pack: u8, blob: u8, offset: u32) -> pb::IndexShard {
+        let mut shard = shard_of(pack, blob, &[]);
+        shard.packs[0].entries = record(blob, offset, 5000).entries;
+        shard
+    }
+
+    #[test]
+    fn index_untrusted_supersedes_keeps_legit_copy() {
+        let (legit, planted) = ([1u8; 32], [2u8; 32]);
+        let legit_shard = shard_of(10, 4, &[]);
+        let planted_shard = shard_of(12, 4, &[legit]);
+        for order in [
+            [(legit, &legit_shard), (planted, &planted_shard)],
+            [(planted, &planted_shard), (legit, &legit_shard)],
+        ] {
+            let mut index = Index::default();
+            index.set_supersedes_trust(SupersedesTrust::Only(HashSet::new()));
+            for (id, shard) in order {
+                index.add_shard(id, shard).unwrap();
+            }
+            let packs: HashSet<BlobId> = index
+                .locations(&[4; 32], 1)
+                .iter()
+                .map(|l| l.pack_id)
+                .collect();
+            assert_eq!(packs, HashSet::from([[10u8; 32], [12u8; 32]]));
+        }
+        let mut index = Index::default();
+        index.add_shard(legit, &legit_shard).unwrap();
+        index.add_shard(planted, &planted_shard).unwrap();
+        assert_eq!(index.get(&[4; 32], 1).unwrap().pack_id, [12; 32]);
+    }
+
+    #[test]
+    fn index_trusted_supersedes_prefers_new_location() {
+        let (old, new) = ([1u8; 32], [2u8; 32]);
+        let old_shard = shard_of(10, 4, &[]);
+        let new_shard = shard_of(11, 4, &[old]);
+        for order in [
+            [(old, &old_shard), (new, &new_shard)],
+            [(new, &new_shard), (old, &old_shard)],
+        ] {
+            let mut index = Index::default();
+            index.set_supersedes_trust(SupersedesTrust::Only(HashSet::from([new])));
+            for (id, shard) in order {
+                index.add_shard(id, shard).unwrap();
+            }
+            assert_eq!(index.get(&[4; 32], 1).unwrap().pack_id, [11; 32]);
+        }
+    }
+
+    #[test]
+    fn index_locations_lists_chosen_first() {
+        let mut index = Index::default();
+        index.add_shard([1; 32], &shard_of(10, 4, &[])).unwrap();
+        index.add_shard([2; 32], &shard_of(11, 4, &[])).unwrap();
+        index.add_shard([3; 32], &shard_of(12, 4, &[])).unwrap();
+        let chosen = *index.get(&[4; 32], 1).unwrap();
+        let all = index.locations(&[4; 32], 1);
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0], chosen);
+        assert!(index.locations(&[7; 32], 1).is_empty());
+        assert!(index.locations(&[4; 32], 2).is_empty());
+    }
+
+    #[test]
+    fn index_locations_keeps_same_pack_copy_at_other_offset() {
+        let (planted, legit) = ([1u8; 32], [2u8; 32]);
+        let planted_shard = shifted_shard(10, 4, PACK_PREFIX_LEN as u32 + 300);
+        let legit_shard = shifted_shard(10, 4, PACK_PREFIX_LEN as u32);
+        let mut index = Index::default();
+        index.set_supersedes_trust(SupersedesTrust::Only(HashSet::new()));
+        index.add_shard(planted, &planted_shard).unwrap();
+        index.add_shard(legit, &legit_shard).unwrap();
+        assert_eq!(
+            index.get(&[4; 32], 1).unwrap().offset,
+            PACK_PREFIX_LEN as u32 + 300
+        );
+        let offsets: Vec<u32> = index
+            .locations(&[4; 32], 1)
+            .iter()
+            .map(|l| l.offset)
+            .collect();
+        assert_eq!(
+            offsets,
+            [PACK_PREFIX_LEN as u32 + 300, PACK_PREFIX_LEN as u32]
+        );
+
+        index.add_shard(legit, &legit_shard).unwrap();
+        assert_eq!(index.locations(&[4; 32], 1).len(), 2);
     }
 }

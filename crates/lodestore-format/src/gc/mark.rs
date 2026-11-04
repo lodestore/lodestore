@@ -2,9 +2,10 @@
 
 use std::collections::HashSet;
 
+use crate::attest::read_attestations;
 use crate::crypto::{BLOB_TYPE_DATA, BLOB_TYPE_TREE, BlobId};
 use crate::error::{Error, Result, within_size};
-use crate::index::{INDEX_PREFIX, Index, hex32, open_shard, parse_hex32};
+use crate::index::{INDEX_PREFIX, Index, SupersedesTrust, hex32, open_shard, parse_hex32};
 use crate::keys::ReadKeys;
 use crate::pb;
 use crate::reader::{Reader, ReaderCache};
@@ -19,10 +20,15 @@ pub struct ShardSet {
     /// `(object key, reason)` of the shards that did not open. Their packs
     /// are unindexed to the plan, and a rebuild finds them again.
     pub skipped: Vec<(String, String)>,
+    /// Shards the server vouches for; only their `supersedes` count.
+    pub attested: HashSet<BlobId>,
 }
 
 pub async fn load_shards<S: BlobStore>(store: &S, keys: &ReadKeys) -> Result<ShardSet> {
-    let mut out = ShardSet::default();
+    let mut out = ShardSet {
+        attested: read_attestations(store, keys).await?.shards,
+        ..ShardSet::default()
+    };
     for entry in store.list(INDEX_PREFIX).await? {
         let Some(shard_id) = entry.key.strip_prefix(INDEX_PREFIX).and_then(parse_hex32) else {
             continue;
@@ -47,6 +53,7 @@ impl ShardSet {
     pub fn index(&self, exclude: &HashSet<BlobId>) -> Result<Index> {
         let mut index = Index::default();
         index.exclude_packs(exclude.clone());
+        index.set_supersedes_trust(SupersedesTrust::Only(self.attested.clone()));
         for (id, shard) in &self.shards {
             index.add_shard(*id, shard)?;
         }
