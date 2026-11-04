@@ -62,6 +62,7 @@ for file in crates/*/tests/adv_*.rs; do
             --color never -E 'test(/^adv_/)'
     ) >"$log" 2>&1 || status=$?
     echo "== $stem: exit $status"
+    grep -A1 'panicked at' "$log" | cut -c1-300 | head -n 24 || true
     if [ "$status" -ne 0 ] && grep -q 'could not compile' "$log"; then
         echo "$stem | (all) | does not compile on $TAG" >>"$TABLE"
         BAD=1
@@ -69,10 +70,10 @@ for file in crates/*/tests/adv_*.rs; do
         continue
     fi
     for name in $names; do
-        result="$(grep -E "^ +(PASS|FAIL|TIMEOUT|SIG[A-Z]+|ABORT|LEAK[A-Z-]*) .* ${stem} ${name}\$" "$log" \
+        result="$(grep -E "^ +(PASS|FAIL|TIMEOUT|SIG[A-Z]+|ABORT|LEAK[A-Z-]*) .*::${stem} ${name} *\$" "$log" \
             | head -n 1 | awk '{print $1}' || true)"
         case "$result" in
-            "") result="NOT RUN"; BAD=1 ;;
+            "") result="NOT RUN"; BAD=1; tail -n 15 "$log" ;;
             PASS) BAD=1 ;;
         esac
         echo "$stem::$name | $result on $TAG" >>"$TABLE"
