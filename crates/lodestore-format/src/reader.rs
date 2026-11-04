@@ -4,13 +4,14 @@
 //! their names, frames against their authentication tags and declared sizes,
 //! and plaintext against its keyed hash before it is used.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use crate::Fut;
+use crate::attest::read_attestations;
 use crate::chunker::blob_id;
 use crate::config;
 use crate::crypto::{BLOB_TYPE_DATA, BLOB_TYPE_TREE, BlobId, Key32, RepoId, open_frame};
@@ -18,7 +19,8 @@ use crate::error::{Error, Result};
 use crate::fs::filter::PathMatcher;
 use crate::fs::restore::{RestoreSettings, Restorer, check_extents};
 use crate::index::{
-    BlobLocation, INDEX_PREFIX, Index, hex32, index_object_key, open_shard, parse_hex32,
+    BlobLocation, INDEX_PREFIX, Index, SupersedesTrust, hex32, index_object_key, open_shard,
+    parse_hex32,
 };
 use crate::keys::ReadKeys;
 use crate::pack::{PACK_PREFIX_LEN, decompress, open_prefix, pack_object_key};
@@ -186,6 +188,7 @@ pub struct ReaderCache {
     repo_id: OnceLock<RepoId>,
     index: tokio::sync::RwLock<Index>,
     load: tokio::sync::Mutex<()>,
+    trust_set: tokio::sync::OnceCell<()>,
     listed_at: Mutex<Option<Instant>>,
     pack_keys: Mutex<HashMap<BlobId, Key32>>,
     trees: Mutex<TreeBytes>,
@@ -198,6 +201,7 @@ impl ReaderCache {
             repo_id: OnceLock::new(),
             index: tokio::sync::RwLock::default(),
             load: tokio::sync::Mutex::new(()),
+            trust_set: tokio::sync::OnceCell::new(),
             listed_at: Mutex::new(None),
             pack_keys: Mutex::default(),
             trees: Mutex::new(TreeBytes {
@@ -341,6 +345,10 @@ impl<S: BlobStore> Reader<S> {
         if self.cache.index.read().await.has_shard(&shard_id) {
             return Ok(true);
         }
+        self.cache
+            .trust_set
+            .get_or_init(|| self.trust_attested())
+            .await;
         match self.store.get(&index_object_key(&shard_id)).await {
             Ok(bytes) => {
                 let shard = open_shard(self.keys.k_idx(), self.keys.repo_id(), &shard_id, &bytes)?;
@@ -350,6 +358,21 @@ impl<S: BlobStore> Reader<S> {
             Err(BlobError::NotFound) => Ok(false),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Only shards the server attested may supersede others. When the
+    /// attestations cannot be read nothing is trusted: that only costs the
+    /// preference for a newer copy.
+    async fn trust_attested(&self) {
+        let attested = match read_attestations(&self.store, &self.keys).await {
+            Ok(set) => set.shards,
+            Err(_) => HashSet::new(),
+        };
+        self.cache
+            .index
+            .write()
+            .await
+            .set_supersedes_trust(SupersedesTrust::Only(attested));
     }
 
     /// Lists the shards in the store and loads those that open; one that does
@@ -368,28 +391,30 @@ impl<S: BlobStore> Reader<S> {
         Ok(())
     }
 
-    /// Where the index says a blob is. The index named by the snapshot is
-    /// loaded already; a blob missing from it triggers one listing of all shards.
-    async fn locate_blob(&mut self, id: &BlobId, blob_type: u8) -> Result<BlobLocation> {
-        let name = || format!("blob {}", hex32(id));
-        let mut loc = self.cache.index.read().await.get(id, blob_type).copied();
-        if loc.is_none() && self.cache.may_list() {
+    /// Every location the index knows for a blob, the preferred one first. The
+    /// index named by the snapshot is loaded already; a blob missing from it
+    /// triggers one listing of all shards.
+    async fn locate_blob_all(&mut self, id: &BlobId, blob_type: u8) -> Result<Vec<BlobLocation>> {
+        let mut locs = self.cache.index.read().await.locations(id, blob_type);
+        if locs.is_empty() && self.cache.may_list() {
             self.load_all_shards().await?;
-            loc = self.cache.index.read().await.get(id, blob_type).copied();
+            locs = self.cache.index.read().await.locations(id, blob_type);
         }
-        loc.ok_or_else(|| {
-            Error::corrupt(
-                name(),
+        if locs.is_empty() {
+            return Err(Error::corrupt(
+                format!("blob {}", hex32(id)),
                 "not in the index; if index/ objects are missing, run `lode repo rebuild-index`",
-            )
-        })
+            ));
+        }
+        Ok(locs)
     }
 
-    /// Reads, decrypts, decompresses and verifies one blob.
-    pub async fn read_blob(&mut self, id: &BlobId, blob_type: u8) -> Result<Vec<u8>> {
-        let name = || format!("blob {}", hex32(id));
-        let loc = self.locate_blob(id, blob_type).await?;
+    async fn locate_blob(&mut self, id: &BlobId, blob_type: u8) -> Result<BlobLocation> {
+        Ok(self.locate_blob_all(id, blob_type).await?.remove(0))
+    }
 
+    async fn read_at(&mut self, loc: &BlobLocation, id: &BlobId, blob_type: u8) -> Result<Vec<u8>> {
+        let name = || format!("blob {}", hex32(id));
         let missing = |e: Error| match e {
             Error::Store(BlobError::NotFound) => {
                 Error::corrupt(name(), "its pack is missing from the store")
@@ -421,6 +446,38 @@ impl<S: BlobStore> Reader<S> {
             loc.ulen,
             self.keys.k_id(),
         )
+    }
+
+    /// Reads, decrypts, decompresses and verifies one blob. A location that
+    /// does not open (a shard from a write-key holder can name wrong offsets)
+    /// is followed by the next known copy; when none works the shards are
+    /// listed once more, since the real record may sit in one not loaded yet.
+    /// Store errors other than a missing pack are returned at once.
+    pub async fn read_blob(&mut self, id: &BlobId, blob_type: u8) -> Result<Vec<u8>> {
+        let locs = self.locate_blob_all(id, blob_type).await?;
+        let mut first_err = None;
+        for loc in &locs {
+            match self.read_at(loc, id, blob_type).await {
+                Ok(bytes) => return Ok(bytes),
+                Err(e @ (Error::Corrupt { .. } | Error::Crypto)) => {
+                    first_err.get_or_insert(e);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        if self.cache.may_list() {
+            self.load_all_shards().await?;
+            let fresh = self.cache.index.read().await.locations(id, blob_type);
+            for loc in fresh.iter().filter(|l| !locs.contains(l)) {
+                match self.read_at(loc, id, blob_type).await {
+                    Ok(bytes) => return Ok(bytes),
+                    Err(Error::Corrupt { .. } | Error::Crypto) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        Err(first_err
+            .unwrap_or_else(|| Error::corrupt(format!("blob {}", hex32(id)), "unreadable")))
     }
 
     /// Where the data chunks of a file are stored, in content order.
