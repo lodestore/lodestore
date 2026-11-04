@@ -392,7 +392,10 @@ async fn gc_compaction_cut_short_hides_nothing() {
         HashSet::from([records[0].pack_id.as_slice().try_into().unwrap()]);
     let shards = load_shards(&fx.store, keys).await.unwrap();
     let plan = compact_plan(&shards, &doomed);
-    assert!(plan.record_count() > 1024, "the compaction needs two shards");
+    assert!(
+        plan.record_count() > 1024,
+        "the compaction needs two shards"
+    );
 
     let failing = FailIndexPuts {
         inner: &fx.store,

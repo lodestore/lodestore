@@ -5,8 +5,13 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use common::{Api, TestServer, WAIT, backends, bearer_client, wait_until};
+use lodestore_format::attest::{
+    MARKER_LEGACY_SHARDS, ensure_upgraded, put_attestation, read_attestations,
+};
 use lodestore_format::crypto::{BLOB_TYPE_DATA, BlobId, Entropy, HPKE_ENC_LEN, SEALED_KEY_LEN};
-use lodestore_format::index::{hex32, index_object_key, parse_hex32, seal_shard_superseding};
+use lodestore_format::index::{
+    hex32, index_object_key, open_shard, parse_hex32, seal_shard_superseding,
+};
 use lodestore_format::locks::{new_lock_id, publish_gc_manifest};
 use lodestore_format::pack::PACK_PREFIX_LEN;
 use lodestore_format::pb;
@@ -1686,6 +1691,217 @@ async fn gc_cycle_foreign_marker_stops_before_sweep() {
             1,
             "only the foreign marker stays"
         );
+        assert_restores(&ts, "main", &b).await;
+        assert_restores(&ts, "main", &c).await;
+        ts.stop().await;
+    }
+}
+
+fn index_ids(ts: &TestServer, name: &str) -> std::collections::BTreeSet<BlobId> {
+    files_under(&ts.local_repo_root(name).join("index"))
+        .iter()
+        .filter_map(|p| parse_hex32(&p.file_name()?.to_string_lossy()))
+        .collect()
+}
+
+fn attest_files(ts: &TestServer, name: &str) -> Vec<PathBuf> {
+    let mut files = files_under(&ts.local_repo_root(name).join("locks"));
+    files.retain(|f| {
+        f.file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with("attest-"))
+    });
+    files
+}
+
+async fn attest_shards(ts: &TestServer, name: &str, ids: &[BlobId]) {
+    let store = LocalFsStore::new(ts.local_repo_root(name));
+    let repo = Repository::open(&store, PASSWORD).await.unwrap();
+    put_attestation(
+        &store,
+        repo.read_keys(),
+        ids,
+        &[],
+        Vec::new(),
+        &mut Entropy::os(),
+    )
+    .await
+    .unwrap();
+}
+
+async fn verified_ids(ts: &TestServer, repo: &str) -> std::collections::BTreeSet<BlobId> {
+    lodestore_server::maintenance::attest::load_verified(ts.state(), repo)
+        .await
+        .unwrap()
+        .into_iter()
+        .collect()
+}
+
+async fn pack_ids_of_shard(ts: &TestServer, name: &str, id: &BlobId) -> Vec<Vec<u8>> {
+    let store = LocalFsStore::new(ts.local_repo_root(name));
+    let repo = Repository::open(&store, PASSWORD).await.unwrap();
+    let bytes = std::fs::read(ts.local_repo_root(name).join(index_object_key(id))).unwrap();
+    let shard = open_shard(
+        repo.read_keys().k_idx(),
+        repo.read_keys().repo_id(),
+        id,
+        &bytes,
+    )
+    .unwrap();
+    shard.packs.into_iter().map(|p| p.pack_id).collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_cycle_consolidates_attestations() {
+    for backend in backends() {
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let (b, c) = forgotten_a(&ts, "main").await;
+        enable(&ts, &api, &repo).await;
+        lodestore_server::maintenance::attest::ensure_upgraded(ts.state(), &repo)
+            .await
+            .unwrap();
+        for id in index_ids(&ts, "main") {
+            attest_shards(&ts, "main", &[id]).await;
+        }
+        let before = attest_files(&ts, "main");
+        assert!(before.len() > 2);
+
+        let id = run_cycle(&api, &repo).await;
+        let later = after_pause(&ts, &id).await;
+        assert_eq!(
+            steps(&ts, &id, later).await,
+            StepOutcome::Finished(lodestore_server::maintenance::gc::GcState::Done),
+            "[{}]",
+            backend.name()
+        );
+
+        let after = attest_files(&ts, "main");
+        assert_eq!(after.len(), 1, "[{}] {after:?}", backend.name());
+        for gone in &before {
+            assert!(!gone.exists(), "{gone:?} was not consolidated");
+        }
+        let store = LocalFsStore::new(ts.local_repo_root("main"));
+        let repository = Repository::open(&store, PASSWORD).await.unwrap();
+        let attested = read_attestations(&store, repository.read_keys())
+            .await
+            .unwrap();
+        assert!(attested.markers.contains(&MARKER_LEGACY_SHARDS));
+        assert_restores(&ts, "main", &b).await;
+        assert_restores(&ts, "main", &c).await;
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_cycle_records_server_shards_as_verified() {
+    for backend in backends() {
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let a = backup_files(&ts, "main", "a", 11).await;
+        let first = index_ids(&ts, "main");
+        let b = backup_files(&ts, "main", "b", 12).await;
+        let second = index_ids(&ts, "main");
+        let c = backup_files(&ts, "main", "c", 13).await;
+        let third = index_ids(&ts, "main");
+        forget_snapshot(&ts, "main", &a.id);
+        age_packs(&ts, "main");
+        enable(&ts, &api, &repo).await;
+
+        let verified_shard = *second.difference(&first).next().expect("shard of b");
+        let signed_shard = *third.difference(&second).next().expect("shard of c");
+        let mut signed_packs = pack_ids_of_shard(&ts, "main", &signed_shard).await;
+        signed_packs.sort();
+        lodestore_server::maintenance::attest::ensure_upgraded(ts.state(), &repo)
+            .await
+            .unwrap();
+        lodestore_server::maintenance::attest::record_verified(
+            ts.state(),
+            &repo,
+            &[verified_shard],
+        )
+        .await
+        .unwrap();
+
+        let id = run_cycle(&api, &repo).await;
+        let later = after_pause(&ts, &id).await;
+        assert_eq!(
+            steps(&ts, &id, later).await,
+            StepOutcome::Finished(lodestore_server::maintenance::gc::GcState::Done),
+            "[{}]",
+            backend.name()
+        );
+
+        let present = index_ids(&ts, "main");
+        let recorded = verified_ids(&ts, &repo).await;
+        let recorded_now: Vec<_> = recorded.intersection(&present).copied().collect();
+        assert!(
+            !recorded_now.is_empty(),
+            "[{}] the compaction records no verified shard",
+            backend.name()
+        );
+        for shard in &recorded_now {
+            for pack in pack_ids_of_shard(&ts, "main", shard).await {
+                assert!(
+                    signed_packs.binary_search(&pack).is_err(),
+                    "[{}] a verified shard names a pack only the upgrade vouched for",
+                    backend.name()
+                );
+            }
+        }
+        let mut named = false;
+        for shard in present.difference(&recorded) {
+            for pack in pack_ids_of_shard(&ts, "main", shard).await {
+                named |= signed_packs.binary_search(&pack).is_ok();
+            }
+        }
+        assert!(named, "[{}] the signed records vanished", backend.name());
+        assert_restores(&ts, "main", &b).await;
+        assert_restores(&ts, "main", &c).await;
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_cycle_upgrades_before_attesting() {
+    for backend in backends() {
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let (b, c) = forgotten_a(&ts, "main").await;
+        enable(&ts, &api, &repo).await;
+        for file in attest_files(&ts, "main") {
+            std::fs::remove_file(file).unwrap();
+        }
+        sqlx::query("UPDATE repositories SET attest_upgraded_at = NULL WHERE id = $1")
+            .bind(&repo)
+            .execute(&ts.state().db.pool)
+            .await
+            .unwrap();
+
+        let id = run_cycle(&api, &repo).await;
+        let later = after_pause(&ts, &id).await;
+        assert_eq!(
+            steps(&ts, &id, later).await,
+            StepOutcome::Finished(lodestore_server::maintenance::gc::GcState::Done),
+            "[{}]",
+            backend.name()
+        );
+
+        let store = LocalFsStore::new(ts.local_repo_root("main"));
+        let repository = Repository::open(&store, PASSWORD).await.unwrap();
+        let outcome = ensure_upgraded(&store, repository.read_keys(), &mut Entropy::os())
+            .await
+            .unwrap();
+        assert!(outcome.already, "[{}]", backend.name());
+        let flag: Option<i64> =
+            sqlx::query_scalar("SELECT attest_upgraded_at FROM repositories WHERE id = $1")
+                .bind(&repo)
+                .fetch_one(&ts.state().db.pool)
+                .await
+                .unwrap();
+        assert!(flag.is_some());
         assert_restores(&ts, "main", &b).await;
         assert_restores(&ts, "main", &c).await;
         ts.stop().await;

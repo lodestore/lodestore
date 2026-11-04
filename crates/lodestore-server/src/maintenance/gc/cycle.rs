@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, bail};
+use lodestore_format::attest::consolidate_attestations;
 use lodestore_format::crypto::{BlobId, Entropy};
 use lodestore_format::gc::compact::{compact_plan, write_compacted};
 use lodestore_format::gc::plan::{MAX_CANDIDATES, PlanOptions};
@@ -35,6 +36,7 @@ use crate::catalog::{OpenRepository, open_repository};
 use crate::db::now_ms;
 use crate::jobs::ACTIVE_STATES;
 use crate::jobs::restore::RestoreRecord;
+use crate::maintenance::attest::{ensure_upgraded, load_verified, record_verified};
 use crate::state::AppState;
 
 const PACKS_PREFIX: &str = "packs/";
@@ -361,6 +363,9 @@ async fn mark_and_repack(
     cycle: &CycleRow,
     now_ms: i64,
 ) -> anyhow::Result<StepOutcome> {
+    ensure_upgraded(state, &cycle.repository_id)
+        .await
+        .context("signing the repository's existing index before garbage collection")?;
     let source = open_repository(state, &cycle.repository_id)
         .await
         .context("opening the repository")?;
@@ -446,6 +451,11 @@ async fn mark_and_repack(
     )
     .await?
     .context("repacking sparse packs")?;
+    if let Some(shard) = repacked.shard {
+        record_verified(state, &cycle.repository_id, &[shard])
+            .await
+            .context("recording the repacked shard as verified")?;
+    }
 
     let marked = candidates(plan, &repacked);
     let gc_id = new_lock_id(&mut entropy);
@@ -631,7 +641,7 @@ async fn verifying(state: &AppState, cycle: &CycleRow) -> anyhow::Result<StepOut
         return Ok(StepOutcome::Postponed);
     }
 
-    let verified = tracked(
+    let mut verified = tracked(
         state,
         &cycle.id,
         &seen,
@@ -650,17 +660,32 @@ async fn verifying(state: &AppState, cycle: &CycleRow) -> anyhow::Result<StepOut
         return finished(state, &cycle.id).await;
     }
 
+    verified.shards.verified = load_verified(state, &cycle.repository_id).await?;
     let plan = compact_plan(&verified.shards, &verified.candidates);
-    write_compacted(
+    let mut entropy = Entropy::os();
+    let compacted = write_compacted(
         &source.store,
         &source.keys,
         &plan,
         &verified.live,
         &verified.candidates,
-        &mut Entropy::os(),
+        &mut entropy,
     )
     .await
     .context("compacting the index and checking that every live blob can still be found")?;
+    record_verified(state, &cycle.repository_id, &compacted.verified)
+        .await
+        .context("recording the compacted shards as verified")?;
+    let consolidated = consolidate_attestations(&source.store, &source.keys, false, &mut entropy)
+        .await
+        .context("consolidating the server attestations")?;
+    let message = format!(
+        "Attestations consolidated: {} read, {} written, {} deleted.",
+        consolidated.read,
+        consolidated.written.len(),
+        consolidated.deleted
+    );
+    event(state, &cycle.id, "info", "attestations", &message).await;
 
     refuse_old_agents(state, &cycle.repository_id).await?;
     refuse_foreign_marker(state, cycle, &source).await?;
