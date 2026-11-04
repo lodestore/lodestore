@@ -73,6 +73,9 @@ jobs:
         run: |
           cargo nextest run --workspace --profile ci --no-fail-fast 2>&1 | tee nextest.log
           grep -E '^ +FLAKY' nextest.log >> "$GITHUB_STEP_SUMMARY" || true
+      - name: Run the compromised-agent suite
+        shell: bash
+        run: cargo nextest run --workspace --profile adversarial --no-fail-fast
 
   web:
     runs-on: ubuntu-latest
