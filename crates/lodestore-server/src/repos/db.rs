@@ -136,11 +136,13 @@ pub async fn create_repository_ext(
         ),
         None => None,
     };
+    let now = now_ms();
     sqlx::query(
         "INSERT INTO repositories (id, name, backend, location_json, experimental, format_repo_id, \
          config_hash, master_secret_id, server_slot_secret_id, server_creds_secret_id, \
-         agent_creds_secret_id, agent_key_state, checks_json, checked_at, created_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+         agent_creds_secret_id, agent_key_state, checks_json, checked_at, created_at, \
+         provenance_backfilled_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
     )
     .bind(&id)
     .bind(&new.name)
@@ -160,7 +162,8 @@ pub async fn create_repository_ext(
     )
     .bind(extras.checks_json)
     .bind(extras.checked_at)
-    .bind(now_ms())
+    .bind(now)
+    .bind(now)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;

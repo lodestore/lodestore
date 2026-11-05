@@ -65,9 +65,11 @@ pub async fn ensure_upgraded(state: &AppState, repository_id: &str) -> anyhow::R
     Ok(())
 }
 
-/// Signs what a 0.1 catalog already tied to a host and a job. The database
-/// flag is a cache: the signatures are additive, so a repeat after a crash
-/// only duplicates records, which collapse by snapshot id.
+/// Signs what a 0.1 catalog already tied to a host and a job. The snapshot
+/// row is the tie: job rows are purged after 90 days, so a missing one does
+/// not count against it. The database flag is a cache: the signatures are
+/// additive, so a repeat after a crash only duplicates records, which
+/// collapse by snapshot id. A repository created by 0.2 starts flagged.
 pub async fn ensure_provenance_backfilled(
     state: &AppState,
     repository_id: &str,
@@ -87,10 +89,11 @@ pub async fn ensure_provenance_backfilled(
     ensure_upgraded(state, repository_id).await?;
     let rows = sqlx::query(
         "SELECT s.id, s.host_id, s.job_id, a.hostname FROM snapshots s \
-         JOIN jobs j ON j.id = s.job_id JOIN agents a ON a.id = s.host_id \
+         LEFT JOIN jobs j ON j.id = s.job_id JOIN agents a ON a.id = s.host_id \
          WHERE s.repository_id = $1 AND s.host_id IS NOT NULL AND s.job_id IS NOT NULL \
          AND s.unverified_reason IS NULL AND s.verified_at IS NULL \
-         AND (j.verify_state IS NULL OR j.verify_state = 'verified') ORDER BY s.id",
+         AND (j.id IS NULL OR (j.state IN ('succeeded', 'warnings') \
+         AND (j.verify_state IS NULL OR j.verify_state = 'verified'))) ORDER BY s.id",
     )
     .bind(repository_id)
     .fetch_all(&state.db.pool)
