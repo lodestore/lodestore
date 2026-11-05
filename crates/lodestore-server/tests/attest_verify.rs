@@ -3,26 +3,33 @@ mod adv_support;
 mod common;
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::fs::File;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use adv_support::{attacker_keys, plant_blobs};
 use common::{AgentEnv, TestServer, WAIT, backends, wait_until};
 use lodestore_format::attest::{ATTEST_PREFIX, put_attestation, read_attestations};
 use lodestore_format::chunker::blob_id;
 use lodestore_format::crypto::{BLOB_TYPE_DATA, BlobId, Entropy};
-use lodestore_format::index::{hex32, parse_hex32};
+use lodestore_format::index::{hex32, index_object_key, open_shard, parse_hex32};
+use lodestore_format::pack::pack_object_key;
 use lodestore_format::repo::Repository;
-use lodestore_format::store::LocalFsStore;
+use lodestore_format::snapshot::snapshot_object_key;
+use lodestore_format::store::{BlobStore, LocalFsStore};
 use lodestore_format::verify_snapshot::snapshot_index_refs;
 use lodestore_format::writer::{BackupOptions, Writer};
 use lodestore_server::alerts::inputs::gather;
 use lodestore_server::catalog::open_repository;
 use lodestore_server::catalog::retention::after_backup;
 use lodestore_server::db::now_ms;
-use lodestore_server::maintenance::attest::verify::verify_then_retain;
+use lodestore_server::maintenance::attest::verify::{SWEEP, verify_then_retain};
 use lodestore_server::maintenance::attest::{
     ensure_upgraded, record_verified, resume_interrupted, tick_once,
 };
+use lodestore_server::maintenance::gc::cycle::{StepOutcome, step};
+use lodestore_server::maintenance::gc::{GcOrigin, GcSettings, GcState, db as gc_db, start_cycle};
+use lodestore_server::state::AppState;
 use serde_json::Value;
 use sqlx::Row;
 
@@ -451,6 +458,209 @@ async fn attest_verify_gives_up_after_retry_window() {
             message.contains("refusing to sign its shards again"),
             "{message}"
         );
+        env.ts.stop().await;
+    }
+}
+
+impl Env {
+    async fn enable_gc(&self) {
+        sqlx::query("UPDATE agents SET capabilities_json = '[\"gc_v1\"]' WHERE id = $1")
+            .bind(HOST)
+            .execute(self.pool())
+            .await
+            .unwrap();
+        let settings = GcSettings {
+            enabled: true,
+            ..GcSettings::default()
+        };
+        gc_db::save_settings(self.ts.state(), &self.repo, &settings)
+            .await
+            .unwrap();
+    }
+
+    /// Removes the snapshot, so that its packs hold nothing alive, and makes
+    /// every pack in the bucket old enough for cleanup.
+    fn forget_and_age(&self, snapshot_id: &str) {
+        let root = self.ts.local_repo_root("main");
+        let id = parse_hex32(snapshot_id).unwrap();
+        std::fs::remove_file(root.join(snapshot_object_key(&id))).unwrap();
+        let old = SystemTime::now() - Duration::from_secs(3 * 86_400);
+        for path in walk(&root.join("packs")) {
+            File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
+        }
+    }
+
+    /// Steps a new cleanup cycle on the real clock until it waits out the
+    /// pause; returns its id and a time past the pause.
+    async fn gc_marked(&self) -> (String, i64) {
+        let id = start_cycle(
+            self.ts.state(),
+            &self.repo,
+            false,
+            GcOrigin::Manual,
+            "admin",
+        )
+        .await
+        .unwrap();
+        loop {
+            match step(self.ts.state(), &id, now_ms()).await.unwrap() {
+                StepOutcome::Advanced(_) => {}
+                StepOutcome::Waiting { until_ms } => return (id, until_ms + 1_000),
+                other => panic!("the cycle was expected to wait out the pause: {other:?}"),
+            }
+        }
+    }
+}
+
+/// Steps the cycle on a clock past the pause until it ends.
+async fn gc_finish(state: AppState, id: String, later: i64) {
+    loop {
+        match step(&state, &id, later).await.unwrap() {
+            StepOutcome::Advanced(_) => {}
+            StepOutcome::Finished(state) => {
+                assert_eq!(state, GcState::Done);
+                return;
+            }
+            other => panic!("the cycle stopped on {other:?}"),
+        }
+    }
+}
+
+fn walk(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            out.extend(walk(&path));
+        } else {
+            out.push(path);
+        }
+    }
+    out
+}
+
+/// A backup whose verification has not run yet when a cleanup cycle
+/// compacts the index and sweeps: the cycle must not move the backup's own
+/// shard into one the server does not vouch for, or the verification that
+/// follows fails an honest job.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn attest_verify_backup_pending_through_gc_cycle_is_verified() {
+    for backend in backends() {
+        let env = Env::new(&backend).await;
+        env.upgrade().await;
+        env.enable_gc().await;
+        let (gone, _) = env.snapshot("gone", Plant::None).await;
+        env.forget_and_age(&gone);
+        let (snapshot_id, _) = env.snapshot("fresh", Plant::None).await;
+        env.job("j1", &snapshot_id, "pending").await;
+
+        let (cycle, later) = env.gc_marked().await;
+        gc_finish(env.ts.state().clone(), cycle, later).await;
+        env.verify("j1").await;
+
+        assert_eq!(
+            env.column("j1", "verify_state").await.as_deref(),
+            Some("verified"),
+            "[{}] {:?}",
+            backend.name(),
+            env.column("j1", "error_message").await
+        );
+        assert_eq!(env.column("j1", "state").await.unwrap(), "succeeded");
+        env.ts.stop().await;
+    }
+}
+
+/// A verification that is reading the bucket holds a cleanup back from
+/// deleting: the sweep starts only once the verification lets go.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn attest_verify_gc_sweep_waits_for_running_verification() {
+    for backend in backends() {
+        let env = Env::new(&backend).await;
+        env.upgrade().await;
+        env.enable_gc().await;
+        let (gone, _) = env.snapshot("gone", Plant::None).await;
+        env.forget_and_age(&gone);
+        let (cycle, later) = env.gc_marked().await;
+        let index = env.ts.local_repo_root("main").join("index");
+
+        let reading = SWEEP.read().await;
+        let before = walk(&index);
+        let mut finish = tokio::spawn(gc_finish(env.ts.state().clone(), cycle.clone(), later));
+        let deciding = wait_until(WAIT, || async {
+            let state: String = sqlx::query("SELECT state FROM gc_cycles WHERE id = $1")
+                .bind(&cycle)
+                .fetch_one(env.pool())
+                .await
+                .unwrap()
+                .get("state");
+            state != "waiting" && state != "verifying"
+        })
+        .await;
+        assert!(
+            deciding,
+            "[{}] the cycle never got past verifying",
+            backend.name()
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), &mut finish)
+                .await
+                .is_err(),
+            "[{}] the sweep ran while a verification was reading",
+            backend.name()
+        );
+        assert!(
+            before.iter().all(|p| p.exists()),
+            "[{}] a shard went while a verification was reading",
+            backend.name()
+        );
+
+        drop(reading);
+        finish.await.unwrap();
+        assert!(
+            before.iter().any(|p| !p.exists()),
+            "[{}] the cycle deleted no shard, so it proved nothing",
+            backend.name()
+        );
+        env.ts.stop().await;
+    }
+}
+
+/// A shard that names a pack which never reached the bucket fails the job
+/// at once; it is not mistaken for data a cleanup moved.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn attest_verify_fails_job_deduped_against_shard_of_missing_pack() {
+    for backend in backends() {
+        let env = Env::new(&backend).await;
+        env.upgrade().await;
+        let (snapshot_id, planted) = env.snapshot("no-pack", Plant::AfterUpgrade).await;
+        let planted = planted.unwrap();
+        let keys = env.server_keys().await;
+        let bytes = BlobStore::get(&env.store, &index_object_key(&planted))
+            .await
+            .unwrap();
+        let shard = open_shard(keys.k_idx(), keys.repo_id(), &planted, &bytes).unwrap();
+        for record in &shard.packs {
+            let pack: BlobId = record.pack_id.as_slice().try_into().unwrap();
+            std::fs::remove_file(env.ts.local_repo_root("main").join(pack_object_key(&pack)))
+                .unwrap();
+        }
+        env.job("j1", &snapshot_id, "pending").await;
+
+        env.verify("j1").await;
+
+        env.assert_failed("j1", &snapshot_id).await;
+        let message = env.column("j1", "error_message").await.unwrap();
+        assert!(
+            message.contains("pack is missing"),
+            "[{}] {message}",
+            backend.name()
+        );
+        assert!(env.events("j1", "verification_retry").await.is_empty());
         env.ts.stop().await;
     }
 }
