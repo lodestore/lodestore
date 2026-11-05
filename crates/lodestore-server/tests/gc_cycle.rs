@@ -1838,6 +1838,18 @@ async fn gc_cycle_drops_distrusted_shard_from_summary() {
             backend.name()
         );
         assert!(!after.shards.is_empty(), "[{}]", backend.name());
+        let planted: Vec<Vec<u8>> = (0..3).map(|n| fake_pack_record(n).pack_id).collect();
+        for shard in index_ids(&ts, "main") {
+            if !after.shards.contains(&shard) {
+                continue;
+            }
+            let packs = pack_ids_of_shard(&ts, "main", &shard).await;
+            assert!(
+                planted.iter().all(|p| !packs.contains(p)),
+                "[{}] the compaction re-attested the distrusted shard's records",
+                backend.name()
+            );
+        }
         assert_restores(&ts, "main", &b).await;
         assert_restores(&ts, "main", &c).await;
         ts.stop().await;

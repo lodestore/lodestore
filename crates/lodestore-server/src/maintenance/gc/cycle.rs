@@ -722,7 +722,15 @@ async fn verifying(state: &AppState, cycle: &CycleRow) -> anyhow::Result<StepOut
         return finished(state, &cycle.id).await;
     }
 
+    let revoked: HashSet<BlobId> = load_distrusted(state, &cycle.repository_id)
+        .await
+        .context("loading the distrusted shards")?
+        .into_iter()
+        .collect();
     verified.shards.verified = load_verified(state, &cycle.repository_id).await?;
+    // Vouched for, a revoked shard's records would be attested again under a new shard id.
+    verified.shards.verified.retain(|id| !revoked.contains(id));
+    verified.shards.attested.retain(|id| !revoked.contains(id));
     leave_unvouched_shards(&mut verified.shards, &verified.candidates);
     let plan = compact_plan(&verified.shards, &verified.candidates);
     let mut entropy = Entropy::os();
@@ -739,11 +747,6 @@ async fn verifying(state: &AppState, cycle: &CycleRow) -> anyhow::Result<StepOut
     record_verified(state, &cycle.repository_id, &compacted.verified)
         .await
         .context("recording the compacted shards as verified")?;
-    let revoked: HashSet<BlobId> = load_distrusted(state, &cycle.repository_id)
-        .await
-        .context("loading the distrusted shards")?
-        .into_iter()
-        .collect();
     let consolidated =
         consolidate_attestations(&source.store, &source.keys, false, &revoked, &mut entropy)
             .await
