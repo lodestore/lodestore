@@ -18,13 +18,14 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use lodestore_format::provenance::LatestMode;
 use lodestore_format::reader::Reader;
 use lodestore_format::snapshot::SnapshotEntry;
 use lodestore_format::store::Store;
 
 use crate::cli::{Cli, Command, UsageError};
 use crate::client::Client;
-use crate::open::resolve_repository;
+use crate::open::{ShardCache, resolve_repository};
 use crate::output::{Output, warn_latest};
 use crate::profile::load_profile;
 
@@ -117,7 +118,14 @@ pub(crate) async fn resolve_spec(reader: &Reader<Store>, spec: &str) -> Result<S
     if spec != "latest" {
         return Ok(reader.resolve_snapshot(spec).await?);
     }
-    let pick = reader.resolve_latest(false).await?;
+    let mut cache = ShardCache::load(reader.keys().repo_id());
+    let pick = reader.resolve_latest(cache.upgraded).await?;
+    if pick.mode == LatestMode::Strict && !cache.upgraded {
+        cache.upgraded = true;
+        if let Err(e) = cache.save() {
+            eprintln!("warning: {e:#}");
+        }
+    }
     warn_latest(&pick.entry.id, &pick.warnings);
     Ok(pick.entry)
 }
