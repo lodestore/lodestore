@@ -6,13 +6,21 @@ All notable changes to Lodestore are recorded here. The format follows [Keep a C
 
 ### Added
 
+- Server-side verification of every new backup an agent makes. After a job finishes, the server opens the new frames the snapshot depends on and checks that the snapshot resolves through shards it has checked. It downloads every new byte once, so expect that much extra egress. A job can turn `failed` with `verification_failed` after it was reported as finished, also when the server could not check the backup within one hour; its snapshot then carries `unverified_reason` in the snapshot list of the API, and the alert for a failed backup fires when that job is still the latest finished job of its policy on that host (a job without a policy, such as a stdin backup, raises no alert yet). A job that reports a snapshot already linked to another job fails the check, and the server never signs a host's shard that lists `supersedes`.
+- A compromised-agent test suite, the tests named `adv_*`. Run it with `scripts/test-adversarial.sh`. `scripts/adversarial-vs-release.sh` checks that every scenario fails on 0.1.0. See [how we test data safety](https://lodestore.dev/docs/security/how-we-test/#compromised-agent-suite).
 - A public read-only demo at <https://demo.lodestore.dev>: three hosts back up synthetic data, and you can browse their snapshots and download one as an archive without signing in.
 
 ### Changed
 
+- Cleanup opens the surviving copy of every live blob before it deletes or replaces a pack, and skips a pack it cannot read instead of failing; the cycle records a warning naming each skipped pack. `supersedes` of an index shard counts only when the server has signed the shard. `lode restore` and the server's own reads try the other known copies of a blob when the first one does not open; a restore run by an agent and an archive download read only the first copy for now. Cleanup, backups and the server's check of a new backup skip an index shard with a malformed record instead of failing.
+- Once a 0.2 server has opened a repository, agents deduplicate only against their own shards and shards the server signed. The repository format stays version 1. The server signs shards with new `locks/attest-*` objects, which 0.1 ignores. An object there that fails the server's MAC is logged and deleted by the next cleanup cycle.
 - The documentation moved to <https://lodestore.dev/docs/>. The old addresses under `https://lodestore.github.io/lodestore/` redirect to the new pages.
 - The project site with comparisons and a blog is at <https://lodestore.dev>.
 - The `lode` message about access to `locks/` links to the new address of the cleanup guide.
+
+### Security
+
+- Index shards from a compromised host no longer influence cleanup or the backups of other hosts. The first time a 0.2 server opens a repository (created, connected or upgraded) it signs the shards that exist at that moment, and trusts them only for `supersedes` and cleanup; the data a new backup depends on is opened and checked by the server once, so a shard planted before the upgrade makes such a backup fail instead of succeed. After upgrading, run `lode check --level packs` to find a forgery made earlier across the whole repository. See [index metadata from a compromised agent](https://lodestore.dev/docs/security/threat-model/#index-metadata-from-a-compromised-agent).
 
 ### Fixed
 

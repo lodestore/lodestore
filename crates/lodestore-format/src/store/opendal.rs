@@ -7,7 +7,7 @@ use bytes::Bytes;
 use opendal::{ErrorKind, Operator};
 
 use super::purge::{BlobPurge, PurgeOutcome, deleted_keys_op, purge_op};
-use super::s3::{check_key, layered, list_op, map_err, modified_op, presign_op};
+use super::s3::{check_key, get_range_op, layered, list_op, map_err, modified_op, presign_op};
 use super::{BlobDelete, BlobError, BlobStore, ListEntry, Presigned};
 use crate::error::{Error, Result};
 
@@ -106,12 +106,7 @@ impl BlobStore for OpendalStore {
         key: &str,
         range: Range<u64>,
     ) -> std::result::Result<Bytes, BlobError> {
-        check_key(key)?;
-        if range.is_empty() {
-            return Ok(Bytes::new());
-        }
-        let buf = self.op.read_with(key).range(range).await.map_err(map_err)?;
-        Ok(buf.to_bytes())
+        get_range_op(&self.op, key, range).await
     }
 
     async fn list(&self, prefix: &str) -> std::result::Result<Vec<ListEntry>, BlobError> {

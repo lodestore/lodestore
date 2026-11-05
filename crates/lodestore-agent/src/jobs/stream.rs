@@ -16,6 +16,7 @@ use lodestore_proto::agent::v1::{
 };
 use serde_json::{Value, json};
 
+use super::own_shards;
 use super::runner::{gc_locks_gate, job_deadline, open_writer, time_limit};
 use super::{JobCtx, failed};
 
@@ -240,6 +241,7 @@ async fn backup(ctx: &JobCtx, stream: &UnixStream, spec: &JobSpec) -> (JobFinish
             &progress,
         )
         .await;
+    own_shards::record_written(ctx.paths(), &writer);
     match result {
         Ok(outcome) => {
             let id = hex32(&outcome.snapshot_id);

@@ -116,6 +116,7 @@ pub async fn serve(config: Config, listeners: Listeners) -> anyhow::Result<Serve
     download::interrupt_running(&state).await?;
     maintenance::gc::interrupt_dry_runs(&state).await?;
     maintenance::check::interrupt_running(&state).await?;
+    maintenance::attest::resume_interrupted(&state).await?;
     catalog::resume_unsynced(&state).await;
 
     let rest_addr = listeners.rest.local_addr()?;
@@ -167,6 +168,10 @@ pub async fn serve(config: Config, listeners: Listeners) -> anyhow::Result<Serve
             stop.clone(),
         )));
         tasks.push(tokio::spawn(maintenance::check::run(
+            state.clone(),
+            stop.clone(),
+        )));
+        tasks.push(tokio::spawn(maintenance::attest::run(
             state.clone(),
             stop.clone(),
         )));

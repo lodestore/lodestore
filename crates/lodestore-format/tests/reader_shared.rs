@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use bytes::Bytes;
 use lodestore_format::crypto::{BLOB_TYPE_DATA, BLOB_TYPE_TREE, BlobId, Entropy};
 use lodestore_format::error::Error;
-use lodestore_format::index::Index;
+use lodestore_format::index::{BlobLocation, Index};
 use lodestore_format::keys::KdfCost;
 use lodestore_format::pack::pack_object_key;
 use lodestore_format::pb;
@@ -27,6 +27,8 @@ const LOW_KDF: KdfCost = KdfCost {
     iterations: 1,
     parallelism: 1,
 };
+
+mod adv_support;
 
 const BIG: usize = 300_000;
 
@@ -355,4 +357,151 @@ async fn reader_shared_futures_are_send() {
         .await
         .unwrap();
     assert_send(walk.next(&mut reader));
+}
+
+/// Fails every read of a pack with `Denied` and counts the attempts.
+#[derive(Clone)]
+struct DenyingPacks {
+    inner: Arc<LocalFsStore>,
+    attempts: Arc<AtomicUsize>,
+}
+
+impl BlobStore for DenyingPacks {
+    async fn put_if_absent(&self, key: &str, data: Bytes) -> Result<(), BlobError> {
+        self.inner.put_if_absent(key, data).await
+    }
+
+    async fn get(&self, key: &str) -> Result<Bytes, BlobError> {
+        self.inner.get(key).await
+    }
+
+    async fn get_range(&self, key: &str, range: Range<u64>) -> Result<Bytes, BlobError> {
+        if key.starts_with("packs/") {
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            return Err(BlobError::Denied {
+                message: "no".into(),
+            });
+        }
+        self.inner.get_range(key, range).await
+    }
+
+    async fn list(&self, prefix: &str) -> Result<Vec<ListEntry>, BlobError> {
+        self.inner.list(prefix).await
+    }
+}
+
+/// The tree blob of `a`, where its frame is, and every record of its pack.
+async fn tree_of_a(fx: &Fx) -> (BlobId, BlobLocation, Vec<pb::PackRecord>) {
+    let local = fx.store();
+    let repo = Repository::open(&local, b"pw").await.unwrap();
+    let cache = ReaderCache::new(DEFAULT_TREE_BUDGET);
+    let mut reader = fx.reader(&local, &cache).await;
+    let top = reader.list_dir(&fx.snapshot, &fx.abs("")).await.unwrap();
+    let tree: BlobId = top.iter().find(|n| n.name == b"a").unwrap().subtrees[0]
+        .as_slice()
+        .try_into()
+        .unwrap();
+    let mut index = Index::default();
+    index
+        .load_all(&local, repo.read_keys().k_idx(), repo.read_keys().repo_id())
+        .await
+        .unwrap();
+    let loc = *index.get(&tree, BLOB_TYPE_TREE).unwrap();
+    let keys = adv_support::attacker_keys(&repo);
+    let records = adv_support::open_all_shards(&local, &keys)
+        .await
+        .into_iter()
+        .flat_map(|(_, shard)| shard.packs)
+        .filter(|p| p.pack_id == loc.pack_id)
+        .collect();
+    (tree, loc, records)
+}
+
+#[tokio::test]
+async fn reader_shared_read_blob_skips_forged_location() {
+    let fx = Fx::new().await;
+    let (tree, _, _) = tree_of_a(&fx).await;
+    let cache = ReaderCache::new(DEFAULT_TREE_BUDGET);
+    let want = fx
+        .reader(fx.store(), &cache)
+        .await
+        .read_blob(&tree, BLOB_TYPE_TREE)
+        .await
+        .unwrap();
+
+    let local = fx.store();
+    let repo = Repository::open(&local, b"pw").await.unwrap();
+    let keys = adv_support::attacker_keys(&repo);
+    let shards = adv_support::open_all_shards(&local, &keys).await;
+    let lowest = shards.iter().map(|(id, _)| *id).min().unwrap();
+    let forged = shards
+        .iter()
+        .flat_map(|(_, s)| s.packs.iter().map(adv_support::forge_offsets))
+        .collect();
+    adv_support::plant_shard_where(&local, &keys, forged, Vec::new(), |id| *id < lowest).await;
+
+    let fresh = ReaderCache::new(DEFAULT_TREE_BUDGET);
+    let mut reader = fx.reader(fx.store(), &fresh).await;
+    assert_eq!(reader.read_blob(&tree, BLOB_TYPE_TREE).await.unwrap(), want);
+}
+
+#[tokio::test]
+async fn reader_shared_read_blob_lists_shards_when_known_copies_fail() {
+    let fx = Fx::new().await;
+    let (_, loc, records) = tree_of_a(&fx).await;
+    let local = fx.store();
+    let repo = Repository::open(&local, b"pw").await.unwrap();
+    let keys = adv_support::attacker_keys(&repo);
+
+    let copy: BlobId = Entropy::os().bytes();
+    let original = fx.repo_dir.join(pack_object_key(&loc.pack_id));
+    let bytes = fs::read(&original).unwrap();
+    local
+        .put_if_absent(&pack_object_key(&copy), Bytes::from(bytes.clone()))
+        .await
+        .unwrap();
+    let moved = records
+        .into_iter()
+        .map(|mut r| {
+            r.pack_id = copy.to_vec();
+            r
+        })
+        .collect();
+    adv_support::plant_shard(&local, &keys, moved, Vec::new()).await;
+
+    let mut broken = bytes;
+    broken[loc.offset as usize + loc.enc_len as usize / 2] ^= 1;
+    fs::set_permissions(&original, fs::Permissions::from_mode(0o644)).unwrap();
+    fs::write(&original, broken).unwrap();
+
+    let fresh = ReaderCache::new(DEFAULT_TREE_BUDGET);
+    let mut reader = fx.reader(fx.store(), &fresh).await;
+    reader
+        .selection_totals(&fx.snapshot, &fx.selection(&["a"]))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn reader_shared_read_blob_store_errors_are_not_retried() {
+    let fx = Fx::new().await;
+    let (tree, _, records) = tree_of_a(&fx).await;
+    let local = fx.store();
+    let repo = Repository::open(&local, b"pw").await.unwrap();
+    let keys = adv_support::attacker_keys(&repo);
+    let forged = records.iter().map(adv_support::forge_offsets).collect();
+    adv_support::plant_shard(&local, &keys, forged, Vec::new()).await;
+
+    let denying = DenyingPacks {
+        inner: Arc::new(fx.store()),
+        attempts: Arc::default(),
+    };
+    let fresh = ReaderCache::new(DEFAULT_TREE_BUDGET);
+    let mut reader = fx.reader(denying.clone(), &fresh).await;
+    let err = reader.read_blob(&tree, BLOB_TYPE_TREE).await.unwrap_err();
+    assert!(
+        matches!(err, Error::Store(BlobError::Denied { .. })),
+        "{err:?}"
+    );
+    assert_eq!(denying.attempts.load(Ordering::SeqCst), 1);
 }

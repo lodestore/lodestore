@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use lodestore_format::Error;
+use lodestore_format::attest::put_attestation;
 use lodestore_format::crypto::{BLOB_TYPE_DATA, BLOB_TYPE_TREE, BlobId, Entropy};
 use lodestore_format::gc::mark::{LiveSet, ShardSet, load_shards};
 use lodestore_format::gc::plan::{PackStat, PlanOptions, plan};
@@ -493,4 +494,52 @@ fn gc_mark_live_blob_in_unlisted_pack_fails() {
         .err()
         .unwrap();
     assert_eq!(corrupt_object(err), pack_object_key(&[1; 32]));
+}
+
+#[test]
+fn gc_mark_index_honours_supersedes_of_attested_shards_only() {
+    let (old, new) = ([1u8; 32], [2u8; 32]);
+    let shared = blob(7, 0);
+    let mut set = ShardSet::default();
+    set.shards.push((
+        old,
+        pb::IndexShard {
+            packs: vec![record(1, &[shared])],
+            supersedes: Vec::new(),
+        },
+    ));
+    set.shards.push((
+        new,
+        pb::IndexShard {
+            packs: vec![record(2, &[shared])],
+            supersedes: vec![old.to_vec()],
+        },
+    ));
+    let pack_of = |set: &ShardSet| {
+        set.index(&Default::default())
+            .unwrap()
+            .get(&shared, BLOB_TYPE_DATA)
+            .unwrap()
+            .pack_id
+    };
+    assert_eq!(pack_of(&set), [1; 32]);
+    set.attested.insert(new);
+    assert_eq!(pack_of(&set), [2; 32]);
+}
+
+#[tokio::test]
+async fn gc_mark_load_shards_reads_attestations() {
+    let fx = Fx::new().await;
+    fx.backup(1).await;
+    let keys = fx.repo.read_keys();
+    let shards = load_shards(&fx.store, keys).await.unwrap();
+    assert!(shards.attested.is_empty());
+    let id = shards.shards[0].0;
+
+    put_attestation(&fx.store, keys, &[id], &[], Vec::new(), &mut Entropy::os())
+        .await
+        .unwrap();
+    let shards = load_shards(&fx.store, keys).await.unwrap();
+    assert_eq!(shards.attested.len(), 1);
+    assert!(shards.attested.contains(&id));
 }

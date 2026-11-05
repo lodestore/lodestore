@@ -8,8 +8,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, bail};
+use lodestore_format::attest::{consolidate_attestations, put_attestation, read_attestations};
+use lodestore_format::check::is_data_error;
 use lodestore_format::crypto::{BlobId, Entropy};
 use lodestore_format::gc::compact::{compact_plan, write_compacted};
+use lodestore_format::gc::mark::ShardSet;
 use lodestore_format::gc::plan::{MAX_CANDIDATES, PlanOptions};
 use lodestore_format::gc::repack::repack;
 use lodestore_format::gc::sweep::{
@@ -24,6 +27,7 @@ use lodestore_format::locks::{
 };
 use lodestore_format::pack::pack_object_key;
 use lodestore_format::store::{BlobDelete, BlobPurge, BlobStore, Store, put_named};
+use lodestore_format::verify_snapshot::verify_shard;
 use lodestore_policy::{format_duration, format_size};
 use sqlx::Row;
 
@@ -35,6 +39,8 @@ use crate::catalog::{OpenRepository, open_repository};
 use crate::db::now_ms;
 use crate::jobs::ACTIVE_STATES;
 use crate::jobs::restore::RestoreRecord;
+use crate::maintenance::attest::verify::SWEEP;
+use crate::maintenance::attest::{ensure_upgraded, load_verified, record_verified};
 use crate::state::AppState;
 
 const PACKS_PREFIX: &str = "packs/";
@@ -356,11 +362,50 @@ async fn remove_stale_markers(
     Ok(())
 }
 
+/// Signs the shards the rebuild wrote once every frame they name opens, so
+/// the next rebuild counts their packs as indexed instead of writing them
+/// again. A shard whose frames do not open stays unsigned.
+async fn vouch_rebuilt(
+    state: &AppState,
+    repository_id: &str,
+    source: &OpenRepository,
+    written: &[BlobId],
+) -> anyhow::Result<()> {
+    let mut vouched = Vec::new();
+    for id in written {
+        match verify_shard(&source.store, &source.keys, id).await {
+            Ok(Some(_)) => vouched.push(*id),
+            Ok(None) => {}
+            Err(error) if is_data_error(&error) => {
+                tracing::warn!(shard = %hex32(id), %error, "a rebuilt index shard does not open");
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    if vouched.is_empty() {
+        return Ok(());
+    }
+    record_verified(state, repository_id, &vouched).await?;
+    put_attestation(
+        &source.store,
+        &source.keys,
+        &vouched,
+        &[],
+        Vec::new(),
+        &mut Entropy::os(),
+    )
+    .await?;
+    Ok(())
+}
+
 async fn mark_and_repack(
     state: &AppState,
     cycle: &CycleRow,
     now_ms: i64,
 ) -> anyhow::Result<StepOutcome> {
+    ensure_upgraded(state, &cycle.repository_id)
+        .await
+        .context("signing the repository's existing index before garbage collection")?;
     let source = open_repository(state, &cycle.repository_id)
         .await
         .context("opening the repository")?;
@@ -369,7 +414,7 @@ async fn mark_and_repack(
         .await
         .context("removing old cleanup markers")?;
 
-    tracked(
+    let rebuilt = tracked(
         state,
         &cycle.id,
         &seen,
@@ -377,6 +422,9 @@ async fn mark_and_repack(
     )
     .await?
     .context("rebuilding the index")?;
+    vouch_rebuilt(state, &cycle.repository_id, &source, &rebuilt.written)
+        .await
+        .context("signing the rebuilt index")?;
 
     let opts = PlanOptions {
         now_ms,
@@ -416,7 +464,6 @@ async fn mark_and_repack(
         let mut report = report;
         report.summary.bytes_freed = swept.bytes_freed;
         apply_locked(state, cycle, &mut report, &swept).await;
-        db::finish_cycle(state, &cycle.id, &report).await?;
         let message = if swept.deleted == 0 && swept.retained.is_empty() {
             "Nothing to free.".to_string()
         } else {
@@ -426,6 +473,7 @@ async fn mark_and_repack(
             )
         };
         event(state, &cycle.id, "info", "finished", &message).await;
+        db::finish_cycle(state, &cycle.id, &report).await?;
         return finished(state, &cycle.id).await;
     }
 
@@ -446,6 +494,25 @@ async fn mark_and_repack(
     )
     .await?
     .context("repacking sparse packs")?;
+    if !repacked.skipped.is_empty() {
+        let packs: Vec<String> = repacked
+            .skipped
+            .iter()
+            .map(|(id, reason)| format!("{} ({reason})", pack_object_key(id)))
+            .collect();
+        let message = format!(
+            "{} pack(s) could not be repacked and stay in place: {}. Run a full check of the \
+             repository.",
+            packs.len(),
+            packs.join("; ")
+        );
+        event(state, &cycle.id, "warning", "repack_skipped", &message).await;
+    }
+    if let Some(shard) = repacked.shard {
+        record_verified(state, &cycle.repository_id, &[shard])
+            .await
+            .context("recording the repacked shard as verified")?;
+    }
 
     let marked = candidates(plan, &repacked);
     let gc_id = new_lock_id(&mut entropy);
@@ -620,6 +687,9 @@ async fn waiting(state: &AppState, cycle: &CycleRow, now_ms: i64) -> anyhow::Res
 }
 
 async fn verifying(state: &AppState, cycle: &CycleRow) -> anyhow::Result<StepOutcome> {
+    ensure_upgraded(state, &cycle.repository_id)
+        .await
+        .context("signing the repository's existing index before compacting it")?;
     let gc_id = cycle_gc_id(cycle)?;
     let source = open_repository(state, &cycle.repository_id).await?;
     let marker = own_marker(&source, &gc_id)
@@ -631,7 +701,7 @@ async fn verifying(state: &AppState, cycle: &CycleRow) -> anyhow::Result<StepOut
         return Ok(StepOutcome::Postponed);
     }
 
-    let verified = tracked(
+    let mut verified = tracked(
         state,
         &cycle.id,
         &seen,
@@ -650,17 +720,34 @@ async fn verifying(state: &AppState, cycle: &CycleRow) -> anyhow::Result<StepOut
         return finished(state, &cycle.id).await;
     }
 
+    verified.shards.verified = load_verified(state, &cycle.repository_id).await?;
+    leave_unvouched_shards(&mut verified.shards, &verified.candidates);
     let plan = compact_plan(&verified.shards, &verified.candidates);
-    write_compacted(
+    let mut entropy = Entropy::os();
+    let compacted = write_compacted(
         &source.store,
         &source.keys,
         &plan,
         &verified.live,
         &verified.candidates,
-        &mut Entropy::os(),
+        &mut entropy,
     )
     .await
     .context("compacting the index and checking that every live blob can still be found")?;
+    record_verified(state, &cycle.repository_id, &compacted.verified)
+        .await
+        .context("recording the compacted shards as verified")?;
+    let consolidated = consolidate_attestations(&source.store, &source.keys, false, &mut entropy)
+        .await
+        .context("consolidating the server attestations")?;
+    let message = format!(
+        "Attestations consolidated: {} read, {} written, {} deleted.",
+        consolidated.read,
+        consolidated.written.len(),
+        consolidated.deleted
+    );
+    event(state, &cycle.id, "info", "attestations", &message).await;
+    remove_rejected_attestations(state, cycle, &source).await?;
 
     refuse_old_agents(state, &cycle.repository_id).await?;
     refuse_foreign_marker(state, cycle, &source).await?;
@@ -683,6 +770,70 @@ async fn verifying(state: &AppState, cycle: &CycleRow) -> anyhow::Result<StepOut
     )
     .await;
     Ok(StepOutcome::Advanced(GcState::Sweeping))
+}
+
+/// Reports and deletes the `locks/attest-*` objects whose MAC does not verify
+/// under the server key: only a writer key planted them, and every reader
+/// ignores them. A valid attestation written meanwhile is never among them.
+/// A storage that refuses the delete (Object Lock) keeps the object; it stays
+/// ignored and is reported again next time.
+async fn remove_rejected_attestations(
+    state: &AppState,
+    cycle: &CycleRow,
+    source: &OpenRepository,
+) -> anyhow::Result<()> {
+    let set = read_attestations(&source.store, &source.keys)
+        .await
+        .context("reading the server attestations")?;
+    if set.rejected.is_empty() {
+        return Ok(());
+    }
+    let mut removed = Vec::new();
+    for (key, reason) in &set.rejected {
+        tracing::warn!(cycle_id = %cycle.id, key, reason, "attestation does not verify");
+        let swept = sweep_object(&source.store, key, 0).await;
+        match swept.failed.first() {
+            None => removed.push(key.as_str()),
+            Some((_, error)) => tracing::warn!(key, error, "removing a forged attestation failed"),
+        }
+    }
+    let message = format!(
+        "{} attestation object(s) did not verify under the server key and were ignored; \
+         removed: {}.",
+        set.rejected.len(),
+        if removed.is_empty() {
+            "none".to_string()
+        } else {
+            removed.join(", ")
+        }
+    );
+    event(
+        state,
+        &cycle.id,
+        "warning",
+        "attestations_rejected",
+        &message,
+    )
+    .await;
+    Ok(())
+}
+
+/// Leaves out of the compaction every shard the server neither verified nor
+/// attested, unless it names a pack that is going. Such a shard may belong to
+/// a backup whose verification has not run yet; rewritten, its records would
+/// sit in a shard nobody vouches for and the verification would fail an
+/// honest job. An honest shard only names the young packs its backup wrote,
+/// which are never candidates.
+fn leave_unvouched_shards(shards: &mut ShardSet, candidates: &HashSet<BlobId>) {
+    let (verified, attested) = (&shards.verified, &shards.attested);
+    shards.shards.retain(|(id, shard)| {
+        verified.contains(id)
+            || attested.contains(id)
+            || shard.packs.is_empty()
+            || shard.packs.iter().any(|p| {
+                BlobId::try_from(p.pack_id.as_slice()).is_ok_and(|p| candidates.contains(&p))
+            })
+    });
 }
 
 /// Restore jobs reading this repository, downloads in flight and checks
@@ -790,6 +941,7 @@ async fn sweeping(state: &AppState, cycle: &CycleRow, now_ms: i64) -> anyhow::Re
 
     let marker = own_marker(&source, &gc_id).await?;
     if let Some(marker) = &marker {
+        let _verifications = SWEEP.write().await;
         let resurrected: HashSet<String> = cycle.resurrected.iter().cloned().collect();
         let doomed: HashSet<BlobId> = marker
             .candidate_packs
@@ -848,7 +1000,6 @@ async fn sweeping(state: &AppState, cycle: &CycleRow, now_ms: i64) -> anyhow::Re
     }
 
     let report = final_report(state, cycle, now_ms, &swept, deleted_packs.as_ref()).await?;
-    db::finish_cycle(state, &cycle.id, &report).await?;
     event(
         state,
         &cycle.id,
@@ -860,6 +1011,7 @@ async fn sweeping(state: &AppState, cycle: &CycleRow, now_ms: i64) -> anyhow::Re
         ),
     )
     .await;
+    db::finish_cycle(state, &cycle.id, &report).await?;
     finished(state, &cycle.id).await
 }
 

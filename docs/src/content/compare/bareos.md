@@ -19,7 +19,7 @@ Bareos is a backup system for networks of computers, a fork of Bacula 5.2 starte
 | Components | Director, a File Daemon on each client, a Storage Daemon and a PostgreSQL catalog | One server binary and an agent on each host |
 | Storage | Tape, File, Fifo, Droplet (object stores, most notably S3), Dplcompat, Dedupable | S3-compatible object storage, local or network folder |
 | Where object-store credentials live | In a profile on the Storage Daemon | On S3-compatible storage the agent holds a write-only key; the server holds the key that can delete |
-| Protection from a compromised host | Tape and WORM media for ransomware-resilient setups | Agent key without delete rights on S3-compatible storage; deletion is server-only |
+| Protection from a compromised host | Tape and WORM media for ransomware-resilient setups | Agent key without delete rights on S3-compatible storage; deletion is server-only; the server checks every new backup an agent makes, so index metadata forged by a compromised host cannot delete the backups of other hosts or pass off an unrestorable backup as a success |
 | Platforms | Linux, Windows, macOS, FreeBSD | Linux, x86_64 and arm64 |
 | Sources | Files, plus File Daemon plugins for PostgreSQL, MariaDB, Percona XtraBackup, Microsoft SQL Server, Proxmox VE and VMware | Files and directories; databases through a dump in a pre-backup hook |
 | Backup levels | Full, differential, incremental and Always Incremental | Deduplicated snapshots |

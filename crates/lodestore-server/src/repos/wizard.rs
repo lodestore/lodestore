@@ -326,6 +326,9 @@ async fn register(state: &AppState, r: Registration) -> Result<RepositorySummary
         .await?
         .ok_or_else(|| ApiError::Internal(anyhow::anyhow!("the new repository vanished")))?;
     state.repos.lock().unlocked.insert(id.clone(), true);
+    if let Err(error) = crate::maintenance::attest::ensure_upgraded(state, &id).await {
+        tracing::warn!(repository = %id, error = %format!("{error:#}"), "attestation upgrade failed");
+    }
     Ok(RepositorySummary {
         base: base_of(&row, 0, Some(true), CleanupSummary::OFF),
         checks: repo_checks_summary(state, &id).await?,

@@ -1,5 +1,6 @@
 //! Lodestore repository format v1.
 
+pub mod attest;
 pub mod check;
 pub mod chunker;
 pub mod config;
@@ -18,6 +19,7 @@ pub mod snapshot;
 pub mod store;
 pub mod tree;
 pub mod tree_cache;
+pub mod verify_snapshot;
 pub mod writer;
 
 #[allow(clippy::all, clippy::pedantic)]

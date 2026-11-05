@@ -21,6 +21,7 @@ snapshots/<hex>              sealed snapshot envelopes
 locks/gc-<32 hex>            GC manifest: packs marked for deletion
 locks/writer-<32 hex>        marker of a running direct writer
 locks/writer-<32 hex>.done   empty; the writer has finished
+locks/attest-<32 hex>        server attestation of index shards (ADR 0005)
 ```
 
 Every object except `config` and those under `locks/` is named by the lowercase hex **BLAKE3 of its exact bytes** (64 characters). A pack lives under a two-character fan-out directory taken from the first two characters of its name. Because names derive from content, a second write of the same object is a no-op, and "already exists" on a create-only write means the identical object is already there.
@@ -40,6 +41,7 @@ The objects under `locks/` coordinate garbage collection with writers. Their nam
 
 - `locks/gc-<id>` is a protobuf `GcManifest` (`version`, `gc_id`, `published`, `candidate_packs` sorted) sealed with XChaCha20-Poly1305 under `k_idx`, additional data `repo_id || "gc-manifest"`. The server publishes it before it deletes anything. A writer reads every manifest when it opens the repository and ignores the records of the listed packs, so it uploads a blob again unless a second location outside the candidates holds it. A manifest that does not authenticate, has an unknown version or whose `gc_id` differs from its name stops the writer.
 - `locks/writer-<id>` is a protobuf `WriterMarker` (`version`, `writer_id`, `hostname`, `started`) sealed the same way with additional data `repo_id || "writer-marker"`. A direct writer creates it before it uploads and creates the empty `locks/writer-<id>.done` when it finishes. A marker without `.done` blocks deletion; one that does not open still counts as open.
+- `locks/attest-<id>` is a server attestation: `0x01 || keyed BLAKE3 MAC || protobuf Attestation`, authenticated under the server key, which writer keys do not contain. The 0.1 readers open only `gc-` and `writer-` objects and skip it. The frame is specified in [ADR 0005](/docs/adr/0005-server-attestations/).
 
 All three are create-only like every other object, and the write path never deletes them.
 
@@ -93,7 +95,7 @@ A snapshot carries `index_refs`: the ids of the index shards that cover every bl
 
 ### Rebuilding the index
 
-The index is a cache; the packs are the truth. `lode repo rebuild-index` lists `packs/`, skips packs that some shard already mentions and packs a running cleanup has marked for deletion in `locks/gc-*`, and for each remaining pack fetches the first 1175 bytes, the last 10 bytes and the header frame with three ranged reads. It opens the pack key with the repository private key, decrypts the header, checks every entry against the pack's bounds, and writes new shards with at most 1024 pack records each. A pack that cannot be parsed is skipped with a warning and the command exits with code 1; the others are still indexed. A second run finds nothing to do and writes no shard.
+The index is a cache; the packs are the truth. `lode repo rebuild-index` lists `packs/`, skips packs that a trusted shard already mentions (any shard before the server upgrades the repository, only attested shards after it) and packs a running cleanup has marked for deletion in `locks/gc-*`, and for each remaining pack fetches the first 1175 bytes, the last 10 bytes and the header frame with three ranged reads. It opens the pack key with the repository private key, decrypts the header, checks every entry against the pack's bounds, and writes new shards with at most 1024 pack records each. A pack that cannot be parsed is skipped with a warning and the command exits with code 1; the others are still indexed. Before the upgrade a second run finds nothing to do and writes no shard. After it, the rebuilt shards are not attested by the rebuild itself: the server's cleanup cycle, which runs the same rebuild, opens every frame a rebuilt shard names and signs the shard when they all open, so its next run skips those packs. A pack whose frames do not open is indexed again on every run.
 
 The rebuild does not hash a pack to compare it with its name: that needs a full download and belongs to integrity verification. A tampered pack is still caught when a blob is read, by authentication and by the keyed-hash check.
 
@@ -113,6 +115,8 @@ A file node lists at most (16 MiB - 2 MiB) / 34 data blob ids, about 430 thousan
 ### Frozen fixtures
 
 `crates/lodestore-format/tests/fixtures/v1` holds a repository written by this format (two snapshots, password and recovery key slots, a writer-keys file) and the frozen outputs of its primitives (`vectors.json`). Tests read, restore and re-encode them on every run, so a change that old repositories would not survive fails the build. The directory is append-only: CI rejects a change that modifies, deletes or renames a file in it. A change to the format needs `format_version` 2 and a new `fixtures/v2` next to this one.
+
+`attest-vectors.json` in the same directory fixes the server MAC key, the attestation frame and the sealed provenance bytes for fixed inputs; the format of `locks/attest-*` objects is in [ADR 0005](/docs/adr/0005-server-attestations/).
 
 ## Consequences
 
