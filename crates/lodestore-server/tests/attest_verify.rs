@@ -22,7 +22,7 @@ use lodestore_server::alerts::inputs::gather;
 use lodestore_server::catalog::open_repository;
 use lodestore_server::catalog::retention::after_backup;
 use lodestore_server::db::now_ms;
-use lodestore_server::maintenance::attest::verify::verify_then_retain;
+use lodestore_server::maintenance::attest::verify::{SWEEP, verify_then_retain};
 use lodestore_server::maintenance::attest::{
     ensure_upgraded, record_verified, resume_interrupted, tick_once,
 };
@@ -570,6 +570,61 @@ async fn attest_verify_backup_pending_through_gc_cycle_is_verified() {
             env.column("j1", "error_message").await
         );
         assert_eq!(env.column("j1", "state").await.unwrap(), "succeeded");
+        env.ts.stop().await;
+    }
+}
+
+/// A verification that is reading the bucket holds a cleanup back from
+/// deleting: the sweep starts only once the verification lets go.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn attest_verify_gc_sweep_waits_for_running_verification() {
+    for backend in backends() {
+        let env = Env::new(&backend).await;
+        env.upgrade().await;
+        env.enable_gc().await;
+        let (gone, _) = env.snapshot("gone", Plant::None).await;
+        env.forget_and_age(&gone);
+        let (cycle, later) = env.gc_marked().await;
+        let index = env.ts.local_repo_root("main").join("index");
+
+        let reading = SWEEP.read().await;
+        let before = walk(&index);
+        let mut finish = tokio::spawn(gc_finish(env.ts.state().clone(), cycle.clone(), later));
+        let deciding = wait_until(WAIT, || async {
+            let state: String = sqlx::query("SELECT state FROM gc_cycles WHERE id = $1")
+                .bind(&cycle)
+                .fetch_one(env.pool())
+                .await
+                .unwrap()
+                .get("state");
+            state != "waiting" && state != "verifying"
+        })
+        .await;
+        assert!(
+            deciding,
+            "[{}] the cycle never got past verifying",
+            backend.name()
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), &mut finish)
+                .await
+                .is_err(),
+            "[{}] the sweep ran while a verification was reading",
+            backend.name()
+        );
+        assert!(
+            before.iter().all(|p| p.exists()),
+            "[{}] a shard went while a verification was reading",
+            backend.name()
+        );
+
+        drop(reading);
+        finish.await.unwrap();
+        assert!(
+            before.iter().any(|p| !p.exists()),
+            "[{}] the cycle deleted no shard, so it proved nothing",
+            backend.name()
+        );
         env.ts.stop().await;
     }
 }

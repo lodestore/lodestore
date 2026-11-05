@@ -15,7 +15,7 @@ use lodestore_format::verify_snapshot::{
     check_snapshot_resolves, snapshot_index_refs, verify_shard,
 };
 use sqlx::Row;
-use tokio::sync::Semaphore;
+use tokio::sync::{RwLock, Semaphore};
 
 use super::{ensure_upgraded, load_verified, record_verified};
 use crate::catalog::retention::{after_backup, append_event};
@@ -28,6 +28,14 @@ pub const VERIFY_RETRY_WINDOW: Duration = Duration::from_secs(3600);
 const VERIFY_CONCURRENCY: usize = 2;
 
 static PERMITS: Semaphore = Semaphore::const_new(VERIFY_CONCURRENCY);
+
+/// Held shared by a verification and exclusively by a cleanup while it
+/// deletes shards and packs. A verification resolves through the verified
+/// shards it loaded first; a sweep in between would remove shards whose
+/// replacements that set does not know yet.
+// shortcut: one lock for every repository, so a sweep in one holds back verifications in all;
+// key it by repository if many repositories share a server.
+pub static SWEEP: RwLock<()> = RwLock::const_new(());
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Verdict {
@@ -82,7 +90,11 @@ async fn run_one(state: &AppState, job_id: &str) -> anyhow::Result<()> {
         set_verify_state(state, job_id, None).await?;
         return Ok(());
     };
-    match verify_job(state, job_id, &target).await {
+    let verdict = {
+        let _sweep = SWEEP.read().await;
+        verify_job(state, job_id, &target).await
+    };
+    match verdict {
         Ok(Verdict::Verified) => {
             set_verify_state(state, job_id, Some("verified")).await?;
             after_backup(state, job_id).await
@@ -182,6 +194,11 @@ async fn verify_job(state: &AppState, job_id: &str, target: &Target) -> anyhow::
     let (store, keys) = (&source.store, &source.keys);
 
     let attested = match read_attestations(store, keys).await {
+        Ok(set) if set.incomplete => {
+            return Ok(Verdict::Retry(
+                "the attestations changed while they were read".into(),
+            ));
+        }
         Ok(set) => set.shards,
         Err(error) => return Ok(classify(&error)),
     };

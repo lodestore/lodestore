@@ -37,6 +37,7 @@ use crate::catalog::{OpenRepository, open_repository};
 use crate::db::now_ms;
 use crate::jobs::ACTIVE_STATES;
 use crate::jobs::restore::RestoreRecord;
+use crate::maintenance::attest::verify::SWEEP;
 use crate::maintenance::attest::{ensure_upgraded, load_verified, record_verified};
 use crate::state::AppState;
 
@@ -835,6 +836,7 @@ async fn sweeping(state: &AppState, cycle: &CycleRow, now_ms: i64) -> anyhow::Re
 
     let marker = own_marker(&source, &gc_id).await?;
     if let Some(marker) = &marker {
+        let _verifications = SWEEP.write().await;
         let resurrected: HashSet<String> = cycle.resurrected.iter().cloned().collect();
         let doomed: HashSet<BlobId> = marker
             .candidate_packs
