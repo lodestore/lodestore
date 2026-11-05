@@ -39,6 +39,7 @@ function snapshot(
 		policy_name: "etc-and-home",
 		policy_deleted: false,
 		received_at: time,
+		verified_by: "server",
 		tags: [],
 		warnings_total: 0,
 		errors_total: 0,
@@ -70,6 +71,7 @@ const hosts: RestoreHost[] = [
 		repository_name: "main",
 		snapshot_count: 1,
 		latest_snapshot_ms: noon(30),
+		unverified_count: 0,
 	},
 	{
 		key: WEB,
@@ -82,6 +84,7 @@ const hosts: RestoreHost[] = [
 		repository_name: "main",
 		snapshot_count: 5,
 		latest_snapshot_ms: noon(0),
+		unverified_count: 0,
 	},
 	{
 		key: "agentless:old-nas",
@@ -94,6 +97,7 @@ const hosts: RestoreHost[] = [
 		repository_name: "main",
 		snapshot_count: 2,
 		latest_snapshot_ms: noon(10),
+		unverified_count: 0,
 	},
 ];
 
@@ -110,9 +114,14 @@ function mockRestore(
 		hosts?: RestoreHost[];
 		bySnapshot?: Record<string, RestoreSnapshot>;
 		seen?: URL[];
+		web?: RestoreSnapshot[];
+		latestVerified?: string | null;
 	} = {},
 ) {
 	const list = options.hosts ?? hosts;
+	const web = options.web ?? webSnapshots;
+	const latestVerified =
+		options.latestVerified === undefined ? web[0].id : options.latestVerified;
 	server.use(
 		http.get("/api/v1/restore/hosts", () => HttpResponse.json(list)),
 		http.get("/api/v1/restore/snapshots", ({ request }) => {
@@ -127,20 +136,21 @@ function mockRestore(
 					items: own,
 					total: own.length,
 					next: null,
+					latest_verified_id: own[0]?.id ?? null,
 				});
 			}
 			const second = url.searchParams.get("before") === "cursor-1";
 			return HttpResponse.json<RestoreSnapshotPage>({
-				items: second ? webSnapshots.slice(3) : webSnapshots.slice(0, 3),
-				total: webSnapshots.length,
+				items: second ? web.slice(3) : web.slice(0, 3),
+				total: web.length,
 				next: second ? null : "cursor-1",
+				latest_verified_id: latestVerified,
 			});
 		}),
 		http.get("/api/v1/snapshots/:id", ({ params }) => {
-			const found = [
-				...webSnapshots,
-				...Object.values(options.bySnapshot ?? {}),
-			].find((s) => s.id === params.id);
+			const found = [...web, ...Object.values(options.bySnapshot ?? {})].find(
+				(s) => s.id === params.id,
+			);
 			return found
 				? HttpResponse.json(found)
 				: apiError(404, "not_found", "snapshot not found");
@@ -203,6 +213,54 @@ describe("Restore timeline", () => {
 		expect(stops().filter((s) => s.hasAttribute("aria-current"))).toHaveLength(
 			1,
 		);
+	});
+
+	it("opens the latest signed snapshot, not the newest listed", async () => {
+		mockRestore({
+			web: [
+				snapshot(1, noon(0), WEB, { verified_by: null }),
+				...webSnapshots.slice(1),
+			],
+			latestVerified: id(2),
+		});
+		const { router } = await openRestore();
+
+		await waitFor(() =>
+			expect(router.state.location.search).toMatchObject({
+				host: WEB,
+				snapshot: id(2),
+			}),
+		);
+		const unsigned = (
+			await screen.findAllByRole("button", {
+				name: new RegExp(`^Snapshot ${short(1)} from `),
+			})
+		)[0];
+		expect(unsigned).not.toHaveAttribute("aria-current");
+		expect(unsigned).toHaveAccessibleDescription(/Unverified/);
+	});
+
+	it("host with only unsigned snapshots has no default snapshot", async () => {
+		mockRestore({
+			hosts: hosts.map((host) =>
+				host.key === WEB
+					? { ...host, latest_snapshot_ms: null, unverified_count: 2 }
+					: host,
+			),
+			web: [snapshot(1, noon(0), WEB, { verified_by: null })],
+			latestVerified: null,
+		});
+		const user = userEvent.setup();
+		const { router } = await openRestore(`/restore?host=${WEB}`);
+
+		expect(
+			await screen.findByText(/Nothing signed any of this host's snapshots/),
+		).toBeInTheDocument();
+		expect(router.state.location.search.snapshot).toBeUndefined();
+		await user.click(screen.getByRole("combobox", { name: /^Host: web-1/ }));
+		const option = await screen.findByRole("option", { name: /web-1/ });
+		expect(within(option).getByText("Unverified 2")).toBeInTheDocument();
+		expect(within(option).getByText("No signed snapshots")).toBeInTheDocument();
 	});
 
 	it("groups snapshots by day, newest first, and flags incomplete ones", async () => {

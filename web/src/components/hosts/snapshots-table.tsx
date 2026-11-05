@@ -19,6 +19,7 @@ import {
 } from "@/components/snapshots/snapshot-dialogs";
 import {
 	PolicyDeletedBadge,
+	ProvenanceBadge,
 	SuspiciousBadge,
 } from "@/components/snapshots/suspicious-badge";
 import { StatusBadge } from "@/components/status-badge";
@@ -285,6 +286,7 @@ export function SnapshotsTable({ host }: { host: HostDetail }) {
 										</TableCell>
 										<TableCell className="px-4">
 											<div className="flex flex-wrap items-center gap-1">
+												<ProvenanceBadge snapshot={snapshot} />
 												{snapshot.suspicious && (
 													<SuspiciousBadge snapshot={snapshot} />
 												)}

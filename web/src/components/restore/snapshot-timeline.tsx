@@ -10,7 +10,10 @@ import {
 	isRebuilding,
 	useCatalogStatus,
 } from "@/components/repos/catalog-card";
-import { SuspiciousBadge } from "@/components/snapshots/suspicious-badge";
+import {
+	SuspiciousBadge,
+	UnverifiedBadge,
+} from "@/components/snapshots/suspicious-badge";
 import { StatusBadge } from "@/components/status-badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -49,6 +52,7 @@ export function useSnapshotTimeline(hostKey?: string) {
 		select: (data) => ({
 			items: data.pages.flatMap((page) => page.items),
 			total: data.pages[0]?.total ?? 0,
+			latest_verified_id: data.pages[0]?.latest_verified_id ?? null,
 		}),
 	});
 }
@@ -98,6 +102,7 @@ function Stop({
 }) {
 	const id = useId();
 	const described = [
+		snapshot.verified_by == null && `${id}-unverified`,
 		snapshot.suspicious && `${id}-suspicious`,
 		snapshot.incomplete && `${id}-incomplete`,
 		selected && `${id}-selected`,
@@ -137,6 +142,11 @@ function Stop({
 					<span className="font-semibold tabular-nums">
 						{formatClock(snapshot.time)}
 					</span>
+					{snapshot.verified_by == null && (
+						<span id={`${id}-unverified`} className="flex">
+							<UnverifiedBadge plain />
+						</span>
+					)}
 					{snapshot.suspicious && (
 						<span id={`${id}-suspicious`} className="flex">
 							<SuspiciousBadge snapshot={snapshot} plain />
