@@ -257,7 +257,8 @@ async fn load_policies(state: &AppState) -> anyhow::Result<(Vec<Policy>, Vec<Str
 async fn last_successes(state: &AppState) -> anyhow::Result<HashMap<Pair, i64>> {
     let rows = sqlx::query(
         "SELECT policy_name, host_id, MAX(received_at) AS at FROM snapshots \
-         WHERE incomplete = 0 AND policy_name IS NOT NULL AND host_id IS NOT NULL \
+         WHERE incomplete = 0 AND verified_at IS NOT NULL \
+         AND policy_name IS NOT NULL AND host_id IS NOT NULL \
          GROUP BY policy_name, host_id",
     )
     .fetch_all(&state.db.pool)
@@ -305,9 +306,10 @@ async fn last_snapshots(state: &AppState) -> anyhow::Result<HashMap<String, Snap
     let rows = sqlx::query(
         "SELECT s.host_id, s.received_at, s.stats_json FROM snapshots s JOIN ( \
              SELECT host_id, MAX(received_at) AS at FROM snapshots \
-             WHERE incomplete = 0 AND host_id IS NOT NULL GROUP BY host_id \
+             WHERE incomplete = 0 AND verified_at IS NOT NULL AND host_id IS NOT NULL \
+             GROUP BY host_id \
          ) l ON l.host_id = s.host_id AND l.at = s.received_at \
-         WHERE s.incomplete = 0",
+         WHERE s.incomplete = 0 AND s.verified_at IS NOT NULL",
     )
     .fetch_all(&state.db.pool)
     .await

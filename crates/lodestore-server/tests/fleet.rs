@@ -71,8 +71,8 @@ impl Fleet {
         sqlx::query(
             "INSERT INTO snapshots (id, repository_id, host_id, hostname, time_ms, paths_json, \
              tags_json, policy_name, incomplete, errors_total, warnings_total, stats_json, \
-             discovered_at, received_at, received_exact) \
-             VALUES ($1, $2, $3, 'h', $4, '[]', '[]', $5, 0, 0, 0, $6, $4, $4, 1)",
+             discovered_at, received_at, received_exact, verified_at, verified_by) \
+             VALUES ($1, $2, $3, 'h', $4, '[]', '[]', $5, 0, 0, 0, $6, $4, $4, 1, $4, 'server')",
         )
         .bind(id)
         .bind(&self.repo)

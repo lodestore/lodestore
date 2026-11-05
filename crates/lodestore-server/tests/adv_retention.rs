@@ -28,6 +28,7 @@ use sqlx::Row;
 const PASSWORD: &[u8] = b"test-password";
 const POLICY: &str = "keep-three";
 const FORGED: usize = 100;
+const THREE_DAYS_MS: i64 = 3 * 24 * 3600 * 1000;
 
 async fn create_policy(env: &AgentEnv, data: &Path) {
     let yaml = format!(
@@ -198,5 +199,64 @@ async fn adv_hundred_unverified_snapshots_do_not_displace_retention() {
     );
     let forged_left = forged.iter().filter(|id| catalog.contains(*id)).count();
     assert_eq!(forged_left, FORGED, "no forged snapshot is deleted");
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adv_forged_snapshot_does_not_mask_overdue_backup() {
+    let env = AgentEnv::start(&Backend::Sqlite).await;
+    let data = env.work.path().join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    create_policy(&env, &data).await;
+    let honest = real_backup(&env, &data, 1).await;
+    sqlx::query("UPDATE snapshots SET received_at = received_at - $1 WHERE id = $2")
+        .bind(THREE_DAYS_MS)
+        .bind(&honest)
+        .execute(&env.ts().state().db.pool)
+        .await
+        .unwrap();
+    let received: i64 = sqlx::query("SELECT received_at FROM snapshots WHERE id = $1")
+        .bind(&honest)
+        .fetch_one(&env.ts().state().db.pool)
+        .await
+        .unwrap()
+        .try_get("received_at")
+        .unwrap();
+
+    let store = LocalFsStore::new(env.ts().local_repo_root("main"));
+    let repo = Repository::open(&store, PASSWORD).await.unwrap();
+    let source = env.work.path().join("forged");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("file.txt"), b"data of the forger").unwrap();
+    let mut writer = Writer::new(&store, attacker_keys(&repo), repo.config())
+        .await
+        .unwrap();
+    let options = BackupOptions {
+        hostname: Some(env.hostname.as_bytes().to_vec()),
+        agent_id: Some(env.host.as_bytes().to_vec()),
+        ..Default::default()
+    };
+    writer.backup(&[source], options, &|_| {}).await.unwrap();
+    let response = env
+        .api
+        .post(
+            &format!("/api/v1/repositories/{}/catalog/sync", env.repo),
+            &json!({}),
+        )
+        .await;
+    assert_eq!(response.status(), 200);
+
+    let fleet = env.json("/api/v1/fleet").await;
+    let host = fleet["hosts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["id"] == env.host)
+        .expect("the victim host");
+    assert_eq!(
+        host["last_snapshot"]["time"].as_i64(),
+        Some(received),
+        "a planted snapshot must not make the host look freshly backed up"
+    );
     env.stop().await;
 }
