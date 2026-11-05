@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+pub mod fake_agent;
+
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::net::SocketAddr;
