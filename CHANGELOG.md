@@ -12,7 +12,7 @@ All notable changes to Lodestore are recorded here. The format follows [Keep a C
 
 ### Changed
 
-- Cleanup opens the surviving copy of every live blob before it deletes or replaces a pack, and skips a pack it cannot read instead of failing. `supersedes` of an index shard counts only when the server has signed the shard. A restore tries the other known copies of a blob when the first one does not open.
+- Cleanup opens the surviving copy of every live blob before it deletes or replaces a pack, and skips a pack it cannot read instead of failing. `supersedes` of an index shard counts only when the server has signed the shard. A restore tries the other known copies of a blob when the first one does not open. Cleanup, backups and the server's check of a new backup skip an index shard with a malformed record instead of failing.
 - Once a 0.2 server has opened a repository, agents deduplicate only against their own shards and shards the server signed. The repository format stays version 1. The server signs shards with new `locks/attest-*` objects, which 0.1 ignores.
 - The documentation moved to <https://lodestore.dev/docs/>. The old addresses under `https://lodestore.github.io/lodestore/` redirect to the new pages.
 - The project site with comparisons and a blog is at <https://lodestore.dev>.
