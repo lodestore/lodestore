@@ -19,7 +19,7 @@ Two products carry the Plakar name, so the table below separates them where the 
 | | Plakar community | Plakar Control Plane | Lodestore 0.1 |
 |---|------------------|----------------------|---------------|
 | What it is | Command-line engine, ISC license | Commercial self-hosted management system on Plakar, packaged as a virtual appliance | Self-hosted server with agents, AGPL-3.0 server and Apache-2.0 agent and format |
-| Protection from a compromised host | Immutable backups on object-lock storage, per the Plakar website | Immutable backups on object-lock storage, per the Plakar website | Agent key without delete rights on S3-compatible storage; deletion is server-only; the server checks every new backup, so index metadata forged by a compromised host cannot delete the backups of other hosts or pass off an unrestorable backup as a success |
+| Protection from a compromised host | Immutable backups on object-lock storage, per the Plakar website | Immutable backups on object-lock storage, per the Plakar website | Agent key without delete rights on S3-compatible storage; deletion is server-only; the server checks every new backup an agent makes, so index metadata forged by a compromised host cannot delete the backups of other hosts or pass off an unrestorable backup as a success |
 | Scheduling | cron, systemd timer or the platform scheduler | Centralized scheduling | Server-side schedules with retention |
 | Plans | None | Free (up to 500 GB of managed data), Community (for qualifying organizations) and Enterprise | None |
 | Sources | Files, plus integrations such as PostgreSQL, MySQL, etcd, Kubernetes and S3-compatible object stores | More resource types, including Proxmox | Files and directories; databases through a dump in a pre-backup hook |
