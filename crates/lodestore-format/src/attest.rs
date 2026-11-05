@@ -198,6 +198,25 @@ pub async fn read_attestations<S: BlobStore>(store: &S, keys: &ReadKeys) -> Resu
     Ok(out)
 }
 
+const READ_ATTEMPTS: usize = 3;
+const ATTESTATIONS_CHANGING: &str = "attestations changed while reading; try again";
+
+/// [`read_attestations`] until no object vanishes between the listing and its
+/// read: a partial read can miss the upgrade marker or a signature. A cleanup
+/// cycle writes its summary before it deletes, so a fresh listing settles.
+pub async fn read_attestations_complete<S: BlobStore>(
+    store: &S,
+    keys: &ReadKeys,
+) -> Result<AttestedSet> {
+    for _ in 0..READ_ATTEMPTS {
+        let set = read_attestations(store, keys).await?;
+        if !set.incomplete {
+            return Ok(set);
+        }
+    }
+    Err(Error::InvalidInput(ATTESTATIONS_CHANGING.into()))
+}
+
 /// What the attestations claim, with no MAC check. Deliberately a different
 /// type from [`AttestedSet`]: it is only fit for an agent-side deduplication
 /// filter, never for a collector, a server check or a reader.
@@ -205,16 +224,21 @@ pub async fn read_attestations<S: BlobStore>(store: &S, keys: &ReadKeys) -> Resu
 pub struct UnverifiedAttestations {
     pub shards: HashSet<BlobId>,
     pub markers: BTreeSet<u32>,
+    /// The store refused the listing or a read, so something may be missing.
+    pub denied: bool,
 }
 
 /// Reads the `locks/attest-*` objects without a server key. A store that
-/// refuses the listing, a vanished object and a malformed one all count as
-/// "nothing attested".
+/// refuses the listing or a read, a vanished object and a malformed one all
+/// count as "nothing attested"; a refusal also sets `denied`.
 pub async fn peek_attestations<S: BlobStore>(store: &S) -> Result<UnverifiedAttestations> {
     let mut out = UnverifiedAttestations::default();
     let listed = match store.list(LOCKS_PREFIX).await {
         Ok(listed) => listed,
-        Err(BlobError::Denied { .. }) => return Ok(out),
+        Err(BlobError::Denied { .. }) => {
+            out.denied = true;
+            return Ok(out);
+        }
         Err(e) => return Err(e.into()),
     };
     for entry in listed {
@@ -223,7 +247,11 @@ pub async fn peek_attestations<S: BlobStore>(store: &S) -> Result<UnverifiedAtte
         }
         let bytes = match store.get(&entry.key).await {
             Ok(bytes) => bytes,
-            Err(BlobError::NotFound | BlobError::Denied { .. }) => continue,
+            Err(BlobError::NotFound) => continue,
+            Err(BlobError::Denied { .. }) => {
+                out.denied = true;
+                continue;
+            }
             Err(e) => return Err(e.into()),
         };
         if let Ok(attestation) = peek_attestation(&entry.key, &bytes) {
@@ -297,12 +325,7 @@ async fn upgrade<S: BlobStore>(
     entropy: &mut Entropy,
     chunk: usize,
 ) -> Result<UpgradeOutcome> {
-    let set = read_attestations(store, keys).await?;
-    if set.incomplete {
-        return Err(Error::InvalidInput(
-            "attestations changed while reading; try again".into(),
-        ));
-    }
+    let set = read_attestations_complete(store, keys).await?;
     if set.markers.contains(&MARKER_LEGACY_SHARDS) {
         return Ok(UpgradeOutcome {
             already: true,
@@ -462,12 +485,7 @@ async fn consolidate<S: BlobStore + BlobDelete + BlobPurge>(
     entropy: &mut Entropy,
     max_records: usize,
 ) -> Result<ConsolidateOutcome> {
-    let set = read_attestations(store, keys).await?;
-    if set.incomplete {
-        return Err(Error::InvalidInput(
-            "attestations changed while reading; try again".into(),
-        ));
-    }
+    let set = read_attestations_complete(store, keys).await?;
     let mut out = ConsolidateOutcome {
         read: set.objects.len(),
         written: Vec::new(),

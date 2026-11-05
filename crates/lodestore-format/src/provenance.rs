@@ -18,6 +18,7 @@ pub const FUTURE_TOLERANCE_MS: i64 = 600_000;
 pub const NO_VERIFIED_SNAPSHOT: &str = "No snapshot in this repository is signed by the server or by the password holder. Name one by id; `lode snapshots` lists them.";
 pub const ATTESTATIONS_MISSING: &str = "This repository was upgraded for server signatures, but no signature can be read now; they may have been deleted. Name a snapshot by id; `lode snapshots` lists them.";
 pub const ALL_STORED_IN_FUTURE: &str = "Every snapshot in this repository was stored with a time in the future. Name one by id; `lode snapshots` lists them.";
+pub const ALL_SIGNED_STORED_IN_FUTURE: &str = "Every signed snapshot in this repository was stored with a time in the future. Name one by id; `lode snapshots` lists them.";
 
 /// Who sealed a provenance record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,6 +123,13 @@ impl ProvenanceSet {
         self.records.len()
     }
 
+    /// The order of a signed snapshot: the store's clock, else the time its
+    /// record was signed. The manifest's own time never counts.
+    pub fn stored_order(&self, e: &SnapshotEntry) -> (i64, BlobId) {
+        let signed_at = self.records.get(&e.id).map_or(0, verified_at_ms);
+        (e.modified_ms.unwrap_or(signed_at), e.id)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.records.is_empty()
     }
@@ -213,13 +221,19 @@ pub fn pick_latest(
     let mut warnings = Vec::new();
 
     let (mode, chosen) = if provenance.attested_any() {
-        let key = |e: &SnapshotEntry| {
-            let signed_at = provenance.get(&e.id).map_or(0, verified_at_ms);
-            (e.modified_ms.unwrap_or(signed_at), e.id)
-        };
-        let chosen = entries
+        let key = |e: &SnapshotEntry| provenance.stored_order(e);
+        let (kept, future): (Vec<&SnapshotEntry>, Vec<&SnapshotEntry>) = entries
             .iter()
             .filter(|e| provenance.contains(&e.id))
+            .partition(|e| key(e).0 <= limit);
+        if kept.is_empty() && !future.is_empty() {
+            return Err(Error::InvalidInput(ALL_SIGNED_STORED_IN_FUTURE.into()));
+        }
+        if let Some((count, newest)) = newest_of(future.into_iter(), key) {
+            warnings.push(LatestWarning::FutureStored { count, newest });
+        }
+        let chosen = kept
+            .into_iter()
             .max_by_key(|e| key(e))
             .ok_or_else(|| Error::InvalidInput(NO_VERIFIED_SNAPSHOT.into()))?;
         let bar = key(chosen);
