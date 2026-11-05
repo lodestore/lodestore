@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use crate::Fut;
 use crate::attest::read_attestations;
+use crate::check::is_data_error;
 use crate::chunker::blob_id;
 use crate::config;
 use crate::crypto::{BLOB_TYPE_DATA, BLOB_TYPE_TREE, BlobId, Key32, RepoId, open_frame};
@@ -449,17 +450,18 @@ impl<S: BlobStore> Reader<S> {
     }
 
     /// Reads, decrypts, decompresses and verifies one blob. A location that
-    /// does not open (a shard from a write-key holder can name wrong offsets)
-    /// is followed by the next known copy; when none works the shards are
-    /// listed once more, since the real record may sit in one not loaded yet.
-    /// Store errors other than a missing pack are returned at once.
+    /// does not open (a shard from a write-key holder can name wrong offsets,
+    /// or a pack of a version this build does not know) is followed by the
+    /// next known copy; when none works the shards are listed once more,
+    /// since the real record may sit in one not loaded yet. Store errors
+    /// other than a missing pack are returned at once.
     pub async fn read_blob(&mut self, id: &BlobId, blob_type: u8) -> Result<Vec<u8>> {
         let locs = self.locate_blob_all(id, blob_type).await?;
         let mut first_err = None;
         for loc in &locs {
             match self.read_at(loc, id, blob_type).await {
                 Ok(bytes) => return Ok(bytes),
-                Err(e @ (Error::Corrupt { .. } | Error::Crypto)) => {
+                Err(e) if is_data_error(&e) => {
                     first_err.get_or_insert(e);
                 }
                 Err(e) => return Err(e),
@@ -471,7 +473,7 @@ impl<S: BlobStore> Reader<S> {
             for loc in fresh.iter().filter(|l| !locs.contains(l)) {
                 match self.read_at(loc, id, blob_type).await {
                     Ok(bytes) => return Ok(bytes),
-                    Err(Error::Corrupt { .. } | Error::Crypto) => {}
+                    Err(e) if is_data_error(&e) => {}
                     Err(e) => return Err(e),
                 }
             }
@@ -662,22 +664,20 @@ impl<S: BlobStore> Reader<S> {
     }
 
     /// Checks that the chunks of a regular file add up to the size it claims.
+    /// The sizes come from the index; when they do not add up, the chunks are
+    /// read, since a shard from a write-key holder can list a copy with a
+    /// wrong size ahead of the real one.
     pub(crate) async fn check_file(&mut self, node: &pb::Node) -> Result<Vec<(u64, u64)>> {
         let extents = check_extents(node)?;
-        let mut total = 0u64;
-        for raw in &node.content {
-            let id: BlobId = raw
-                .as_slice()
-                .try_into()
-                .map_err(|_| Error::corrupt("tree", "content id must be 32 bytes"))?;
-            total =
-                total.saturating_add(u64::from(self.locate_blob(&id, BLOB_TYPE_DATA).await?.ulen));
-        }
         let expected = if extents.is_empty() {
             node.size
         } else {
             extents.iter().map(|e| e.1).sum()
         };
+        let mut total = self.content_len(node, false).await?;
+        if total != expected {
+            total = self.content_len(node, true).await?;
+        }
         if total != expected {
             return Err(Error::corrupt(
                 String::from_utf8_lossy(&node.name),
@@ -685,6 +685,25 @@ impl<S: BlobStore> Reader<S> {
             ));
         }
         Ok(extents)
+    }
+
+    /// The size of a file's chunks, from the index or, with `read`, from the
+    /// chunks themselves.
+    async fn content_len(&mut self, node: &pb::Node, read: bool) -> Result<u64> {
+        let mut total = 0u64;
+        for raw in &node.content {
+            let id: BlobId = raw
+                .as_slice()
+                .try_into()
+                .map_err(|_| Error::corrupt("tree", "content id must be 32 bytes"))?;
+            let len = if read {
+                self.read_blob(&id, BLOB_TYPE_DATA).await?.len() as u64
+            } else {
+                u64::from(self.locate_blob(&id, BLOB_TYPE_DATA).await?.ulen)
+            };
+            total = total.saturating_add(len);
+        }
+        Ok(total)
     }
 
     /// Writes the content of one regular file to `out`; holes of a sparse

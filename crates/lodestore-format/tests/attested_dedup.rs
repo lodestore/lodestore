@@ -16,7 +16,7 @@ use lodestore_format::chunker::blob_id;
 use lodestore_format::crypto::{BLOB_TYPE_DATA, BlobId, Entropy};
 use lodestore_format::index::index_object_key;
 use lodestore_format::reader::{Reader, RestoreOptions};
-use lodestore_format::store::BlobDelete;
+use lodestore_format::store::{BlobDelete, put_named};
 use lodestore_format::writer::{BackupOptions, BackupOutcome, Writer};
 use rand_chacha::ChaCha20Rng;
 use rand_chacha::rand_core::{Rng, SeedableRng};
@@ -135,6 +135,30 @@ async fn attested_dedup_without_marker_loads_everything() {
     let mut w = attested_writer(&fx, &HashSet::new()).await;
     let out = backup(&mut w, &src).await;
     assert!((out.stats.bytes_added as usize) < FILE_SIZE / 2);
+}
+
+#[tokio::test]
+async fn attested_writer_skips_attested_shard_that_does_not_load() {
+    let fx = Fx::new().await;
+    let src = src_with(&fx, "host-a", 5);
+    let first = {
+        let mut w = fx.open_writer().await;
+        backup(&mut w, &src).await
+    };
+    let keys = attacker_keys(&fx.repo);
+    let mut record = open_all_shards(&fx.store, &keys).await[0].1.packs[0].clone();
+    record.entries.pop();
+    plant_shard_where(&fx.store, &keys, vec![record], Vec::new(), |_| true).await;
+    put_named(&fx.store, &index_object_key(&[5; 32]), vec![1; 64])
+        .await
+        .unwrap();
+    upgrade(&fx).await;
+
+    let mut w = attested_writer(&fx, &HashSet::new()).await;
+    assert_eq!(w.skipped_index_shards().len(), 2);
+    let again = backup(&mut w, &src).await;
+    assert!(again.stats.bytes_added * 100 <= first.stats.bytes_added);
+    assert_restores(&fx, &again, &src).await;
 }
 
 #[tokio::test]

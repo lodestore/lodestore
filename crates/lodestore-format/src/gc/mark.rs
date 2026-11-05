@@ -5,7 +5,9 @@ use std::collections::HashSet;
 use crate::attest::read_attestations;
 use crate::crypto::{BLOB_TYPE_DATA, BLOB_TYPE_TREE, BlobId};
 use crate::error::{Error, Result, within_size};
-use crate::index::{INDEX_PREFIX, Index, SupersedesTrust, hex32, open_shard, parse_hex32};
+use crate::index::{
+    INDEX_PREFIX, Index, SupersedesTrust, check_shard, hex32, open_shard, parse_hex32,
+};
 use crate::keys::ReadKeys;
 use crate::pb;
 use crate::reader::{Reader, ReaderCache};
@@ -13,12 +15,14 @@ use crate::snapshot::{MAX_SNAPSHOT_SIZE, SNAPSHOT_PREFIX, open_snapshot, snapsho
 use crate::store::{BlobError, BlobStore};
 use crate::tree::decode_tree;
 
-/// Every index shard that opens, as listed in the bucket.
+/// Every index shard that opens and whose records are well formed, as
+/// listed in the bucket.
 #[derive(Debug, Default)]
 pub struct ShardSet {
     pub shards: Vec<(BlobId, pb::IndexShard)>,
-    /// `(object key, reason)` of the shards that did not open. Their packs
-    /// are unindexed to the plan, and a rebuild finds them again.
+    /// `(object key, reason)` of the shards that did not open or hold a
+    /// malformed record. Their packs are unindexed to the plan, and a
+    /// rebuild finds them again.
     pub skipped: Vec<(String, String)>,
     /// Shards the server vouches for; only their `supersedes` count.
     pub attested: HashSet<BlobId>,
@@ -39,7 +43,9 @@ pub async fn load_shards<S: BlobStore>(store: &S, keys: &ReadKeys) -> Result<Sha
         // shortcut: a shard is read whole; compaction legitimately writes shards of many
         // GiB, so no size cap fits. Parse shards streaming if planted giant ones matter.
         let bytes = store.get(&entry.key).await?;
-        match open_shard(keys.k_idx(), keys.repo_id(), &shard_id, &bytes) {
+        let opened = open_shard(keys.k_idx(), keys.repo_id(), &shard_id, &bytes)
+            .and_then(|shard| check_shard(shard_id, &shard).map(|()| shard));
+        match opened {
             Ok(shard) => out.shards.push((shard_id, shard)),
             Err(e @ (Error::Corrupt { .. } | Error::UnsupportedVersion { .. })) => {
                 out.skipped.push((entry.key, e.to_string()));

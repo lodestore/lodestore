@@ -209,3 +209,57 @@ async fn adv_planted_unopenable_pack_does_not_stop_gc() {
     full_cycle(&fx, 50).await;
     fx.assert_all_restore().await;
 }
+
+/// One record of a real pack, broken in each way loading a shard checks.
+fn malformed(record: &pb::PackRecord) -> Vec<pb::PackRecord> {
+    let one = pb::PackRecord {
+        entries: record.entries[..ENTRY_LEN].to_vec(),
+        ..record.clone()
+    };
+    let with_entry = |edit: &dyn Fn(&mut Vec<u8>)| {
+        let mut r = one.clone();
+        edit(&mut r.entries);
+        r
+    };
+    let past_end = u32::try_from(record.pack_size).unwrap();
+    vec![
+        with_entry(&|e| e.truncate(ENTRY_LEN - 1)),
+        with_entry(&|e| e[32] = 9),
+        with_entry(&|e| e[33..37].copy_from_slice(&0u32.to_le_bytes())),
+        with_entry(&|e| e[33..37].copy_from_slice(&past_end.to_le_bytes())),
+        pb::PackRecord {
+            hpke_enc: one.hpke_enc[1..].to_vec(),
+            ..one.clone()
+        },
+    ]
+}
+
+#[tokio::test]
+async fn adv_malformed_shard_does_not_stop_gc() {
+    let fx = Fx::new().await;
+    let a = fx
+        .backup("host-a", &[("a", 1, 200 << 10), ("shared", 3, 100 << 10)])
+        .await;
+    fx.backup("host-b", &[("b", 2, 200 << 10), ("shared", 3, 100 << 10)])
+        .await;
+    fx.forget(&a.snapshot_id).await;
+
+    let keys = attacker_keys(&fx.repo);
+    let shards = open_all_shards(&fx.store, &keys).await;
+    let template = shards
+        .iter()
+        .find_map(|(_, s)| s.packs.first())
+        .unwrap()
+        .clone();
+    let variants = malformed(&template);
+    let planted = variants.len();
+    for record in variants {
+        plant_shard_where(&fx.store, &keys, vec![record], Vec::new(), |_| true).await;
+    }
+
+    let survey = fx.survey(100).await;
+    assert_eq!(survey.shards.skipped.len(), planted);
+    drop(survey);
+    full_cycle(&fx, 100).await;
+    fx.assert_all_restore().await;
+}

@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use prost::Message;
 
 use crate::attest::{MARKER_LEGACY_SHARDS, read_attestations};
+use crate::check::is_data_error;
 use crate::crypto::{
     BlobId, Entropy, HPKE_ENC_LEN, RepoId, SEALED_KEY_LEN, open_index_shard, seal_index_shard,
 };
@@ -158,9 +159,9 @@ impl Index {
         self.trust = trust;
     }
 
-    /// `(object key, reason)` of every listed shard [`Index::load_all`] could
-    /// not use. Losing one costs deduplication and the packs it described are
-    /// found again by a rebuild.
+    /// `(object key, reason)` of every shard [`Index::load_all`] or
+    /// [`Index::load_refs`] could not use. Losing one costs deduplication and
+    /// the packs it described are found again by a rebuild.
     pub fn skipped(&self) -> &[(String, String)] {
         &self.skipped
     }
@@ -195,59 +196,13 @@ impl Index {
     /// cut short cannot hide data. Which location wins does not depend on the
     /// order shards are added in, except between equally ranked copies.
     pub fn add_shard(&mut self, shard_id: BlobId, shard: &pb::IndexShard) -> Result<()> {
-        let bad = |reason: &str| Error::corrupt(index_object_key(&shard_id), reason.to_owned());
-        let supersedes = shard
-            .supersedes
-            .iter()
-            .map(|s| {
-                BlobId::try_from(s.as_slice())
-                    .map_err(|_| bad("superseded shard id must be 32 bytes"))
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let excluded = &self.excluded;
+        let (supersedes, staged, pack_sizes) =
+            read_shard(shard_id, shard, |pack| !excluded.contains(pack))?;
         let supersedes = match &self.trust {
             SupersedesTrust::Only(trusted) if !trusted.contains(&shard_id) => Vec::new(),
             _ => supersedes,
         };
-        let mut staged = Vec::new();
-        let mut pack_sizes = Vec::new();
-        for pack in &shard.packs {
-            let pack_id: BlobId = pack
-                .pack_id
-                .as_slice()
-                .try_into()
-                .map_err(|_| bad("pack id must be 32 bytes"))?;
-            let excluded = self.excluded.contains(&pack_id);
-            if !excluded {
-                pack_sizes.push((pack_id, pack.pack_size));
-            }
-            if pack.hpke_enc.len() != HPKE_ENC_LEN || pack.sealed_pack_key.len() != SEALED_KEY_LEN {
-                return Err(bad("sealed pack key has the wrong size"));
-            }
-            for e in parse_entries(&pack.entries)? {
-                let end = u64::from(e.offset) + u64::from(e.enc_len);
-                if (e.offset as usize) < PACK_PREFIX_LEN
-                    || end > pack.pack_size
-                    || e.ulen as usize > max_ulen(e.blob_type)
-                    || !frame_len_in_range(e.blob_type, e.enc_len)
-                {
-                    return Err(bad("entry lies outside its pack"));
-                }
-                if excluded {
-                    continue;
-                }
-                staged.push((
-                    e.blob_id,
-                    BlobLocation {
-                        pack_id,
-                        offset: e.offset,
-                        enc_len: e.enc_len,
-                        ulen: e.ulen,
-                        blob_type: e.blob_type,
-                        shard: shard_id,
-                    },
-                ));
-            }
-        }
         self.shards.insert(shard_id);
         let newly: HashSet<BlobId> = supersedes
             .into_iter()
@@ -375,7 +330,15 @@ impl Index {
                         self.others.remove(key);
                     }
                 }
-                None => lost.push(*key),
+                None => match self.stale.get_mut(key) {
+                    Some(alts) => {
+                        *loc = alts.remove(0);
+                        if alts.is_empty() {
+                            self.stale.remove(key);
+                        }
+                    }
+                    None => lost.push(*key),
+                },
             }
         }
         for key in lost {
@@ -432,7 +395,9 @@ impl Index {
     }
 
     /// Loads the shards a snapshot names by their exact keys. A shard that is
-    /// gone is skipped; the caller falls back to [`Index::load_all`].
+    /// gone is skipped; the caller falls back to [`Index::load_all`]. A shard
+    /// that does not open or holds a malformed record is recorded in
+    /// [`Index::skipped`] and left out.
     pub async fn load_refs<S: BlobStore>(
         &mut self,
         store: &S,
@@ -445,7 +410,14 @@ impl Index {
                 .as_slice()
                 .try_into()
                 .map_err(|_| Error::corrupt("snapshot", "index reference must be 32 bytes"))?;
-            self.load_one(store, k_idx, repo_id, shard_id).await?;
+            match self.load_one(store, k_idx, repo_id, shard_id).await {
+                Ok(_) => {}
+                Err(e) if is_data_error(&e) => {
+                    self.skipped
+                        .push((index_object_key(&shard_id), e.to_string()));
+                }
+                Err(e) => return Err(e),
+            }
         }
         Ok(())
     }
@@ -471,6 +443,71 @@ impl Index {
         }
         Ok(())
     }
+}
+
+type ReadShard = (Vec<BlobId>, Vec<(BlobId, BlobLocation)>, Vec<(BlobId, u64)>);
+
+/// Checks every record of a shard and returns its `supersedes`, the
+/// locations in the packs `keep` accepts and the sizes of those packs.
+fn read_shard(
+    shard_id: BlobId,
+    shard: &pb::IndexShard,
+    keep: impl Fn(&BlobId) -> bool,
+) -> Result<ReadShard> {
+    let bad = |reason: &str| Error::corrupt(index_object_key(&shard_id), reason.to_owned());
+    let supersedes = shard
+        .supersedes
+        .iter()
+        .map(|s| {
+            BlobId::try_from(s.as_slice()).map_err(|_| bad("superseded shard id must be 32 bytes"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut staged = Vec::new();
+    let mut pack_sizes = Vec::new();
+    for pack in &shard.packs {
+        let pack_id: BlobId = pack
+            .pack_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| bad("pack id must be 32 bytes"))?;
+        let kept = keep(&pack_id);
+        if kept {
+            pack_sizes.push((pack_id, pack.pack_size));
+        }
+        if pack.hpke_enc.len() != HPKE_ENC_LEN || pack.sealed_pack_key.len() != SEALED_KEY_LEN {
+            return Err(bad("sealed pack key has the wrong size"));
+        }
+        for e in parse_entries(&pack.entries)? {
+            let end = u64::from(e.offset) + u64::from(e.enc_len);
+            if (e.offset as usize) < PACK_PREFIX_LEN
+                || end > pack.pack_size
+                || e.ulen as usize > max_ulen(e.blob_type)
+                || !frame_len_in_range(e.blob_type, e.enc_len)
+            {
+                return Err(bad("entry lies outside its pack"));
+            }
+            if !kept {
+                continue;
+            }
+            staged.push((
+                e.blob_id,
+                BlobLocation {
+                    pack_id,
+                    offset: e.offset,
+                    enc_len: e.enc_len,
+                    ulen: e.ulen,
+                    blob_type: e.blob_type,
+                    shard: shard_id,
+                },
+            ));
+        }
+    }
+    Ok((supersedes, staged, pack_sizes))
+}
+
+/// Whether [`Index::add_shard`] accepts the shard, without adding it.
+pub(crate) fn check_shard(shard_id: BlobId, shard: &pb::IndexShard) -> Result<()> {
+    read_shard(shard_id, shard, |_| false).map(drop)
 }
 
 fn same_extent(a: &BlobLocation, b: &BlobLocation) -> bool {
@@ -781,6 +818,19 @@ mod tests {
         assert_eq!(index.get(&[4; 32], 1).unwrap().pack_id, [11; 32]);
         assert!(index.get(&[5; 32], 1).is_none());
         assert!(!index.has_pack(&[10; 32]) && index.has_pack(&[11; 32]));
+    }
+
+    #[test]
+    fn index_missing_pack_falls_back_to_superseded_copy() {
+        let (old, new) = ([1u8; 32], [2u8; 32]);
+        let mut index = Index::default();
+        index.add_shard(old, &shard_of(10, 4, &[])).unwrap();
+        index.add_shard(new, &shard_of(11, 4, &[old])).unwrap();
+        assert_eq!(index.get(&[4; 32], 1).unwrap().pack_id, [11; 32]);
+        let listed = HashMap::from([([10u8; 32], 5000u64)]);
+        assert_eq!(index.retain_packs(&listed), 1);
+        assert_eq!(index.get(&[4; 32], 1).unwrap().pack_id, [10; 32]);
+        assert_eq!(index.locations(&[4; 32], 1).len(), 1);
     }
 
     #[test]

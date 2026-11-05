@@ -8,11 +8,17 @@ use std::collections::HashSet;
 
 use adv_support::{attacker_keys, forge_offsets, open_all_shards, plant_shard_where};
 use gc_support::{Cycle, Fx};
+use lodestore_format::crypto::{BlobId, Entropy};
 use lodestore_format::index::parse_hex32;
+use lodestore_format::pack::{ENTRY_LEN, pack_object_key, parse_entries};
+use lodestore_format::pb;
 use lodestore_format::reader::Reader;
+use lodestore_format::store::{BlobStore, put_named};
 
-#[tokio::test]
-async fn adv_forged_copy_listed_first_does_not_break_restore() {
+/// Two hosts after a full cleanup, so that no snapshot names a shard still
+/// in `index/` and a reader has to list them. Returns the real pack records
+/// and the lowest shard id.
+async fn compacted_fleet() -> (Fx, Vec<pb::PackRecord>, BlobId) {
     let fx = Fx::new().await;
     let a = fx
         .backup(
@@ -57,15 +63,76 @@ async fn adv_forged_copy_listed_first_does_not_break_restore() {
         }
     }
 
-    let keys = attacker_keys(&fx.repo);
-    let shards = open_all_shards(&fx.store, &keys).await;
-    let records = shards
-        .iter()
-        .flat_map(|(_, shard)| shard.packs.iter().map(forge_offsets))
-        .collect();
-    let supersedes = shards.iter().map(|(id, _)| *id).collect();
+    let shards = open_all_shards(&fx.store, &attacker_keys(&fx.repo)).await;
     let lowest = shards.iter().map(|(id, _)| *id).min().unwrap();
-    plant_shard_where(&fx.store, &keys, records, supersedes, |id| *id < lowest).await;
+    let records = shards
+        .into_iter()
+        .flat_map(|(_, shard)| shard.packs)
+        .collect();
+    (fx, records, lowest)
+}
 
+async fn plant_first(fx: &Fx, records: Vec<pb::PackRecord>, lowest: BlobId) {
+    let keys = attacker_keys(&fx.repo);
+    plant_shard_where(&fx.store, &keys, records, Vec::new(), |id| *id < lowest).await;
+}
+
+#[tokio::test]
+async fn adv_forged_copy_listed_first_does_not_break_restore() {
+    let (fx, records, lowest) = compacted_fleet().await;
+    plant_first(&fx, records.iter().map(forge_offsets).collect(), lowest).await;
+    fx.assert_all_restore().await;
+}
+
+#[tokio::test]
+async fn adv_copy_in_pack_of_unknown_version_does_not_break_restore() {
+    let (fx, records, lowest) = compacted_fleet().await;
+    let mut entropy = Entropy::os();
+    let mut planted = Vec::new();
+    for record in &records {
+        let real: BlobId = record.pack_id.as_slice().try_into().unwrap();
+        let mut bytes = fx
+            .store
+            .get(&pack_object_key(&real))
+            .await
+            .unwrap()
+            .to_vec();
+        bytes[6] = 99;
+        let twin: BlobId = entropy.bytes();
+        put_named(&fx.store, &pack_object_key(&twin), bytes)
+            .await
+            .unwrap();
+        planted.push(pb::PackRecord {
+            pack_id: twin.to_vec(),
+            ..record.clone()
+        });
+    }
+    plant_first(&fx, planted, lowest).await;
+    fx.assert_all_restore().await;
+}
+
+#[tokio::test]
+async fn adv_copy_with_wrong_size_listed_first_does_not_break_restore() {
+    let (fx, records, lowest) = compacted_fleet().await;
+    let forged = records
+        .iter()
+        .map(|record| {
+            let mut entries = Vec::with_capacity(record.entries.len());
+            for e in parse_entries(&record.entries).unwrap() {
+                entries.extend_from_slice(&e.blob_id);
+                entries.push(e.blob_type);
+                entries.extend_from_slice(&e.offset.to_le_bytes());
+                entries.extend_from_slice(&e.enc_len.to_le_bytes());
+                entries.extend_from_slice(&(e.ulen - 1).to_le_bytes());
+            }
+            assert_eq!(entries.len(), record.entries.len());
+            assert!(entries.len().is_multiple_of(ENTRY_LEN));
+            pb::PackRecord {
+                entries,
+                ..record.clone()
+            }
+        })
+        .collect();
+    plant_first(&fx, forged, lowest).await;
     fx.assert_all_restore().await;
 }

@@ -13,7 +13,8 @@ use crate::check::is_data_error;
 use crate::crypto::{BLOB_TYPE_DATA, BLOB_TYPE_TREE, BlobId, Key32};
 use crate::error::{Error, Result, within_size};
 use crate::index::{
-    INDEX_PREFIX, Index, SupersedesTrust, hex32, index_object_key, open_shard, parse_hex32,
+    INDEX_PREFIX, Index, SupersedesTrust, check_shard, hex32, index_object_key, open_shard,
+    parse_hex32,
 };
 use crate::keys::ReadKeys;
 use crate::pack::{PACK_PREFIX_LEN, pack_object_key, parse_entries, parse_prefix};
@@ -178,23 +179,33 @@ struct Resolver<'a, S> {
 impl<S: BlobStore> Resolver<'_, S> {
     /// Adds a shard to the index: a verified one as it is, an attested one
     /// only after its frames open. A shard that is neither is never loaded.
+    /// One that fails with a data error is left out and not tried again: any
+    /// writer can plant a shard, and another may still hold the blob.
     async fn load_shard(&mut self, id: &BlobId) -> Result<()> {
         let is_verified = self.verified.contains(id);
         if self.loaded.contains(id) || !(is_verified || self.attested.contains(id)) {
             return Ok(());
         }
+        match self.add(id, is_verified).await {
+            Err(e) if is_data_error(&e) => {
+                self.loaded.insert(*id);
+                Ok(())
+            }
+            other => other,
+        }
+    }
+
+    async fn add(&mut self, id: &BlobId, is_verified: bool) -> Result<()> {
         let Some(shard) = fetch_shard(self.store, self.keys, id).await? else {
             return Ok(());
         };
-        self.add(id, &shard, is_verified).await
-    }
-
-    async fn add(&mut self, id: &BlobId, shard: &pb::IndexShard, is_verified: bool) -> Result<()> {
         if !is_verified {
-            verify_opened(self.store, self.keys, id, shard).await?;
+            verify_opened(self.store, self.keys, id, &shard).await?;
+        }
+        self.index.add_shard(*id, &shard)?;
+        if !is_verified {
             self.newly_verified.push(*id);
         }
-        self.index.add_shard(*id, shard)?;
         self.loaded.insert(*id);
         Ok(())
     }
@@ -214,6 +225,9 @@ impl<S: BlobStore> Resolver<'_, S> {
                 let Some(shard) = fetch_shard_lenient(self.store, self.keys, &id).await? else {
                     continue;
                 };
+                if check_shard(id, &shard).is_err() {
+                    continue;
+                }
                 for pack in &shard.packs {
                     for e in parse_entries(&pack.entries)? {
                         holders
