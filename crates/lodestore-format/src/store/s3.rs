@@ -113,6 +113,46 @@ pub(super) fn map_err(e: opendal::Error) -> BlobError {
     }
 }
 
+/// A range that runs past the end of the object reads as the bytes that
+/// exist, possibly none, as on a local store: the caller sees a short read,
+/// not a backend failure. OpenDAL refuses such a read, so a refusal is
+/// followed by a HEAD that tells it apart from a real failure.
+pub(super) async fn get_range_op(
+    op: &Operator,
+    key: &str,
+    range: Range<u64>,
+) -> std::result::Result<Bytes, BlobError> {
+    check_key(key)?;
+    if range.is_empty() {
+        return Ok(Bytes::new());
+    }
+    let e = match op.read_with(key).range(range.clone()).await {
+        Ok(buf) => return Ok(buf.to_bytes()),
+        Err(e) => e,
+    };
+    if e.is_temporary()
+        || !matches!(
+            e.kind(),
+            ErrorKind::RangeNotSatisfied | ErrorKind::Unexpected
+        )
+    {
+        return Err(map_err(e));
+    }
+    let size = op.stat(key).await.map_err(map_err)?.content_length();
+    if range.end <= size {
+        return Err(map_err(e));
+    }
+    if range.start >= size {
+        return Ok(Bytes::new());
+    }
+    let buf = op
+        .read_with(key)
+        .range(range.start..size)
+        .await
+        .map_err(map_err)?;
+    Ok(buf.to_bytes())
+}
+
 pub(super) fn check_key(key: &str) -> std::result::Result<(), BlobError> {
     let bad = key.is_empty()
         || key.contains('\0')
@@ -311,12 +351,7 @@ impl BlobStore for S3Store {
         key: &str,
         range: Range<u64>,
     ) -> std::result::Result<Bytes, BlobError> {
-        check_key(key)?;
-        if range.is_empty() {
-            return Ok(Bytes::new());
-        }
-        let buf = self.op.read_with(key).range(range).await.map_err(map_err)?;
-        Ok(buf.to_bytes())
+        get_range_op(&self.op, key, range).await
     }
 
     async fn list(&self, prefix: &str) -> std::result::Result<Vec<ListEntry>, BlobError> {
