@@ -108,37 +108,46 @@ export function PolicyDeletedBadge() {
 	);
 }
 
+export const isPendingVerification = (snapshot: SnapshotItem) =>
+	snapshot.verified_by == null &&
+	snapshot.job_id != null &&
+	snapshot.unverified_reason == null;
+
 export function UnverifiedBadge({
 	plain = false,
 	count,
+	pending = false,
 }: {
 	plain?: boolean;
 	count?: number;
+	pending?: boolean;
 }) {
+	const tip = pending ? text.verifyingTip : text.unverifiedTip;
+	const label = pending ? text.verifying : text.unverified;
 	const badge = (
 		<Badge
 			variant="outline"
 			data-status="unverified"
 			className="gap-1 text-warning"
 			{...(plain
-				? { title: text.unverifiedTip }
+				? { title: tip }
 				: {
 						role: "group",
 						tabIndex: 0,
-						"aria-label": text.unverifiedLabel(count),
+						"aria-label": pending
+							? text.verifyingLabel
+							: text.unverifiedLabel(count),
 					})}
 		>
 			<ShieldQuestion aria-hidden />
-			<span>
-				{count === undefined ? text.unverified : `${text.unverified} ${count}`}
-			</span>
+			<span>{count === undefined ? label : `${label} ${count}`}</span>
 		</Badge>
 	);
 	if (plain) return badge;
 	return (
 		<Tooltip>
 			<TooltipTrigger asChild>{badge}</TooltipTrigger>
-			<TooltipContent className="max-w-sm">{text.unverifiedTip}</TooltipContent>
+			<TooltipContent className="max-w-sm">{tip}</TooltipContent>
 		</Tooltip>
 	);
 }
@@ -165,6 +174,8 @@ export function OwnerSignedBadge() {
 }
 
 export function ProvenanceBadge({ snapshot }: { snapshot: SnapshotItem }) {
-	if (snapshot.verified_by == null) return <UnverifiedBadge />;
+	if (snapshot.verified_by == null) {
+		return <UnverifiedBadge pending={isPendingVerification(snapshot)} />;
+	}
 	return snapshot.verified_by === "owner" ? <OwnerSignedBadge /> : null;
 }

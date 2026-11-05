@@ -11,6 +11,7 @@ import {
 	useCatalogStatus,
 } from "@/components/repos/catalog-card";
 import {
+	isPendingVerification,
 	SuspiciousBadge,
 	UnverifiedBadge,
 } from "@/components/snapshots/suspicious-badge";
@@ -144,7 +145,10 @@ function Stop({
 					</span>
 					{snapshot.verified_by == null && (
 						<span id={`${id}-unverified`} className="flex">
-							<UnverifiedBadge plain />
+							<UnverifiedBadge
+								plain
+								pending={isPendingVerification(snapshot)}
+							/>
 						</span>
 					)}
 					{snapshot.suspicious && (
