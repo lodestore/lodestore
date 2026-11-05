@@ -17,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 use crate::db::now_ms;
 use crate::grpc::registry::{CAP_GC, CAP_LIMITS, CAP_RESTORE};
 use crate::jobs::restore::RestoreRecord;
+use crate::maintenance::attest::load_distrusted;
 use crate::maintenance::gc::db as gc_db;
 use crate::repos::db::server_access;
 use crate::state::AppState;
@@ -110,6 +111,19 @@ pub async fn lock_host(
         .execute(&mut **tx)
         .await?;
     Ok(())
+}
+
+async fn distrusted_for_host(state: &AppState, host_id: &str) -> anyhow::Result<Vec<Vec<u8>>> {
+    let repository: String = sqlx::query("SELECT repository_id FROM agents WHERE id = $1")
+        .bind(host_id)
+        .fetch_one(&state.db.pool)
+        .await?
+        .try_get("repository_id")?;
+    Ok(load_distrusted(state, &repository)
+        .await?
+        .into_iter()
+        .map(|id| id.to_vec())
+        .collect())
 }
 
 pub async fn claim_job(
@@ -209,6 +223,7 @@ pub async fn assign_queued(state: &AppState, only_agent: Option<&str>) -> anyhow
                         continue;
                     }
                     spec.gc_locks_required = aware && (gc.enabled || gc.unfinished);
+                    spec.distrusted_shards = distrusted_for_host(state, &host_id).await?;
                     (Some(spec), None)
                 }
                 Err(_) => {

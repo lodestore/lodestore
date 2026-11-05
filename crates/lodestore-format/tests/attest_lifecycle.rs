@@ -685,6 +685,24 @@ async fn attest_consolidate_drops_revoked_shards() {
 }
 
 #[tokio::test]
+async fn attest_consolidate_drops_revoked_shard_from_a_single_object() {
+    let (_tmp, store) = bare();
+    let keys = keys();
+    let x = plant(&store, 1).await;
+    let y = plant(&store, 2).await;
+    put(&store, &keys, &[x, y], &[MARKER_LEGACY_SHARDS]).await;
+
+    let revoked = HashSet::from([y]);
+    let out = consolidate_attestations(&store, &keys, false, &revoked, &mut Entropy::os())
+        .await
+        .unwrap();
+    assert_eq!(out.read, 1);
+    let set = read_attestations(&store, &keys).await.unwrap();
+    assert_eq!(set.shards, HashSet::from([x]));
+    assert!(set.markers.contains(&MARKER_LEGACY_SHARDS));
+}
+
+#[tokio::test]
 async fn attest_consolidate_drops_provenance_of_gone_snapshots() {
     let (_tmp, store) = bare();
     let keys = keys();

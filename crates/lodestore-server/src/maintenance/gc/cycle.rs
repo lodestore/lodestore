@@ -40,7 +40,9 @@ use crate::db::now_ms;
 use crate::jobs::ACTIVE_STATES;
 use crate::jobs::restore::RestoreRecord;
 use crate::maintenance::attest::verify::SWEEP;
-use crate::maintenance::attest::{ensure_upgraded, load_verified, record_verified};
+use crate::maintenance::attest::{
+    ensure_upgraded, load_distrusted, load_verified, record_verified,
+};
 use crate::state::AppState;
 
 const PACKS_PREFIX: &str = "packs/";
@@ -737,15 +739,15 @@ async fn verifying(state: &AppState, cycle: &CycleRow) -> anyhow::Result<StepOut
     record_verified(state, &cycle.repository_id, &compacted.verified)
         .await
         .context("recording the compacted shards as verified")?;
-    let consolidated = consolidate_attestations(
-        &source.store,
-        &source.keys,
-        false,
-        &HashSet::new(),
-        &mut entropy,
-    )
-    .await
-    .context("consolidating the server attestations")?;
+    let revoked: HashSet<BlobId> = load_distrusted(state, &cycle.repository_id)
+        .await
+        .context("loading the distrusted shards")?
+        .into_iter()
+        .collect();
+    let consolidated =
+        consolidate_attestations(&source.store, &source.keys, false, &revoked, &mut entropy)
+            .await
+            .context("consolidating the server attestations")?;
     let message = format!(
         "Attestations consolidated: {} read, {} written, {} deleted.",
         consolidated.read,
