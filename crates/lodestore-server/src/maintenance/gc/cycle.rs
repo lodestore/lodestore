@@ -421,7 +421,6 @@ async fn mark_and_repack(
         let mut report = report;
         report.summary.bytes_freed = swept.bytes_freed;
         apply_locked(state, cycle, &mut report, &swept).await;
-        db::finish_cycle(state, &cycle.id, &report).await?;
         let message = if swept.deleted == 0 && swept.retained.is_empty() {
             "Nothing to free.".to_string()
         } else {
@@ -431,6 +430,7 @@ async fn mark_and_repack(
             )
         };
         event(state, &cycle.id, "info", "finished", &message).await;
+        db::finish_cycle(state, &cycle.id, &report).await?;
         return finished(state, &cycle.id).await;
     }
 
@@ -873,7 +873,6 @@ async fn sweeping(state: &AppState, cycle: &CycleRow, now_ms: i64) -> anyhow::Re
     }
 
     let report = final_report(state, cycle, now_ms, &swept, deleted_packs.as_ref()).await?;
-    db::finish_cycle(state, &cycle.id, &report).await?;
     event(
         state,
         &cycle.id,
@@ -885,6 +884,7 @@ async fn sweeping(state: &AppState, cycle: &CycleRow, now_ms: i64) -> anyhow::Re
         ),
     )
     .await;
+    db::finish_cycle(state, &cycle.id, &report).await?;
     finished(state, &cycle.id).await
 }
 
