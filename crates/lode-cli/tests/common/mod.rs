@@ -14,10 +14,18 @@ pub const PASSWORD: &str = "correct horse";
 pub fn lode(repo: &Path) -> Command {
     let mut cmd = Command::cargo_bin("lode").unwrap();
     cmd.env("LODE_PASSWORD", PASSWORD)
+        .env("XDG_CACHE_HOME", cache_dir_of(repo))
         .env_remove("LODE_PASSWORD_FILE")
         .arg("-r")
         .arg(repo);
     cmd
+}
+
+/// Where `lode` keeps its cache while running against `repo`.
+pub fn cache_dir_of(repo: &Path) -> PathBuf {
+    let mut name = repo.as_os_str().to_owned();
+    name.push(".cache");
+    PathBuf::from(name)
 }
 
 /// Path of the recovery key file that `init_repo` writes next to `repo`.
