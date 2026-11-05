@@ -632,6 +632,9 @@ async fn waiting(state: &AppState, cycle: &CycleRow, now_ms: i64) -> anyhow::Res
 }
 
 async fn verifying(state: &AppState, cycle: &CycleRow) -> anyhow::Result<StepOutcome> {
+    ensure_upgraded(state, &cycle.repository_id)
+        .await
+        .context("signing the repository's existing index before compacting it")?;
     let gc_id = cycle_gc_id(cycle)?;
     let source = open_repository(state, &cycle.repository_id).await?;
     let marker = own_marker(&source, &gc_id)

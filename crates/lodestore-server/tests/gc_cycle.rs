@@ -1907,3 +1907,46 @@ async fn gc_cycle_upgrades_before_attesting() {
         ts.stop().await;
     }
 }
+
+/// A cycle that a server older than attestations left waiting resumes after
+/// the upgrade straight into the compaction, which attests. The upgrade has
+/// to come first, or it refuses every later run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_cycle_resumed_in_verifying_upgrades_first() {
+    for backend in backends() {
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let (b, c) = forgotten_a(&ts, "main").await;
+        enable(&ts, &api, &repo).await;
+
+        let id = run_cycle(&api, &repo).await;
+        let later = after_pause(&ts, &id).await;
+        for file in attest_files(&ts, "main") {
+            std::fs::remove_file(file).unwrap();
+        }
+        sqlx::query("UPDATE repositories SET attest_upgraded_at = NULL WHERE id = $1")
+            .bind(&repo)
+            .execute(&ts.state().db.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            steps(&ts, &id, later).await,
+            StepOutcome::Finished(lodestore_server::maintenance::gc::GcState::Done),
+            "[{}]",
+            backend.name()
+        );
+
+        let store = LocalFsStore::new(ts.local_repo_root("main"));
+        let repository = Repository::open(&store, PASSWORD).await.unwrap();
+        let outcome = ensure_upgraded(&store, repository.read_keys(), &mut Entropy::os()).await;
+        assert!(
+            outcome.is_ok_and(|o| o.already),
+            "[{}] the compaction attested before the upgrade",
+            backend.name()
+        );
+        assert_restores(&ts, "main", &b).await;
+        assert_restores(&ts, "main", &c).await;
+        ts.stop().await;
+    }
+}
