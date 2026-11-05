@@ -19,6 +19,7 @@ use lodestore_format::pb;
 use lodestore_format::provenance::{ProvenanceSet, Signer};
 use lodestore_format::store::BlobStore;
 use sqlx::Row;
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::catalog::open_repository;
@@ -74,16 +75,11 @@ pub async fn ensure_provenance_backfilled(
     state: &AppState,
     repository_id: &str,
 ) -> anyhow::Result<usize> {
-    let flag: Option<i64> =
-        match sqlx::query("SELECT provenance_backfilled_at FROM repositories WHERE id = $1")
-            .bind(repository_id)
-            .fetch_optional(&state.db.pool)
-            .await?
-        {
-            Some(row) => row.try_get("provenance_backfilled_at")?,
-            None => None,
-        };
-    if flag.is_some() {
+    if backfilled(state, repository_id).await? {
+        return Ok(0);
+    }
+    let _one = BACKFILL.lock().await;
+    if backfilled(state, repository_id).await? {
         return Ok(0);
     }
     ensure_upgraded(state, repository_id).await?;
@@ -101,7 +97,6 @@ pub async fn ensure_provenance_backfilled(
     let source = open_repository(state, repository_id).await?;
     let at = now_ms();
     let mut entropy = Entropy::os();
-    let mut signed = Vec::with_capacity(rows.len());
     let mut sealed = Vec::with_capacity(rows.len());
     for row in &rows {
         let id: String = row.try_get("id")?;
@@ -115,22 +110,17 @@ pub async fn ensure_provenance_backfilled(
             job_id: row.try_get("job_id")?,
             verified_at: Some(verify::timestamp_ms(at)),
         };
-        sealed.push(seal_provenance(&source.keys, &record, &mut entropy)?);
-        signed.push(id);
+        sealed.push((id, seal_provenance(&source.keys, &record, &mut entropy)?));
     }
-    for part in sealed.chunks(MAX_ATTEST_PROVENANCE) {
-        put_attestation(
-            &source.store,
-            &source.keys,
-            &[],
-            &[],
-            part.to_vec(),
-            &mut entropy,
-        )
-        .await?;
-    }
-    for id in &signed {
-        verify::mark_verified(state, id, repository_id, at, "server").await?;
+    let mut signed = 0;
+    for part in parts(sealed, MAX_ATTEST_PROVENANCE, MAX_PART_BYTES) {
+        let (ids, records): (Vec<String>, Vec<Vec<u8>>) = part.into_iter().unzip();
+        put_attestation(&source.store, &source.keys, &[], &[], records, &mut entropy).await?;
+        // A retry after a failed part signs only the rows still unmarked.
+        for id in &ids {
+            verify::mark_verified(state, id, repository_id, at, "server").await?;
+        }
+        signed += ids.len();
     }
     sqlx::query("UPDATE repositories SET provenance_backfilled_at = $1 WHERE id = $2")
         .bind(at)
@@ -139,10 +129,54 @@ pub async fn ensure_provenance_backfilled(
         .await?;
     tracing::info!(
         repository = repository_id,
-        signed = signed.len(),
+        signed,
         "snapshot provenance backfilled"
     );
-    Ok(signed.len())
+    Ok(signed)
+}
+
+/// Held by a backfill: a second one started meanwhile would sign the same rows again.
+static BACKFILL: Mutex<()> = Mutex::const_new(());
+
+/// The format's budget for the sealed records of one attestation.
+const MAX_PART_BYTES: usize = 6 << 20;
+
+async fn backfilled(state: &AppState, repository_id: &str) -> anyhow::Result<bool> {
+    let row = sqlx::query("SELECT provenance_backfilled_at FROM repositories WHERE id = $1")
+        .bind(repository_id)
+        .fetch_optional(&state.db.pool)
+        .await?;
+    Ok(match row {
+        Some(row) => row
+            .try_get::<Option<i64>, _>("provenance_backfilled_at")?
+            .is_some(),
+        None => false,
+    })
+}
+
+/// Cuts sealed records into parts of at most `max_records` records and
+/// `max_bytes` bytes, counting a record's length prefix.
+fn parts<T>(
+    records: Vec<(T, Vec<u8>)>,
+    max_records: usize,
+    max_bytes: usize,
+) -> Vec<Vec<(T, Vec<u8>)>> {
+    let mut out: Vec<Vec<(T, Vec<u8>)>> = Vec::new();
+    let mut bytes = 0usize;
+    for record in records {
+        let size = record.1.len().saturating_add(8);
+        match out.last_mut() {
+            Some(part) if part.len() < max_records && bytes.saturating_add(size) <= max_bytes => {
+                bytes += size;
+                part.push(record);
+            }
+            _ => {
+                bytes = size;
+                out.push(vec![record]);
+            }
+        }
+    }
+    out
 }
 
 /// Bucket to database only: the catalog gets the mark for every snapshot the
@@ -337,5 +371,24 @@ pub async fn run(state: AppState, stop: CancellationToken) -> anyhow::Result<()>
         if let Err(error) = tick_once(&state).await {
             tracing::warn!(%error, "attestation tick failed");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parts;
+
+    fn sizes(parts: &[Vec<(usize, Vec<u8>)>]) -> Vec<usize> {
+        parts.iter().map(Vec::len).collect()
+    }
+
+    #[test]
+    fn parts_respect_record_and_byte_limits() {
+        let small: Vec<_> = (0..5).map(|n| (n, vec![0u8; 1])).collect();
+        assert_eq!(sizes(&parts(small, 2, 1 << 20)), [2, 2, 1]);
+        let big: Vec<_> = (0..5).map(|n| (n, vec![0u8; 92])).collect();
+        assert_eq!(sizes(&parts(big, 100, 250)), [2, 2, 1]);
+        let huge = vec![(0, vec![0u8; 500])];
+        assert_eq!(sizes(&parts(huge, 100, 250)), [1]);
     }
 }

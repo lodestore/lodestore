@@ -20,7 +20,7 @@ use lodestore_format::store::{BlobStore, LocalFsStore};
 use lodestore_format::writer::{BackupOptions, Writer};
 use lodestore_server::catalog::{JobLink, ingest_snapshot, open_repository, sync_repository};
 use lodestore_server::db::now_ms;
-use lodestore_server::maintenance::attest::ensure_provenance_backfilled;
+use lodestore_server::maintenance::attest::{ensure_provenance_backfilled, ensure_upgraded};
 use serde_json::{Value, json};
 use sqlx::Row;
 
@@ -418,6 +418,31 @@ async fn provenance_backfill_never_runs_for_a_new_repository() {
                 .unwrap();
         assert!(flag.is_some(), "[{}]", backend.name());
         ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn provenance_backfill_runs_once_when_called_concurrently() {
+    for backend in backends() {
+        let c = Catalog::new(&backend).await;
+        let all = [c.linked("a", None).await, c.linked("b", None).await];
+        ensure_upgraded(c.ts.state(), &c.repo).await.unwrap();
+        let before = attest_objects(&c.ts).await;
+
+        let (one, two) = tokio::join!(
+            ensure_provenance_backfilled(c.ts.state(), &c.repo),
+            ensure_provenance_backfilled(c.ts.state(), &c.repo),
+        );
+
+        assert_eq!(one.unwrap() + two.unwrap(), 2, "[{}]", backend.name());
+        assert_eq!(
+            attest_objects(&c.ts).await,
+            before + 1,
+            "[{}]",
+            backend.name()
+        );
+        assert_eq!(ids(&provenance(&c.ts, &c.repo).await, &all).len(), 2);
+        c.ts.stop().await;
     }
 }
 
