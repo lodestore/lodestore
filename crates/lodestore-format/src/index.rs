@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use prost::Message;
 
 use crate::attest::{MARKER_LEGACY_SHARDS, read_attestations};
+use crate::check::is_data_error;
 use crate::crypto::{
     BlobId, Entropy, HPKE_ENC_LEN, RepoId, SEALED_KEY_LEN, open_index_shard, seal_index_shard,
 };
@@ -158,9 +159,9 @@ impl Index {
         self.trust = trust;
     }
 
-    /// `(object key, reason)` of every listed shard [`Index::load_all`] could
-    /// not use. Losing one costs deduplication and the packs it described are
-    /// found again by a rebuild.
+    /// `(object key, reason)` of every shard [`Index::load_all`] or
+    /// [`Index::load_refs`] could not use. Losing one costs deduplication and
+    /// the packs it described are found again by a rebuild.
     pub fn skipped(&self) -> &[(String, String)] {
         &self.skipped
     }
@@ -386,7 +387,9 @@ impl Index {
     }
 
     /// Loads the shards a snapshot names by their exact keys. A shard that is
-    /// gone is skipped; the caller falls back to [`Index::load_all`].
+    /// gone is skipped; the caller falls back to [`Index::load_all`]. A shard
+    /// that does not open or holds a malformed record is recorded in
+    /// [`Index::skipped`] and left out.
     pub async fn load_refs<S: BlobStore>(
         &mut self,
         store: &S,
@@ -399,7 +402,14 @@ impl Index {
                 .as_slice()
                 .try_into()
                 .map_err(|_| Error::corrupt("snapshot", "index reference must be 32 bytes"))?;
-            self.load_one(store, k_idx, repo_id, shard_id).await?;
+            match self.load_one(store, k_idx, repo_id, shard_id).await {
+                Ok(_) => {}
+                Err(e) if is_data_error(&e) => {
+                    self.skipped
+                        .push((index_object_key(&shard_id), e.to_string()));
+                }
+                Err(e) => return Err(e),
+            }
         }
         Ok(())
     }

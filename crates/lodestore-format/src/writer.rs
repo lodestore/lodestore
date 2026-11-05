@@ -316,7 +316,7 @@ impl<S: BlobStore> Writer<S> {
         self.gc_locks_denied
     }
 
-    /// `(object key, reason)` of every listed index shard that could not be
+    /// `(object key, reason)` of every index shard that could not be
     /// used; they only cost deduplication.
     pub fn skipped_index_shards(&self) -> &[(String, String)] {
         self.index.skipped()
