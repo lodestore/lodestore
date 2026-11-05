@@ -16,7 +16,7 @@ use lodestore_format::index::hex32;
 use lodestore_format::locks::UNMARKED_WRITER_LIMIT;
 use lodestore_format::pb;
 use lodestore_format::reader::Reader;
-use lodestore_format::snapshot::{ParentTree, find_parent};
+use lodestore_format::snapshot::{ParentTree, SnapshotEntry, find_parent};
 use lodestore_format::store::Store;
 use lodestore_format::verify_snapshot::{
     check_snapshot_resolves, snapshot_index_refs, verify_shard,
@@ -26,6 +26,7 @@ use lodestore_format::writer::{
 };
 use serde::Serialize;
 
+use super::resolve_spec;
 use crate::cli::{BackupFlags, SecretArgs, UsageError};
 use crate::open::{Marker, Strict, open_for_write};
 use crate::output::{JsonPath, Output, StatsJson, Throttle, spinner, warn_skipped};
@@ -146,14 +147,10 @@ async fn backup_paths(
         None => None,
         Some(reader) => {
             let found = match &flags.parent {
-                Some(spec) => Some(reader.resolve_snapshot(spec).await?.id),
+                Some(spec) => Some(explicit_parent(&reader, strict.as_ref(), spec).await?),
                 None => {
-                    let mut list = reader.list_snapshots().await?;
-                    warn_skipped(&list.skipped);
-                    if let Some(strict) = &strict {
-                        list.entries.retain(|e| strict.provenance.contains(&e.id));
-                    }
-                    find_parent(&list.entries, &hostname, &roots).map(|e| e.id)
+                    let entries = parent_candidates(&reader, strict.as_ref(), &hostname).await?;
+                    find_parent(&entries, &hostname, &roots).map(|e| e.id)
                 }
             };
             open_parent(reader, found, flags.parent.is_some()).await?
@@ -201,6 +198,47 @@ async fn backup_paths(
         check_and_sign(strict, &writer, &outcome, &hostname).await?;
     }
     finish(out, outcome, parent_id)
+}
+
+/// The snapshot `--parent` names; `latest` follows the same rules as restore.
+async fn explicit_parent(
+    reader: &Reader<Store>,
+    strict: Option<&Strict>,
+    spec: &str,
+) -> Result<BlobId> {
+    let id = resolve_spec(reader, spec).await?.id;
+    if strict.is_some_and(|s| !s.provenance.contains(&id)) {
+        eprintln!(
+            "warning: parent snapshot {} is not signed by the server or by the password holder",
+            hex32(&id)
+        );
+    }
+    Ok(id)
+}
+
+/// The snapshots a parent is looked for in, oldest first. In an upgraded
+/// repository only those signed for this hostname count, in the order the
+/// store wrote them: the manifest's own hostname and time are whatever the
+/// host that wrote it chose.
+async fn parent_candidates(
+    reader: &Reader<Store>,
+    strict: Option<&Strict>,
+    hostname: &[u8],
+) -> Result<Vec<SnapshotEntry>> {
+    let list = reader.list_snapshots().await?;
+    warn_skipped(&list.skipped);
+    let mut entries = list.entries;
+    if let Some(strict) = strict {
+        let hostname = String::from_utf8_lossy(hostname);
+        entries.retain(|e| {
+            strict
+                .provenance
+                .get(&e.id)
+                .is_some_and(|r| r.hostname == hostname)
+        });
+        entries.sort_by_key(|e| strict.provenance.stored_order(e));
+    }
+    Ok(entries)
 }
 
 async fn open_parent(
@@ -311,19 +349,13 @@ async fn backup_stdin(
         None => None,
         Some(reader) => {
             let found = match &flags.parent {
-                Some(spec) => Some(reader.resolve_snapshot(spec).await?.id),
-                None => {
-                    let mut list = reader.list_snapshots().await?;
-                    warn_skipped(&list.skipped);
-                    if let Some(strict) = &strict {
-                        list.entries.retain(|e| strict.provenance.contains(&e.id));
-                    }
-                    list.entries
-                        .iter()
-                        .rev()
-                        .find(|e| e.snapshot.hostname == hostname && e.snapshot.tags.contains(&tag))
-                        .map(|e| e.id)
-                }
+                Some(spec) => Some(explicit_parent(&reader, strict.as_ref(), spec).await?),
+                None => parent_candidates(&reader, strict.as_ref(), &hostname)
+                    .await?
+                    .iter()
+                    .rev()
+                    .find(|e| e.snapshot.hostname == hostname && e.snapshot.tags.contains(&tag))
+                    .map(|e| e.id),
             };
             open_parent(reader, found, flags.parent.is_some()).await?
         }
