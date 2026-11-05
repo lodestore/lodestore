@@ -11,6 +11,7 @@ use anyhow::{Context, bail};
 use lodestore_format::attest::consolidate_attestations;
 use lodestore_format::crypto::{BlobId, Entropy};
 use lodestore_format::gc::compact::{compact_plan, write_compacted};
+use lodestore_format::gc::mark::ShardSet;
 use lodestore_format::gc::plan::{MAX_CANDIDATES, PlanOptions};
 use lodestore_format::gc::repack::repack;
 use lodestore_format::gc::sweep::{
@@ -661,6 +662,7 @@ async fn verifying(state: &AppState, cycle: &CycleRow) -> anyhow::Result<StepOut
     }
 
     verified.shards.verified = load_verified(state, &cycle.repository_id).await?;
+    leave_unvouched_shards(&mut verified.shards, &verified.candidates);
     let plan = compact_plan(&verified.shards, &verified.candidates);
     let mut entropy = Entropy::os();
     let compacted = write_compacted(
@@ -708,6 +710,24 @@ async fn verifying(state: &AppState, cycle: &CycleRow) -> anyhow::Result<StepOut
     )
     .await;
     Ok(StepOutcome::Advanced(GcState::Sweeping))
+}
+
+/// Leaves out of the compaction every shard the server neither verified nor
+/// attested, unless it names a pack that is going. Such a shard may belong to
+/// a backup whose verification has not run yet; rewritten, its records would
+/// sit in a shard nobody vouches for and the verification would fail an
+/// honest job. An honest shard only names the young packs its backup wrote,
+/// which are never candidates.
+fn leave_unvouched_shards(shards: &mut ShardSet, candidates: &HashSet<BlobId>) {
+    let (verified, attested) = (&shards.verified, &shards.attested);
+    shards.shards.retain(|(id, shard)| {
+        verified.contains(id)
+            || attested.contains(id)
+            || shard.packs.is_empty()
+            || shard.packs.iter().any(|p| {
+                BlobId::try_from(p.pack_id.as_slice()).is_ok_and(|p| candidates.contains(&p))
+            })
+    });
 }
 
 /// Restore jobs reading this repository, downloads in flight and checks
