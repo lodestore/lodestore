@@ -6,6 +6,10 @@ import { useGetFindGroup, useGetSnapshot } from "@/api/gen/endpoints";
 import type { FindGroup, FindSnapshotRef, FindVersion } from "@/api/gen/model";
 import { DownloadDialog } from "@/components/restore/download-dialog";
 import { RestoreDialog } from "@/components/restore/restore-dialog";
+import {
+	OwnerSignedBadge,
+	UnverifiedBadge,
+} from "@/components/snapshots/suspicious-badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
@@ -85,7 +89,11 @@ export function VersionEntry({
 				aria-hidden
 				className="absolute top-4 bottom-0 left-[3.5px] w-px bg-border group-last/version:hidden"
 			/>
-			<p className="font-semibold">{copy.find.range(first, last)}</p>
+			<div className="flex flex-wrap items-center gap-2">
+				<p className="font-semibold">{copy.find.range(first, last)}</p>
+				{version.verified_by == null && <UnverifiedBadge />}
+				{version.verified_by === "owner" && <OwnerSignedBadge />}
+			</div>
 			<p className="text-sm text-muted-foreground">
 				{version.content_id != null && (
 					<>

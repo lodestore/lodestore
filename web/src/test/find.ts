@@ -28,6 +28,7 @@ export function findVersion(over: Partial<FindVersion> = {}): FindVersion {
 		kind: "file",
 		mtime_ms: Date.UTC(2026, 9, 15, 14, 2),
 		size: 3174,
+		verified_by: "server",
 		snapshot_count: 2,
 		snapshots: [findSnapshotRef(2), findSnapshotRef(1)],
 		...over,
