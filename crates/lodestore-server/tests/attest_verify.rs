@@ -12,10 +12,11 @@ use common::{AgentEnv, TestServer, WAIT, backends, wait_until};
 use lodestore_format::attest::{ATTEST_PREFIX, put_attestation, read_attestations};
 use lodestore_format::chunker::blob_id;
 use lodestore_format::crypto::{BLOB_TYPE_DATA, BlobId, Entropy};
-use lodestore_format::index::{hex32, parse_hex32};
+use lodestore_format::index::{hex32, index_object_key, open_shard, parse_hex32};
+use lodestore_format::pack::pack_object_key;
 use lodestore_format::repo::Repository;
 use lodestore_format::snapshot::snapshot_object_key;
-use lodestore_format::store::LocalFsStore;
+use lodestore_format::store::{BlobStore, LocalFsStore};
 use lodestore_format::verify_snapshot::snapshot_index_refs;
 use lodestore_format::writer::{BackupOptions, Writer};
 use lodestore_server::alerts::inputs::gather;
@@ -625,6 +626,41 @@ async fn attest_verify_gc_sweep_waits_for_running_verification() {
             "[{}] the cycle deleted no shard, so it proved nothing",
             backend.name()
         );
+        env.ts.stop().await;
+    }
+}
+
+/// A shard that names a pack which never reached the bucket fails the job
+/// at once; it is not mistaken for data a cleanup moved.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn attest_verify_fails_job_deduped_against_shard_of_missing_pack() {
+    for backend in backends() {
+        let env = Env::new(&backend).await;
+        env.upgrade().await;
+        let (snapshot_id, planted) = env.snapshot("no-pack", Plant::AfterUpgrade).await;
+        let planted = planted.unwrap();
+        let keys = env.server_keys().await;
+        let bytes = BlobStore::get(&env.store, &index_object_key(&planted))
+            .await
+            .unwrap();
+        let shard = open_shard(keys.k_idx(), keys.repo_id(), &planted, &bytes).unwrap();
+        for record in &shard.packs {
+            let pack: BlobId = record.pack_id.as_slice().try_into().unwrap();
+            std::fs::remove_file(env.ts.local_repo_root("main").join(pack_object_key(&pack)))
+                .unwrap();
+        }
+        env.job("j1", &snapshot_id, "pending").await;
+
+        env.verify("j1").await;
+
+        env.assert_failed("j1", &snapshot_id).await;
+        let message = env.column("j1", "error_message").await.unwrap();
+        assert!(
+            message.contains("pack is missing"),
+            "[{}] {message}",
+            backend.name()
+        );
+        assert!(env.events("j1", "verification_retry").await.is_empty());
         env.ts.stop().await;
     }
 }
