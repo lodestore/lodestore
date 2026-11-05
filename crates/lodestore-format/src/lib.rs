@@ -12,6 +12,7 @@ pub mod index;
 pub mod keys;
 pub mod locks;
 pub mod pack;
+pub mod provenance;
 pub mod reader;
 pub mod repo;
 pub mod selection;

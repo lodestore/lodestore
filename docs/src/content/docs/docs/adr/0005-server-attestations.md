@@ -34,7 +34,7 @@ The MAC is keyed BLAKE3 under `k_srv`. Its input, in order, is the domain `lodes
 - `markers`: repository-level facts, in the clear.
   - `1`: the repository upgrade is complete. It sits on its own last upgrade object, with an empty `shard_ids`, and every part of a consolidation carries it too.
   - `2`: a part of an upgrade. It names the shards that existed when the server first opened the repository. The server finishes an interrupted upgrade by running it again. A repository that has MAC-valid attestations of other kinds but no attestation with marker `1` shows that the completion object was removed; the server then refuses to sign the repository again.
-- `sealed_provenance`: repeated AEAD blobs under `derive_key("lodestore v1 attestation seal key", k_srv)`, additional data `repo_id || "lodestore v1 provenance"`. The field is reserved. This version does not fill it; later it carries the provenance records of snapshots (`ProvenanceRecord`: snapshot id, host id, host name, job id, verification time) without a format change. `seal_provenance` and `open_provenance` exist so that the schema is frozen now. A holder of writer keys cannot read the host or job.
+- `sealed_provenance`: repeated AEAD blobs under `derive_key("lodestore v1 attestation seal key", k_srv)`, additional data `repo_id || "lodestore v1 provenance"`. The field carries the provenance records of snapshots (`ProvenanceRecord`: snapshot id, host id, host name, job id, verification time), filled as described in [ADR 0006](0006-snapshot-provenance.md) without a format change. `seal_provenance` and `open_provenance` froze the schema. A holder of writer keys cannot read the host or job.
 
 ### What an attestation means
 

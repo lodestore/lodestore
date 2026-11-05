@@ -31,6 +31,8 @@ pub fn snapshot_object_key(id: &BlobId) -> String {
 pub struct SnapshotEntry {
     pub id: BlobId,
     pub snapshot: pb::Snapshot,
+    /// When the store wrote the snapshot object, from the listing; `None` when the backend does not report it.
+    pub modified_ms: Option<i64>,
 }
 
 /// Returns `(snapshot_id, envelope_bytes)`; the id is the BLAKE3 of the bytes.
@@ -125,7 +127,11 @@ pub async fn list_snapshots<S: BlobStore>(store: &S, keys: &ReadKeys) -> Result<
         }
         let bytes = store.get(&entry.key).await?;
         match open_snapshot(keys.hpke_private_key(), keys.repo_id(), &id, &bytes) {
-            Ok(snapshot) => out.entries.push(SnapshotEntry { id, snapshot }),
+            Ok(snapshot) => out.entries.push(SnapshotEntry {
+                id,
+                snapshot,
+                modified_ms: entry.modified_ms,
+            }),
             Err(e @ (Error::Corrupt { .. } | Error::UnsupportedVersion { .. })) => {
                 out.skipped.push((entry.key, e.to_string()));
             }
