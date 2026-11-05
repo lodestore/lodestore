@@ -20,7 +20,10 @@ use lodestore_format::store::{BlobStore, LocalFsStore};
 use lodestore_format::writer::{BackupOptions, Writer};
 use lodestore_server::catalog::{JobLink, ingest_snapshot, open_repository, sync_repository};
 use lodestore_server::db::now_ms;
-use lodestore_server::maintenance::attest::{ensure_provenance_backfilled, ensure_upgraded};
+use lodestore_server::maintenance::attest::verify::verify_then_retain;
+use lodestore_server::maintenance::attest::{
+    ensure_provenance_backfilled, ensure_upgraded, resume_interrupted,
+};
 use serde_json::{Value, json};
 use sqlx::Row;
 
@@ -594,6 +597,52 @@ async fn provenance_reconcile_saturates_a_far_future_time() {
         assert_eq!(by.as_deref(), Some("owner"));
         c.ts.stop().await;
     }
+}
+
+async fn verify_state(c: &Catalog, job: &str) -> Option<String> {
+    sqlx::query("SELECT verify_state FROM jobs WHERE id = $1")
+        .bind(job)
+        .fetch_one(c.pool())
+        .await
+        .unwrap()
+        .try_get("verify_state")
+        .unwrap()
+}
+
+/// The job's verdict never runs ahead of the snapshot's mark: a job marked
+/// verified is not checked again, so a lost mark would never be repaired.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn verification_marks_the_snapshot_before_the_job() {
+    // The ordering does not depend on the database; the failure is injected with an SQLite trigger.
+    let c = Catalog::new(&common::Backend::Sqlite).await;
+    let snapshot = c.write("a", Some("host-a")).await;
+    c.job("job-a", &snapshot, Some("pending")).await;
+    sqlx::query(
+        "CREATE TRIGGER refuse_mark BEFORE UPDATE OF verified_at ON snapshots \
+         BEGIN SELECT RAISE(ABORT, 'refused'); END",
+    )
+    .execute(c.pool())
+    .await
+    .unwrap();
+
+    verify_then_retain(c.ts.state().clone(), "job-a".into()).await;
+
+    assert_ne!(verify_state(&c, "job-a").await.as_deref(), Some("verified"));
+    assert_eq!(verified_columns(&c.ts, &snapshot).await, (None, None));
+
+    sqlx::query("DROP TRIGGER refuse_mark")
+        .execute(c.pool())
+        .await
+        .unwrap();
+    resume_interrupted(c.ts.state()).await.unwrap();
+    verify_then_retain(c.ts.state().clone(), "job-a".into()).await;
+
+    assert_eq!(verify_state(&c, "job-a").await.as_deref(), Some("verified"));
+    assert_eq!(
+        verified_columns(&c.ts, &snapshot).await.1.as_deref(),
+        Some("server")
+    );
+    c.ts.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

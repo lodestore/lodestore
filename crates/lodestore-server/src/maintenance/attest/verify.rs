@@ -104,7 +104,7 @@ async fn run_one(state: &AppState, job_id: &str) -> anyhow::Result<()> {
     };
     match verdict {
         Ok(Verdict::Verified) => {
-            set_verify_state(state, job_id, Some("verified")).await?;
+            // The snapshot first: a job left `running` is checked again after a restart.
             mark_verified(
                 state,
                 &target.snapshot_id,
@@ -113,6 +113,7 @@ async fn run_one(state: &AppState, job_id: &str) -> anyhow::Result<()> {
                 "server",
             )
             .await?;
+            set_verify_state(state, job_id, Some("verified")).await?;
             after_backup(state, job_id).await
         }
         Ok(Verdict::Failed(reason)) => {
