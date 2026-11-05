@@ -76,7 +76,7 @@ The quickstart uses plain HTTP so that it works on any network; put the server b
 
 ## Storage
 
-Repositories live on S3-compatible object storage or in a local or network folder. On S3-compatible storage the agent key has no delete rights and Object Lock is available; in a folder the agent can delete and overwrite, so prefer object storage for data that a compromised host must not be able to destroy. See [Agent credentials](https://lodestore.dev/docs/security/threat-model/#agent-credentials).
+Repositories live on S3-compatible object storage or in a local or network folder. On S3-compatible storage the agent key has no delete rights and Object Lock is available; in a folder the agent can delete and overwrite, so prefer object storage for data that a compromised host must not be able to destroy. The server checks every new backup, so index metadata forged by a compromised host does not lead to the deletion of other hosts' data. See [Agent credentials](https://lodestore.dev/docs/security/threat-model/#agent-credentials) and [index metadata from a compromised agent](https://lodestore.dev/docs/security/threat-model/#index-metadata-from-a-compromised-agent).
 
 ## Version 0.1 and roadmap
 
