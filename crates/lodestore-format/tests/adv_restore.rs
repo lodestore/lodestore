@@ -10,7 +10,7 @@ use adv_support::{attacker_keys, forge_offsets, open_all_shards, plant_shard_whe
 use gc_support::{Cycle, Fx};
 use lodestore_format::crypto::{BlobId, Entropy};
 use lodestore_format::index::parse_hex32;
-use lodestore_format::pack::pack_object_key;
+use lodestore_format::pack::{ENTRY_LEN, pack_object_key, parse_entries};
 use lodestore_format::pb;
 use lodestore_format::reader::Reader;
 use lodestore_format::store::{BlobStore, put_named};
@@ -108,5 +108,31 @@ async fn adv_copy_in_pack_of_unknown_version_does_not_break_restore() {
         });
     }
     plant_first(&fx, planted, lowest).await;
+    fx.assert_all_restore().await;
+}
+
+#[tokio::test]
+async fn adv_copy_with_wrong_size_listed_first_does_not_break_restore() {
+    let (fx, records, lowest) = compacted_fleet().await;
+    let forged = records
+        .iter()
+        .map(|record| {
+            let mut entries = Vec::with_capacity(record.entries.len());
+            for e in parse_entries(&record.entries).unwrap() {
+                entries.extend_from_slice(&e.blob_id);
+                entries.push(e.blob_type);
+                entries.extend_from_slice(&e.offset.to_le_bytes());
+                entries.extend_from_slice(&e.enc_len.to_le_bytes());
+                entries.extend_from_slice(&(e.ulen - 1).to_le_bytes());
+            }
+            assert_eq!(entries.len(), record.entries.len());
+            assert!(entries.len().is_multiple_of(ENTRY_LEN));
+            pb::PackRecord {
+                entries,
+                ..record.clone()
+            }
+        })
+        .collect();
+    plant_first(&fx, forged, lowest).await;
     fx.assert_all_restore().await;
 }

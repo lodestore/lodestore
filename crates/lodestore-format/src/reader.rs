@@ -664,22 +664,20 @@ impl<S: BlobStore> Reader<S> {
     }
 
     /// Checks that the chunks of a regular file add up to the size it claims.
+    /// The sizes come from the index; when they do not add up, the chunks are
+    /// read, since a shard from a write-key holder can list a copy with a
+    /// wrong size ahead of the real one.
     pub(crate) async fn check_file(&mut self, node: &pb::Node) -> Result<Vec<(u64, u64)>> {
         let extents = check_extents(node)?;
-        let mut total = 0u64;
-        for raw in &node.content {
-            let id: BlobId = raw
-                .as_slice()
-                .try_into()
-                .map_err(|_| Error::corrupt("tree", "content id must be 32 bytes"))?;
-            total =
-                total.saturating_add(u64::from(self.locate_blob(&id, BLOB_TYPE_DATA).await?.ulen));
-        }
         let expected = if extents.is_empty() {
             node.size
         } else {
             extents.iter().map(|e| e.1).sum()
         };
+        let mut total = self.content_len(node, false).await?;
+        if total != expected {
+            total = self.content_len(node, true).await?;
+        }
         if total != expected {
             return Err(Error::corrupt(
                 String::from_utf8_lossy(&node.name),
@@ -687,6 +685,25 @@ impl<S: BlobStore> Reader<S> {
             ));
         }
         Ok(extents)
+    }
+
+    /// The size of a file's chunks, from the index or, with `read`, from the
+    /// chunks themselves.
+    async fn content_len(&mut self, node: &pb::Node, read: bool) -> Result<u64> {
+        let mut total = 0u64;
+        for raw in &node.content {
+            let id: BlobId = raw
+                .as_slice()
+                .try_into()
+                .map_err(|_| Error::corrupt("tree", "content id must be 32 bytes"))?;
+            let len = if read {
+                self.read_blob(&id, BLOB_TYPE_DATA).await?.len() as u64
+            } else {
+                u64::from(self.locate_blob(&id, BLOB_TYPE_DATA).await?.ulen)
+            };
+            total = total.saturating_add(len);
+        }
+        Ok(total)
     }
 
     /// Writes the content of one regular file to `out`; holes of a sparse
