@@ -20,7 +20,10 @@ use lodestore_format::store::{BlobStore, LocalFsStore};
 use lodestore_format::writer::{BackupOptions, Writer};
 use lodestore_server::catalog::{JobLink, ingest_snapshot, open_repository, sync_repository};
 use lodestore_server::db::now_ms;
-use lodestore_server::maintenance::attest::ensure_provenance_backfilled;
+use lodestore_server::maintenance::attest::verify::verify_then_retain;
+use lodestore_server::maintenance::attest::{
+    ensure_provenance_backfilled, ensure_upgraded, resume_interrupted,
+};
 use serde_json::{Value, json};
 use sqlx::Row;
 
@@ -193,6 +196,7 @@ impl Catalog {
         let ts = TestServer::start_with(backend, |c| c.schedule_tick_secs = 0).await;
         let repo = ts.create_local_repository("main").await;
         let catalog = Catalog { ts, repo };
+        catalog.unflag().await;
         catalog.host("host-a").await;
         catalog
     }
@@ -288,6 +292,15 @@ impl Catalog {
             .unwrap()
     }
 
+    /// A repository a 0.1 server created: the 0.2 migration left the flag empty.
+    async fn unflag(&self) {
+        sqlx::query("UPDATE repositories SET provenance_backfilled_at = NULL WHERE id = $1")
+            .bind(&self.repo)
+            .execute(self.pool())
+            .await
+            .unwrap();
+    }
+
     async fn forget_marks(&self) {
         sqlx::query("UPDATE snapshots SET verified_at = NULL, verified_by = NULL")
             .execute(self.pool())
@@ -329,6 +342,109 @@ async fn provenance_backfill_signs_linked_snapshots_only() {
             assert_eq!(by.as_deref(), (n < 2).then_some("server"), "snapshot {n}");
         }
         assert!(c.flag().await.is_some());
+        c.ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn provenance_backfill_signs_snapshot_whose_job_was_purged() {
+    for backend in backends() {
+        let c = Catalog::new(&backend).await;
+        let old = c.linked("old", None).await;
+        sqlx::query("DELETE FROM jobs WHERE id = 'job-old'")
+            .execute(c.pool())
+            .await
+            .unwrap();
+
+        let signed = ensure_provenance_backfilled(c.ts.state(), &c.repo)
+            .await
+            .unwrap();
+
+        assert_eq!(signed, 1, "[{}]", backend.name());
+        let set = provenance(&c.ts, &c.repo).await;
+        let record = set.get(&parse_hex32(&old).unwrap()).expect("signed");
+        assert_eq!(record.host_id, "host-a");
+        assert_eq!(record.job_id, "job-old");
+        assert_eq!(
+            verified_columns(&c.ts, &old).await.1.as_deref(),
+            Some("server")
+        );
+        c.ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn provenance_backfill_skips_jobs_that_did_not_succeed() {
+    for backend in backends() {
+        let c = Catalog::new(&backend).await;
+        let failed = c.linked("failed", None).await;
+        let cancelled = c.linked("cancelled", None).await;
+        let warned = c.linked("warned", None).await;
+        for (job, state) in [
+            ("job-failed", "failed"),
+            ("job-cancelled", "cancelled"),
+            ("job-warned", "warnings"),
+        ] {
+            sqlx::query("UPDATE jobs SET state = $1 WHERE id = $2")
+                .bind(state)
+                .bind(job)
+                .execute(c.pool())
+                .await
+                .unwrap();
+        }
+
+        let signed = ensure_provenance_backfilled(c.ts.state(), &c.repo)
+            .await
+            .unwrap();
+
+        assert_eq!(signed, 1, "[{}]", backend.name());
+        let set = provenance(&c.ts, &c.repo).await;
+        let all = [failed, cancelled, warned.clone()];
+        assert_eq!(ids(&set, &all), BTreeSet::from([warned]));
+        assert_eq!(verified_columns(&c.ts, &all[0]).await, (None, None));
+        c.ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn provenance_backfill_never_runs_for_a_new_repository() {
+    for backend in backends() {
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+        let repo = ts.create_local_repository("main").await;
+        let flag: Option<i64> =
+            sqlx::query("SELECT provenance_backfilled_at FROM repositories WHERE id = $1")
+                .bind(&repo)
+                .fetch_one(&ts.state().db.pool)
+                .await
+                .unwrap()
+                .try_get("provenance_backfilled_at")
+                .unwrap();
+        assert!(flag.is_some(), "[{}]", backend.name());
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn provenance_backfill_runs_once_when_called_concurrently() {
+    for backend in backends() {
+        let c = Catalog::new(&backend).await;
+        let all = [c.linked("a", None).await, c.linked("b", None).await];
+        ensure_upgraded(c.ts.state(), &c.repo).await.unwrap();
+        let before = attest_objects(&c.ts).await;
+
+        let (one, two) = tokio::join!(
+            ensure_provenance_backfilled(c.ts.state(), &c.repo),
+            ensure_provenance_backfilled(c.ts.state(), &c.repo),
+        );
+
+        assert_eq!(one.unwrap() + two.unwrap(), 2, "[{}]", backend.name());
+        assert_eq!(
+            attest_objects(&c.ts).await,
+            before + 1,
+            "[{}]",
+            backend.name()
+        );
+        assert_eq!(ids(&provenance(&c.ts, &c.repo).await, &all).len(), 2);
         c.ts.stop().await;
     }
 }
@@ -388,6 +504,145 @@ async fn provenance_reconcile_restores_marks_after_db_loss() {
         assert_eq!(verified_columns(&c.ts, &all[2]).await, (None, None));
         c.ts.stop().await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn provenance_reconcile_skips_row_bound_to_another_host() {
+    for backend in backends() {
+        let c = Catalog::new(&backend).await;
+        c.host("host-b").await;
+        let theirs = c.linked("a", None).await;
+        ensure_provenance_backfilled(c.ts.state(), &c.repo)
+            .await
+            .unwrap();
+        c.forget_marks().await;
+        sqlx::query("UPDATE snapshots SET host_id = 'host-b' WHERE id = $1")
+            .bind(&theirs)
+            .execute(c.pool())
+            .await
+            .unwrap();
+
+        sync_repository(c.ts.state(), &c.repo).await.unwrap();
+
+        assert_eq!(
+            verified_columns(&c.ts, &theirs).await,
+            (None, None),
+            "[{}]",
+            backend.name()
+        );
+        c.ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn provenance_reconcile_skips_snapshot_that_failed_verification() {
+    for backend in backends() {
+        let c = Catalog::new(&backend).await;
+        let bad = c.linked("a", None).await;
+        ensure_provenance_backfilled(c.ts.state(), &c.repo)
+            .await
+            .unwrap();
+        c.forget_marks().await;
+        sqlx::query("UPDATE snapshots SET unverified_reason = 'bad' WHERE id = $1")
+            .bind(&bad)
+            .execute(c.pool())
+            .await
+            .unwrap();
+
+        sync_repository(c.ts.state(), &c.repo).await.unwrap();
+
+        assert_eq!(
+            verified_columns(&c.ts, &bad).await,
+            (None, None),
+            "[{}]",
+            backend.name()
+        );
+        c.ts.stop().await;
+    }
+}
+
+async fn owner_sign(c: &Catalog, snapshot: &str, seconds: i64, nanos: u32) {
+    let store = store(&c.ts);
+    let repo = Repository::open(&store, PASSWORD).await.unwrap();
+    let record = pb::ProvenanceRecord {
+        snapshot_id: parse_hex32(snapshot).unwrap().to_vec(),
+        verified_at: Some(pb::Timestamp { seconds, nanos }),
+        ..Default::default()
+    };
+    let mut entropy = Entropy::os();
+    let sealed = seal_provenance(repo.read_keys(), &record, &mut entropy).unwrap();
+    put_attestation(
+        &store,
+        repo.read_keys(),
+        &[],
+        &[],
+        vec![sealed],
+        &mut entropy,
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn provenance_reconcile_saturates_a_far_future_time() {
+    for backend in backends() {
+        let c = Catalog::new(&backend).await;
+        let snapshot = c.write("direct", None).await;
+        owner_sign(&c, &snapshot, i64::MAX, 999_000_000).await;
+
+        sync_repository(c.ts.state(), &c.repo).await.unwrap();
+
+        let (at, by) = verified_columns(&c.ts, &snapshot).await;
+        assert_eq!(at, Some(i64::MAX), "[{}]", backend.name());
+        assert_eq!(by.as_deref(), Some("owner"));
+        c.ts.stop().await;
+    }
+}
+
+async fn verify_state(c: &Catalog, job: &str) -> Option<String> {
+    sqlx::query("SELECT verify_state FROM jobs WHERE id = $1")
+        .bind(job)
+        .fetch_one(c.pool())
+        .await
+        .unwrap()
+        .try_get("verify_state")
+        .unwrap()
+}
+
+/// The job's verdict never runs ahead of the snapshot's mark: a job marked
+/// verified is not checked again, so a lost mark would never be repaired.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn verification_marks_the_snapshot_before_the_job() {
+    // The ordering does not depend on the database; the failure is injected with an SQLite trigger.
+    let c = Catalog::new(&common::Backend::Sqlite).await;
+    let snapshot = c.write("a", Some("host-a")).await;
+    c.job("job-a", &snapshot, Some("pending")).await;
+    sqlx::query(
+        "CREATE TRIGGER refuse_mark BEFORE UPDATE OF verified_at ON snapshots \
+         BEGIN SELECT RAISE(ABORT, 'refused'); END",
+    )
+    .execute(c.pool())
+    .await
+    .unwrap();
+
+    verify_then_retain(c.ts.state().clone(), "job-a".into()).await;
+
+    assert_ne!(verify_state(&c, "job-a").await.as_deref(), Some("verified"));
+    assert_eq!(verified_columns(&c.ts, &snapshot).await, (None, None));
+
+    sqlx::query("DROP TRIGGER refuse_mark")
+        .execute(c.pool())
+        .await
+        .unwrap();
+    resume_interrupted(c.ts.state()).await.unwrap();
+    verify_then_retain(c.ts.state().clone(), "job-a".into()).await;
+
+    assert_eq!(verify_state(&c, "job-a").await.as_deref(), Some("verified"));
+    assert_eq!(
+        verified_columns(&c.ts, &snapshot).await.1.as_deref(),
+        Some("server")
+    );
+    c.ts.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
