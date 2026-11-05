@@ -27,7 +27,9 @@ use crate::error::{Error, Result};
 use crate::fs::scan::{self, ScanTotals};
 use crate::fs::walk::{CACHEDIR_TAG, ExtentReader, WalkOptions, Walker, data_extents};
 use crate::fs::{conv, hostname, meta, now};
-use crate::index::{Index, SupersedesTrust, index_object_key, seal_shard};
+use crate::index::{
+    INDEX_PREFIX, Index, SupersedesTrust, index_object_key, parse_hex32, seal_shard,
+};
 use crate::keys::WriteKeys;
 use crate::locks;
 use crate::pack::{MAX_TREE_ULEN, PACK_TARGET_SIZE, PackBuilder, pack_object_key, parse_entries};
@@ -198,6 +200,51 @@ pub struct BackupOutcome {
     pub warnings_total: u64,
 }
 
+/// Which index shards a writer deduplicates against.
+enum Dedup<'a> {
+    /// Every shard in `index/`.
+    All,
+    /// The attestation list (read without a MAC check) and the writer's own
+    /// shards once the repository is upgraded; every shard before that.
+    Hinted(&'a HashSet<BlobId>),
+    /// Exactly this set, which the caller verified.
+    Attested(&'a HashSet<BlobId>),
+}
+
+async fn load_refs<S: BlobStore>(
+    index: &mut Index,
+    store: &S,
+    keys: &WriteKeys,
+    shards: &HashSet<BlobId>,
+) -> Result<()> {
+    let ordered: BTreeSet<&BlobId> = shards.iter().collect();
+    let refs: Vec<Vec<u8>> = ordered.into_iter().map(|id| id.to_vec()).collect();
+    index
+        .load_refs(store, &keys.k_idx, &keys.repo_id, &refs)
+        .await
+}
+
+/// `load_all` without the shards in `distrusted`.
+async fn load_listed<S: BlobStore>(
+    index: &mut Index,
+    store: &S,
+    keys: &WriteKeys,
+    distrusted: &HashSet<BlobId>,
+) -> Result<()> {
+    if distrusted.is_empty() {
+        return index.load_all(store, &keys.k_idx, &keys.repo_id).await;
+    }
+    let mut shards = HashSet::new();
+    for entry in store.list(INDEX_PREFIX).await? {
+        if let Some(id) = entry.key.strip_prefix(INDEX_PREFIX).and_then(parse_hex32)
+            && !distrusted.contains(&id)
+        {
+            shards.insert(id);
+        }
+    }
+    load_refs(index, store, keys, &shards).await
+}
+
 pub struct Writer<S: BlobStore> {
     store: S,
     keys: WriteKeys,
@@ -216,14 +263,28 @@ impl<S: BlobStore> Writer<S> {
     /// loads the index by LIST, which is discovery only: a shard that is not
     /// listed costs deduplication, never correctness.
     pub async fn new(store: S, keys: WriteKeys, config: &pb::Config) -> Result<Self> {
-        Self::open(store, keys, config, None).await
+        Self::open(store, keys, config, Dedup::All, &HashSet::new()).await
+    }
+
+    /// Opens a writer for the holder of the read keys: only shards in
+    /// `attested`, which the caller read with a MAC check, are used for
+    /// deduplication, minus those in `distrusted`.
+    pub async fn new_attested(
+        store: S,
+        keys: WriteKeys,
+        config: &pb::Config,
+        attested: &HashSet<BlobId>,
+        distrusted: &HashSet<BlobId>,
+    ) -> Result<Self> {
+        Self::open(store, keys, config, Dedup::Attested(attested), distrusted).await
     }
 
     async fn open(
         store: S,
         keys: WriteKeys,
         config: &pb::Config,
-        own_shards: Option<&HashSet<BlobId>>,
+        dedup: Dedup<'_>,
+        distrusted: &HashSet<BlobId>,
     ) -> Result<Self> {
         config::check_write_version(config)?;
         check_params(config.chunker.as_ref())?;
@@ -239,29 +300,47 @@ impl<S: BlobStore> Writer<S> {
             ));
         }
         let gc_locks = locks::read_gc_locks(&store, &keys.k_idx, &keys.repo_id).await?;
-        let peeked = attest::peek_attestations(&store).await?;
         let mut index = Index::default();
         index.set_supersedes_trust(SupersedesTrust::Only(HashSet::new()));
         index.exclude_packs(gc_locks.candidate_packs());
-        match own_shards {
-            Some(own) if peeked.markers.contains(&MARKER_LEGACY_SHARDS) => {
-                let ordered: BTreeSet<&BlobId> = peeked.shards.union(own).collect();
-                let refs: Vec<Vec<u8>> = ordered.into_iter().map(|id| id.to_vec()).collect();
-                index
-                    .load_refs(&store, &keys.k_idx, &keys.repo_id, &refs)
-                    .await?;
+        let attested = match dedup {
+            Dedup::Attested(attested) => {
+                let usable: HashSet<BlobId> = attested.difference(distrusted).copied().collect();
+                load_refs(&mut index, &store, &keys, &usable).await?;
+                usable
             }
-            _ => {
+            Dedup::Hinted(own) => {
+                let peeked = attest::peek_attestations(&store).await?;
+                if peeked.markers.contains(&MARKER_LEGACY_SHARDS) {
+                    let shards: HashSet<BlobId> = peeked
+                        .shards
+                        .union(own)
+                        .filter(|id| !distrusted.contains(*id))
+                        .copied()
+                        .collect();
+                    load_refs(&mut index, &store, &keys, &shards).await?;
+                } else {
+                    load_listed(&mut index, &store, &keys, distrusted).await?;
+                }
+                peeked
+                    .shards
+                    .into_iter()
+                    .filter(|id| !distrusted.contains(id))
+                    .collect()
+            }
+            Dedup::All => {
+                let peeked = attest::peek_attestations(&store).await?;
                 index.load_all(&store, &keys.k_idx, &keys.repo_id).await?;
+                peeked.shards
             }
-        }
+        };
         Ok(Writer {
             store,
             keys,
             index,
             entropy: Entropy::os(),
             gc_locks_denied: gc_locks.denied,
-            attested: peeked.shards,
+            attested,
             written: Vec::new(),
             #[cfg(feature = "test-hooks")]
             raw: [None, None],
@@ -284,11 +363,14 @@ impl<S: BlobStore> Writer<S> {
     /// Like [`Writer::connect`], but once the server has upgraded the
     /// repository only shards in the attestation list and `own_shards` are
     /// used for deduplication. The list is read without a MAC check: a filter
-    /// that saves a failed job, not a trust boundary.
+    /// that saves a failed job, not a trust boundary. Shards in `distrusted`
+    /// are left out of deduplication in both cases (the caller learned they
+    /// lie); restore may still read frames from them.
     pub async fn connect_attested(
         store: S,
         keys: WriteKeys,
         own_shards: &HashSet<BlobId>,
+        distrusted: &HashSet<BlobId>,
     ) -> Result<Self> {
         let config_bytes = match store.get("config").await {
             Ok(bytes) => bytes,
@@ -297,7 +379,7 @@ impl<S: BlobStore> Writer<S> {
         };
         keys.verify_config(&config_bytes)?;
         let config = config::decode(&config_bytes)?;
-        Self::open(store, keys, &config, Some(own_shards)).await
+        Self::open(store, keys, &config, Dedup::Hinted(own_shards), distrusted).await
     }
 
     /// Shards this writer put into the store.

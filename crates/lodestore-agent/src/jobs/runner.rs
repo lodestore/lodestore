@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -104,6 +104,7 @@ async fn open_writer_with(
         Throttled::new(store, rate, uploaded),
         keys,
         &own_shards::load(paths),
+        &HashSet::new(),
     )
     .await
     .map_err(|e| format!("cannot open the repository: {e}"))
