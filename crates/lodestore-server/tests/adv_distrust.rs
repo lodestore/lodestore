@@ -15,12 +15,11 @@ use common::{AgentEnv, Backend, TestServer, WAIT, wait_until};
 use lodestore_format::chunker::blob_id;
 use lodestore_format::config::config_hash;
 use lodestore_format::crypto::{BLOB_TYPE_DATA, Entropy};
-use lodestore_format::index::parse_hex32;
+use lodestore_format::index::{hex32, parse_hex32};
 use lodestore_format::keys::{KdfCost, WriteKeys};
 use lodestore_format::reader::{Reader, RestoreOptions};
 use lodestore_format::repo::{InitOptions, PendingInit, Repository};
 use lodestore_format::store::LocalFsStore;
-use lodestore_server::maintenance::attest::load_distrusted;
 use lodestore_server::repos::db::{NewRepository, RepoLocation, create_repository};
 use serde_json::{Value, json};
 use sqlx::Row;
@@ -220,10 +219,18 @@ async fn planted_hint_costs_one_backup(files: &[&[u8]]) {
     plant_attestation_hint(&store, &shards).await;
 
     assert_costs_one_backup(&env, &dir, root).await;
-    let distrusted = load_distrusted(env.ts().state(), &env.repo).await.unwrap();
+    let distrusted: Vec<String> =
+        sqlx::query("SELECT shard_id FROM distrusted_shards WHERE repository_id = $1")
+            .bind(&env.repo)
+            .fetch_all(&env.ts().state().db.pool)
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.get("shard_id"))
+            .collect();
     for shard in &shards {
         assert!(
-            distrusted.contains(shard),
+            distrusted.contains(&hex32(shard)),
             "a planted shard was not distrusted"
         );
     }
