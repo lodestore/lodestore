@@ -146,14 +146,6 @@ async fn ensure_catalog_row(
     job_id: &str,
     target: &Target,
 ) -> anyhow::Result<Option<Verdict>> {
-    let known = sqlx::query("SELECT 1 FROM snapshots WHERE id = $1")
-        .bind(&target.snapshot_id)
-        .fetch_optional(&state.db.pool)
-        .await?
-        .is_some();
-    if known {
-        return Ok(None);
-    }
     let link = JobLink {
         job_id,
         host_id: &target.host_id,
@@ -264,9 +256,10 @@ pub async fn fail_verification(
     .bind(job_id)
     .execute(&mut *tx)
     .await?;
-    sqlx::query("UPDATE snapshots SET unverified_reason = $1 WHERE id = $2")
+    sqlx::query("UPDATE snapshots SET unverified_reason = $1 WHERE id = $2 AND job_id = $3")
         .bind(&message)
         .bind(snapshot_id)
+        .bind(job_id)
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;

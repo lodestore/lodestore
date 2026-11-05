@@ -342,6 +342,48 @@ async fn attest_verify_fails_job_deduped_against_shard_planted_before_upgrade() 
     }
 }
 
+/// A job that names a snapshot the catalog already links to another job
+/// fails, and leaves that job's snapshot alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn attest_verify_fails_job_naming_another_jobs_snapshot() {
+    for backend in backends() {
+        let env = Env::new(&backend).await;
+        env.upgrade().await;
+        let (snapshot_id, _) = env.snapshot("claimed", Plant::None).await;
+        env.job("j0", &snapshot_id, "verified").await;
+        let link = lodestore_server::catalog::JobLink {
+            job_id: "j0",
+            host_id: HOST,
+        };
+        lodestore_server::catalog::ingest_snapshot(
+            env.ts.state(),
+            &env.repo,
+            &snapshot_id,
+            Some(link),
+        )
+        .await
+        .unwrap();
+        env.job("j1", &snapshot_id, "pending").await;
+
+        env.verify("j1").await;
+
+        assert_eq!(
+            env.column("j1", "verify_state").await.as_deref(),
+            Some("failed"),
+            "{}",
+            backend.name()
+        );
+        assert_eq!(
+            env.column("j1", "error_code").await.as_deref(),
+            Some("verification_failed")
+        );
+        let snapshot = env.snapshot_json(&snapshot_id).await;
+        assert_eq!(snapshot["job_id"], "j0");
+        assert!(snapshot["unverified_reason"].is_null(), "{snapshot}");
+        env.ts.stop().await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn attest_verify_resumes_after_restart() {
     for backend in backends() {
