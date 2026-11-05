@@ -330,7 +330,15 @@ impl Index {
                         self.others.remove(key);
                     }
                 }
-                None => lost.push(*key),
+                None => match self.stale.get_mut(key) {
+                    Some(alts) => {
+                        *loc = alts.remove(0);
+                        if alts.is_empty() {
+                            self.stale.remove(key);
+                        }
+                    }
+                    None => lost.push(*key),
+                },
             }
         }
         for key in lost {
@@ -810,6 +818,19 @@ mod tests {
         assert_eq!(index.get(&[4; 32], 1).unwrap().pack_id, [11; 32]);
         assert!(index.get(&[5; 32], 1).is_none());
         assert!(!index.has_pack(&[10; 32]) && index.has_pack(&[11; 32]));
+    }
+
+    #[test]
+    fn index_missing_pack_falls_back_to_superseded_copy() {
+        let (old, new) = ([1u8; 32], [2u8; 32]);
+        let mut index = Index::default();
+        index.add_shard(old, &shard_of(10, 4, &[])).unwrap();
+        index.add_shard(new, &shard_of(11, 4, &[old])).unwrap();
+        assert_eq!(index.get(&[4; 32], 1).unwrap().pack_id, [11; 32]);
+        let listed = HashMap::from([([10u8; 32], 5000u64)]);
+        assert_eq!(index.retain_packs(&listed), 1);
+        assert_eq!(index.get(&[4; 32], 1).unwrap().pack_id, [10; 32]);
+        assert_eq!(index.locations(&[4; 32], 1).len(), 1);
     }
 
     #[test]
