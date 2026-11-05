@@ -66,6 +66,8 @@ Then:
    lode restore latest --target ./restored
    ```
 
+   `latest` is the newest snapshot the server signed, ordered by the time the storage wrote it, so a snapshot that a compromised host planted with a date in the future is not chosen.
+
 The quickstart uses plain HTTP so that it works on any network; put the server behind HTTPS for anything beyond a trial. Full walkthrough with the storage keys: <https://lodestore.dev/docs/quickstart/>
 
 ## Installation
@@ -76,7 +78,7 @@ The quickstart uses plain HTTP so that it works on any network; put the server b
 
 ## Storage
 
-Repositories live on S3-compatible object storage or in a local or network folder. On S3-compatible storage the agent key has no delete rights and Object Lock is available; in a folder the agent can delete and overwrite, so prefer object storage for data that a compromised host must not be able to destroy. The server checks every new backup an agent makes, so index metadata forged by a compromised host does not lead to the deletion of other hosts' data. See [Agent credentials](https://lodestore.dev/docs/security/threat-model/#agent-credentials) and [index metadata from a compromised agent](https://lodestore.dev/docs/security/threat-model/#index-metadata-from-a-compromised-agent).
+Repositories live on S3-compatible object storage or in a local or network folder. On S3-compatible storage the agent key has no delete rights and Object Lock is available; in a folder the agent can delete and overwrite, so prefer object storage for data that a compromised host must not be able to destroy. The server checks every new backup an agent makes, so index metadata forged by a compromised host does not lead to the deletion of other hosts' data. The server signs which host and job made each snapshot, and the server and `lode` pick the latest snapshot from those signatures, not from the time a host writes into the snapshot. See [Agent credentials](https://lodestore.dev/docs/security/threat-model/#agent-credentials) and [index metadata from a compromised agent](https://lodestore.dev/docs/security/threat-model/#index-metadata-from-a-compromised-agent).
 
 ## Version 0.1 and roadmap
 

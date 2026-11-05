@@ -20,7 +20,7 @@ When it first opens a repository, and in any case before the first cycle, the se
 3. **Mark.** The server publishes the list of packs it plans to delete as an object `locks/gc-<id>`. From now on every backup, whether run by an agent or by `lode backup`, reads that list at the start and uploads again any blob that lives only in a marked pack.
 4. **Pause.** Nothing is deleted for the length of the pause, at least 24 hours. Backups that started before the mark must finish within this time.
 5. **Check again.** After the pause the server reads all snapshots again, including those created during the pause. A marked pack that a new snapshot needs is taken off the list. Deletion also waits while a restore or download of the repository is running, and while a backup that started before the mark has not finished (see [Unfinished backups](#unfinished-backups)).
-6. **Delete.** The server writes a new, smaller index without the marked packs, checks that every blob of every snapshot is still found, and only then deletes the old index shards, the marked packs and last the `locks/gc-<id>` object. When it compacts the index it also merges the `locks/attest-*` objects into one. Up to the first deleted object a cycle can be aborted without any loss. After that it cannot, and a cycle that stops continues where it stopped on the next run.
+6. **Delete.** The server writes a new, smaller index without the marked packs, checks that every blob of every snapshot is still found, and only then deletes the old index shards, the marked packs and last the `locks/gc-<id>` object. When it compacts the index it also merges the `locks/attest-*` objects into one, without the shards the server has revoked and without the records of snapshots that no longer exist (see [Attestations and cleanup](#attestations-and-cleanup)). Up to the first deleted object a cycle can be aborted without any loss. After that it cannot, and a cycle that stops continues where it stopped on the next run.
 
 The server also checks every new backup an agent makes, outside the cycle. See [Backups the server could not verify](#backups-the-server-could-not-verify).
 
@@ -124,6 +124,12 @@ After a backup finishes, the server opens the new frames the snapshot depends on
 The check counts only a snapshot that belongs to the job: a job that reports a snapshot the catalog already links to another job fails it. The hour of retries is measured on the server's clock from the first failed attempt.
 
 Reads and cleanup do not depend on this check. When `lode restore`, or a read the server makes while browsing a snapshot, finds that the first known copy of a blob does not open, it tries the other copies listed by the index, including those of shards that a newer shard replaced, and every frame is authenticated by the blob id. A restore run by an agent and a download as an archive do not try other copies yet: they read each file's data from the first known copy only.
+
+## Attestations and cleanup
+
+The server signs what it checks in `locks/attest-*` objects: the index shards it vouches for, and the record of who made each snapshot. Every backup the server has verified adds exactly one such object, and so does every strict `lode backup` (a backup with the repository password in a repository the server has upgraded; see [Command line](/docs/reference/cli/#backup-in-a-repository-the-server-has-upgraded)). Only a cleanup cycle merges them. With cleanup turned off, the objects pile up by one per backup, and every open of the repository for writing and every `lode restore latest` reads all of them, so the cost grows with the number of backups. Keep cleanup turned on for a repository that receives backups.
+
+When a cycle merges the objects it keeps one record per snapshot that still exists, drops the shards that the server has revoked, and cuts the result into parts so that no object grows past the size limit. A shard is revoked when the server's check of a backup finds that it does not hold the data it claims; the job then fails with `verification_failed`, the server remembers the shard in its database and tells every agent not to use it. A forgotten snapshot loses its record at the next merge, not at the moment it is forgotten.
 
 ## Reading a report
 
