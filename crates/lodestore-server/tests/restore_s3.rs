@@ -172,6 +172,7 @@ async fn restore_s3_presigned_range_e2e() {
                 in_place: false,
                 conflict: ConflictPolicy::OverwriteChanged,
                 restore_owners: false,
+                accept_unverified: true,
             },
             "admin",
         )

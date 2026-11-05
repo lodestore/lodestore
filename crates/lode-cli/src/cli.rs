@@ -357,6 +357,9 @@ pub struct ServerRestoreArgs {
     /// Do not restore file owners, setuid/setgid bits or file capabilities
     #[arg(long)]
     pub no_owners: bool,
+    /// Restore a snapshot that nothing signed (never in place)
+    #[arg(long)]
+    pub accept_unverified: bool,
 }
 
 #[derive(Debug, Subcommand)]

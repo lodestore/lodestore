@@ -83,6 +83,7 @@ fn body(seeded: &Seeded, host: &str) -> Value {
         "in_place": false,
         "conflict": "skip_existing",
         "restore_owners": true,
+        "accept_unverified": true,
     })
 }
 
@@ -377,6 +378,43 @@ async fn restore_and_download_name_the_host_like_the_host_list() {
         );
         let downloads = get_json(&api, "/api/v1/jobs?kind=download").await;
         assert_eq!(downloads["items"][0]["hostname"], "host-a");
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restore_api_unverified_needs_confirmation() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let host = enroll(&ts, &api, &repo, "host-a").await;
+        let seeded = seed(&ts, &repo).await;
+
+        let mut payload = body(&seeded, &host);
+        payload["accept_unverified"] = json!(false);
+        let response = api.post("/api/v1/restores", &payload).await;
+        assert_eq!(response.status(), 400, "[{}]", backend.name());
+        let error: Value = response.json().await.unwrap();
+        assert_eq!(error["code"], "restore_unverified_not_confirmed");
+        payload.as_object_mut().unwrap().remove("accept_unverified");
+        let response = api.post("/api/v1/restores", &payload).await;
+        assert_eq!(response.status(), 400);
+
+        payload["accept_unverified"] = json!(true);
+        let response = api.post("/api/v1/restores", &payload).await;
+        assert_eq!(response.status(), 201);
+
+        sqlx::query(
+            "UPDATE snapshots SET verified_at = received_at, verified_by = 'server' WHERE id = $1",
+        )
+        .bind(&seeded.snapshot)
+        .execute(&ts.state().db.pool)
+        .await
+        .unwrap();
+        payload["accept_unverified"] = json!(false);
+        let response = api.post("/api/v1/restores", &payload).await;
+        assert_eq!(response.status(), 201);
         ts.stop().await;
     }
 }

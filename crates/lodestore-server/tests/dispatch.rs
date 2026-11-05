@@ -2263,6 +2263,7 @@ async fn dispatch_gc_restore_not_gated() {
                 in_place: false,
                 conflict: ConflictPolicy::OverwriteChanged,
                 restore_owners: false,
+                accept_unverified: true,
             },
             "admin",
         )

@@ -34,8 +34,9 @@ async fn insert(ts: &TestServer, repo: &str, host: Option<&str>, hostname: &str,
     });
     sqlx::query(
         "INSERT INTO snapshots (id, repository_id, host_id, hostname, time_ms, paths_json, \
-         tags_json, incomplete, errors_total, warnings_total, stats_json, discovered_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 0, 0, 0, $8, 0)",
+         tags_json, incomplete, errors_total, warnings_total, stats_json, discovered_at, \
+         received_at, verified_at, verified_by) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 0, 0, 0, $8, 0, $5, $5, 'server')",
     )
     .bind(snapshot_id(n))
     .bind(repo)
