@@ -453,6 +453,20 @@ async fn mark_and_repack(
     )
     .await?
     .context("repacking sparse packs")?;
+    if !repacked.skipped.is_empty() {
+        let packs: Vec<String> = repacked
+            .skipped
+            .iter()
+            .map(|(id, reason)| format!("{} ({reason})", pack_object_key(id)))
+            .collect();
+        let message = format!(
+            "{} pack(s) could not be repacked and stay in place: {}. Run a full check of the \
+             repository.",
+            packs.len(),
+            packs.join("; ")
+        );
+        event(state, &cycle.id, "warning", "repack_skipped", &message).await;
+    }
     if let Some(shard) = repacked.shard {
         record_verified(state, &cycle.repository_id, &[shard])
             .await

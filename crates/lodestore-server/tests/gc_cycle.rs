@@ -1908,6 +1908,49 @@ async fn gc_cycle_upgrades_before_attesting() {
     }
 }
 
+/// A pack chosen for repacking whose key does not open stays in place, and
+/// the cycle says so.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_cycle_reports_packs_it_could_not_repack() {
+    for backend in backends() {
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let packs = ts.local_repo_root("main").join("packs");
+        let a = backup_files(&ts, "main", "a", 11).await;
+        let of_a = files_under(&packs);
+        backup_files(&ts, "main", "b", 12).await;
+        forget_snapshot(&ts, "main", &a.id);
+        for path in &of_a {
+            let mut bytes = std::fs::read(path).unwrap();
+            bytes[PACK_PREFIX_LEN - 1] ^= 0xFF;
+            std::fs::write(path, bytes).unwrap();
+        }
+        age_packs(&ts, "main");
+        enable(&ts, &api, &repo).await;
+
+        let id = run_cycle(&api, &repo).await;
+        let later = after_pause(&ts, &id).await;
+        steps(&ts, &id, later).await;
+
+        assert_eq!(
+            events_of(&ts, &id, "repack_skipped").await,
+            1,
+            "[{}]",
+            backend.name()
+        );
+        let message: String = sqlx::query_scalar(
+            "SELECT message FROM gc_events WHERE cycle_id = $1 AND kind = 'repack_skipped'",
+        )
+        .bind(&id)
+        .fetch_one(&ts.state().db.pool)
+        .await
+        .unwrap();
+        assert!(message.contains("packs/"), "{message}");
+        ts.stop().await;
+    }
+}
+
 /// An attestation a writer key planted fails the MAC: the cycle reports it
 /// and removes it, and keeps what a valid one says.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
