@@ -8,7 +8,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, bail};
-use lodestore_format::attest::{consolidate_attestations, read_attestations};
+use lodestore_format::attest::{consolidate_attestations, put_attestation, read_attestations};
+use lodestore_format::check::is_data_error;
 use lodestore_format::crypto::{BlobId, Entropy};
 use lodestore_format::gc::compact::{compact_plan, write_compacted};
 use lodestore_format::gc::mark::ShardSet;
@@ -26,6 +27,7 @@ use lodestore_format::locks::{
 };
 use lodestore_format::pack::pack_object_key;
 use lodestore_format::store::{BlobDelete, BlobPurge, BlobStore, Store, put_named};
+use lodestore_format::verify_snapshot::verify_shard;
 use lodestore_policy::{format_duration, format_size};
 use sqlx::Row;
 
@@ -360,6 +362,42 @@ async fn remove_stale_markers(
     Ok(())
 }
 
+/// Signs the shards the rebuild wrote once every frame they name opens, so
+/// the next rebuild counts their packs as indexed instead of writing them
+/// again. A shard whose frames do not open stays unsigned.
+async fn vouch_rebuilt(
+    state: &AppState,
+    repository_id: &str,
+    source: &OpenRepository,
+    written: &[BlobId],
+) -> anyhow::Result<()> {
+    let mut vouched = Vec::new();
+    for id in written {
+        match verify_shard(&source.store, &source.keys, id).await {
+            Ok(Some(_)) => vouched.push(*id),
+            Ok(None) => {}
+            Err(error) if is_data_error(&error) => {
+                tracing::warn!(shard = %hex32(id), %error, "a rebuilt index shard does not open");
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    if vouched.is_empty() {
+        return Ok(());
+    }
+    record_verified(state, repository_id, &vouched).await?;
+    put_attestation(
+        &source.store,
+        &source.keys,
+        &vouched,
+        &[],
+        Vec::new(),
+        &mut Entropy::os(),
+    )
+    .await?;
+    Ok(())
+}
+
 async fn mark_and_repack(
     state: &AppState,
     cycle: &CycleRow,
@@ -376,7 +414,7 @@ async fn mark_and_repack(
         .await
         .context("removing old cleanup markers")?;
 
-    tracked(
+    let rebuilt = tracked(
         state,
         &cycle.id,
         &seen,
@@ -384,6 +422,9 @@ async fn mark_and_repack(
     )
     .await?
     .context("rebuilding the index")?;
+    vouch_rebuilt(state, &cycle.repository_id, &source, &rebuilt.written)
+        .await
+        .context("signing the rebuilt index")?;
 
     let opts = PlanOptions {
         now_ms,

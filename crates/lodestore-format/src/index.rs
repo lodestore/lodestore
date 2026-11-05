@@ -531,6 +531,8 @@ pub struct RebuildReport {
     pub packs_scanned: u64,
     pub packs_indexed: u64,
     pub shards_written: u64,
+    /// Ids of the shards written, in order.
+    pub written: Vec<BlobId>,
     /// `(object key, reason)` of every pack that could not be parsed.
     pub packs_skipped: Vec<(String, String)>,
     /// `(object key, reason)` of every index shard that could not be opened.
@@ -543,6 +545,8 @@ pub struct RebuildReport {
 /// vouches for cannot hide a pack from the rebuild; before that every shard
 /// counts, as nothing is attested yet. The shards written here are not
 /// attested: the header of a pack is written by whoever uploaded the pack.
+/// Their ids are in [`RebuildReport::written`] so a server can open their
+/// frames and sign them.
 /// Packs are not hashed: a pack whose bytes differ from its name is only noticed when a blob of it is read.
 /// Packs a running cleanup marked for deletion are left alone: indexing one
 /// of them again would make a shard name a pack that is about to go.
@@ -651,6 +655,7 @@ async fn write_rebuilt_shard<S: BlobStore>(
     )?;
     put_named(store, &index_object_key(&id), bytes).await?;
     report.shards_written += 1;
+    report.written.push(id);
     Ok(())
 }
 

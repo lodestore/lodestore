@@ -2064,3 +2064,61 @@ async fn gc_cycle_resumed_in_verifying_upgrades_first() {
         ts.stop().await;
     }
 }
+
+/// A pack named only by a shard nobody vouches for is re-indexed once: the
+/// cycle signs the shard it rebuilt, so the next cycle finds the pack indexed
+/// instead of writing yet another shard for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_cycle_signs_rebuilt_index() {
+    for backend in backends() {
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        enable(&ts, &api, &repo).await;
+        let upgrade = run_cycle(&api, &repo).await;
+        wait_state(&ts, &upgrade, "done").await;
+        backup_files(&ts, "main", "a", 21).await;
+        age_packs(&ts, "main");
+
+        let id = run_cycle(&api, &repo).await;
+        wait_state(&ts, &id, "done").await;
+        let after_first = files_under(&ts.local_repo_root("main").join("index")).len();
+
+        let store = LocalFsStore::new(ts.local_repo_root("main"));
+        let opened = Repository::open(&store, PASSWORD).await.unwrap();
+        let keys = opened.read_keys();
+        let attested = read_attestations(&store, keys).await.unwrap().shards;
+        let mut named = std::collections::HashSet::new();
+        for shard in &attested {
+            let bytes = std::fs::read(ts.local_repo_root("main").join(index_object_key(shard)));
+            let Ok(bytes) = bytes else { continue };
+            let shard = open_shard(keys.k_idx(), keys.repo_id(), shard, &bytes).unwrap();
+            named.extend(
+                shard
+                    .packs
+                    .into_iter()
+                    .map(|p| hex32(&p.pack_id.try_into().unwrap())),
+            );
+        }
+        let packs = files_under(&ts.local_repo_root("main").join("packs"));
+        assert!(!packs.is_empty());
+        for pack in packs {
+            let name = pack.file_name().unwrap().to_string_lossy().into_owned();
+            assert!(
+                named.contains(&name),
+                "[{}] {name} is not signed",
+                backend.name()
+            );
+        }
+
+        let second = run_cycle(&api, &repo).await;
+        wait_state(&ts, &second, "done").await;
+        assert_eq!(
+            files_under(&ts.local_repo_root("main").join("index")).len(),
+            after_first,
+            "[{}] the second cycle wrote index shards again",
+            backend.name()
+        );
+        ts.stop().await;
+    }
+}
