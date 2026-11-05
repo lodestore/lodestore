@@ -288,6 +288,8 @@ async fn verify_job(state: &AppState, job_id: &str, target: &Target) -> anyhow::
         Err(error) => return Ok(classify(&error)),
     };
     let mut verified = load_verified(state, repository).await?;
+    // Every lying shard of this pass is recorded, so a hint naming many costs one backup.
+    let mut lies = Vec::new();
     for shard in &refs {
         if verified.contains(shard) {
             continue;
@@ -298,13 +300,16 @@ async fn verify_job(state: &AppState, job_id: &str, target: &Target) -> anyhow::
                 verified.insert(*shard);
             }
             Ok(None) => {}
-            Err(error) => {
-                if is_data_error(&error) {
-                    distrust(state, job_id, repository, shard, &error.to_string()).await;
-                }
-                return Ok(classify(&error));
-            }
+            Err(error) if is_data_error(&error) => lies.push((*shard, error.to_string())),
+            Err(error) if lies.is_empty() => return Ok(classify(&error)),
+            Err(_) => break,
         }
+    }
+    if let Some((_, reason)) = lies.first() {
+        for (shard, reason) in &lies {
+            distrust(state, job_id, repository, shard, reason).await;
+        }
+        return Ok(Verdict::Failed(reason.clone()));
     }
     let check = match check_snapshot_resolves(store, keys, &snapshot, &verified, &attested).await {
         Ok(check) => check,

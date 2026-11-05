@@ -20,6 +20,7 @@ use lodestore_format::keys::{KdfCost, WriteKeys};
 use lodestore_format::reader::{Reader, RestoreOptions};
 use lodestore_format::repo::{InitOptions, PendingInit, Repository};
 use lodestore_format::store::LocalFsStore;
+use lodestore_server::maintenance::attest::load_distrusted;
 use lodestore_server::repos::db::{NewRepository, RepoLocation, create_repository};
 use serde_json::{Value, json};
 use sqlx::Row;
@@ -178,8 +179,9 @@ async fn adv_lying_attested_shard_costs_one_backup() {
     ts.stop().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn adv_planted_attestation_hint_costs_one_backup() {
+/// One hint names a shard per file; every file of the backup dedups against
+/// a lying shard, and the host still loses only one backup.
+async fn planted_hint_costs_one_backup(files: &[&[u8]]) {
     let env = AgentEnv::start(&Backend::Sqlite).await;
     let first = source(&env, "first", b"the first backup, nothing planted");
     let job = run_backup(&env, 0, &first).await;
@@ -205,18 +207,40 @@ async fn adv_planted_attestation_hint_costs_one_backup() {
         &std::fs::read_to_string(env.paths.writer_keys()).expect("the agent's writer keys"),
     )
     .unwrap();
-    let content = b"a file the attacker names through an attestation hint".to_vec();
     let root = env.ts().local_repo_root("main");
     let store = LocalFsStore::new(root.clone());
-    let shard = plant_blobs(
-        &store,
-        &keys,
-        &[(blob_id(&keys.k_id, &content), BLOB_TYPE_DATA)],
-    )
-    .await;
-    plant_attestation_hint(&store, &[shard]).await;
+    let dir = env.work.path().join("planted");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut shards = Vec::new();
+    for (n, content) in files.iter().enumerate() {
+        std::fs::write(dir.join(format!("file-{n}.txt")), content).unwrap();
+        let id = blob_id(&keys.k_id, content);
+        shards.push(plant_blobs(&store, &keys, &[(id, BLOB_TYPE_DATA)]).await);
+    }
+    plant_attestation_hint(&store, &shards).await;
 
-    let dir = source(&env, "planted", &content);
     assert_costs_one_backup(&env, &dir, root).await;
+    let distrusted = load_distrusted(env.ts().state(), &env.repo).await.unwrap();
+    for shard in &shards {
+        assert!(
+            distrusted.contains(shard),
+            "a planted shard was not distrusted"
+        );
+    }
     env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adv_planted_attestation_hint_costs_one_backup() {
+    planted_hint_costs_one_backup(&[b"a file the attacker names through an attestation hint"])
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adv_two_lying_shards_cost_one_backup() {
+    planted_hint_costs_one_backup(&[
+        b"the first file the attacker names through an attestation hint",
+        b"the second file the attacker names through the same hint",
+    ])
+    .await;
 }
