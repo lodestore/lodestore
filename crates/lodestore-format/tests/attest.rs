@@ -2,12 +2,13 @@
 //! key, never forgeable with writer keys, invisible to the 0.1 lock readers.
 
 use std::ops::Range;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use bytes::Bytes;
 use lodestore_format::attest::{
     ATTEST_FRAME_V1, ATTEST_PREFIX, MARKER_LEGACY_SHARDS, MAX_ATTEST_SIZE, attest_key,
     open_attestation, open_provenance, peek_attestation, peek_attestations, put_attestation,
-    read_attestations, seal_attestation, seal_provenance,
+    read_attestations, read_attestations_complete, seal_attestation, seal_provenance,
 };
 use lodestore_format::crypto::{Entropy, attest_mac};
 use lodestore_format::keys::{MasterKey, ReadKeys};
@@ -292,7 +293,23 @@ async fn attest_peek_reads_shards_without_key() {
 struct Wrapped<S> {
     inner: S,
     deny_list: bool,
+    deny_get: bool,
     inflate: u64,
+    /// Listings still to come that name an attestation which is gone by the
+    /// time it is read.
+    ghosts: AtomicUsize,
+}
+
+impl<S> Wrapped<S> {
+    fn new(inner: S) -> Self {
+        Wrapped {
+            inner,
+            deny_list: false,
+            deny_get: false,
+            inflate: 0,
+            ghosts: AtomicUsize::new(0),
+        }
+    }
 }
 
 impl<S: BlobStore> BlobStore for Wrapped<S> {
@@ -302,6 +319,11 @@ impl<S: BlobStore> BlobStore for Wrapped<S> {
 
     async fn get(&self, key: &str) -> Result<Bytes, BlobError> {
         assert_eq!(self.inflate, 0, "an oversized object must not be fetched");
+        if self.deny_get {
+            return Err(BlobError::Denied {
+                message: "AccessDenied".into(),
+            });
+        }
         self.inner.get(key).await
     }
 
@@ -318,6 +340,17 @@ impl<S: BlobStore> BlobStore for Wrapped<S> {
         let mut listed = self.inner.list(prefix).await?;
         for entry in &mut listed {
             entry.size += self.inflate;
+        }
+        if self.ghosts.load(Ordering::SeqCst) > 0 {
+            self.ghosts.fetch_sub(1, Ordering::SeqCst);
+            listed.insert(
+                0,
+                ListEntry {
+                    key: attest_key(&new_lock_id(&mut entropy(99))),
+                    size: 100,
+                    modified_ms: None,
+                },
+            );
         }
         Ok(listed)
     }
@@ -337,13 +370,50 @@ async fn attest_peek_denied_is_empty() {
     .await
     .unwrap();
     let store = Wrapped {
-        inner,
         deny_list: true,
-        inflate: 0,
+        ..Wrapped::new(inner)
     };
     let peeked = peek_attestations(&store).await.unwrap();
     assert!(peeked.shards.is_empty());
     assert!(peeked.markers.is_empty());
+    assert!(peeked.denied);
+
+    let store = Wrapped {
+        deny_list: false,
+        deny_get: true,
+        ..store
+    };
+    let peeked = peek_attestations(&store).await.unwrap();
+    assert!(peeked.shards.is_empty());
+    assert!(peeked.denied);
+
+    let store = Wrapped::new(store.inner);
+    assert!(!peek_attestations(&store).await.unwrap().denied);
+}
+
+#[tokio::test]
+async fn attest_complete_read_retries_a_vanished_object() {
+    let (_tmp, inner) = store();
+    let keys = keys();
+    put_attestation(
+        &inner,
+        &keys,
+        &[],
+        &[MARKER_LEGACY_SHARDS],
+        Vec::new(),
+        &mut entropy(1),
+    )
+    .await
+    .unwrap();
+    let store = Wrapped::new(inner);
+    store.ghosts.store(1, Ordering::SeqCst);
+    let set = read_attestations_complete(&store, &keys).await.unwrap();
+    assert!(!set.incomplete);
+    assert!(set.markers.contains(&MARKER_LEGACY_SHARDS));
+
+    store.ghosts.store(usize::MAX, Ordering::SeqCst);
+    let err = read_attestations_complete(&store, &keys).await.unwrap_err();
+    assert!(err.to_string().contains("changed while reading"), "{err}");
 }
 
 #[tokio::test]
@@ -361,9 +431,8 @@ async fn attest_oversized_listing_is_rejected_without_get() {
     .await
     .unwrap();
     let store = Wrapped {
-        inner,
-        deny_list: false,
         inflate: MAX_ATTEST_SIZE,
+        ..Wrapped::new(inner)
     };
     let set = read_attestations(&store, &keys).await.unwrap();
     assert!(set.shards.is_empty());

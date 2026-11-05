@@ -4,14 +4,17 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use lodestore_format::Error;
-use lodestore_format::attest::{MARKER_LEGACY_SHARDS, peek_attestations, read_attestations};
+use lodestore_format::attest::{
+    AttestedSet, MARKER_LEGACY_SHARDS, UnverifiedAttestations, peek_attestations,
+    read_attestations_complete,
+};
 use lodestore_format::crypto::{BlobId, Entropy};
 use lodestore_format::index::{hex32, parse_hex32};
 use lodestore_format::keys::{ReadKeys, WriteKeys};
 use lodestore_format::locks::{
     LockId, UNMARKED_WRITER_LIMIT, close_writer_marker, put_writer_marker, writer_marker_key,
 };
-use lodestore_format::provenance::ProvenanceSet;
+use lodestore_format::provenance::{ATTESTATIONS_MISSING, ProvenanceSet};
 use lodestore_format::reader::Reader;
 use lodestore_format::repo::Repository;
 use lodestore_format::store::{BlobError, BlobStore, Store, open_url};
@@ -116,6 +119,7 @@ pub struct Opened {
 }
 
 const WRITER_KEYS_UPGRADED: &str = "this repository is upgraded for server signatures, and writer keys cannot check a backup here. Back up through the agent (`lode backup --stdin` over its socket) or with the repository password or recovery key.";
+const WRITER_KEYS_DENIED: &str = "cannot read locks/ in the repository (access denied), so writer keys cannot tell whether a server has upgraded it for signatures. Update the key policy (see https://lodestore.dev/docs/guides/gc/) or pass --no-gc-check if no Lodestore server manages this repository.";
 
 pub const MAX_CACHED_SHARDS: usize = 262_144;
 const VERIFIED_FILE: &str = "verified-shards";
@@ -148,6 +152,18 @@ fn cache_base() -> Option<PathBuf> {
         })
 }
 
+fn cache_dir(repo_id: &[u8]) -> Option<PathBuf> {
+    cache_base().map(|base| {
+        base.join("lode")
+            .join(data_encoding::HEXLOWER.encode(repo_id))
+    })
+}
+
+/// This machine has seen the repository carry server signatures.
+fn upgrade_marked(repo_id: &[u8]) -> bool {
+    cache_dir(repo_id).is_some_and(|dir| dir.join(UPGRADED_FILE).exists())
+}
+
 fn read_ids(path: &Path) -> Vec<BlobId> {
     let Ok(text) = std::fs::read_to_string(path) else {
         return Vec::new();
@@ -178,15 +194,12 @@ fn write_ids(dir: &Path, name: &str, ids: &[BlobId]) -> Result<()> {
 
 impl ShardCache {
     pub fn load(repo_id: &[u8]) -> Self {
-        let Some(base) = cache_base() else {
+        let Some(dir) = cache_dir(repo_id) else {
             eprintln!(
                 "warning: no cache folder (set HOME or XDG_CACHE_HOME); every backup in this repository downloads the packs of its signed shards again"
             );
             return Self::default();
         };
-        let dir = base
-            .join("lode")
-            .join(data_encoding::HEXLOWER.encode(repo_id));
         let verified_order = read_ids(&dir.join(VERIFIED_FILE));
         let distrusted_order = read_ids(&dir.join(DISTRUSTED_FILE));
         Self {
@@ -275,6 +288,12 @@ fn check_locks_readable(writer: &Writer<Store>, no_gc_check: bool) -> Result<()>
     )
 }
 
+/// The attestations, read whole, and whether the upgrade marker is among them.
+async fn read_upgraded(store: &Store, keys: &ReadKeys) -> Result<(bool, AttestedSet)> {
+    let set = read_attestations_complete(store, keys).await?;
+    Ok((set.markers.contains(&MARKER_LEGACY_SHARDS), set))
+}
+
 /// Writes the writer marker before anything is read from the repository, so a
 /// manifest published after that is seen by the writer or held back by the
 /// marker. Whatever fails afterwards closes the marker again.
@@ -289,10 +308,19 @@ pub async fn open_for_write(
     }
     let (store, repo) = open_repository(url, args).await?;
     let keys = repo.read_keys().write_keys(repo.config_hash());
+    // Checked before the marker so a refused run writes nothing, and again
+    // after it, from the read the backup then relies on.
+    let marked = upgrade_marked(repo.read_keys().repo_id());
+    if marked && !read_upgraded(&store, repo.read_keys()).await?.0 {
+        anyhow::bail!(ATTESTATIONS_MISSING);
+    }
     let marker = put_marker(url, &keys, hostname).await?;
     let opened = async {
-        let attestations = read_attestations(&store, repo.read_keys()).await?;
-        let strict = if attestations.markers.contains(&MARKER_LEGACY_SHARDS) {
+        let (is_upgraded, attestations) = read_upgraded(&store, repo.read_keys()).await?;
+        if marked && !is_upgraded {
+            anyhow::bail!(ATTESTATIONS_MISSING);
+        }
+        let strict = if is_upgraded {
             let mut cache = ShardCache::load(repo.read_keys().repo_id());
             cache.upgraded = true;
             Some(Strict {
@@ -365,8 +393,8 @@ async fn open_with_writer_keys(
     let hints = peek_attestations(&store)
         .await
         .with_context(|| format!("cannot back up to {url}"))?;
-    if hints.markers.contains(&MARKER_LEGACY_SHARDS) {
-        anyhow::bail!(WRITER_KEYS_UPGRADED);
+    if let Some(refusal) = writer_keys_refusal(&hints, upgrade_marked(&keys.repo_id), no_gc_check) {
+        anyhow::bail!(refusal);
     }
     let marker = put_marker(url, &keys, hostname).await?;
     let opened = async {
@@ -389,5 +417,48 @@ async fn open_with_writer_keys(
             marker.close().await;
             Err(e)
         }
+    }
+}
+
+/// Writer keys cannot check a backup in an upgraded repository (D-32). One
+/// they cannot tell about counts as upgraded unless `--no-gc-check` says no
+/// server manages it, and only a server upgrades a repository.
+fn writer_keys_refusal(
+    hints: &UnverifiedAttestations,
+    marked: bool,
+    no_gc_check: bool,
+) -> Option<&'static str> {
+    if marked || hints.markers.contains(&MARKER_LEGACY_SHARDS) {
+        Some(WRITER_KEYS_UPGRADED)
+    } else if hints.denied && !no_gc_check {
+        Some(WRITER_KEYS_DENIED)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn writer_keys_refuse_when_locks_cannot_be_read() {
+        let mut hints = UnverifiedAttestations::default();
+        assert_eq!(writer_keys_refusal(&hints, false, false), None);
+        assert_eq!(
+            writer_keys_refusal(&hints, true, true),
+            Some(WRITER_KEYS_UPGRADED)
+        );
+        hints.denied = true;
+        assert_eq!(
+            writer_keys_refusal(&hints, false, false),
+            Some(WRITER_KEYS_DENIED)
+        );
+        assert_eq!(writer_keys_refusal(&hints, false, true), None);
+        hints.markers.insert(MARKER_LEGACY_SHARDS);
+        assert_eq!(
+            writer_keys_refusal(&hints, false, true),
+            Some(WRITER_KEYS_UPGRADED)
+        );
     }
 }

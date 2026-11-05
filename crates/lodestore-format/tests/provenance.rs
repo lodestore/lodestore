@@ -4,7 +4,10 @@
 mod adv_support;
 mod gc_support;
 
+use std::ops::Range;
+
 use adv_support::attacker_keys;
+use bytes::Bytes;
 use gc_support::Fx;
 use lodestore_format::attest::{
     AttestedSet, MARKER_LEGACY_SHARDS, attest_key, ensure_upgraded, put_attestation,
@@ -18,7 +21,7 @@ use lodestore_format::pb;
 use lodestore_format::provenance::{LatestMode, LatestWarning, ProvenanceSet, Signer, pick_latest};
 use lodestore_format::reader::Reader;
 use lodestore_format::snapshot::SnapshotEntry;
-use lodestore_format::store::put_named;
+use lodestore_format::store::{BlobError, BlobStore, ListEntry, LocalFsStore, put_named};
 use lodestore_format::writer::{BackupOptions, Writer};
 use rand_chacha::ChaCha20Rng;
 use rand_chacha::rand_core::{Rng, SeedableRng};
@@ -340,4 +343,76 @@ fn provenance_latest_expected_upgrade_without_attestations_refuses() {
     let set = signed(&[record(id(1), "h", "j", 5)]);
     let pick = pick_latest(entries, &set, NOW_MS, true).unwrap();
     assert_eq!(pick.mode, LatestMode::Strict);
+}
+
+#[test]
+fn provenance_latest_strict_skips_future_storage_time() {
+    let set = signed(&[
+        record(id(1), "h", "j", 10),
+        record(id(2), "h", "j", 10),
+        record(id(3), "h", "j", (NOW_MS + DAY_MS) / 1000),
+    ]);
+    let entries = vec![
+        entry(1, Some(NOW_MS - HOUR_MS), 0),
+        entry(2, Some(NOW_MS + 2 * DAY_MS), 0),
+        entry(3, None, 0),
+    ];
+    let pick = pick_latest(entries, &set, NOW_MS, false).unwrap();
+    assert_eq!((pick.entry.id, pick.mode), (id(1), LatestMode::Strict));
+    assert!(pick.warnings.contains(&LatestWarning::FutureStored {
+        count: 2,
+        newest: id(2)
+    }));
+
+    let set = signed(&[record(id(2), "h", "j", 10)]);
+    let entries = vec![entry(1, Some(5), 5), entry(2, Some(NOW_MS + DAY_MS), 0)];
+    let err = pick_latest(entries, &set, NOW_MS, false).unwrap_err();
+    assert!(text(err).contains("stored with a time in the future"));
+}
+
+/// Lists one attestation more than there is, as a listing taken just before
+/// a cleanup cycle swept it does.
+struct Vanishing<'a>(&'a LocalFsStore);
+
+impl BlobStore for Vanishing<'_> {
+    async fn put_if_absent(&self, key: &str, data: Bytes) -> Result<(), BlobError> {
+        self.0.put_if_absent(key, data).await
+    }
+
+    async fn get(&self, key: &str) -> Result<Bytes, BlobError> {
+        self.0.get(key).await
+    }
+
+    async fn get_range(&self, key: &str, range: Range<u64>) -> Result<Bytes, BlobError> {
+        self.0.get_range(key, range).await
+    }
+
+    async fn list(&self, prefix: &str) -> Result<Vec<ListEntry>, BlobError> {
+        let mut listed = self.0.list(prefix).await?;
+        if prefix == "locks/" {
+            listed.push(ListEntry {
+                key: attest_key(&new_lock_id(&mut Entropy::os())),
+                size: 100,
+                modified_ms: None,
+            });
+        }
+        Ok(listed)
+    }
+}
+
+#[tokio::test]
+async fn provenance_reader_refuses_a_partial_attestation_read() {
+    let fx = Fx::new().await;
+    let honest = fx.backup("one", &[("f", 1, 1000)]).await.snapshot_id;
+    upgrade(&fx).await;
+    sign(&fx, &[record(honest, "h", "j", 10)]).await;
+    let r = Reader::open(
+        Vanishing(&fx.store),
+        fx.repo.read_keys().duplicate(),
+        fx.repo.config(),
+    )
+    .unwrap();
+    let err = r.provenance().await.unwrap_err();
+    assert!(err.to_string().contains("changed while reading"), "{err}");
+    assert!(r.resolve_latest(false).await.is_err());
 }

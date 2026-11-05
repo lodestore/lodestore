@@ -332,3 +332,51 @@ async fn cli_strict_backup_sets_upgrade_mark() {
     backup(&fx.repo, &fx.src);
     assert_eq!(upgrade_marks(&fx.repo).len(), 1, "no upgrade mark");
 }
+
+fn repo_files(dir: &Path) -> std::collections::BTreeSet<PathBuf> {
+    let mut out = std::collections::BTreeSet::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            out.extend(repo_files(&path));
+        } else {
+            out.insert(path);
+        }
+    }
+    out
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cli_backup_refuses_when_attestations_vanish() {
+    let fx = fixture();
+    sign(&fx.repo, &[]).await;
+    backup(&fx.repo, &fx.src);
+    assert_eq!(upgrade_marks(&fx.repo).len(), 1, "no upgrade mark");
+    for path in repo_files(&fx.repo.join("locks")) {
+        if path
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with("attest-"))
+        {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+    let before = repo_files(&fx.repo);
+
+    for args in [
+        vec!["backup", fx.src.to_str().unwrap()],
+        vec!["backup", "--parent", "latest", fx.src.to_str().unwrap()],
+        vec!["backup", "--stdin", "--name", "x"],
+    ] {
+        let refused = lode(&fx.repo)
+            .args(&args)
+            .write_stdin("some data")
+            .assert()
+            .failure();
+        let stderr = String::from_utf8_lossy(&refused.get_output().stderr).into_owned();
+        assert!(
+            stderr.contains("may have been deleted"),
+            "{args:?}: {stderr}"
+        );
+        assert_eq!(repo_files(&fx.repo), before, "{args:?} wrote to the bucket");
+    }
+}

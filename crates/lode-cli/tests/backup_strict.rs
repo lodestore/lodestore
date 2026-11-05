@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 
 use adv_support::{attacker_keys, plant_blobs};
 use common::{PASSWORD, cache_dir_of, init_repo, lode, pseudo_random, restored_path, stdout_of};
-use lodestore_format::attest::{ensure_upgraded, read_attestations};
+use lodestore_format::attest::{
+    ensure_upgraded, put_attestation, read_attestations, seal_provenance,
+};
 use lodestore_format::chunker::blob_id;
 use lodestore_format::crypto::{BLOB_TYPE_DATA, BlobId, Entropy};
 use lodestore_format::index::{hex32, parse_hex32};
@@ -292,4 +294,74 @@ async fn backup_writer_keys_refused_in_upgraded_repo() {
         );
         assert_eq!(objects_outside_attestations(&fx.repo), before);
     }
+}
+
+const YEAR_2099: i64 = 4_070_908_800;
+
+/// A snapshot of `src` written with writer keys whose manifest claims this
+/// host's name and the year 2099.
+async fn plant_own_host(repo: &Path, src: &Path) -> BlobId {
+    let (store, repository) = open(repo).await;
+    let keys = repository.read_keys().write_keys(repository.config_hash());
+    let mut writer = Writer::new(&store, keys, repository.config())
+        .await
+        .unwrap();
+    let options = BackupOptions {
+        hostname: Some(lodestore_format::fs::hostname()),
+        time: Some(pb::Timestamp {
+            seconds: YEAR_2099,
+            nanos: 0,
+        }),
+        ..Default::default()
+    };
+    writer
+        .backup(&[src.to_path_buf()], options, &|_| {})
+        .await
+        .unwrap()
+        .snapshot_id
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn backup_strict_parent_ignores_another_hosts_signed_snapshot() {
+    let fx = fixture();
+    upgrade(&fx.repo).await;
+    let first = snapshot_id(&summary(&fx.repo, &fx.src));
+
+    let forged = plant_own_host(&fx.repo, &fx.src).await;
+    let (store, repository) = open(&fx.repo).await;
+    let keys = repository.read_keys();
+    let record = pb::ProvenanceRecord {
+        snapshot_id: forged.to_vec(),
+        host_id: "host-db01".into(),
+        hostname: "db01".into(),
+        job_id: "job-1".into(),
+        verified_at: Some(pb::Timestamp {
+            seconds: 1_700_000_000,
+            nanos: 0,
+        }),
+    };
+    let sealed = seal_provenance(keys, &record, &mut Entropy::os()).unwrap();
+    put_attestation(&store, keys, &[], &[], vec![sealed], &mut Entropy::os())
+        .await
+        .unwrap();
+    assert!(provenance(&fx.repo).await.contains(&forged));
+
+    let second = summary(&fx.repo, &fx.src);
+    assert_eq!(second["parent"], hex32(&first));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn backup_strict_warns_on_unsigned_explicit_parent() {
+    let fx = fixture();
+    upgrade(&fx.repo).await;
+    summary(&fx.repo, &fx.src);
+    let unsigned = plant_own_host(&fx.repo, &fx.src).await;
+
+    let out = lode(&fx.repo)
+        .args(["backup", "--parent", &hex32(&unsigned)])
+        .arg(&fx.src)
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr).to_string();
+    assert!(stderr.contains("is not signed"), "{stderr}");
 }

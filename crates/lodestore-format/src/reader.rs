@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use crate::Fut;
-use crate::attest::read_attestations;
+use crate::attest::{read_attestations, read_attestations_complete};
 use crate::check::is_data_error;
 use crate::chunker::blob_id;
 use crate::config;
@@ -267,9 +267,10 @@ impl<S: BlobStore> Reader<S> {
         list_snapshots(&self.store, &self.keys).await
     }
 
-    /// What the server and the password holder have signed.
+    /// What the server and the password holder have signed. A read that a
+    /// cleanup cycle keeps changing is an error, never a partial set.
     pub async fn provenance(&self) -> Result<ProvenanceSet> {
-        let set = read_attestations(&self.store, &self.keys).await?;
+        let set = read_attestations_complete(&self.store, &self.keys).await?;
         Ok(ProvenanceSet::from_attested(&set, &self.keys))
     }
 
@@ -287,6 +288,8 @@ impl<S: BlobStore> Reader<S> {
     }
 
     /// Finds a snapshot by `latest`, its full id or a unique hex prefix.
+    /// `latest` here assumes the caller knows nothing of an earlier upgrade;
+    /// a caller that keeps that knowledge calls [`Reader::resolve_latest`].
     pub async fn resolve_snapshot(&self, spec: &str) -> Result<SnapshotEntry> {
         if spec == "latest" {
             return Ok(self.resolve_latest(false).await?.entry);
