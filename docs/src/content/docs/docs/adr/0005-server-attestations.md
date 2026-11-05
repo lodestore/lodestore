@@ -38,7 +38,7 @@ The MAC is keyed BLAKE3 under `k_srv`. Its input, in order, is the domain `lodes
 
 ### What an attestation means
 
-The server trusts the records of an attested shard when it applies `supersedes` and when it collects garbage. An attestation does not mean the server opened the frames of that shard's packs. A check of a finished backup relies only on shards whose frames the server opened itself; the server keeps that list, and it is not a reading of the attestation objects.
+The server trusts the records of an attested shard when it applies `supersedes` and when it collects garbage. An attestation does not mean the server opened the frames of that shard's packs. A check of a finished backup relies only on shards whose frames the server opened itself; the server keeps that list, and it is not a reading of the attestation objects. After such a check the server attests the host's shards it opened, except a shard that lists `supersedes`: opened frames do not vouch for that list.
 
 `format_version` stays 1. A new object kind under `locks/` does not change how any existing object is read, and readers that do not know the prefix skip it.
 
@@ -48,7 +48,7 @@ The agent's bucket policy already lets it read under `locks/` (it reads the clea
 
 ### What each side checks
 
-The server and `lode`, holding the master key, read every `locks/attest-*` object, drop those whose MAC does not verify (they are reported and ignored, because a planted object must not stop the server), and use the rest. The agent cannot verify a MAC. For the agent an attestation is a hint for deduplication; the boundary of trust is the server-side check and the collector, described in the threat model.
+The server and `lode`, holding the master key, read every `locks/attest-*` object, drop those whose MAC does not verify (they are reported and ignored, because a planted object must not stop the server; a cleanup cycle then deletes them), and use the rest. The agent cannot verify a MAC. For the agent an attestation is a hint for deduplication; the boundary of trust is the server-side check and the collector, described in the threat model.
 
 On a local-folder repository the agent can write into `locks/`. The MAC stops it from forging an attestation, but it does not stop deletion of attestations or re-planting of old ones. The consequences, and the server's refusal to sign again a repository that has attestations without marker `1`, are described in the threat model.
 

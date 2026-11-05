@@ -121,7 +121,9 @@ A cycle that fails before it deletes anything takes its own marker down. One tha
 
 After a backup finishes, the server opens the new frames the snapshot depends on and checks that every tree and data blob resolves through shards it has checked. It downloads each new byte once, so plan for that egress. The agent is not kept waiting: the job can become `failed` after it finished. If the check fails, the job ends as `failed` with the error code `verification_failed`, the snapshot carries `unverified_reason` in the snapshot list of the API, and the alert for a failed backup fires. If the server cannot run the check, for example because the storage is unreachable, it retries for at most one hour from the first failure, and then the job becomes `failed` with `verification_failed` too.
 
-Reads and cleanup do not depend on this check. When a restore finds that the first known copy of a blob does not open, it tries the other copies listed by the index, including those of shards that a newer shard replaced, and every frame is authenticated by the blob id.
+The check counts only a snapshot that belongs to the job: a job that reports a snapshot the catalog already links to another job fails it. The hour of retries is measured on the server's clock from the first failed attempt.
+
+Reads and cleanup do not depend on this check. When `lode restore`, or a read the server makes while browsing a snapshot, finds that the first known copy of a blob does not open, it tries the other copies listed by the index, including those of shards that a newer shard replaced, and every frame is authenticated by the blob id. A restore run by an agent and a download as an archive do not try other copies yet: they read each file's data from the first known copy only.
 
 ## Reading a report
 

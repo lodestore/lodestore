@@ -10,7 +10,9 @@ use anyhow::Context;
 use lodestore_format::attest::{put_attestation, read_attestations};
 use lodestore_format::check::is_data_error;
 use lodestore_format::crypto::{BlobId, Entropy};
-use lodestore_format::index::parse_hex32;
+use lodestore_format::index::{hex32, index_object_key, open_shard, parse_hex32};
+use lodestore_format::keys::ReadKeys;
+use lodestore_format::store::BlobStore;
 use lodestore_format::verify_snapshot::{
     check_snapshot_resolves, snapshot_index_refs, verify_shard,
 };
@@ -146,14 +148,6 @@ async fn ensure_catalog_row(
     job_id: &str,
     target: &Target,
 ) -> anyhow::Result<Option<Verdict>> {
-    let known = sqlx::query("SELECT 1 FROM snapshots WHERE id = $1")
-        .bind(&target.snapshot_id)
-        .fetch_optional(&state.db.pool)
-        .await?
-        .is_some();
-    if known {
-        return Ok(None);
-    }
     let link = JobLink {
         job_id,
         host_id: &target.host_id,
@@ -199,7 +193,17 @@ async fn verify_job(state: &AppState, job_id: &str, target: &Target) -> anyhow::
                 "the attestations changed while they were read".into(),
             ));
         }
-        Ok(set) => set.shards,
+        Ok(set) => {
+            for (key, reason) in &set.rejected {
+                tracing::warn!(
+                    repository,
+                    key,
+                    reason,
+                    "ignoring an attestation that does not verify"
+                );
+            }
+            set.shards
+        }
         Err(error) => return Ok(classify(&error)),
     };
     let refs = match snapshot_index_refs(store, keys, &snapshot).await {
@@ -227,21 +231,44 @@ async fn verify_job(state: &AppState, job_id: &str, target: &Target) -> anyhow::
     record_verified(state, repository, &check.newly_verified).await?;
     verified.extend(check.newly_verified.iter().copied());
 
-    let to_attest: HashSet<BlobId> = refs
+    let candidates: HashSet<BlobId> = refs
         .iter()
         .chain(&check.newly_verified)
         .filter(|id| verified.contains(*id) && !attested.contains(*id))
         .copied()
         .collect();
-    if !to_attest.is_empty() {
-        let ids: Vec<BlobId> = to_attest.into_iter().collect();
-        if let Err(error) =
-            put_attestation(store, keys, &ids, &[], Vec::new(), &mut Entropy::os()).await
-        {
-            return Ok(Verdict::Retry(error.to_string()));
+    // An attested shard's `supersedes` hides other shards from readers and
+    // cleanup; opened frames say nothing about whether that list is honest.
+    let mut ids = Vec::with_capacity(candidates.len());
+    for id in candidates {
+        match supersedes_nothing(store, keys, &id).await {
+            Ok(true) => ids.push(id),
+            Ok(false) => tracing::warn!(
+                %job_id,
+                shard = %hex32(&id),
+                "not attesting a host's shard that supersedes others"
+            ),
+            Err(error) => return Ok(classify(&error)),
         }
     }
+    if !ids.is_empty()
+        && let Err(error) =
+            put_attestation(store, keys, &ids, &[], Vec::new(), &mut Entropy::os()).await
+    {
+        return Ok(Verdict::Retry(error.to_string()));
+    }
     Ok(Verdict::Verified)
+}
+
+async fn supersedes_nothing<S: BlobStore>(
+    store: &S,
+    keys: &ReadKeys,
+    id: &BlobId,
+) -> lodestore_format::Result<bool> {
+    let bytes = store.get(&index_object_key(id)).await?;
+    Ok(open_shard(keys.k_idx(), keys.repo_id(), id, &bytes)?
+        .supersedes
+        .is_empty())
 }
 
 pub async fn fail_verification(
@@ -264,9 +291,10 @@ pub async fn fail_verification(
     .bind(job_id)
     .execute(&mut *tx)
     .await?;
-    sqlx::query("UPDATE snapshots SET unverified_reason = $1 WHERE id = $2")
+    sqlx::query("UPDATE snapshots SET unverified_reason = $1 WHERE id = $2 AND job_id = $3")
         .bind(&message)
         .bind(snapshot_id)
+        .bind(job_id)
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -294,13 +322,12 @@ async fn retry_or_give_up(
         {
             tracing::warn!(%error, job_id, "writing a verification log entry failed");
         }
-        // shortcut: a job whose log is full cannot record the event, so the window starts at
-        // its finish time; upgrade to a dedicated column if that ever matters.
-        first = Some(
-            first_retry_at(state, job_id)
-                .await?
-                .unwrap_or(finished_at(state, job_id).await?),
-        );
+        first = first_retry_at(state, job_id).await?;
+        if first.is_none() {
+            // The log is full; the window still has to start on the server's clock.
+            record_retry_past_log_limit(state, job_id, &message).await?;
+            first = Some(now_ms());
+        }
     }
     let started = first.unwrap_or_else(now_ms);
     if now_ms() - started < window_ms {
@@ -327,12 +354,28 @@ async fn first_retry_at(state: &AppState, job_id: &str) -> anyhow::Result<Option
     Ok(row.try_get("first_at")?)
 }
 
-async fn finished_at(state: &AppState, job_id: &str) -> anyhow::Result<i64> {
-    let row = sqlx::query("SELECT finished_at FROM jobs WHERE id = $1")
-        .bind(job_id)
-        .fetch_one(&state.db.pool)
-        .await?;
-    Ok(row
-        .try_get::<Option<i64>, _>("finished_at")?
-        .unwrap_or_else(now_ms))
+async fn record_retry_past_log_limit(
+    state: &AppState,
+    job_id: &str,
+    message: &str,
+) -> anyhow::Result<()> {
+    let mut tx = state.db.pool.begin().await?;
+    let seq: i64 =
+        sqlx::query("UPDATE jobs SET log_seq = log_seq + 1 WHERE id = $1 RETURNING log_seq")
+            .bind(job_id)
+            .fetch_one(&mut *tx)
+            .await?
+            .try_get("log_seq")?;
+    sqlx::query(
+        "INSERT INTO job_events (job_id, seq, at, level, kind, message) \
+         VALUES ($1, $2, $3, 'warning', 'verification_retry', $4) ON CONFLICT DO NOTHING",
+    )
+    .bind(job_id)
+    .bind(seq)
+    .bind(now_ms())
+    .bind(message)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
 }

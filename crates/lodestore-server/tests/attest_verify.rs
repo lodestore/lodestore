@@ -16,7 +16,7 @@ use lodestore_format::index::{hex32, index_object_key, open_shard, parse_hex32};
 use lodestore_format::pack::pack_object_key;
 use lodestore_format::repo::Repository;
 use lodestore_format::snapshot::snapshot_object_key;
-use lodestore_format::store::{BlobStore, LocalFsStore};
+use lodestore_format::store::{BlobStore, LocalFsStore, put_named};
 use lodestore_format::verify_snapshot::snapshot_index_refs;
 use lodestore_format::writer::{BackupOptions, Writer};
 use lodestore_server::alerts::inputs::gather;
@@ -342,6 +342,116 @@ async fn attest_verify_fails_job_deduped_against_shard_planted_before_upgrade() 
     }
 }
 
+/// A host's shard whose frames open but which lists shards it supersedes
+/// may serve its own snapshot, but the server never attests it: that would
+/// let a host hide other shards from readers and cleanup.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn attest_verify_does_not_attest_superseding_host_shard() {
+    for backend in backends() {
+        let env = Env::new(&backend).await;
+        env.upgrade().await;
+        let (original, _) = env.snapshot("supersedes", Plant::None).await;
+        let keys = env.server_keys().await;
+        let id: BlobId = parse_hex32(&original).unwrap();
+        let bytes = BlobStore::get(&env.store, &snapshot_object_key(&id))
+            .await
+            .unwrap();
+        let mut snapshot = lodestore_format::snapshot::open_snapshot(
+            keys.hpke_private_key(),
+            keys.repo_id(),
+            &id,
+            &bytes,
+        )
+        .unwrap();
+        let honest: BlobId = snapshot.index_refs[0].as_slice().try_into().unwrap();
+        let bytes = BlobStore::get(&env.store, &index_object_key(&honest))
+            .await
+            .unwrap();
+        let shard = open_shard(keys.k_idx(), keys.repo_id(), &honest, &bytes).unwrap();
+        let (forged, bytes) = lodestore_format::index::seal_shard_superseding(
+            keys.k_idx(),
+            keys.repo_id(),
+            shard.packs,
+            vec![[7u8; 32]],
+            &mut Entropy::os(),
+        )
+        .unwrap();
+        put_named(&env.store, &index_object_key(&forged), bytes)
+            .await
+            .unwrap();
+        snapshot.index_refs[0] = forged.to_vec();
+        let (rewritten, bytes) = lodestore_format::snapshot::seal_snapshot(
+            &snapshot,
+            keys.hpke_public_key(),
+            keys.repo_id(),
+            &mut Entropy::os(),
+        )
+        .unwrap();
+        put_named(&env.store, &snapshot_object_key(&rewritten), bytes)
+            .await
+            .unwrap();
+        env.job("j1", &hex32(&rewritten), "pending").await;
+
+        env.verify("j1").await;
+
+        assert_eq!(
+            env.column("j1", "verify_state").await.as_deref(),
+            Some("verified"),
+            "[{}] {:?}",
+            backend.name(),
+            env.column("j1", "error_message").await
+        );
+        assert!(
+            !env.attested().await.contains(&forged),
+            "[{}] a host's superseding shard was attested",
+            backend.name()
+        );
+        env.ts.stop().await;
+    }
+}
+
+/// A job that names a snapshot the catalog already links to another job
+/// fails, and leaves that job's snapshot alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn attest_verify_fails_job_naming_another_jobs_snapshot() {
+    for backend in backends() {
+        let env = Env::new(&backend).await;
+        env.upgrade().await;
+        let (snapshot_id, _) = env.snapshot("claimed", Plant::None).await;
+        env.job("j0", &snapshot_id, "verified").await;
+        let link = lodestore_server::catalog::JobLink {
+            job_id: "j0",
+            host_id: HOST,
+        };
+        lodestore_server::catalog::ingest_snapshot(
+            env.ts.state(),
+            &env.repo,
+            &snapshot_id,
+            Some(link),
+        )
+        .await
+        .unwrap();
+        env.job("j1", &snapshot_id, "pending").await;
+
+        env.verify("j1").await;
+
+        assert_eq!(
+            env.column("j1", "verify_state").await.as_deref(),
+            Some("failed"),
+            "{}",
+            backend.name()
+        );
+        assert_eq!(
+            env.column("j1", "error_code").await.as_deref(),
+            Some("verification_failed")
+        );
+        let snapshot = env.snapshot_json(&snapshot_id).await;
+        assert_eq!(snapshot["job_id"], "j0");
+        assert!(snapshot["unverified_reason"].is_null(), "{snapshot}");
+        env.ts.stop().await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn attest_verify_resumes_after_restart() {
     for backend in backends() {
@@ -368,6 +478,60 @@ async fn attest_verify_resumes_after_restart() {
             "{}",
             backend.name()
         );
+        env.ts.stop().await;
+    }
+}
+
+/// Checks cut short by a restart are queued again before the server
+/// accepts agents, so a job finishing meanwhile is never checked twice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn attest_verify_restart_requeues_before_serving() {
+    for backend in backends() {
+        let mut env = Env::new(&backend).await;
+        env.upgrade().await;
+        let (snapshot_id, _) = env.snapshot("requeue", Plant::None).await;
+        env.job("j1", &snapshot_id, "running").await;
+
+        env.ts.restart().await;
+
+        assert_eq!(
+            env.column("j1", "verify_state").await.as_deref(),
+            Some("pending"),
+            "{}",
+            backend.name()
+        );
+        env.ts.stop().await;
+    }
+}
+
+/// A job whose log is full still gets an hour of retries counted on the
+/// server's clock, not from the finish time its agent reported.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn attest_verify_retry_window_ignores_agent_finish_time() {
+    for backend in backends() {
+        let env = Env::new(&backend).await;
+        let keys = env.server_keys().await;
+        put_attestation(&env.store, &keys, &[], &[], Vec::new(), &mut Entropy::os())
+            .await
+            .unwrap();
+        let (snapshot_id, _) = env.snapshot("full-log", Plant::None).await;
+        env.job("j1", &snapshot_id, "pending").await;
+        sqlx::query("UPDATE jobs SET finished_at = $1, log_lines = 5000 WHERE id = 'j1'")
+            .bind(now_ms() - 86_400_000)
+            .execute(env.pool())
+            .await
+            .unwrap();
+
+        env.verify("j1").await;
+
+        assert_eq!(
+            env.column("j1", "verify_state").await.as_deref(),
+            Some("pending"),
+            "[{}] {:?}",
+            backend.name(),
+            env.column("j1", "error_message").await
+        );
+        assert_eq!(env.column("j1", "state").await.unwrap(), "succeeded");
         env.ts.stop().await;
     }
 }
