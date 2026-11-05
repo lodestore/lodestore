@@ -237,6 +237,53 @@ pub async fn record_verified(
     Ok(())
 }
 
+pub const MAX_DISTRUSTED_SENT: usize = 65_536;
+
+pub async fn record_distrusted(
+    state: &AppState,
+    repository_id: &str,
+    shard: &BlobId,
+    reason: &str,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO distrusted_shards (repository_id, shard_id, at, reason) \
+         VALUES ($1, $2, $3, $4) ON CONFLICT (repository_id, shard_id) DO NOTHING",
+    )
+    .bind(repository_id)
+    .bind(hex32(shard))
+    .bind(now_ms())
+    .bind(reason)
+    .execute(&state.db.pool)
+    .await?;
+    Ok(())
+}
+
+/// Newest first, at most [`MAX_DISTRUSTED_SENT`].
+pub async fn load_distrusted(state: &AppState, repository_id: &str) -> anyhow::Result<Vec<BlobId>> {
+    let limit = i64::try_from(MAX_DISTRUSTED_SENT).unwrap_or(i64::MAX);
+    let rows = sqlx::query(
+        "SELECT shard_id FROM distrusted_shards WHERE repository_id = $1 \
+         ORDER BY at DESC, shard_id LIMIT $2",
+    )
+    .bind(repository_id)
+    .bind(limit)
+    .fetch_all(&state.db.pool)
+    .await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let hex: String = row.try_get("shard_id")?;
+        match parse_hex32(&hex) {
+            Some(id) => out.push(id),
+            None => tracing::warn!(
+                repository = repository_id,
+                shard = %hex,
+                "skipping a malformed distrusted shard id"
+            ),
+        }
+    }
+    Ok(out)
+}
+
 pub async fn tick_once(state: &AppState) -> anyhow::Result<()> {
     let rows = sqlx::query("SELECT id FROM repositories WHERE attest_upgraded_at IS NULL")
         .fetch_all(&state.db.pool)

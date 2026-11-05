@@ -21,7 +21,10 @@ use lodestore_format::verify_snapshot::{
 use sqlx::Row;
 use tokio::sync::{RwLock, Semaphore};
 
-use super::{ensure_provenance_backfilled, ensure_upgraded, load_verified, record_verified};
+use super::{
+    ensure_provenance_backfilled, ensure_upgraded, load_verified, record_distrusted,
+    record_verified,
+};
 use crate::catalog::retention::{after_backup, append_event};
 use crate::catalog::{self, JobLink, open_repository};
 use crate::db::now_ms;
@@ -294,13 +297,28 @@ async fn verify_job(state: &AppState, job_id: &str, target: &Target) -> anyhow::
                 verified.insert(*shard);
             }
             Ok(None) => {}
-            Err(error) => return Ok(classify(&error)),
+            Err(error) => {
+                if is_data_error(&error) {
+                    distrust(state, job_id, repository, shard, &error.to_string()).await;
+                }
+                return Ok(classify(&error));
+            }
         }
     }
     let check = match check_snapshot_resolves(store, keys, &snapshot, &verified, &attested).await {
         Ok(check) => check,
         Err(error) => return Ok(classify(&error)),
     };
+    for shard in &check.lying {
+        distrust(
+            state,
+            job_id,
+            repository,
+            shard,
+            "the frames of an attested shard did not open",
+        )
+        .await;
+    }
     record_verified(state, repository, &check.newly_verified).await?;
     verified.extend(check.newly_verified.iter().copied());
 
@@ -334,6 +352,15 @@ async fn verify_job(state: &AppState, job_id: &str, target: &Target) -> anyhow::
         return Ok(Verdict::Retry(error.to_string()));
     }
     Ok(Verdict::Verified)
+}
+
+/// Best effort: the verdict stands even when the database refuses the row,
+/// and the next failing job names the shard again.
+async fn distrust(state: &AppState, job_id: &str, repository: &str, shard: &BlobId, reason: &str) {
+    tracing::warn!(%job_id, shard = %hex32(shard), reason, "a shard lied about its blobs");
+    if let Err(error) = record_distrusted(state, repository, shard, reason).await {
+        tracing::warn!(%job_id, %error, "recording a distrusted shard failed");
+    }
 }
 
 async fn supersedes_nothing<S: BlobStore>(
