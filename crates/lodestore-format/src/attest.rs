@@ -474,7 +474,11 @@ async fn consolidate<S: BlobStore + BlobDelete + BlobPurge>(
         deleted: 0,
         provenance_dropped: 0,
     };
-    if set.objects.len() <= 1 || !set.markers.contains(&MARKER_LEGACY_SHARDS) || dry_run {
+    let drops_revoked = revoked.iter().any(|id| set.shards.contains(id));
+    if (set.objects.len() <= 1 && !drops_revoked)
+        || !set.markers.contains(&MARKER_LEGACY_SHARDS)
+        || dry_run
+    {
         return Ok(out);
     }
     let live = listed_shards(store).await?;
