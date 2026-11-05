@@ -252,7 +252,7 @@ async fn verify_snapshot_rejects_forged_shard_attested_at_upgrade() {
 /// `(snapshot, its own shards, the earlier shards)`.
 async fn snapshot_over_earlier_shards(fx: &Fx) -> (BlobId, Vec<BlobId>, Vec<BlobId>) {
     let a = fx.backup("a", FILE).await;
-    let shard_a = refs(&fx, &a.snapshot_id).await;
+    let shard_a = refs(fx, &a.snapshot_id).await;
     let content = fs::read(fx.tmp.path().join("src-a/f")).unwrap();
     let data = blob_id(fx.repo.read_keys().k_id(), &content);
     let mut w = fx.open_writer().await;
