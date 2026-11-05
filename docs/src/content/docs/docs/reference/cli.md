@@ -232,7 +232,7 @@ web-1   /etc/nginx/nginx.conf   3         2026-10-29 12:00:00  4f0c...
 old-box /srv/nginx.conf         1         2026-10-02 03:10:00  9a1d...
 ```
 
-`VERSIONS` counts the different contents the file had. `SNAPSHOT` is the full id of the newest snapshot that holds the newest version. Below the table the command prints how to restore the first row. When the host has an agent that is online, this is a ready command:
+`VERSIONS` counts the different contents the file had. `SNAPSHOT` is the full id of the newest snapshot that holds the newest version. Versions that a signature covers (`verified_by` in the JSON) come before those that nothing signed, and `LAST SEEN` is when the server received the snapshot, so a snapshot with a manifest time far in the future does not become the newest version. Below the table the command prints how to restore the first row. When the host has an agent that is online, this is a ready command:
 
 ```
 lode server restore <snapshot> --host web-1 --path /etc/nginx/nginx.conf

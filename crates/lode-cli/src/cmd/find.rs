@@ -32,7 +32,6 @@ struct Snapshot {
 
 #[derive(Deserialize)]
 struct Version {
-    last_ms: i64,
     snapshots: Vec<Snapshot>,
 }
 
@@ -46,9 +45,9 @@ struct Group {
 }
 
 impl Group {
-    /// The newest snapshot of the newest version.
+    /// The newest snapshot of the first version, which the server lists signed ones first.
     fn newest_snapshot(&self) -> Option<&str> {
-        let version = self.versions.iter().max_by_key(|v| v.last_ms)?;
+        let version = self.versions.first()?;
         let snapshot = version.snapshots.iter().max_by_key(|s| s.time_ms)?;
         Some(&snapshot.id)
     }
@@ -300,7 +299,7 @@ mod tests {
             "hostname": hostname,
             "path": "/etc/hosts",
             "last_seen_ms": 1,
-            "versions": [{ "last_ms": 1, "snapshots": [{ "id": "ab", "time_ms": 1 }] }],
+            "versions": [{ "snapshots": [{ "id": "ab", "time_ms": 1 }] }],
         }))
         .unwrap()
     }

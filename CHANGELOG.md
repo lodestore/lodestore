@@ -12,6 +12,7 @@ All notable changes to Lodestore are recorded here. The format follows [Keep a C
 - `verified_by` (`server`, `owner` or `null`) on every snapshot of the REST API and in `lode snapshots --json`. In the restore host list, `latest_verified_id` and `unverified_count`. The web interface marks a snapshot nothing signed as "Unverified" and one signed with the repository password as "Signed with password".
 - `accept_unverified` in `POST /api/v1/restores` and `lode server restore --accept-unverified`: a snapshot that nothing signed is restored into another folder only after this confirmation, and never in place. The restore and download dialogs ask for it.
 - The agent and the server revoke an index shard that lied: the server records it in its database, sends the list with every job and on every connection (`distrusted_shards` in the agent protocol), and the next cleanup leaves it out of the signed list. See [cleanup](https://lodestore.dev/docs/guides/gc/#attestations-and-cleanup).
+- Find orders and dates its results by when the server received each snapshot, not by the time in the snapshot's manifest, and every version has `verified_by`. A version that nothing signed is listed after the signed ones, and the web interface marks it "Unverified". `lode server find` picks the first (signed) version.
 - A public read-only demo at <https://demo.lodestore.dev>: three hosts back up synthetic data, and you can browse their snapshots and download one as an archive without signing in.
 
 ### Changed

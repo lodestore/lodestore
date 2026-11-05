@@ -190,6 +190,30 @@ describe("Find file version actions", { timeout: 30_000 }, () => {
 	});
 });
 
+describe("Find file version provenance", { timeout: 30_000 }, () => {
+	it("marks a version that nothing signed as Unverified", async () => {
+		openFind([
+			findGroup(0, {
+				versions: [
+					findVersion(),
+					findVersion({ content_id: "ab".repeat(16), verified_by: null }),
+				],
+			}),
+		]);
+		const badges = await screen.findAllByText("Unverified");
+		expect(badges).toHaveLength(1);
+		expect(badges[0].closest("[data-status=unverified]")).toBeInTheDocument();
+	});
+
+	it("marks a version signed with the repository password", async () => {
+		openFind([
+			findGroup(0, { versions: [findVersion({ verified_by: "owner" })] }),
+		]);
+		expect(await screen.findByText("Signed with password")).toBeVisible();
+		expect(screen.queryByText("Unverified")).not.toBeInTheDocument();
+	});
+});
+
 describe("Find file version history", { timeout: 30_000 }, () => {
 	const showLinks = () => screen.getAllByRole("link", { name: /^Show / });
 

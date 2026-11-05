@@ -146,6 +146,8 @@ pub struct Version {
     pub mtime_ms: i64,
     pub first_ms: i64,
     pub last_ms: i64,
+    /// Who signed the provenance of a snapshot holding this version; none when none is signed.
+    pub verified_by: Option<String>,
     pub snapshots: Vec<(String, i64)>,
 }
 
