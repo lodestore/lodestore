@@ -73,7 +73,7 @@ pub async fn run(
     };
     let mut reader = open_for_read(url, args).await?;
     let (snapshot, path) = parse_snapshot_path(snapshot);
-    let entry = reader.resolve_snapshot(snapshot).await?;
+    let entry = super::resolve_spec(&reader, snapshot).await?;
     let throttle = Throttle::new();
     let bar = if out.json { None } else { spinner() };
     let progress = |p: &RestoreProgress| {
