@@ -8,7 +8,9 @@ use std::collections::HashSet;
 use std::fs;
 use std::ops::Range;
 
-use adv_support::{attacker_keys, forge_offsets, open_all_shards, plant_blobs, plant_shard};
+use adv_support::{
+    attacker_keys, forge_offsets, open_all_shards, plant_blobs, plant_shard, plant_shard_where,
+};
 use bytes::Bytes;
 use gc_support::Fx;
 use lodestore_format::Error;
@@ -246,9 +248,9 @@ async fn verify_snapshot_rejects_forged_shard_attested_at_upgrade() {
         .expect("only opening the frames of the shard rejects it");
 }
 
-#[tokio::test]
-async fn verify_snapshot_verifies_attested_fallback() {
-    let fx = Fx::new().await;
+/// A snapshot whose data blob is only in the shards of an earlier backup:
+/// `(snapshot, its own shards, the earlier shards)`.
+async fn snapshot_over_earlier_shards(fx: &Fx) -> (BlobId, Vec<BlobId>, Vec<BlobId>) {
     let a = fx.backup("a", FILE).await;
     let shard_a = refs(&fx, &a.snapshot_id).await;
     let content = fs::read(fx.tmp.path().join("src-a/f")).unwrap();
@@ -264,11 +266,52 @@ async fn verify_snapshot_verifies_attested_fallback() {
         }]))
         .unwrap();
     let raw = w.commit_snapshot_raw(tree, Vec::new()).await.unwrap();
-    let named = refs(&fx, &raw).await;
+    let named = refs(fx, &raw).await;
     assert!(named.iter().all(|s| !shard_a.contains(s)));
+    (raw, named, shard_a)
+}
+
+#[tokio::test]
+async fn verify_snapshot_verifies_attested_fallback() {
+    let fx = Fx::new().await;
+    let (raw, named, shard_a) = snapshot_over_earlier_shards(&fx).await;
     let got = resolves(&fx, &raw, &set(named), &set(shard_a.clone()))
         .await
         .unwrap();
+    assert_eq!(set(got.newly_verified), set(shard_a));
+}
+
+#[tokio::test]
+async fn verify_snapshot_skips_attested_holder_that_fails() {
+    let fx = Fx::new().await;
+    let (raw, named, shard_a) = snapshot_over_earlier_shards(&fx).await;
+    let keys = attacker_keys(&fx.repo);
+    let records: Vec<pb::PackRecord> = open_all_shards(&fx.store, &keys)
+        .await
+        .into_iter()
+        .filter(|(id, _)| shard_a.contains(id))
+        .flat_map(|(_, shard)| shard.packs)
+        .collect();
+    let missing = records
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(i, mut r)| {
+            r.pack_id = vec![200 + i as u8; 32];
+            r
+        })
+        .collect();
+    let lowest = *shard_a.iter().min().unwrap();
+    let bad = plant_shard_where(&fx.store, &keys, missing, Vec::new(), |id| *id < lowest).await;
+    let mut truncated = records;
+    for r in &mut truncated {
+        r.entries.pop();
+    }
+    let malformed = plant_shard(&fx.store, &keys, truncated, Vec::new()).await;
+
+    let mut attested = set(shard_a.clone());
+    attested.extend([bad, malformed]);
+    let got = resolves(&fx, &raw, &set(named), &attested).await.unwrap();
     assert_eq!(set(got.newly_verified), set(shard_a));
 }
 
