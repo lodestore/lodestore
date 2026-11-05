@@ -22,7 +22,7 @@ When it first opens a repository, and in any case before the first cycle, the se
 5. **Check again.** After the pause the server reads all snapshots again, including those created during the pause. A marked pack that a new snapshot needs is taken off the list. Deletion also waits while a restore or download of the repository is running, and while a backup that started before the mark has not finished (see [Unfinished backups](#unfinished-backups)).
 6. **Delete.** The server writes a new, smaller index without the marked packs, checks that every blob of every snapshot is still found, and only then deletes the old index shards, the marked packs and last the `locks/gc-<id>` object. When it compacts the index it also merges the `locks/attest-*` objects into one. Up to the first deleted object a cycle can be aborted without any loss. After that it cannot, and a cycle that stops continues where it stopped on the next run.
 
-The server also checks every new backup, outside the cycle. See [Backups the server could not verify](#backups-the-server-could-not-verify).
+The server also checks every new backup an agent makes, outside the cycle. See [Backups the server could not verify](#backups-the-server-could-not-verify).
 
 `lode gc` stops at step 3 and prints when deletion happens. Follow the rest with `lode gc status`.
 
