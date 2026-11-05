@@ -1908,6 +1908,77 @@ async fn gc_cycle_upgrades_before_attesting() {
     }
 }
 
+/// An attestation a writer key planted fails the MAC: the cycle reports it
+/// and removes it, and keeps what a valid one says.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_cycle_removes_forged_attestations() {
+    for backend in backends() {
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let (b, c) = forgotten_a(&ts, "main").await;
+        enable(&ts, &api, &repo).await;
+        let store = LocalFsStore::new(ts.local_repo_root("main"));
+        let repository = Repository::open(&store, PASSWORD).await.unwrap();
+        let keys = repository.read_keys();
+        lodestore_server::maintenance::attest::ensure_upgraded(ts.state(), &repo)
+            .await
+            .unwrap();
+        let forged_id = new_lock_id(&mut Entropy::os());
+        let forged_key = lodestore_format::attest::attest_key(&forged_id);
+        let forged = lodestore_format::attest::seal_attestation(
+            &[9u8; 32],
+            keys.repo_id(),
+            &pb::Attestation {
+                attest_id: forged_id.to_vec(),
+                shard_ids: index_ids(&ts, "main")
+                    .iter()
+                    .map(|id| id.to_vec())
+                    .collect(),
+                ..Default::default()
+            },
+        );
+        put_named(&store, &forged_key, forged).await.unwrap();
+        put_attestation(&store, keys, &[], &[99], Vec::new(), &mut Entropy::os())
+            .await
+            .unwrap();
+        assert_eq!(
+            read_attestations(&store, keys)
+                .await
+                .unwrap()
+                .rejected
+                .len(),
+            1
+        );
+
+        let id = run_cycle(&api, &repo).await;
+        let later = after_pause(&ts, &id).await;
+        assert_eq!(
+            steps(&ts, &id, later).await,
+            StepOutcome::Finished(lodestore_server::maintenance::gc::GcState::Done),
+            "[{}]",
+            backend.name()
+        );
+
+        let after = read_attestations(&store, keys).await.unwrap();
+        assert!(
+            after.rejected.is_empty(),
+            "[{}] {:?}",
+            backend.name(),
+            after.rejected
+        );
+        assert!(!ts.local_repo_root("main").join(&forged_key).exists());
+        assert!(
+            after.markers.contains(&99),
+            "the valid attestation was lost"
+        );
+        assert_eq!(events_of(&ts, &id, "attestations_rejected").await, 1);
+        assert_restores(&ts, "main", &b).await;
+        assert_restores(&ts, "main", &c).await;
+        ts.stop().await;
+    }
+}
+
 /// A cycle that a server older than attestations left waiting resumes after
 /// the upgrade straight into the compaction, which attests. The upgrade has
 /// to come first, or it refuses every later run.

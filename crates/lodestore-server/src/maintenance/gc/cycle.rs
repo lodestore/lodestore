@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, bail};
-use lodestore_format::attest::consolidate_attestations;
+use lodestore_format::attest::{consolidate_attestations, read_attestations};
 use lodestore_format::crypto::{BlobId, Entropy};
 use lodestore_format::gc::compact::{compact_plan, write_compacted};
 use lodestore_format::gc::mark::ShardSet;
@@ -692,6 +692,7 @@ async fn verifying(state: &AppState, cycle: &CycleRow) -> anyhow::Result<StepOut
         consolidated.deleted
     );
     event(state, &cycle.id, "info", "attestations", &message).await;
+    remove_rejected_attestations(state, cycle, &source).await?;
 
     refuse_old_agents(state, &cycle.repository_id).await?;
     refuse_foreign_marker(state, cycle, &source).await?;
@@ -714,6 +715,52 @@ async fn verifying(state: &AppState, cycle: &CycleRow) -> anyhow::Result<StepOut
     )
     .await;
     Ok(StepOutcome::Advanced(GcState::Sweeping))
+}
+
+/// Reports and deletes the `locks/attest-*` objects whose MAC does not verify
+/// under the server key: only a writer key planted them, and every reader
+/// ignores them. A valid attestation written meanwhile is never among them.
+/// A storage that refuses the delete (Object Lock) keeps the object; it stays
+/// ignored and is reported again next time.
+async fn remove_rejected_attestations(
+    state: &AppState,
+    cycle: &CycleRow,
+    source: &OpenRepository,
+) -> anyhow::Result<()> {
+    let set = read_attestations(&source.store, &source.keys)
+        .await
+        .context("reading the server attestations")?;
+    if set.rejected.is_empty() {
+        return Ok(());
+    }
+    let mut removed = Vec::new();
+    for (key, reason) in &set.rejected {
+        tracing::warn!(cycle_id = %cycle.id, key, reason, "attestation does not verify");
+        let swept = sweep_object(&source.store, key, 0).await;
+        match swept.failed.first() {
+            None => removed.push(key.as_str()),
+            Some((_, error)) => tracing::warn!(key, error, "removing a forged attestation failed"),
+        }
+    }
+    let message = format!(
+        "{} attestation object(s) did not verify under the server key and were ignored; \
+         removed: {}.",
+        set.rejected.len(),
+        if removed.is_empty() {
+            "none".to_string()
+        } else {
+            removed.join(", ")
+        }
+    );
+    event(
+        state,
+        &cycle.id,
+        "warning",
+        "attestations_rejected",
+        &message,
+    )
+    .await;
+    Ok(())
 }
 
 /// Leaves out of the compaction every shard the server neither verified nor

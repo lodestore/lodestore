@@ -193,7 +193,17 @@ async fn verify_job(state: &AppState, job_id: &str, target: &Target) -> anyhow::
                 "the attestations changed while they were read".into(),
             ));
         }
-        Ok(set) => set.shards,
+        Ok(set) => {
+            for (key, reason) in &set.rejected {
+                tracing::warn!(
+                    repository,
+                    key,
+                    reason,
+                    "ignoring an attestation that does not verify"
+                );
+            }
+            set.shards
+        }
         Err(error) => return Ok(classify(&error)),
     };
     let refs = match snapshot_index_refs(store, keys, &snapshot).await {
