@@ -193,10 +193,42 @@ Forgetting a snapshot only removes its manifest. Space comes back when the serve
 - Read: the agent key may list and read `locks/`. Garbage collection publishes the candidate packs of a cycle there, and a running backup checks them before it reuses an existing pack.
 - Not write: the agent key has no `PutObject` on `locks/`, so a compromised host cannot plant a candidate list or block a collection cycle with markers that never close.
 - Not delete: no `Delete*` action is granted on any prefix. On a bucket with versioning or Object Lock this covers deleting a version by its version id as well.
+- `locks/attest-*`: the objects that carry the server's signature over index shards are written only by the server. A compromised host can neither write one nor make one verify. See [Index metadata from a compromised agent](#index-metadata-from-a-compromised-agent).
 
 **What the server key needs.** The server deletes with its own key, never the agent key, and never asks the storage to bypass a lock. On AWS S3 versioned deletion takes `s3:DeleteObject`, `s3:DeleteObjectVersion`, `s3:ListBucketVersions` and `s3:GetObjectVersion` in addition to the rights it already uses. MinIO does not tell these apart: a key with `s3:DeleteObject` alone removed a version in testing, so a MinIO setup that works does not prove the AWS policy is complete.
 
 **Locked versions.** When the storage refuses to delete a version because Object Lock still protects it (MinIO answers 400 `InvalidRequest`, AWS answers 403 `AccessDenied`), the version is reported as retained, not as a failure. Its delete marker is kept until the last real version is gone, otherwise the object would reappear in listings. A later cycle frees the version once the lock has run out.
+
+## Index metadata from a compromised agent
+
+An agent holds the key that seals index shards ([ADR 0002](/docs/adr/0002-key-model-and-envelope/)). Whoever controls an agent can therefore write a shard that lists any blob at any place and declares that it supersedes any other shard, and can put a pack of their own choosing in the bucket. This section says what Lodestore does about that. The signature objects are described in [ADR 0005](/docs/adr/0005-server-attestations/).
+
+**What the server signs.** The server writes create-only objects `locks/attest-*` that list the index shards it vouches for, with a MAC under a key derived from the repository master key. Agents do not have that key. They can read the objects and cannot forge or alter one. The server and `lode` hold the master key, verify every object and ignore those that fail.
+
+**What this prevents.**
+
+- **A planted shard does not steer cleanup.** `supersedes` counts only from attested shards, in garbage collection and in restore. The writer of a backup, whether an agent or `lode backup`, does not apply `supersedes` at all: it cannot verify the signature.
+- **Cleanup opens the surviving copy.** Before it deletes or replaces a pack that holds a live blob, the server reads the frame at the place the index names as the surviving copy and opens it: the authentication tag and the keyed blob id must match. If the frame does not open, the pack stays. A pack that cannot be read, or whose live blobs do not all open, is skipped by the rewrite step and left for a later cycle. This check does not depend on trusting any shard, so it also covers shards signed at the upgrade.
+- **Reads fall back to other copies.** If the first known location of a blob does not open, a restore tries the others, including those listed only by a shard that a newer shard supersedes. Every frame is authenticated by its blob id, so a false copy is rejected and never returned.
+- **A backup that cannot be restored does not end as a success.** After every backup the server opens every new frame the snapshot depends on and checks that all its trees and data blobs resolve through shards whose frames it has opened itself. This costs egress: the server downloads every new byte once. If the check fails, the job is set to `failed` with the error code `verification_failed`, the snapshot is marked with `unverified_reason` in the snapshot list of the API, and the usual alert for a failed backup fires. A job can therefore turn from succeeded to failed after the agent reported it finished. If the server cannot run the check (the storage is unreachable, or the server refuses to sign the repository, see below), it retries for at most one hour from the first failed attempt; after that the job also becomes `failed` with `verification_failed`.
+- **The agent's deduplication filter is not a boundary.** Once the server has upgraded a repository, an agent deduplicates only against its own shards and the attested ones. The agent cannot verify a signature, so this narrows what a planted shard can influence and nothing more. The boundary is the server's check above: a shard that passes the filter but lacks the data it claims produces a failed job, not a silent gap.
+
+**What the upgrade trusts.** When the server first opens a repository (it creates one, you connect an existing one, or a repository written by 0.1 meets a newer server) it signs the shards that are in `index/` at that moment. The signature means "present at the upgrade", not "contents verified". The server relies on such a shard only for `supersedes` and for cleanup. The check of a new backup does not rely on it: the first time a backup refers to the shard, the server opens its frames, and it remembers the result. A shard planted before the upgrade is therefore signed too, and a backup that depends on it becomes a failed job. A forgery made before the upgrade is found across the whole repository by `lode check --level packs`; run it once after upgrading.
+
+**Where the state lives, and a folder repository.** The list of shards whose frames the server opened is in the server database. The fact that a repository was upgraded is in the bucket, as a marker in `locks/attest-*`, so a new database does not sign the shards again. On S3 the agent key is read-only on `locks/`, which rules out everything below. On a local or network folder the agent has file permissions and can write and delete in `locks/`:
+
+- It cannot forge a MAC. An object that does not verify is ignored.
+- A planted or deleted list of shards affects only the agents' deduplication filter. The outcome is a failed job, not a successful backup that cannot be restored.
+- Deleting attestations withdraws the trust in `supersedes` (the index still holds the other copies, and reads fall back to them) and in deduplication against verified data. It does not turn the backup check off, because the list of verified shards is in the database.
+- If the marker is deleted while other attestations remain and the database is lost as well, the server refuses to sign the repository again and says so. Cleanup of that repository then fails with that error before it deletes anything, and a new backup becomes a failed job with `verification_failed` one hour after its first failed check.
+- If an agent deletes the marker together with every attestation and the database is lost as well, nothing in the bucket shows it. This is an accepted residual risk. The next upgrade signs the current index, including a shard planted in the meantime. Such a shard still cannot cause a deletion, because cleanup opens the surviving copy, and a backup that depends on it becomes a failed job with `verification_failed`: the upgrade signature does not replace opening the frames.
+- Do not use a folder repository for hosts you do not trust.
+
+**What stays open.**
+
+- A shard with an entry outside its own pack makes the survey step of cleanup fail. Cleanup then stops without deleting anything, so this costs availability, not data.
+- When `index/` is lost, agents deduplicate only against their own shards and the attested ones, so they upload again data that the server has not yet verified. `rebuild-index` accepts every shard of a repository that has not been upgraded, and only attested shards after the upgrade. This costs bandwidth and space, not data.
+- The pointer to a host's latest snapshot and the record of who made a snapshot are not covered by these checks.
 
 ## Demo mode
 
