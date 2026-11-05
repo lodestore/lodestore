@@ -845,6 +845,16 @@ async fn rebuild(state: &AppState, repository_id: &str) -> anyhow::Result<SyncRe
         .fetch_one(&state.db.pool)
         .await?
         .try_get("n")?;
+    if let Err(error) = crate::maintenance::attest::reconcile_provenance(
+        state,
+        repository_id,
+        &source.store,
+        &source.keys,
+    )
+    .await
+    {
+        tracing::warn!(repository = repository_id, error = %format!("{error:#}"), "reconciling snapshot provenance failed");
+    }
     Ok(SyncReport {
         added: status.added,
         skipped: status.skipped.len() as u64,

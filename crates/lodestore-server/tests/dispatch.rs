@@ -4,7 +4,9 @@ use std::time::Duration;
 
 use common::{Api, TestServer, backends, wait_until};
 use lodestore_agent::{EnrollArgs, NetOptions, Paths, connect, tls};
-use lodestore_format::index::hex32;
+use lodestore_format::attest::read_attestations;
+use lodestore_format::index::{hex32, parse_hex32};
+use lodestore_format::provenance::ProvenanceSet;
 use lodestore_format::repo::Repository;
 use lodestore_format::store::LocalFsStore;
 use lodestore_format::writer::{BackupOptions, Writer};
@@ -234,6 +236,10 @@ async fn wait_state(pool: &AnyPool, id: &str, want: &str) {
 }
 
 async fn write_snapshot(ts: &TestServer, hostname: &str) -> String {
+    write_snapshot_for(ts, hostname, None).await
+}
+
+async fn write_snapshot_for(ts: &TestServer, hostname: &str, agent_id: Option<&str>) -> String {
     let store = LocalFsStore::new(ts.local_repo_root("main"));
     let repo = Repository::open(&store, PASSWORD).await.unwrap();
     let keys = repo.read_keys().write_keys(repo.config_hash());
@@ -246,6 +252,7 @@ async fn write_snapshot(ts: &TestServer, hostname: &str) -> String {
             &[data],
             BackupOptions {
                 hostname: Some(hostname.as_bytes().to_vec()),
+                agent_id: agent_id.map(|a| a.as_bytes().to_vec()),
                 ..BackupOptions::default()
             },
             &|_| {},
@@ -368,6 +375,68 @@ async fn dispatch_assigns_and_finishes_job() {
             .as_deref(),
             Some(host.id.as_str())
         );
+        drop(agent);
+        ts.stop().await;
+    }
+}
+
+async fn signed(ts: &TestServer, repo: &str, snapshot: &str) -> bool {
+    let keys = lodestore_server::catalog::open_repository(ts.state(), repo)
+        .await
+        .unwrap()
+        .keys;
+    let store = LocalFsStore::new(ts.local_repo_root("main"));
+    let attested = read_attestations(&store, &keys).await.unwrap();
+    ProvenanceSet::from_attested(&attested, &keys).contains(&parse_hex32(snapshot).unwrap())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dispatch_finish_with_unclaimed_snapshot_is_not_signed() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let a = enroll(&ts, &api, &repo, "host-a").await;
+        let b = enroll(&ts, &api, &repo, "host-b").await;
+        let pool = &ts.state().db.pool;
+        let unclaimed = write_snapshot_for(&ts, "host-b", None).await;
+
+        let mut agent = Fake::connect(&ts, &b, vec![]).await;
+        insert_job(pool, "job-b1", &b.id, "cli", "running", now_ms()).await;
+        agent
+            .send(AgentBody::JobFinished(finished(
+                "job-b1",
+                JobOutcome::Succeeded,
+                &unclaimed,
+            )))
+            .await;
+        assert_eq!(agent.recv(is_ack).await, "job-b1");
+        wait_state(pool, "job-b1", "failed").await;
+        let sql = "SELECT error_code FROM jobs WHERE id = $1";
+        assert_eq!(
+            text(pool, sql, "job-b1").await.as_deref(),
+            Some("verification_failed"),
+            "[{}]",
+            backend.name()
+        );
+        let sql = "SELECT unverified_reason FROM snapshots WHERE id = $1";
+        let reason = text(pool, sql, &unclaimed).await.unwrap_or_default();
+        assert!(reason.contains("does not name the host"), "{reason}");
+        assert!(!signed(&ts, &repo, &unclaimed).await);
+
+        let theirs = write_snapshot_for(&ts, "host-a", Some(&a.id)).await;
+        insert_job(pool, "job-b2", &b.id, "cli", "running", now_ms()).await;
+        agent
+            .send(AgentBody::JobFinished(finished(
+                "job-b2",
+                JobOutcome::Succeeded,
+                &theirs,
+            )))
+            .await;
+        assert_eq!(agent.recv(is_ack).await, "job-b2");
+        let sql = "SELECT snapshot_id FROM jobs WHERE id = $1";
+        assert_eq!(text(pool, sql, "job-b2").await, None);
+        assert!(!signed(&ts, &repo, &theirs).await);
         drop(agent);
         ts.stop().await;
     }

@@ -9,8 +9,15 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use anyhow::Context;
+use lodestore_format::attest::{
+    MAX_ATTEST_PROVENANCE, put_attestation, read_attestations, seal_provenance,
+};
 use lodestore_format::crypto::{BlobId, Entropy};
 use lodestore_format::index::{hex32, parse_hex32};
+use lodestore_format::keys::ReadKeys;
+use lodestore_format::pb;
+use lodestore_format::provenance::{ProvenanceSet, Signer};
+use lodestore_format::store::BlobStore;
 use sqlx::Row;
 use tokio_util::sync::CancellationToken;
 
@@ -56,6 +63,133 @@ pub async fn ensure_upgraded(state: &AppState, repository_id: &str) -> anyhow::R
         "repository index attested"
     );
     Ok(())
+}
+
+/// Signs what a 0.1 catalog already tied to a host and a job. The database
+/// flag is a cache: the signatures are additive, so a repeat after a crash
+/// only duplicates records, which collapse by snapshot id.
+pub async fn ensure_provenance_backfilled(
+    state: &AppState,
+    repository_id: &str,
+) -> anyhow::Result<usize> {
+    let flag: Option<i64> =
+        match sqlx::query("SELECT provenance_backfilled_at FROM repositories WHERE id = $1")
+            .bind(repository_id)
+            .fetch_optional(&state.db.pool)
+            .await?
+        {
+            Some(row) => row.try_get("provenance_backfilled_at")?,
+            None => None,
+        };
+    if flag.is_some() {
+        return Ok(0);
+    }
+    ensure_upgraded(state, repository_id).await?;
+    let rows = sqlx::query(
+        "SELECT s.id, s.host_id, s.job_id, a.hostname FROM snapshots s \
+         JOIN jobs j ON j.id = s.job_id JOIN agents a ON a.id = s.host_id \
+         WHERE s.repository_id = $1 AND s.host_id IS NOT NULL AND s.job_id IS NOT NULL \
+         AND s.unverified_reason IS NULL AND s.verified_at IS NULL \
+         AND (j.verify_state IS NULL OR j.verify_state = 'verified') ORDER BY s.id",
+    )
+    .bind(repository_id)
+    .fetch_all(&state.db.pool)
+    .await?;
+    let source = open_repository(state, repository_id).await?;
+    let at = now_ms();
+    let mut entropy = Entropy::os();
+    let mut signed = Vec::with_capacity(rows.len());
+    let mut sealed = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let id: String = row.try_get("id")?;
+        let Some(snapshot) = parse_hex32(&id) else {
+            continue;
+        };
+        let record = pb::ProvenanceRecord {
+            snapshot_id: snapshot.to_vec(),
+            host_id: row.try_get("host_id")?,
+            hostname: row.try_get("hostname")?,
+            job_id: row.try_get("job_id")?,
+            verified_at: Some(verify::timestamp_ms(at)),
+        };
+        sealed.push(seal_provenance(&source.keys, &record, &mut entropy)?);
+        signed.push(id);
+    }
+    for part in sealed.chunks(MAX_ATTEST_PROVENANCE) {
+        put_attestation(
+            &source.store,
+            &source.keys,
+            &[],
+            &[],
+            part.to_vec(),
+            &mut entropy,
+        )
+        .await?;
+    }
+    for id in &signed {
+        verify::mark_verified(state, id, repository_id, at, "server").await?;
+    }
+    sqlx::query("UPDATE repositories SET provenance_backfilled_at = $1 WHERE id = $2")
+        .bind(at)
+        .bind(repository_id)
+        .execute(&state.db.pool)
+        .await?;
+    tracing::info!(
+        repository = repository_id,
+        signed = signed.len(),
+        "snapshot provenance backfilled"
+    );
+    Ok(signed.len())
+}
+
+/// Bucket to database only: the catalog gets the mark for every snapshot the
+/// bucket's signatures cover, including those a rebuilt catalog lost.
+pub async fn reconcile_provenance<S: BlobStore>(
+    state: &AppState,
+    repository_id: &str,
+    store: &S,
+    keys: &ReadKeys,
+) -> anyhow::Result<usize> {
+    let attested = read_attestations(store, keys).await?;
+    if attested.incomplete {
+        return Ok(0);
+    }
+    let set = ProvenanceSet::from_attested(&attested, keys);
+    let rows =
+        sqlx::query("SELECT id FROM snapshots WHERE repository_id = $1 AND verified_at IS NULL")
+            .bind(repository_id)
+            .fetch_all(&state.db.pool)
+            .await?;
+    let mut marked = 0;
+    for row in rows {
+        let id: String = row.try_get("id")?;
+        let Some(snapshot) = parse_hex32(&id) else {
+            continue;
+        };
+        let (Some(record), Some(signer)) = (set.get(&snapshot), set.signer(&snapshot)) else {
+            continue;
+        };
+        let at = record
+            .verified_at
+            .as_ref()
+            .map_or(0, |t| t.seconds * 1000 + i64::from(t.nanos / 1_000_000));
+        let by = match signer {
+            Signer::Server => "server",
+            Signer::Owner => "owner",
+        };
+        sqlx::query(
+            "UPDATE snapshots SET verified_at = $1, verified_by = $2 \
+             WHERE id = $3 AND repository_id = $4 AND verified_at IS NULL",
+        )
+        .bind(at)
+        .bind(by)
+        .bind(&id)
+        .bind(repository_id)
+        .execute(&state.db.pool)
+        .await?;
+        marked += 1;
+    }
+    Ok(marked)
 }
 
 pub async fn load_verified(
@@ -111,6 +245,15 @@ pub async fn tick_once(state: &AppState) -> anyhow::Result<()> {
         let id: String = row.try_get("id")?;
         if let Err(error) = ensure_upgraded(state, &id).await {
             tracing::warn!(repository = %id, error = %format!("{error:#}"), "attestation upgrade failed");
+        }
+    }
+    let rows = sqlx::query("SELECT id FROM repositories WHERE provenance_backfilled_at IS NULL")
+        .fetch_all(&state.db.pool)
+        .await?;
+    for row in rows {
+        let id: String = row.try_get("id")?;
+        if let Err(error) = ensure_provenance_backfilled(state, &id).await {
+            tracing::warn!(repository = %id, error = %format!("{error:#}"), "provenance backfill failed");
         }
     }
     let pending = sqlx::query(
