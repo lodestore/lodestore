@@ -559,6 +559,24 @@ impl AgentEnv {
         self.wait_for(id, &FINAL_STATES).await
     }
 
+    /// Waits until the job failed, or succeeded with retention decided, which on 0.2 happens only after the server verified it.
+    pub async fn wait_job_settled(&self, id: &str) -> Value {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let job = self.json(&format!("/api/v1/jobs/{id}")).await;
+            let state = job["state"].as_str().unwrap();
+            let ok = state == "succeeded" || state == "warnings";
+            let retention = job["retention"]["state"].as_str();
+            if (!ok && FINAL_STATES.contains(&state))
+                || matches!(retention, Some("done" | "skipped"))
+            {
+                return job;
+            }
+            assert!(Instant::now() < deadline, "job {id} not settled: {job}");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
     pub async fn events(&self, id: &str, query: &str) -> Vec<Value> {
         self.json(&format!("/api/v1/jobs/{id}/events{query}")).await["events"]
             .as_array()
