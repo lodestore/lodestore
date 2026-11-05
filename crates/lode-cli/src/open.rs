@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use lodestore_format::Error;
-use lodestore_format::attest::{MARKER_LEGACY_SHARDS, read_attestations};
+use lodestore_format::attest::{MARKER_LEGACY_SHARDS, peek_attestations, read_attestations};
 use lodestore_format::crypto::{BlobId, Entropy};
 use lodestore_format::index::{hex32, parse_hex32};
 use lodestore_format::keys::{ReadKeys, WriteKeys};
@@ -114,6 +114,8 @@ pub struct Opened {
     /// backup deduplicates and checks itself accordingly.
     pub strict: Option<Strict>,
 }
+
+const WRITER_KEYS_UPGRADED: &str = "this repository is upgraded for server signatures, and writer keys cannot check a backup here. Back up through the agent (`lode backup --stdin` over its socket) or with the repository password or recovery key.";
 
 pub const MAX_CACHED_SHARDS: usize = 262_144;
 const VERIFIED_FILE: &str = "verified-shards";
@@ -342,6 +344,12 @@ async fn open_with_writer_keys(
     };
     keys.verify_config(&config)
         .with_context(|| format!("cannot back up to {url}"))?;
+    let hints = peek_attestations(&store)
+        .await
+        .with_context(|| format!("cannot back up to {url}"))?;
+    if hints.markers.contains(&MARKER_LEGACY_SHARDS) {
+        anyhow::bail!(WRITER_KEYS_UPGRADED);
+    }
     let marker = put_marker(url, &keys, hostname).await?;
     let opened = async {
         let writer = Writer::connect(store, keys)

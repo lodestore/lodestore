@@ -127,6 +127,29 @@ fn attestation_count(repo: &Path) -> usize {
         .unwrap_or(0)
 }
 
+fn objects_outside_attestations(repo: &Path) -> BTreeSet<String> {
+    fn walk(dir: &Path, root: &Path, out: &mut BTreeSet<String>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                walk(&path, root, out);
+            } else {
+                let rel = path
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string();
+                if !rel.starts_with("locks/attest-") {
+                    out.insert(rel);
+                }
+            }
+        }
+    }
+    let mut out = BTreeSet::new();
+    walk(repo, repo, &mut out);
+    out
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn backup_strict_skips_unattested_shard_and_signs() {
     let fx = fixture();
@@ -233,4 +256,40 @@ fn backup_legacy_repo_writes_no_attestation() {
     let fx = fixture();
     lode(&fx.repo).arg("backup").arg(&fx.src).assert().success();
     assert_eq!(attestation_count(&fx.repo), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn backup_writer_keys_refused_in_upgraded_repo() {
+    let fx = fixture();
+    let keys = fx.repo.with_extension("writer-keys");
+    lode(&fx.repo)
+        .args(["key", "export-writer", "--output"])
+        .arg(&keys)
+        .assert()
+        .success();
+    upgrade(&fx.repo).await;
+    let before = objects_outside_attestations(&fx.repo);
+
+    let writer = |stdin: bool| {
+        let mut cmd = lode(&fx.repo);
+        cmd.env_remove("LODE_PASSWORD")
+            .arg("--writer-keys")
+            .arg(&keys);
+        if stdin {
+            cmd.args(["backup", "--stdin", "--name", "x"])
+                .write_stdin("some data");
+        } else {
+            cmd.arg("backup").arg(&fx.src);
+        }
+        cmd
+    };
+    for stdin in [false, true] {
+        let failed = writer(stdin).assert().failure();
+        let stderr = String::from_utf8_lossy(&failed.get_output().stderr).to_string();
+        assert!(
+            stderr.contains("writer keys cannot check a backup here"),
+            "{stderr}"
+        );
+        assert_eq!(objects_outside_attestations(&fx.repo), before);
+    }
 }
