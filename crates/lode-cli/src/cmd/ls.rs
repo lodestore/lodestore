@@ -53,7 +53,7 @@ pub async fn run(
 ) -> Result<()> {
     let mut reader = open_for_read(url, args).await?;
     let (snapshot, path) = parse_snapshot_path(snapshot);
-    let entry = reader.resolve_snapshot(snapshot).await?;
+    let entry = super::resolve_spec(&reader, snapshot).await?;
     let mut stdout = std::io::BufWriter::new(std::io::stdout().lock());
     let mut visit = |path: &[u8], node: &pb::Node| -> Result<(), Error> {
         if out.json {

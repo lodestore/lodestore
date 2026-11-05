@@ -18,11 +18,14 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use lodestore_format::reader::Reader;
+use lodestore_format::snapshot::SnapshotEntry;
+use lodestore_format::store::Store;
 
 use crate::cli::{Cli, Command, UsageError};
 use crate::client::Client;
 use crate::open::resolve_repository;
-use crate::output::Output;
+use crate::output::{Output, warn_latest};
 use crate::profile::load_profile;
 
 /// Returns the process exit code of a command that did not fail: 0, 1 for a
@@ -106,6 +109,17 @@ pub fn run(cli: Cli) -> Result<u8> {
             }
         }
     })
+}
+
+/// A snapshot by `latest`, id or unique id prefix. `latest` follows the
+/// signature rules of the format library and explains its choice on stderr.
+pub(crate) async fn resolve_spec(reader: &Reader<Store>, spec: &str) -> Result<SnapshotEntry> {
+    if spec != "latest" {
+        return Ok(reader.resolve_snapshot(spec).await?);
+    }
+    let pick = reader.resolve_latest(false).await?;
+    warn_latest(&pick.entry.id, &pick.warnings);
+    Ok(pick.entry)
 }
 
 /// Whether `lode backup --stdin` hands the data to the local agent (true) or

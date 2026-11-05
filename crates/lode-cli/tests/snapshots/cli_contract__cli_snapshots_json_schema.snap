@@ -21,7 +21,8 @@ expression: doc
         "files_unchanged": 0
       },
       "tags": [],
-      "time": "[time]"
+      "time": "[time]",
+      "verified_by": null
     }
   ],
   "type": "snapshots",
