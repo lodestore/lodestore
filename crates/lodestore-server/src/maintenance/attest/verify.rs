@@ -10,7 +10,9 @@ use anyhow::Context;
 use lodestore_format::attest::{put_attestation, read_attestations};
 use lodestore_format::check::is_data_error;
 use lodestore_format::crypto::{BlobId, Entropy};
-use lodestore_format::index::parse_hex32;
+use lodestore_format::index::{hex32, index_object_key, open_shard, parse_hex32};
+use lodestore_format::keys::ReadKeys;
+use lodestore_format::store::BlobStore;
 use lodestore_format::verify_snapshot::{
     check_snapshot_resolves, snapshot_index_refs, verify_shard,
 };
@@ -219,14 +221,27 @@ async fn verify_job(state: &AppState, job_id: &str, target: &Target) -> anyhow::
     record_verified(state, repository, &check.newly_verified).await?;
     verified.extend(check.newly_verified.iter().copied());
 
-    let to_attest: HashSet<BlobId> = refs
+    let candidates: HashSet<BlobId> = refs
         .iter()
         .chain(&check.newly_verified)
         .filter(|id| verified.contains(*id) && !attested.contains(*id))
         .copied()
         .collect();
-    if !to_attest.is_empty() {
-        let ids: Vec<BlobId> = to_attest.into_iter().collect();
+    // An attested shard's `supersedes` hides other shards from readers and
+    // cleanup; opened frames say nothing about whether that list is honest.
+    let mut ids = Vec::with_capacity(candidates.len());
+    for id in candidates {
+        match supersedes_nothing(store, keys, &id).await {
+            Ok(true) => ids.push(id),
+            Ok(false) => tracing::warn!(
+                %job_id,
+                shard = %hex32(&id),
+                "not attesting a host's shard that supersedes others"
+            ),
+            Err(error) => return Ok(classify(&error)),
+        }
+    }
+    if !ids.is_empty() {
         if let Err(error) =
             put_attestation(store, keys, &ids, &[], Vec::new(), &mut Entropy::os()).await
         {
@@ -234,6 +249,17 @@ async fn verify_job(state: &AppState, job_id: &str, target: &Target) -> anyhow::
         }
     }
     Ok(Verdict::Verified)
+}
+
+async fn supersedes_nothing<S: BlobStore>(
+    store: &S,
+    keys: &ReadKeys,
+    id: &BlobId,
+) -> lodestore_format::Result<bool> {
+    let bytes = store.get(&index_object_key(id)).await?;
+    Ok(open_shard(keys.k_idx(), keys.repo_id(), id, &bytes)?
+        .supersedes
+        .is_empty())
 }
 
 pub async fn fail_verification(

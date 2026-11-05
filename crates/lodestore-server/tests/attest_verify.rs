@@ -16,7 +16,7 @@ use lodestore_format::index::{hex32, index_object_key, open_shard, parse_hex32};
 use lodestore_format::pack::pack_object_key;
 use lodestore_format::repo::Repository;
 use lodestore_format::snapshot::snapshot_object_key;
-use lodestore_format::store::{BlobStore, LocalFsStore};
+use lodestore_format::store::{BlobStore, LocalFsStore, put_named};
 use lodestore_format::verify_snapshot::snapshot_index_refs;
 use lodestore_format::writer::{BackupOptions, Writer};
 use lodestore_server::alerts::inputs::gather;
@@ -338,6 +338,74 @@ async fn attest_verify_fails_job_deduped_against_shard_planted_before_upgrade() 
                 .await
                 .unwrap();
         assert!(!verified.contains(&planted), "{}", backend.name());
+        env.ts.stop().await;
+    }
+}
+
+/// A host's shard whose frames open but which lists shards it supersedes
+/// may serve its own snapshot, but the server never attests it: that would
+/// let a host hide other shards from readers and cleanup.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn attest_verify_does_not_attest_superseding_host_shard() {
+    for backend in backends() {
+        let env = Env::new(&backend).await;
+        env.upgrade().await;
+        let (original, _) = env.snapshot("supersedes", Plant::None).await;
+        let keys = env.server_keys().await;
+        let id: BlobId = parse_hex32(&original).unwrap();
+        let bytes = BlobStore::get(&env.store, &snapshot_object_key(&id))
+            .await
+            .unwrap();
+        let mut snapshot = lodestore_format::snapshot::open_snapshot(
+            keys.hpke_private_key(),
+            keys.repo_id(),
+            &id,
+            &bytes,
+        )
+        .unwrap();
+        let honest: BlobId = snapshot.index_refs[0].as_slice().try_into().unwrap();
+        let bytes = BlobStore::get(&env.store, &index_object_key(&honest))
+            .await
+            .unwrap();
+        let shard = open_shard(keys.k_idx(), keys.repo_id(), &honest, &bytes).unwrap();
+        let (forged, bytes) = lodestore_format::index::seal_shard_superseding(
+            keys.k_idx(),
+            keys.repo_id(),
+            shard.packs,
+            vec![[7u8; 32]],
+            &mut Entropy::os(),
+        )
+        .unwrap();
+        put_named(&env.store, &index_object_key(&forged), bytes)
+            .await
+            .unwrap();
+        snapshot.index_refs[0] = forged.to_vec();
+        let (rewritten, bytes) = lodestore_format::snapshot::seal_snapshot(
+            &snapshot,
+            keys.hpke_public_key(),
+            keys.repo_id(),
+            &mut Entropy::os(),
+        )
+        .unwrap();
+        put_named(&env.store, &snapshot_object_key(&rewritten), bytes)
+            .await
+            .unwrap();
+        env.job("j1", &hex32(&rewritten), "pending").await;
+
+        env.verify("j1").await;
+
+        assert_eq!(
+            env.column("j1", "verify_state").await.as_deref(),
+            Some("verified"),
+            "[{}] {:?}",
+            backend.name(),
+            env.column("j1", "error_message").await
+        );
+        assert!(
+            !env.attested().await.contains(&forged),
+            "[{}] a host's superseding shard was attested",
+            backend.name()
+        );
         env.ts.stop().await;
     }
 }
