@@ -14,7 +14,7 @@ const SPIKE_MIN_BASE: usize = 3;
 const MIN_USUAL_SHARE: f64 = 0.01;
 const BASE_SQL: &str = "SELECT stats_json FROM snapshots WHERE repository_id = $1 \
      AND policy_name = $2 AND host_id = $3 AND paths_json = $4 AND id <> $5 \
-     AND received_at < $6 AND incomplete = 0 AND suspicious = 0 \
+     AND received_at < $6 AND incomplete = 0 AND suspicious = 0 AND verified_at IS NOT NULL \
      ORDER BY received_at DESC LIMIT $7";
 
 #[derive(Default, Deserialize)]

@@ -324,10 +324,11 @@ async fn pair_details(state: &AppState) -> anyhow::Result<HashMap<Pair, PairDeta
     let rows = sqlx::query(
         "SELECT s.policy_name, s.host_id, s.stats_json FROM snapshots s JOIN ( \
              SELECT policy_name, host_id, MAX(received_at) AS at FROM snapshots \
-             WHERE incomplete = 0 AND policy_name IS NOT NULL AND host_id IS NOT NULL \
+             WHERE incomplete = 0 AND verified_at IS NOT NULL \
+                 AND policy_name IS NOT NULL AND host_id IS NOT NULL \
              GROUP BY policy_name, host_id \
          ) l ON l.policy_name = s.policy_name AND l.host_id = s.host_id AND l.at = s.received_at \
-         WHERE s.incomplete = 0",
+         WHERE s.incomplete = 0 AND s.verified_at IS NOT NULL",
     )
     .fetch_all(&state.db.pool)
     .await

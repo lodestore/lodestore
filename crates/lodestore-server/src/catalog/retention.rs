@@ -73,12 +73,13 @@ struct PairRow {
 const PAIRS_SQL: &str = "SELECT s.id, s.host_id, a.hostname, s.time_ms, s.received_at, \
      s.received_exact, s.suspicious, s.incomplete FROM snapshots s \
      JOIN agents a ON a.id = s.host_id \
-     WHERE s.policy_name = $1 AND s.repository_id = $2 AND s.job_id IS NOT NULL";
+     WHERE s.policy_name = $1 AND s.repository_id = $2 AND s.job_id IS NOT NULL \
+     AND s.verified_at IS NOT NULL";
 const HOST_SQL: &str = "SELECT s.id, s.host_id, a.hostname, s.time_ms, s.received_at, \
      s.received_exact, s.suspicious, s.incomplete FROM snapshots s \
      JOIN agents a ON a.id = s.host_id \
      WHERE s.policy_name = $1 AND s.repository_id = $2 AND s.host_id = $3 \
-     AND s.job_id IS NOT NULL";
+     AND s.job_id IS NOT NULL AND s.verified_at IS NOT NULL";
 
 async fn repository_of(state: &AppState, policy: &BackupPolicy) -> anyhow::Result<String> {
     sqlx::query("SELECT id FROM repositories WHERE name = $1")

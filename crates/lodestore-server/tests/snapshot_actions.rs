@@ -32,8 +32,8 @@ async fn insert_snapshot(
     sqlx::query(
         "INSERT INTO snapshots (id, repository_id, host_id, hostname, time_ms, paths_json, \
          tags_json, policy_name, job_id, incomplete, errors_total, warnings_total, stats_json, \
-         discovered_at, received_at, received_exact) \
-         SELECT $1, id, $2, $3, $4, '[]', '[]', $5, 'seeded', 0, 0, 0, $6, $4, $4, 1 \
+         discovered_at, received_at, received_exact, verified_at, verified_by) \
+         SELECT $1, id, $2, $3, $4, '[]', '[]', $5, 'seeded', 0, 0, 0, $6, $4, $4, 1, $4, 'server' \
          FROM repositories WHERE name = 'main'",
     )
     .bind(&id)
