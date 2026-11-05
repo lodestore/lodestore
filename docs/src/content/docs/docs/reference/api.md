@@ -51,6 +51,12 @@ Three requests change or remove a snapshot. Each works with a signed-in administ
 
 Snapshot lists (`GET /api/v1/hosts/{id}/snapshots`, `GET /api/v1/restore/snapshots`, `GET /api/v1/snapshots/{id}`) also report `received_at`, `suspicious`, `unverified_reason` and `policy_deleted`, which is true when the snapshot was made by a policy that no longer exists. `unverified_reason` is the reason the server could not verify the data of the snapshot after the backup (the data failed the check, or the check could not finish within an hour), and is `null` when the snapshot is not marked. `GET /api/v1/hosts/{id}/snapshots` accepts a token with `snapshots:read`.
 
+Snapshot lists are ordered by `received_at`, the time the server saw the snapshot, newest first (ties: the larger id first), never by the time written in the snapshot manifest, which anyone with write access to the bucket can set. `verified_by` says who signed the provenance of a snapshot: `server` when the server checked a backup job of the host named by its certificate, `owner` when `lode backup` signed it with the repository password, and `null` when nothing signed it. A snapshot that nothing signed is never the latest of its host, is not counted by retention and cannot be restored in place.
+
+`GET /api/v1/restore/hosts` reports, for each host, `latest_snapshot_ms`, the server time (`received_at`) of its newest signed snapshot, `null` when it has none, and `unverified_count`, the number of its snapshots that nothing signed. `GET /api/v1/restore/snapshots` adds `latest_verified_id`, the id of the newest signed snapshot of the host, whatever page is returned; its `next` cursor counts `received_at`.
+
+`POST /api/v1/restores` refuses a snapshot that nothing signed: with `in_place` it answers `400` `restore_unverified_in_place`; into another folder it answers `400` `restore_unverified_not_confirmed` unless the body holds `"accept_unverified": true`. A signed snapshot ignores the field. Downloads are not restricted.
+
 ## Find a file
 
 `POST /api/v1/find` searches the file trees of all live snapshots of all hosts and answers `202` with `{"id": "..."}`. It needs a session or a token with `snapshots:read`.

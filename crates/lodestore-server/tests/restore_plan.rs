@@ -268,6 +268,7 @@ async fn queue(ts: &TestServer, fx: &Fixture, host: &Host, items: Vec<Vec<u8>>) 
             in_place: false,
             conflict: ConflictPolicy::OverwriteChanged,
             restore_owners: false,
+            accept_unverified: true,
         },
         "admin",
     )
@@ -1127,6 +1128,7 @@ async fn restore_plan_enqueue_validates() {
                 in_place: false,
                 conflict: ConflictPolicy::SkipExisting,
                 restore_owners: false,
+                accept_unverified: true,
             };
             tweak(&mut req);
             req

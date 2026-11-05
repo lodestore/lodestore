@@ -1,11 +1,13 @@
 mod common;
+mod forge_support;
 
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::Arc;
 
-use common::{Api, TestServer, backends};
+use common::{AgentEnv, Api, TestServer, backends};
 use data_encoding::BASE64URL_NOPAD;
+use forge_support::{YEAR_2000, YEAR_9999, forge_snapshot, signed_backup};
 use lodestore_format::index::hex32;
 use lodestore_format::repo::Repository;
 use lodestore_format::store::LocalFsStore;
@@ -539,5 +541,139 @@ async fn browse_summary_validation() {
             .await;
         assert_eq!(unknown.status(), 404);
         ts.stop().await;
+    }
+}
+
+async fn insert_hostless(ts: &TestServer, repo: &str, n: u64, hostname: &str, signed: bool) {
+    let verified = signed.then_some(n as i64);
+    sqlx::query(
+        "INSERT INTO snapshots (id, repository_id, hostname, time_ms, paths_json, tags_json, \
+         incomplete, errors_total, warnings_total, stats_json, discovered_at, received_at, \
+         received_exact, verified_at, verified_by) \
+         VALUES ($1, $2, $3, 0, '[]', '[]', 0, 0, 0, $4, 0, $5, 1, $6, $7)",
+    )
+    .bind(format!("{n:064x}"))
+    .bind(repo)
+    .bind(hostname)
+    .bind(
+        json!({
+            "files_new": 0, "files_changed": 0, "files_unchanged": 0, "dirs": 0,
+            "bytes_total": 0, "bytes_read": 0, "bytes_added": 0,
+        })
+        .to_string(),
+    )
+    .bind(n as i64)
+    .bind(verified)
+    .bind(signed.then_some("owner"))
+    .execute(&ts.state().db.pool)
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn browse_picker_latest_counts_only_signed() {
+    for backend in backends() {
+        let env = AgentEnv::start(&backend).await;
+        let honest = signed_backup(&env, &host_dir(&env)).await;
+        forge_snapshot(&env, YEAR_9999, "forged").await;
+        let received = env.json(&format!("/api/v1/snapshots/{honest}")).await["received_at"]
+            .as_i64()
+            .unwrap();
+        insert_hostless(env.ts(), &env.repo, 1, "legacy", true).await;
+        insert_hostless(env.ts(), &env.repo, 2, "legacy", false).await;
+        insert_hostless(env.ts(), &env.repo, 3, "stranger", false).await;
+
+        let hosts = env.json("/api/v1/restore/hosts").await;
+        let hosts = hosts.as_array().unwrap();
+        let find = |key: &str| hosts.iter().find(|h| h["key"] == key).unwrap();
+        let agent = find(&env.host);
+        assert_eq!(agent["snapshot_count"], 2, "[{}]", backend.name());
+        assert_eq!(agent["latest_snapshot_ms"], received);
+        assert_eq!(agent["unverified_count"], 1);
+        let legacy = find("agentless:legacy");
+        assert_eq!(legacy["latest_snapshot_ms"], 1);
+        assert_eq!(legacy["unverified_count"], 1);
+        let stranger = find("agentless:stranger");
+        assert!(stranger["latest_snapshot_ms"].is_null());
+        assert_eq!(stranger["unverified_count"], 1);
+        env.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn browse_timeline_latest_verified_id_beyond_first_page() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        insert_hostless(&ts, &repo, 1, "h", true).await;
+        for n in 2..=61 {
+            insert_hostless(&ts, &repo, n, "h", false).await;
+        }
+
+        let get = |extra: String| {
+            let api = &api;
+            async move {
+                let response = api
+                    .get(&format!(
+                        "/api/v1/restore/snapshots?host=agentless:h{extra}"
+                    ))
+                    .await;
+                assert_eq!(response.status(), 200);
+                response.json::<Value>().await.unwrap()
+            }
+        };
+        let first = get(String::new()).await;
+        let ids = |page: &Value| -> Vec<String> {
+            page["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|i| i["id"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let signed = format!("{:064x}", 1);
+        assert_eq!(ids(&first).len(), 50, "[{}]", backend.name());
+        assert!(!ids(&first).contains(&signed));
+        assert_eq!(first["latest_verified_id"], signed);
+        assert_eq!(ids(&first)[0], format!("{:064x}", 61));
+
+        let cursor = first["next"].as_str().unwrap();
+        let second = get(format!("&before={cursor}")).await;
+        assert_eq!(ids(&second).len(), 11);
+        assert_eq!(ids(&second).last().unwrap(), &signed);
+        assert!(second["next"].is_null());
+        assert_eq!(second["latest_verified_id"], signed);
+        ts.stop().await;
+    }
+}
+
+fn host_dir(env: &AgentEnv) -> std::path::PathBuf {
+    let dir = env.work.path().join("data");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("file.txt"), b"the agent's real data").unwrap();
+    dir
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn browse_host_snapshots_ordered_by_server_time() {
+    for backend in backends() {
+        let env = AgentEnv::start(&backend).await;
+        let honest = signed_backup(&env, &host_dir(&env)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let forged = forge_snapshot(&env, YEAR_2000, "forged").await;
+
+        let page = env
+            .json(&format!("/api/v1/hosts/{}/snapshots", env.host))
+            .await;
+        let items = page["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2, "[{}]", backend.name());
+        let by_id = |id: &str| items.iter().find(|i| i["id"] == id).unwrap();
+        assert!(by_id(&forged)["received_at"].as_i64() > by_id(&honest)["received_at"].as_i64());
+        assert_eq!(items[0]["id"], forged, "newest by server time first");
+        assert_eq!(items[1]["id"], honest);
+        assert_eq!(by_id(&honest)["verified_by"], "server");
+        assert!(by_id(&forged)["verified_by"].is_null());
+        env.stop().await;
     }
 }

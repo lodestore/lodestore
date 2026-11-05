@@ -22,10 +22,10 @@ pub mod tree;
 
 pub(crate) const AGENTLESS: &str = "agentless:";
 
-/// `repository_id`, `host_id` and `hostname` of snapshot `$1`. `hostname` is
+/// `repository_id`, `host_id`, `verified_at` and `hostname` of snapshot `$1`. `hostname` is
 /// the name the restore host list shows: the agent's name when the snapshot
 /// belongs to an enrolled agent, else the hostname stored in the snapshot.
-pub(crate) const SNAPSHOT_HOST: &str = "SELECT s.repository_id, s.host_id, \
+pub(crate) const SNAPSHOT_HOST: &str = "SELECT s.repository_id, s.host_id, s.verified_at, \
     COALESCE(a.hostname, s.hostname) AS hostname \
     FROM snapshots s LEFT JOIN agents a ON a.id = s.host_id WHERE s.id = $1";
 const DEFAULT_LIMIT: u32 = 50;
@@ -42,7 +42,10 @@ pub struct RestoreHost {
     pub repository_id: Option<String>,
     pub repository_name: Option<String>,
     pub snapshot_count: u64,
+    /// Server time of the newest signed snapshot; null when the host has none.
     pub latest_snapshot_ms: Option<i64>,
+    /// Snapshots of this host that nothing signed; they are never offered as the latest.
+    pub unverified_count: u64,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -58,6 +61,8 @@ pub struct RestoreSnapshotPage {
     pub items: Vec<RestoreSnapshot>,
     pub total: u64,
     pub next: Option<String>,
+    /// Id of the newest signed snapshot of the host by server time, whatever the page; null when the host has none.
+    pub latest_verified_id: Option<String>,
 }
 
 #[derive(Deserialize, IntoParams)]
@@ -95,7 +100,9 @@ async fn list_restore_hosts(
     let mut hosts = Vec::new();
     let agents = sqlx::query(
         "SELECT a.id, a.hostname, a.repository_id, a.labels_json, a.status, \
-         COUNT(s.id) AS n, MAX(s.time_ms) AS latest \
+         COUNT(s.id) AS n, \
+         MAX(CASE WHEN s.verified_at IS NOT NULL THEN s.received_at END) AS latest, \
+         CAST(COALESCE(SUM(CASE WHEN s.id IS NOT NULL AND s.verified_at IS NULL THEN 1 ELSE 0 END), 0) AS BIGINT) AS unverified \
          FROM agents a LEFT JOIN snapshots s ON s.host_id = a.id \
          GROUP BY a.id, a.hostname, a.repository_id, a.labels_json, a.status \
          ORDER BY a.hostname, a.id",
@@ -124,10 +131,13 @@ async fn list_restore_hosts(
             repository_id: Some(repository_id),
             snapshot_count: count(row, "n")?,
             latest_snapshot_ms: row.try_get("latest")?,
+            unverified_count: count(row, "unverified")?,
         });
     }
     let groups = sqlx::query(
-        "SELECT hostname, COUNT(*) AS n, MAX(time_ms) AS latest, \
+        "SELECT hostname, COUNT(*) AS n, \
+         MAX(CASE WHEN verified_at IS NOT NULL THEN received_at END) AS latest, \
+         CAST(SUM(CASE WHEN verified_at IS NULL THEN 1 ELSE 0 END) AS BIGINT) AS unverified, \
          MIN(repository_id) AS repo_first, MAX(repository_id) AS repo_last \
          FROM snapshots WHERE host_id IS NULL GROUP BY hostname ORDER BY hostname",
     )
@@ -149,6 +159,7 @@ async fn list_restore_hosts(
             repository_id,
             snapshot_count: count(row, "n")?,
             latest_snapshot_ms: row.try_get("latest")?,
+            unverified_count: count(row, "unverified")?,
         });
     }
     Ok(Json(hosts))
@@ -259,8 +270,8 @@ async fn list_restore_snapshots(
     let rows = match cursor {
         Some((time, id)) => {
             sqlx::query(sqlx::AssertSqlSafe(format!(
-                "{select} AND (time_ms < $2 OR (time_ms = $2 AND id < $3)) \
-                 ORDER BY time_ms DESC, id DESC LIMIT $4"
+                "{select} AND (received_at < $2 OR (received_at = $2 AND id < $3)) \
+                 ORDER BY received_at DESC, id DESC LIMIT $4"
             )))
             .bind(filter.value())
             .bind(time)
@@ -271,7 +282,7 @@ async fn list_restore_snapshots(
         }
         None => {
             sqlx::query(sqlx::AssertSqlSafe(format!(
-                "{select} ORDER BY time_ms DESC, id DESC LIMIT $2"
+                "{select} ORDER BY received_at DESC, id DESC LIMIT $2"
             )))
             .bind(filter.value())
             .bind(i64::from(limit) + 1)
@@ -289,8 +300,23 @@ async fn list_restore_snapshots(
     let next = items
         .last()
         .filter(|_| more)
-        .map(|last| format!("{}.{}", last.item.time, last.item.id));
-    Ok(Json(RestoreSnapshotPage { items, total, next }))
+        .map(|last| format!("{}.{}", last.item.received_at, last.item.id));
+    let latest_verified_id = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SELECT id FROM snapshots WHERE {} AND verified_at IS NOT NULL \
+         ORDER BY received_at DESC, id DESC LIMIT 1",
+        filter.condition()
+    )))
+    .bind(filter.value())
+    .fetch_optional(&state.db.pool)
+    .await?
+    .map(|row| row.try_get("id"))
+    .transpose()?;
+    Ok(Json(RestoreSnapshotPage {
+        items,
+        total,
+        next,
+        latest_verified_id,
+    }))
 }
 
 #[utoipa::path(

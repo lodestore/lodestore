@@ -21,6 +21,7 @@ pub struct RestoreRequest {
     pub in_place: bool,
     pub conflict: ConflictPolicy,
     pub restore_owners: bool,
+    pub accept_unverified: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,6 +116,24 @@ pub async fn enqueue_restore(
         .fetch_optional(&state.db.pool)
         .await?
         .ok_or_else(|| ApiError::NotFound("The snapshot was not found.".into()))?;
+    if snapshot.try_get::<Option<i64>, _>("verified_at")?.is_none() {
+        if req.in_place {
+            return Err(ApiError::BadRequest(
+                "restore_unverified_in_place",
+                "Nothing signed this snapshot, so it may not come from the host it names. \
+                 Restore it into another folder or download it."
+                    .into(),
+            ));
+        }
+        if !req.accept_unverified {
+            return Err(ApiError::BadRequest(
+                "restore_unverified_not_confirmed",
+                "Nothing signed this snapshot. Confirm the restore to restore it into \
+                 another folder."
+                    .into(),
+            ));
+        }
+    }
     let target = sqlx::query("SELECT status FROM agents WHERE id = $1")
         .bind(&req.target_host_id)
         .fetch_optional(&state.db.pool)

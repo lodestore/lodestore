@@ -206,6 +206,7 @@ fn request(
         in_place: false,
         conflict,
         restore_owners: owners,
+        accept_unverified: true,
     }
 }
 
@@ -345,6 +346,13 @@ async fn restore_e2e_in_place_restores_changes() {
             true,
         );
         req.in_place = true;
+        sqlx::query(
+            "UPDATE snapshots SET verified_at = received_at, verified_by = 'server' WHERE id = $1",
+        )
+        .bind(&snapshot)
+        .execute(&env.ts().state().db.pool)
+        .await
+        .unwrap();
         let id = queue(env.ts(), req).await;
         let job = env.wait_job(&id).await;
         assert_only_ancestor_warnings(&env, &id, &job, &tree).await;
