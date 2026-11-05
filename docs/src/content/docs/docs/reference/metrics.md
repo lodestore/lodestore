@@ -89,7 +89,7 @@ One series per host and policy, with the labels `host_id`, `host` and `policy`.
 
 | Metric | Meaning |
 |--------|---------|
-| `lodestore_backup_last_success_timestamp_seconds` | When the last successful backup finished, Unix time. Absent before the first success. |
+| `lodestore_backup_last_success_timestamp_seconds` | When the last successful backup finished, Unix time. Absent before the first success. A snapshot that the server has not signed does not count. |
 | `lodestore_backup_last_status` | 1 when the last attempt succeeded, 0 when it failed. Absent before the first attempt. |
 | `lodestore_backup_last_duration_seconds` | How long the last successful backup took. |
 | `lodestore_backup_last_bytes_added` | Bytes the last successful snapshot added to the repository. |

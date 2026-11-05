@@ -43,7 +43,7 @@ lode snapshots
 lode restore latest --target ./restored
 ```
 
-`lode snapshots` prints the oldest first. Each line is a short id, the time in UTC, the host name and the backed-up paths. `latest` is the newest snapshot of the whole repository, whichever host made it. To restore another one, give its id or any unique start of the id from the first column.
+`lode snapshots` prints the oldest first. Each line is a short id, the time in UTC, the host name and the backed-up paths. `latest` is the newest signed snapshot of the whole repository, whichever host made it, judged by the time the storage wrote it, not by the time the snapshot claims. A snapshot is signed when the server checked it or when `lode backup` with the repository password did. `lode` warns when it skips a snapshot that nothing signed or that claims a time in the future. In a repository that no Lodestore 0.2 server has opened there are no signatures yet; `latest` then warns that it is the snapshot the storage wrote last, and you can name a snapshot by its id instead. If no snapshot is signed, `lode` asks for an id. The marks in the listing and the details are in [the command line reference](/docs/reference/cli/#which-snapshot-is-latest). To restore another one, give its id or any unique start of the id from the first column.
 
 Files land under the target folder at their original absolute path: `/etc/hosts` comes back as `./restored/etc/hosts`. The target folder is required.
 

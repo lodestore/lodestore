@@ -35,7 +35,7 @@ A policy that stays silent is the failure no error message reports, so Lodestore
 - Otherwise it is twice the longest gap between the next scheduled runs plus the jitter. A daily policy with 15 minutes of jitter gets about 48 hours and 15 minutes.
 - A policy with no schedule and no `maxAge` has no limit and never raises this alert.
 
-The age counts from the last successful backup, or, when there is none yet, from the later of the time the host enrolled and the time the policy was created. The same limit decides which hosts the Overview shows as overdue and the value of the metric `lodestore_backup_overdue_after_seconds`.
+The age counts from the last successful backup, which is the newest complete snapshot that the server has signed, by the time the server received it. A snapshot that nothing signed, such as one planted with stolen writer keys, does not reset the age. When there is no successful backup yet, it counts from the later of the time the host enrolled and the time the policy was created. The same limit decides which hosts the Overview shows as overdue and the value of the metric `lodestore_backup_overdue_after_seconds`.
 
 After the server restarts, an agent that is not yet connected is not reported offline until the offline threshold has passed since the start, so a restart does not send a wave of alerts.
 
