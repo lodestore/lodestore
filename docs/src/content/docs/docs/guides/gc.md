@@ -87,7 +87,7 @@ On a bucket with versioning or Object Lock a plain delete only adds a delete mar
 - At the start it reads `locks/gc-*` and uploads again any blob that lives only in a marked pack.
 - It writes a marker `locks/writer-<id>` before it reads anything, and a `locks/writer-<id>.done` object when it ends. Deletion waits for every marker that is older than the mark and has no `.done` partner.
 - If the key it uses may not write under `locks/` (a write-only agent key does not), it cannot leave a marker. Such a run is limited to 23 hours and refuses to create a snapshot after that, which the pause (at least 24 hours) outlasts.
-- If the key may not read `locks/`, `lode backup` stops with an error, because it could reuse a pack that is about to be deleted. Fix the key policy, or pass `--no-gc-check` when no Lodestore server cleans up this repository.
+- If the key may not read `locks/`, `lode backup` stops with an error, because it could reuse a pack that is about to be deleted. Fix the key policy, or pass `--no-gc-check` when no Lodestore server cleans up this repository. With writer keys the same unreadable `locks/` also stops the check for server signatures, unless `--no-gc-check` is given.
 
 A `lode` from before cleanup existed writes no marker and does not read `locks/`. Its backups are safe only if each of them runs for less than the pause. Update `lode` before turning cleanup on for a repository such a client writes to.
 

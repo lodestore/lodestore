@@ -28,8 +28,10 @@ If several records name one snapshot they collapse to one. A server record beats
 
 The order never comes from the manifest, except as a last resort in the legacy mode below.
 
-- **Strict**, when at least one MAC-valid attestation exists. Only verified snapshots compete. The key is the time the store reports for the snapshot object (`LastModified`), and the record's `verified_at` when the store does not report one. Equal keys are broken by snapshot id, the larger wins, so the result does not depend on listing order. With no verified snapshot the command fails and asks for an id.
+- **Strict**, when at least one MAC-valid attestation exists. Only verified snapshots compete. The key is the time the store reports for the snapshot object (`LastModified`), and the record's `verified_at` when the store does not report one. Equal keys are broken by snapshot id, the larger wins, so the result does not depend on listing order. A verified snapshot whose key is more than ten minutes ahead of the clock is skipped with a warning. With no verified snapshot left the command fails and asks for an id.
 - **Legacy**, when no MAC-valid attestation exists at all (a 0.1 repository the 0.2 server has not opened yet). The key is `LastModified`, or the manifest time when the store does not report it, and the command warns loudly. A snapshot whose key is more than ten minutes ahead of the clock is never chosen; if every snapshot is, the command fails and asks for an id. A caller that knows the repository was upgraded before (the local mark `lode` keeps) asks for `expect_upgraded`, and with no readable attestation it refuses instead of using the legacy order.
+
+Attestations are read completely or not at all: when an object disappears between listing and reading (a consolidation running at the same time), the read is retried and then fails, so a partial set never switches the mode or drops records.
 
 Both modes warn about manifests that claim a time more than ten minutes ahead of the clock. Strict also warns about unverified snapshots stored after the chosen one, and about records that did not open.
 
@@ -44,9 +46,9 @@ Consolidating attestations carries the provenance of snapshots that still exist 
 ## Consequences
 
 - The server and `lode` make the same decision, because the rule lives in `lodestore-format`.
-- On a local-folder repository the agent can write `LastModified` (file mtime). Strict mode does not depend on it for who is verified, only for the order among verified snapshots, which an agent cannot enlarge: it cannot create a verified snapshot.
+- On a local-folder repository the agent can write `LastModified` (file mtime). Strict mode does not depend on it for who is verified, only for the order among verified snapshots: an agent cannot create a verified snapshot, but with file permissions it can reorder the verified ones by touching their files, though not into the future.
 - A repository with no attestation stays in legacy mode. That mode relies on the store's clock and refuses snapshots stored in the future, but a folder repository can have an old mtime set on a planted file.
-- The upgrade mark lives inside the attestations. Deleting them removes the mark from the bucket, so only a client that saw the upgrade before notices (`expect_upgraded`). A machine without that memory, reading a folder repository whose attestations were deleted, falls back to legacy mode. This limit is stated in the threat model.
+- The upgrade mark lives inside the attestations. Deleting them removes the mark from the bucket, so only a client that saw the upgrade before notices (`expect_upgraded`); `lode backup` also refuses to run on such a machine. A machine without that memory, reading a folder repository whose attestations were deleted, falls back to legacy mode. This limit is stated in the threat model.
 - Unverified snapshots stay restorable by explicit id.
 
 ## Alternatives considered
