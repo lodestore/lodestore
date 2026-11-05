@@ -67,3 +67,21 @@ async fn adv_legacy_latest_uses_storage_time_not_manifest_time() {
         "latest followed the time in the planted manifest ({forged:?})"
     );
 }
+
+#[tokio::test]
+async fn adv_legacy_latest_ignores_future_storage_time() {
+    let fx = Fx::new().await;
+    let honest = fx.backup("honest", &[("f", 1, 1000)]).await.snapshot_id;
+    let forged = plant_forged(&fx).await;
+    set_mtime(
+        &fx,
+        &forged,
+        SystemTime::now() + Duration::from_secs(86_400),
+    );
+
+    assert_eq!(
+        latest(&fx).await,
+        honest,
+        "latest followed a snapshot stored in the future ({forged:?})"
+    );
+}
