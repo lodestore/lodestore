@@ -737,9 +737,15 @@ async fn verifying(state: &AppState, cycle: &CycleRow) -> anyhow::Result<StepOut
     record_verified(state, &cycle.repository_id, &compacted.verified)
         .await
         .context("recording the compacted shards as verified")?;
-    let consolidated = consolidate_attestations(&source.store, &source.keys, false, &mut entropy)
-        .await
-        .context("consolidating the server attestations")?;
+    let consolidated = consolidate_attestations(
+        &source.store,
+        &source.keys,
+        false,
+        &HashSet::new(),
+        &mut entropy,
+    )
+    .await
+    .context("consolidating the server attestations")?;
     let message = format!(
         "Attestations consolidated: {} read, {} written, {} deleted.",
         consolidated.read,

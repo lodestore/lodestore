@@ -4,7 +4,7 @@
 //! can derive: an agent holding writer keys can write into `locks/` but cannot
 //! forge one. This module never deletes anything.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use prost::Message;
 use subtle::ConstantTimeEq;
@@ -19,6 +19,8 @@ use crate::index::{INDEX_PREFIX, index_object_key, parse_hex32};
 use crate::keys::ReadKeys;
 use crate::locks::{LOCKS_PREFIX, LockId, lock_id_hex, new_lock_id};
 use crate::pb;
+use crate::provenance::supersedes;
+use crate::snapshot::SNAPSHOT_PREFIX;
 use crate::store::{BlobDelete, BlobError, BlobPurge, BlobStore, put_named};
 
 pub const ATTEST_PREFIX: &str = "locks/attest-";
@@ -351,17 +353,114 @@ pub struct ConsolidateOutcome {
     pub read: usize,
     pub written: Vec<String>,
     pub deleted: usize,
+    /// Sealed provenance records not carried over: those that do not open
+    /// and those of snapshots no longer in `snapshots/`.
+    pub provenance_dropped: usize,
+}
+
+/// Most sealed provenance records one attestation carries.
+pub const MAX_ATTEST_PROVENANCE: usize = 32_768;
+
+/// Most sealed provenance bytes one attestation carries; a part also holds
+/// up to [`MAX_ATTEST_SHARDS`] shards, so the two stay under [`MAX_ATTEST_SIZE`].
+const MAX_ATTEST_PROVENANCE_BYTES: usize = 6 << 20;
+
+/// The sealed records of snapshots that are still listed, one per snapshot,
+/// and how many records were left out as unreadable or orphaned.
+async fn live_provenance<S: BlobStore>(
+    store: &S,
+    keys: &ReadKeys,
+    sealed: &[Vec<u8>],
+) -> Result<(Vec<Vec<u8>>, usize)> {
+    let live: HashSet<BlobId> = store
+        .list(SNAPSHOT_PREFIX)
+        .await?
+        .into_iter()
+        .filter_map(|e| parse_hex32(e.key.strip_prefix(SNAPSHOT_PREFIX)?))
+        .collect();
+    let mut kept: BTreeMap<BlobId, (pb::ProvenanceRecord, &Vec<u8>)> = BTreeMap::new();
+    let mut dropped = 0;
+    for bytes in sealed {
+        let Ok(record) = open_provenance(keys, bytes) else {
+            dropped += 1;
+            continue;
+        };
+        let Ok(id) = BlobId::try_from(record.snapshot_id.as_slice()) else {
+            dropped += 1;
+            continue;
+        };
+        if !live.contains(&id) {
+            dropped += 1;
+            continue;
+        }
+        match kept.get(&id) {
+            Some((old, _)) if !supersedes(&record, old) => {}
+            _ => {
+                kept.insert(id, (record, bytes));
+            }
+        }
+    }
+    Ok((
+        kept.into_values().map(|(_, b)| b.clone()).collect(),
+        dropped,
+    ))
+}
+
+/// Cuts `records` into parts of at most [`MAX_ATTEST_PROVENANCE`] records and
+/// [`MAX_ATTEST_PROVENANCE_BYTES`] bytes.
+fn provenance_parts(records: Vec<Vec<u8>>, max_records: usize) -> Vec<Vec<Vec<u8>>> {
+    let mut parts: Vec<Vec<Vec<u8>>> = Vec::new();
+    let mut bytes = 0usize;
+    for record in records {
+        let size = record.len().saturating_add(8);
+        match parts.last_mut() {
+            Some(part)
+                if part.len() < max_records
+                    && bytes.saturating_add(size) <= MAX_ATTEST_PROVENANCE_BYTES =>
+            {
+                bytes += size;
+                part.push(record);
+            }
+            _ => {
+                bytes = size;
+                parts.push(vec![record]);
+            }
+        }
+    }
+    parts
 }
 
 /// Replaces the attestation objects with a summary: the shards still in
-/// `index/`, every marker in every part, the sealed provenance untouched. The
-/// summary is written before anything is deleted, and only objects this call
-/// read are deleted. Does nothing until the upgrade has completed. Server only.
+/// `index/` and not in `revoked`, every marker in every part, and the sealed
+/// provenance of the snapshots still in `snapshots/`, one record per snapshot,
+/// cut into parts that fit the size limit. The summary is written before
+/// anything is deleted, and only objects this call read are deleted. Does
+/// nothing until the upgrade has completed. Server only.
 pub async fn consolidate_attestations<S: BlobStore + BlobDelete + BlobPurge>(
     store: &S,
     keys: &ReadKeys,
     dry_run: bool,
+    revoked: &HashSet<BlobId>,
     entropy: &mut Entropy,
+) -> Result<ConsolidateOutcome> {
+    consolidate(
+        store,
+        keys,
+        dry_run,
+        revoked,
+        entropy,
+        MAX_ATTEST_PROVENANCE,
+    )
+    .await
+}
+
+async fn consolidate<S: BlobStore + BlobDelete + BlobPurge>(
+    store: &S,
+    keys: &ReadKeys,
+    dry_run: bool,
+    revoked: &HashSet<BlobId>,
+    entropy: &mut Entropy,
+    max_records: usize,
 ) -> Result<ConsolidateOutcome> {
     let set = read_attestations(store, keys).await?;
     if set.incomplete {
@@ -373,6 +472,7 @@ pub async fn consolidate_attestations<S: BlobStore + BlobDelete + BlobPurge>(
         read: set.objects.len(),
         written: Vec::new(),
         deleted: 0,
+        provenance_dropped: 0,
     };
     if set.objects.len() <= 1 || !set.markers.contains(&MARKER_LEGACY_SHARDS) || dry_run {
         return Ok(out);
@@ -380,21 +480,23 @@ pub async fn consolidate_attestations<S: BlobStore + BlobDelete + BlobPurge>(
     let live = listed_shards(store).await?;
     let shards: Vec<BlobId> = live
         .into_iter()
-        .filter(|id| set.shards.contains(id))
+        .filter(|id| set.shards.contains(id) && !revoked.contains(id))
         .collect();
+    // Listed after the attestations were read: a record is written only after
+    // its snapshot object, so no record of a snapshot that exists is missed.
+    let (records, dropped) = live_provenance(store, keys, &set.sealed_provenance).await?;
+    out.provenance_dropped = dropped;
     let markers: Vec<u32> = set.markers.iter().copied().collect();
-    let mut provenance = Some(set.sealed_provenance);
-    let mut parts = shards.chunks(MAX_ATTEST_SHARDS).collect::<Vec<_>>();
-    if parts.is_empty() {
-        parts.push(&[]);
-    }
-    for part in parts {
+    let shard_parts: Vec<&[BlobId]> = shards.chunks(MAX_ATTEST_SHARDS).collect();
+    let mut prov_parts = provenance_parts(records, max_records).into_iter();
+    let count = shard_parts.len().max(prov_parts.len()).max(1);
+    for i in 0..count {
         let key = put_attestation(
             store,
             keys,
-            part,
+            shard_parts.get(i).copied().unwrap_or(&[]),
             &markers,
-            provenance.take().unwrap_or_default(),
+            prov_parts.next().unwrap_or_default(),
             entropy,
         )
         .await?;
@@ -423,6 +525,67 @@ mod tests {
     use crate::index::hex32;
     use crate::keys::MasterKey;
     use crate::store::LocalFsStore;
+
+    #[test]
+    fn attest_provenance_parts_respect_both_limits() {
+        let tiny = vec![vec![0u8; 1]; MAX_ATTEST_PROVENANCE + 1];
+        let parts = provenance_parts(tiny, MAX_ATTEST_PROVENANCE);
+        assert_eq!(
+            parts.iter().map(Vec::len).collect::<Vec<_>>(),
+            [MAX_ATTEST_PROVENANCE, 1]
+        );
+
+        let big = vec![vec![0u8; MAX_ATTEST_PROVENANCE_BYTES / 2]; 3];
+        let parts = provenance_parts(big, MAX_ATTEST_PROVENANCE);
+        assert_eq!(parts.iter().map(Vec::len).collect::<Vec<_>>(), [1, 1, 1]);
+        assert!(provenance_parts(Vec::new(), 3).is_empty());
+    }
+
+    #[tokio::test]
+    async fn attest_consolidate_chunks_provenance() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = LocalFsStore::new(tmp.path().join("repo"));
+        let keys = ReadKeys::derive(MasterKey::from_bytes([1u8; 32]), [2u8; 16]);
+        let mut entropy = Entropy::from_rng(ChaCha20Rng::from_seed([7u8; 32]));
+        let marker = [MARKER_LEGACY_SHARDS];
+        put_attestation(&store, &keys, &[], &marker, Vec::new(), &mut entropy)
+            .await
+            .unwrap();
+        let mut sealed = Vec::new();
+        for n in 1u8..=7 {
+            let id = [n; 32];
+            let name = format!("{SNAPSHOT_PREFIX}{}", hex32(&id));
+            store
+                .put_if_absent(&name, bytes::Bytes::from_static(b"x"))
+                .await
+                .unwrap();
+            let record = pb::ProvenanceRecord {
+                snapshot_id: id.to_vec(),
+                host_id: "h".into(),
+                job_id: "j".into(),
+                ..Default::default()
+            };
+            sealed.push(seal_provenance(&keys, &record, &mut entropy).unwrap());
+        }
+        put_attestation(&store, &keys, &[], &[], sealed, &mut entropy)
+            .await
+            .unwrap();
+
+        let out = consolidate(&store, &keys, false, &HashSet::new(), &mut entropy, 3)
+            .await
+            .unwrap();
+        assert_eq!((out.written.len(), out.provenance_dropped), (3, 0));
+        let mut sizes = Vec::new();
+        for entry in store.list(LOCKS_PREFIX).await.unwrap() {
+            assert!(entry.size <= MAX_ATTEST_SIZE);
+            let bytes = store.get(&entry.key).await.unwrap();
+            let a = open_attestation(keys.k_srv(), keys.repo_id(), &entry.key, &bytes).unwrap();
+            assert_eq!(a.markers, marker);
+            sizes.push(a.sealed_provenance.len());
+        }
+        sizes.sort_unstable();
+        assert_eq!(sizes, [1, 3, 3]);
+    }
 
     #[tokio::test]
     async fn attest_upgrade_chunks_large_repositories() {
