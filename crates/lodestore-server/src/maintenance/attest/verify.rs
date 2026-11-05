@@ -251,12 +251,11 @@ async fn verify_job(state: &AppState, job_id: &str, target: &Target) -> anyhow::
             Err(error) => return Ok(classify(&error)),
         }
     }
-    if !ids.is_empty() {
-        if let Err(error) =
+    if !ids.is_empty()
+        && let Err(error) =
             put_attestation(store, keys, &ids, &[], Vec::new(), &mut Entropy::os()).await
-        {
-            return Ok(Verdict::Retry(error.to_string()));
-        }
+    {
+        return Ok(Verdict::Retry(error.to_string()));
     }
     Ok(Verdict::Verified)
 }
