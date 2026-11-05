@@ -145,7 +145,14 @@ impl Env {
         }
         .unwrap();
         let out = writer
-            .backup(&[dir], BackupOptions::default(), &|_| {})
+            .backup(
+                &[dir],
+                BackupOptions {
+                    agent_id: Some(HOST.as_bytes().to_vec()),
+                    ..BackupOptions::default()
+                },
+                &|_| {},
+            )
             .await
             .expect("backup");
         let refs = snapshot_index_refs(&self.store, repo.read_keys(), &out.snapshot_id)
