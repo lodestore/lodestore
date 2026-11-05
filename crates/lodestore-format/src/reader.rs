@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use crate::Fut;
 use crate::attest::read_attestations;
+use crate::check::is_data_error;
 use crate::chunker::blob_id;
 use crate::config;
 use crate::crypto::{BLOB_TYPE_DATA, BLOB_TYPE_TREE, BlobId, Key32, RepoId, open_frame};
@@ -449,17 +450,18 @@ impl<S: BlobStore> Reader<S> {
     }
 
     /// Reads, decrypts, decompresses and verifies one blob. A location that
-    /// does not open (a shard from a write-key holder can name wrong offsets)
-    /// is followed by the next known copy; when none works the shards are
-    /// listed once more, since the real record may sit in one not loaded yet.
-    /// Store errors other than a missing pack are returned at once.
+    /// does not open (a shard from a write-key holder can name wrong offsets,
+    /// or a pack of a version this build does not know) is followed by the
+    /// next known copy; when none works the shards are listed once more,
+    /// since the real record may sit in one not loaded yet. Store errors
+    /// other than a missing pack are returned at once.
     pub async fn read_blob(&mut self, id: &BlobId, blob_type: u8) -> Result<Vec<u8>> {
         let locs = self.locate_blob_all(id, blob_type).await?;
         let mut first_err = None;
         for loc in &locs {
             match self.read_at(loc, id, blob_type).await {
                 Ok(bytes) => return Ok(bytes),
-                Err(e @ (Error::Corrupt { .. } | Error::Crypto)) => {
+                Err(e) if is_data_error(&e) => {
                     first_err.get_or_insert(e);
                 }
                 Err(e) => return Err(e),
@@ -471,7 +473,7 @@ impl<S: BlobStore> Reader<S> {
             for loc in fresh.iter().filter(|l| !locs.contains(l)) {
                 match self.read_at(loc, id, blob_type).await {
                     Ok(bytes) => return Ok(bytes),
-                    Err(Error::Corrupt { .. } | Error::Crypto) => {}
+                    Err(e) if is_data_error(&e) => {}
                     Err(e) => return Err(e),
                 }
             }
