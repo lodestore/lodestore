@@ -211,6 +211,7 @@ impl Agent for AgentService {
                 body: Some(ServerBody::HelloAck(HelloAck {
                     selected_version,
                     server_time,
+                    distrusted_shards: Vec::new(),
                 })),
             },
         );

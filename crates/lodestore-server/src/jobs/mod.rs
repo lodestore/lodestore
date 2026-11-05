@@ -448,6 +448,7 @@ pub fn job_spec(policy: &BackupPolicy) -> JobSpec {
             .map(limits_spec),
         max_runtime_s: max_runtime_of(policy).as_secs(),
         gc_locks_required: false,
+        distrusted_shards: Vec::new(),
     }
 }
 

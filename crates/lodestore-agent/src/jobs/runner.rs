@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -27,6 +27,7 @@ use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
+use super::distrusted;
 use super::own_shards;
 use super::priority;
 use super::throttle::Throttled;
@@ -104,7 +105,7 @@ async fn open_writer_with(
         Throttled::new(store, rate, uploaded),
         keys,
         &own_shards::load(paths),
-        &HashSet::new(),
+        &distrusted::load(paths),
     )
     .await
     .map_err(|e| format!("cannot open the repository: {e}"))
@@ -439,6 +440,7 @@ async fn backup(ctx: &JobCtx, spec: &JobSpec, deadline: Deadline) -> JobFinished
         Ok(keys) => keys,
         Err(e) => return failed("repository_unavailable", &e),
     };
+    distrusted::record_or_warn(ctx.paths(), &spec.distrusted_shards);
     let dir = cache_dir(ctx.paths(), &keys, spec);
     let parent = open_parent(&dir, &keys).await;
     let repo_id = keys.repo_id;
