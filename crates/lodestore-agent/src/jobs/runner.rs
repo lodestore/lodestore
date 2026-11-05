@@ -440,9 +440,7 @@ async fn backup(ctx: &JobCtx, spec: &JobSpec, deadline: Deadline) -> JobFinished
         Ok(keys) => keys,
         Err(e) => return failed("repository_unavailable", &e),
     };
-    if let Err(e) = distrusted::record(ctx.paths(), &spec.distrusted_shards) {
-        tracing::warn!(error = %e, "cannot save the list of distrusted index shards");
-    }
+    distrusted::record_or_warn(ctx.paths(), &spec.distrusted_shards);
     let dir = cache_dir(ctx.paths(), &keys, spec);
     let parent = open_parent(&dir, &keys).await;
     let repo_id = keys.repo_id;

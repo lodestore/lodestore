@@ -35,6 +35,14 @@ pub(crate) fn record(paths: &Paths, ids: &[Vec<u8>]) -> std::io::Result<()> {
     write_private_file(&paths.distrusted_shards(), text.as_bytes())
 }
 
+/// A lost update only costs deduplication safety until the next list arrives,
+/// so a failed write never fails the job or the session.
+pub(crate) fn record_or_warn(paths: &Paths, ids: &[Vec<u8>]) {
+    if let Err(e) = record(paths, ids) {
+        tracing::warn!(error = %e, "cannot save the list of distrusted index shards");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,6 +105,20 @@ mod tests {
     #[test]
     fn distrusted_missing_file_is_empty() {
         let (_dir, paths) = paths();
+        assert!(load(&paths).is_empty());
+    }
+
+    #[test]
+    fn distrusted_recorded_from_hello() {
+        use lodestore_proto::agent::v1::HelloAck;
+        let (_dir, paths) = paths();
+        let ack = HelloAck {
+            distrusted_shards: raw(&[id(9)]),
+            ..Default::default()
+        };
+        record_or_warn(&paths, &ack.distrusted_shards);
+        assert_eq!(load(&paths), HashSet::from([id(9)]));
+        record_or_warn(&paths, &HelloAck::default().distrusted_shards);
         assert!(load(&paths).is_empty());
     }
 
