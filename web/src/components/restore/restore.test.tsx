@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
 	RestoreHost,
 	RestoreSnapshot,
@@ -289,6 +289,36 @@ describe("Restore timeline", () => {
 			.closest("section") as HTMLElement;
 		expect(within(yesterday).getByText(/CLI · pg_dump/)).toBeInTheDocument();
 		expect(formatDay(noon(40))).toMatch(/^\d{1,2} \w{3} \d{4}$/);
+	});
+
+	it("groups by receive day when manifest times are out of order", async () => {
+		mockRestore({
+			web: [
+				snapshot(1, noon(5), WEB, { received_at: noon(0) }),
+				snapshot(2, noon(0), WEB, { received_at: noon(1) }),
+				snapshot(3, noon(7), WEB, { received_at: noon(0) }),
+			],
+			latestVerified: id(1),
+		});
+		const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+		await openRestore();
+		await screen.findAllByRole("button", {
+			name: /^Snapshot [0-9a-f]{8} from /,
+		});
+
+		expect(
+			screen.getAllByRole("heading", { level: 3 }).map((h) => h.textContent),
+		).toEqual(["Today", "Yesterday"]);
+		const today = screen
+			.getByRole("heading", { name: "Today" })
+			.closest("section") as HTMLElement;
+		expect(within(today).getAllByRole("button")).toHaveLength(2);
+		expect(errors).not.toHaveBeenCalledWith(
+			expect.stringContaining("same key"),
+			expect.anything(),
+			expect.anything(),
+		);
+		errors.mockRestore();
 	});
 
 	it("moves focus with the arrow keys and selects only on Enter", async () => {

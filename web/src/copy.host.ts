@@ -43,6 +43,9 @@ export const hostBackup = {
 const unverifiedTip =
 	"Not linked to a server job. Nothing signed this snapshot, so it may not come from the host it names: it is never the latest, retention ignores it and it cannot be restored in place.";
 
+const verifyingTip =
+	"The server is still checking this backup. Until it finishes the snapshot is never the latest and cannot be restored in place.";
+
 export const snapshots = {
 	title: "Snapshots",
 	emptyHeading: "No snapshots yet",
@@ -79,6 +82,9 @@ export const snapshots = {
 	suspiciousLabel: (reasons: string) => `Suspicious. ${reasons}`,
 	unverified: "Unverified",
 	unverifiedTip,
+	verifying: "Verifying",
+	verifyingTip,
+	verifyingLabel: `Verifying. ${verifyingTip}`,
 	unverifiedLabel: (count?: number) =>
 		count === undefined
 			? `Unverified. ${unverifiedTip}`

@@ -179,6 +179,30 @@ describe("Host snapshots: suspicious", () => {
 		expect(within(rows[1]).queryByText("Unverified")).toBeNull();
 	});
 
+	it("snapshot awaiting verification shows the pending label, not the unbound text", async () => {
+		const table = await openSnapshots([
+			makeSnapshot({ verified_by: null, job_id: "job-1" }),
+			makeSnapshot({
+				id: "bbbbbbbb00000000",
+				verified_by: null,
+				job_id: "job-2",
+				unverified_reason: "verify_failed",
+			}),
+		]);
+		const rows = within(table).getAllByRole("row").slice(1);
+
+		const pending = within(rows[0])
+			.getByText("Verifying")
+			.closest("[data-status]");
+		expect(pending?.getAttribute("aria-label")).toContain(
+			"still checking this backup",
+		);
+		expect(pending?.getAttribute("aria-label")).not.toContain(
+			"Not linked to a server job",
+		);
+		expect(within(rows[1]).getByText("Unverified")).toBeInTheDocument();
+	});
+
 	it("owner-signed snapshot shows the owner badge", async () => {
 		const table = await openSnapshots([
 			makeSnapshot({ verified_by: "owner" }),
