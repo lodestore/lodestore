@@ -42,6 +42,7 @@ const snapshot: RestoreSnapshot = {
 	policy_name: "etc",
 	policy_deleted: false,
 	received_at: Date.UTC(2026, 9, 14, 23, 31),
+	verified_by: "server",
 	tags: [],
 	warnings_total: 0,
 	errors_total: 0,
@@ -67,6 +68,7 @@ const host = (over: Partial<RestoreHost>): RestoreHost => ({
 	repository_name: "main",
 	snapshot_count: 1,
 	latest_snapshot_ms: snapshot.time,
+	unverified_count: 0,
 	...over,
 });
 
@@ -92,13 +94,18 @@ const fleet: RestoreHost[] = [
 	}),
 ];
 
-function mockServer(hosts = fleet) {
+function mockServer(hosts = fleet, shown = snapshot) {
 	server.use(
 		http.get("/api/v1/restore/hosts", () => HttpResponse.json(hosts)),
 		http.get("/api/v1/restore/snapshots", () =>
-			HttpResponse.json({ items: [snapshot], total: 1, next: null }),
+			HttpResponse.json({
+				items: [shown],
+				total: 1,
+				next: null,
+				latest_verified_id: shown.verified_by == null ? null : shown.id,
+			}),
 		),
-		http.get("/api/v1/snapshots/:id", () => HttpResponse.json(snapshot)),
+		http.get("/api/v1/snapshots/:id", () => HttpResponse.json(shown)),
 		http.get("/api/v1/snapshots/:id/entries", () =>
 			HttpResponse.json({
 				path: "",
@@ -113,6 +120,8 @@ function mockServer(hosts = fleet) {
 		),
 	);
 }
+
+const unsigned: RestoreSnapshot = { ...snapshot, verified_by: null };
 
 async function openRestore() {
 	useSignedIn();
@@ -248,8 +257,51 @@ describe("Restore dialog", { timeout: 30_000 }, () => {
 				in_place: true,
 				conflict: "overwrite_changed",
 				restore_owners: true,
+				accept_unverified: false,
 			}),
 		);
+	});
+
+	it("unverified restore needs confirmation and sends accept_unverified", async () => {
+		mockServer(fleet, unsigned);
+		let body: { accept_unverified?: boolean; in_place?: boolean } = {};
+		server.use(
+			http.post("/api/v1/restores", async ({ request }) => {
+				body = (await request.json()) as typeof body;
+				return HttpResponse.json({ job_id: "job-1" }, { status: 201 });
+			}),
+		);
+		const { dialog, user } = await openRestore();
+		const view = within(dialog);
+
+		const start = view.getByRole("button", { name: "Start restore" });
+		expect(start).toBeDisabled();
+		await user.click(
+			view.getByRole("checkbox", {
+				name: "Restore this unsigned snapshot into another folder",
+			}),
+		);
+		expect(start).toBeEnabled();
+		await user.click(start);
+
+		await waitFor(() =>
+			expect(body).toMatchObject({ in_place: false, accept_unverified: true }),
+		);
+	});
+
+	it("in place is not offered for an unverified snapshot", async () => {
+		mockServer(fleet, unsigned);
+		const { dialog } = await openRestore();
+		const view = within(dialog);
+
+		expect(
+			view.getByRole("radio", { name: /Original location/ }),
+		).toBeDisabled();
+		expect(
+			view.getByText(
+				"An unsigned snapshot cannot be restored over the original files.",
+			),
+		).toBeVisible();
 	});
 
 	it("offers no stop-if-not-empty policy for the original location", async () => {
@@ -532,8 +584,8 @@ describe("Restore dialog", { timeout: 30_000 }, () => {
 });
 
 describe("Download dialog", { timeout: 30_000 }, () => {
-	async function openDownload() {
-		mockServer();
+	async function openDownload(shown = snapshot) {
+		mockServer(fleet, shown);
 		useSignedIn();
 		renderApp(`/restore?host=${HOST}&snapshot=${SNAP}`);
 		const user = userEvent.setup();
@@ -549,6 +601,18 @@ describe("Download dialog", { timeout: 30_000 }, () => {
 
 	afterEach(() => {
 		for (const frame of frames()) frame.remove();
+	});
+
+	it("download of an unverified snapshot needs confirmation", async () => {
+		const { dialog, user } = await openDownload(unsigned);
+		const view = within(dialog);
+
+		const start = view.getByRole("button", { name: "Download" });
+		expect(start).toBeDisabled();
+		await user.click(
+			view.getByRole("checkbox", { name: "Download this unsigned snapshot" }),
+		);
+		expect(start).toBeEnabled();
 	});
 
 	it("defaults to tar.gz and changes the file name with the format", async () => {

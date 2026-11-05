@@ -11,6 +11,7 @@ import {
 import type { ArchiveFormat, RestoreSnapshot } from "@/api/gen/model";
 import { TextWithPaths } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
 	Dialog,
 	DialogContent,
@@ -71,6 +72,8 @@ function DownloadForm({
 	const navigate = useNavigate();
 	const queryClient = useQueryClient();
 	const [format, setFormat] = useState<ArchiveFormat>("tar_gz");
+	const unverified = snapshot.verified_by == null;
+	const [confirmed, setConfirmed] = useState(false);
 	const download = useCreateDownload();
 	const hosts = useListRestoreHosts().data;
 	const hostName =
@@ -149,6 +152,23 @@ function DownloadForm({
 				))}
 			</RadioGroup>
 
+			{unverified && (
+				<div className="flex items-start gap-2">
+					<Checkbox
+						id={`${id}-unverified`}
+						checked={confirmed}
+						onCheckedChange={(value) => setConfirmed(value === true)}
+						className="mt-px"
+					/>
+					<Label
+						htmlFor={`${id}-unverified`}
+						className="leading-snug font-normal"
+					>
+						{text.unverifiedConfirm}
+					</Label>
+				</div>
+			)}
+
 			<div className="flex flex-col gap-2 text-sm text-muted-foreground">
 				<p className="wrap-anywhere">
 					{text.fileName} <span className="font-mono">{fileName}</span>
@@ -165,7 +185,10 @@ function DownloadForm({
 				>
 					{text.dismiss}
 				</Button>
-				<Button type="submit" disabled={download.isPending}>
+				<Button
+					type="submit"
+					disabled={download.isPending || (unverified && !confirmed)}
+				>
 					{download.isPending && <Spinner />}
 					{text.confirm}
 				</Button>

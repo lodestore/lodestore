@@ -1,4 +1,4 @@
-import { Copy, ShieldAlert } from "lucide-react";
+import { Copy, ShieldAlert, ShieldQuestion } from "lucide-react";
 import { memo, useState } from "react";
 import { toast } from "sonner";
 import type { RestoreSnapshot } from "@/api/gen/model";
@@ -9,6 +9,7 @@ import {
 } from "@/components/snapshots/snapshot-dialogs";
 import {
 	PolicyDeletedBadge,
+	ProvenanceBadge,
 	SuspiciousBadge,
 	suspicionReasons,
 } from "@/components/snapshots/suspicious-badge";
@@ -77,6 +78,7 @@ export const SnapshotHeader = memo(function SnapshotHeader({
 								>
 									<Copy aria-hidden />
 								</Button>
+								<ProvenanceBadge snapshot={snapshot} />
 								{snapshot.suspicious && <SuspiciousBadge snapshot={snapshot} />}
 								{snapshot.incomplete && (
 									<StatusBadge status="warning">
@@ -112,6 +114,15 @@ export const SnapshotHeader = memo(function SnapshotHeader({
 					</p>
 				)}
 			</div>
+			{snapshot.verified_by == null && (
+				<Alert role="status">
+					<ShieldQuestion aria-hidden className="text-warning" />
+					<AlertTitle>{copy.restore.header.unverifiedTitle}</AlertTitle>
+					<AlertDescription>
+						{copy.restore.header.unverifiedBody}
+					</AlertDescription>
+				</Alert>
+			)}
 			{snapshot.suspicious && (
 				<Alert role="status">
 					<ShieldAlert aria-hidden className="text-warning" />

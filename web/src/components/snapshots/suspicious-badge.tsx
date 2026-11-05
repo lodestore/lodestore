@@ -1,4 +1,9 @@
-import { CircleSlash, ShieldAlert } from "lucide-react";
+import {
+	CircleSlash,
+	KeyRound,
+	ShieldAlert,
+	ShieldQuestion,
+} from "lucide-react";
 import type { SnapshotItem } from "@/api/gen/model";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -101,4 +106,65 @@ export function PolicyDeletedBadge() {
 			</TooltipContent>
 		</Tooltip>
 	);
+}
+
+export function UnverifiedBadge({
+	plain = false,
+	count,
+}: {
+	plain?: boolean;
+	count?: number;
+}) {
+	const badge = (
+		<Badge
+			variant="outline"
+			data-status="unverified"
+			className="gap-1 text-warning"
+			{...(plain
+				? { title: text.unverifiedTip }
+				: {
+						role: "group",
+						tabIndex: 0,
+						"aria-label": text.unverifiedLabel(count),
+					})}
+		>
+			<ShieldQuestion aria-hidden />
+			<span>
+				{count === undefined ? text.unverified : `${text.unverified} ${count}`}
+			</span>
+		</Badge>
+	);
+	if (plain) return badge;
+	return (
+		<Tooltip>
+			<TooltipTrigger asChild>{badge}</TooltipTrigger>
+			<TooltipContent className="max-w-sm">{text.unverifiedTip}</TooltipContent>
+		</Tooltip>
+	);
+}
+
+export function OwnerSignedBadge() {
+	return (
+		<Tooltip>
+			<TooltipTrigger asChild>
+				<Badge
+					variant="outline"
+					data-status="owner-signed"
+					tabIndex={0}
+					className="gap-1 text-neutral"
+				>
+					<KeyRound aria-hidden />
+					<span>{text.ownerSigned}</span>
+				</Badge>
+			</TooltipTrigger>
+			<TooltipContent className="max-w-sm">
+				{text.ownerSignedTip}
+			</TooltipContent>
+		</Tooltip>
+	);
+}
+
+export function ProvenanceBadge({ snapshot }: { snapshot: SnapshotItem }) {
+	if (snapshot.verified_by == null) return <UnverifiedBadge />;
+	return snapshot.verified_by === "owner" ? <OwnerSignedBadge /> : null;
 }

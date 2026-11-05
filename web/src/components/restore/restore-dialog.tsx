@@ -103,6 +103,8 @@ function RestoreForm({
 	const target = hosts.find((host) => host.key === targetKey);
 	const targetName = displayName(target?.hostname ?? "");
 
+	const unverified = snapshot.verified_by == null;
+	const [acceptUnverified, setAcceptUnverified] = useState(false);
 	const [inPlace, setInPlace] = useState(false);
 	const [confirmedFor, setConfirmedFor] = useState<string>();
 	const confirmed =
@@ -137,6 +139,7 @@ function RestoreForm({
 		pathError === undefined &&
 		!hostError &&
 		(!inPlace || confirmed) &&
+		(!unverified || acceptUnverified) &&
 		!restore.isPending;
 	const otherHost = target !== undefined && target.key !== snapshot.host_key;
 	const otherRepository =
@@ -157,6 +160,7 @@ function RestoreForm({
 					in_place: inPlace,
 					conflict: policy,
 					restore_owners: owners,
+					accept_unverified: unverified,
 				},
 			},
 			{
@@ -187,6 +191,22 @@ function RestoreForm({
 							<ShieldAlert aria-hidden className="text-warning" />
 							<AlertDescription>{text.suspiciousWarning}</AlertDescription>
 						</Alert>
+					)}
+					{unverified && (
+						<div className="flex items-start gap-2">
+							<Checkbox
+								id={`${id}-unverified`}
+								checked={acceptUnverified}
+								onCheckedChange={(value) => setAcceptUnverified(value === true)}
+								className="mt-px"
+							/>
+							<Label
+								htmlFor={`${id}-unverified`}
+								className="leading-snug font-normal"
+							>
+								{text.unverifiedConfirm}
+							</Label>
+						</div>
 					)}
 					<div className="flex flex-col gap-2">
 						<Label>{text.from}</Label>
@@ -285,8 +305,25 @@ function RestoreForm({
 							</div>
 							<div className="flex flex-col gap-2">
 								<div className="flex items-start gap-2">
-									<RadioGroupItem value="original" id={`${id}-original`} />
-									<Label htmlFor={`${id}-original`}>{text.original}</Label>
+									<RadioGroupItem
+										value="original"
+										id={`${id}-original`}
+										disabled={unverified}
+										aria-describedby={
+											unverified ? `${id}-original-help` : undefined
+										}
+									/>
+									<div className="flex min-w-0 flex-col gap-1">
+										<Label htmlFor={`${id}-original`}>{text.original}</Label>
+										{unverified && (
+											<p
+												id={`${id}-original-help`}
+												className="text-sm text-muted-foreground"
+											>
+												{text.unverifiedInPlaceDisabled}
+											</p>
+										)}
+									</div>
 								</div>
 								{inPlace && (
 									<div className="flex flex-col gap-2 pl-6">

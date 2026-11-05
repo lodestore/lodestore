@@ -30,6 +30,7 @@ const snapshot: RestoreSnapshot = {
 	policy_name: "etc",
 	policy_deleted: false,
 	received_at: Date.UTC(2026, 9, 21, 2, 1),
+	verified_by: "server",
 	tags: [],
 	warnings_total: 0,
 	errors_total: 0,
@@ -54,6 +55,7 @@ const host: RestoreHost = {
 	repository_name: "main",
 	snapshot_count: 2,
 	latest_snapshot_ms: snapshot.time,
+	unverified_count: 0,
 };
 
 function mockRestore() {

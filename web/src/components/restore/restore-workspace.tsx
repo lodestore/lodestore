@@ -1,5 +1,5 @@
 import { getRouteApi } from "@tanstack/react-router";
-import { Info, Search, Server } from "lucide-react";
+import { Info, Search, Server, ShieldQuestion } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError } from "@/api/fetcher";
 import { useGetSnapshot, useListRestoreHosts } from "@/api/gen/endpoints";
@@ -17,7 +17,7 @@ import {
 	useSnapshotTimeline,
 } from "@/components/restore/snapshot-timeline";
 import { useSelection } from "@/components/restore/use-selection";
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
 	Collapsible,
@@ -62,7 +62,7 @@ function ByHostTab() {
 	const hostKey =
 		host ?? (snapshot === undefined ? newest?.key : detail.data?.host_key);
 	const timeline = useSnapshotTimeline(hostKey);
-	const snapshotId = snapshot ?? timeline.data?.items[0]?.id;
+	const snapshotId = snapshot ?? timeline.data?.latest_verified_id ?? undefined;
 
 	const selection = useSelection();
 	const clearSelection = selection.clear;
@@ -180,6 +180,16 @@ function ByHostTab() {
 				<RetryAlert onRetry={() => detail.refetch()}>
 					{copy.restore.snapshot.openFailed(detail.error.message)}
 				</RetryAlert>
+			);
+		} else if (snapshotId === undefined && timeline.data) {
+			detailPane = (
+				<Alert role="status">
+					<ShieldQuestion aria-hidden className="text-warning" />
+					<AlertTitle>{copy.restore.hostPicker.noSigned}</AlertTitle>
+					<AlertDescription>
+						{copy.restore.timeline.noSignedBody}
+					</AlertDescription>
+				</Alert>
 			);
 		} else {
 			detailPane = <SnapshotHeader snapshot={detail.data} />;

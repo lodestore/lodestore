@@ -2,6 +2,7 @@ import { ChevronDown, ChevronsUpDown, Server } from "lucide-react";
 import { memo, useState } from "react";
 import { useListRestoreHosts } from "@/api/gen/endpoints";
 import type { RestoreHost } from "@/api/gen/model";
+import { UnverifiedBadge } from "@/components/snapshots/suspicious-badge";
 import { StatusBadge } from "@/components/status-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -47,10 +48,22 @@ function matches(hosts: RestoreHost[], query: string) {
 }
 
 function Status({ host }: { host: RestoreHost }) {
-	return host.agent && host.status ? (
-		<StatusBadge status={host.status} />
-	) : (
-		<Badge variant="outline">{copy.restore.hostPicker.noAgentBadge}</Badge>
+	return (
+		<>
+			{host.unverified_count > 0 && (
+				<UnverifiedBadge plain count={host.unverified_count} />
+			)}
+			{host.latest_snapshot_ms == null && host.unverified_count > 0 && (
+				<span className="text-sm font-normal text-muted-foreground">
+					{copy.restore.hostPicker.noSigned}
+				</span>
+			)}
+			{host.agent && host.status ? (
+				<StatusBadge status={host.status} />
+			) : (
+				<Badge variant="outline">{copy.restore.hostPicker.noAgentBadge}</Badge>
+			)}
+		</>
 	);
 }
 

@@ -19,6 +19,7 @@ function restoreHost(n: number, labels: RestoreHost["labels"] = []) {
 		repository_name: "main",
 		snapshot_count: 3,
 		latest_snapshot_ms: Date.UTC(2026, 9, 21),
+		unverified_count: 0,
 	} satisfies RestoreHost;
 }
 

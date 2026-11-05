@@ -40,6 +40,9 @@ export const hostBackup = {
 	},
 } as const;
 
+const unverifiedTip =
+	"Not linked to a server job. Nothing signed this snapshot, so it may not come from the host it names: it is never the latest, retention ignores it and it cannot be restored in place.";
+
 export const snapshots = {
 	title: "Snapshots",
 	emptyHeading: "No snapshots yet",
@@ -74,6 +77,15 @@ export const snapshots = {
 	policyDeletedTip:
 		"The policy was deleted. Retention no longer applies to this snapshot. Delete it by hand when you no longer need it.",
 	suspiciousLabel: (reasons: string) => `Suspicious. ${reasons}`,
+	unverified: "Unverified",
+	unverifiedTip,
+	unverifiedLabel: (count?: number) =>
+		count === undefined
+			? `Unverified. ${unverifiedTip}`
+			: `${count} unverified. ${unverifiedTip}`,
+	ownerSigned: "Signed with password",
+	ownerSignedTip:
+		"Signed by `lode backup` with the repository password, not by a server job.",
 	markedBy: (user: string, reason: string) => `Marked by ${user}: ${reason}`,
 	reasons: {
 		files_drop: (pct: string, from: string, to: string) =>

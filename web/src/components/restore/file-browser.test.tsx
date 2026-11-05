@@ -86,6 +86,7 @@ function snapshot(id: string, time: number): RestoreSnapshot {
 		policy_name: "etc-and-home",
 		policy_deleted: false,
 		received_at: time,
+		verified_by: "server",
 		tags: [],
 		warnings_total: 0,
 		errors_total: 0,
@@ -117,6 +118,7 @@ const hosts: RestoreHost[] = [
 		repository_name: "main",
 		snapshot_count: 2,
 		latest_snapshot_ms: snapshots[0].time,
+		unverified_count: 0,
 	},
 ];
 
