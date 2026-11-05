@@ -119,7 +119,7 @@ pub struct Opened {
 }
 
 const WRITER_KEYS_UPGRADED: &str = "this repository is upgraded for server signatures, and writer keys cannot check a backup here. Back up through the agent (`lode backup --stdin` over its socket) or with the repository password or recovery key.";
-const WRITER_KEYS_DENIED: &str = "cannot read the server signatures in locks/ (access denied), so writer keys cannot tell whether this repository is upgraded for them. Let the writer keys read locks/ (see https://lodestore.dev/docs/guides/gc/), back up through the agent, or use the repository password or recovery key.";
+const WRITER_KEYS_DENIED: &str = "cannot read locks/ in the repository (access denied), so writer keys cannot tell whether a server has upgraded it for signatures. Update the key policy (see https://lodestore.dev/docs/guides/gc/) or pass --no-gc-check if no Lodestore server manages this repository.";
 
 pub const MAX_CACHED_SHARDS: usize = 262_144;
 const VERIFIED_FILE: &str = "verified-shards";
@@ -393,7 +393,7 @@ async fn open_with_writer_keys(
     let hints = peek_attestations(&store)
         .await
         .with_context(|| format!("cannot back up to {url}"))?;
-    if let Some(refusal) = writer_keys_refusal(&hints, upgrade_marked(&keys.repo_id)) {
+    if let Some(refusal) = writer_keys_refusal(&hints, upgrade_marked(&keys.repo_id), no_gc_check) {
         anyhow::bail!(refusal);
     }
     let marker = put_marker(url, &keys, hostname).await?;
@@ -420,12 +420,17 @@ async fn open_with_writer_keys(
     }
 }
 
-/// Writer keys cannot check a backup in an upgraded repository (D-32), and a
-/// repository they cannot tell about counts as upgraded.
-fn writer_keys_refusal(hints: &UnverifiedAttestations, marked: bool) -> Option<&'static str> {
+/// Writer keys cannot check a backup in an upgraded repository (D-32). One
+/// they cannot tell about counts as upgraded unless `--no-gc-check` says no
+/// server manages it, and only a server upgrades a repository.
+fn writer_keys_refusal(
+    hints: &UnverifiedAttestations,
+    marked: bool,
+    no_gc_check: bool,
+) -> Option<&'static str> {
     if marked || hints.markers.contains(&MARKER_LEGACY_SHARDS) {
         Some(WRITER_KEYS_UPGRADED)
-    } else if hints.denied {
+    } else if hints.denied && !no_gc_check {
         Some(WRITER_KEYS_DENIED)
     } else {
         None
@@ -439,16 +444,20 @@ mod tests {
     #[test]
     fn writer_keys_refuse_when_locks_cannot_be_read() {
         let mut hints = UnverifiedAttestations::default();
-        assert_eq!(writer_keys_refusal(&hints, false), None);
+        assert_eq!(writer_keys_refusal(&hints, false, false), None);
         assert_eq!(
-            writer_keys_refusal(&hints, true),
+            writer_keys_refusal(&hints, true, true),
             Some(WRITER_KEYS_UPGRADED)
         );
         hints.denied = true;
-        assert_eq!(writer_keys_refusal(&hints, false), Some(WRITER_KEYS_DENIED));
+        assert_eq!(
+            writer_keys_refusal(&hints, false, false),
+            Some(WRITER_KEYS_DENIED)
+        );
+        assert_eq!(writer_keys_refusal(&hints, false, true), None);
         hints.markers.insert(MARKER_LEGACY_SHARDS);
         assert_eq!(
-            writer_keys_refusal(&hints, false),
+            writer_keys_refusal(&hints, false, true),
             Some(WRITER_KEYS_UPGRADED)
         );
     }
