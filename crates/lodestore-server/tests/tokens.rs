@@ -493,6 +493,7 @@ async fn tokens_actor_recorded() {
                 "in_place": false,
                 "conflict": "skip_existing",
                 "restore_owners": false,
+                "accept_unverified": true,
             }))
             .send()
             .await
