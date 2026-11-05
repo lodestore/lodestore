@@ -23,6 +23,7 @@ use tokio::sync::Notify;
 use crate::socket::StdinHeader;
 use crate::{AgentError, NetOptions, Paths};
 
+pub(crate) mod distrusted;
 pub mod fetch;
 pub(crate) mod own_shards;
 pub mod priority;
