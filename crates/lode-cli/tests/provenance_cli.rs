@@ -163,3 +163,103 @@ fn copy_dir(from: &Path, to: &Path) {
         }
     }
 }
+
+fn snapshots_json(cmd: &mut assert_cmd::Command) -> Vec<serde_json::Value> {
+    let out = stdout_of(cmd.args(["snapshots", "--json"]));
+    let doc: serde_json::Value = serde_json::from_str(out.lines().next().unwrap()).unwrap();
+    doc["snapshots"].as_array().unwrap().clone()
+}
+
+fn short(id: BlobId) -> String {
+    lodestore_format::index::hex32(&id)[..8].to_owned()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cli_snapshots_json_reports_verified_by() {
+    let fx = fixture();
+    let second_src = fx.src.with_file_name("second");
+    std::fs::create_dir(&second_src).unwrap();
+    std::fs::write(second_src.join("f"), b"second").unwrap();
+    let server = backup(&fx.repo, &fx.src);
+    let owner = backup(&fx.repo, &second_src);
+    sign(
+        &fx.repo,
+        &[record(server, "host", "job"), record(owner, "", "")],
+    )
+    .await;
+    let forged = plant_forged(&fx.repo, &fx.forged_src).await;
+
+    let listed = snapshots_json(&mut lode(&fx.repo));
+    let of = |id: BlobId| {
+        let id = lodestore_format::index::hex32(&id);
+        let snap = listed.iter().find(|s| s["id"] == id.as_str()).unwrap();
+        snap["verified_by"].as_str().map(str::to_owned)
+    };
+    assert_eq!(of(server).as_deref(), Some("server"));
+    assert_eq!(of(owner).as_deref(), Some("owner"));
+    assert_eq!(of(forged), None);
+
+    let text = stdout_of(lode(&fx.repo).arg("snapshots"));
+    let line = |id: BlobId| {
+        let short = short(id);
+        text.lines()
+            .find(|l| l.starts_with(&short))
+            .unwrap()
+            .to_owned()
+    };
+    assert!(line(forged).ends_with("  unverified"), "{text}");
+    assert!(line(owner).ends_with("  owner"), "{text}");
+    let server_line = line(server);
+    assert!(!server_line.contains("unverified") && !server_line.ends_with("owner"));
+}
+
+#[test]
+fn cli_snapshots_legacy_repo_has_no_verified_by() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixtures =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../lodestore-format/tests/fixtures/v1");
+    let repo = tmp.path().join("repo");
+    copy_dir(&fixtures.join("repo"), &repo);
+    let password = std::fs::read_to_string(fixtures.join("PASSWORD")).unwrap();
+    let cmd = || {
+        let mut cmd = assert_cmd::Command::cargo_bin("lode").unwrap();
+        cmd.env("LODE_PASSWORD", password.trim_end())
+            .env_remove("LODE_PASSWORD_FILE")
+            .arg("-r")
+            .arg(&repo);
+        cmd
+    };
+    let snaps = snapshots_json(&mut cmd());
+    assert!(!snaps.is_empty());
+    assert!(snaps.iter().all(|s| s["verified_by"].is_null()));
+    let text = stdout_of(cmd().arg("snapshots"));
+    assert!(
+        !text.contains("unverified") && !text.contains("owner"),
+        "{text}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cli_latest_without_signed_snapshot_asks_for_id() {
+    let fx = fixture();
+    backup(&fx.repo, &fx.src);
+    sign(&fx.repo, &[]).await;
+
+    let latest = lode(&fx.repo)
+        .args(["restore", "latest", "--target"])
+        .arg(&fx.target)
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&latest.get_output().stderr).into_owned();
+    assert!(stderr.contains("Name one by id"), "{stderr}");
+    let unknown = lode(&fx.repo)
+        .args(["restore", "00000000", "--target"])
+        .arg(&fx.target)
+        .assert()
+        .failure();
+    assert_eq!(
+        latest.get_output().status.code(),
+        unknown.get_output().status.code()
+    );
+    assert!(!fx.target.exists());
+}

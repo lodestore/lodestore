@@ -1,5 +1,6 @@
 use anyhow::Result;
 use lodestore_format::index::hex32;
+use lodestore_format::provenance::Signer;
 use serde::Serialize;
 
 use crate::cli::SecretArgs;
@@ -17,6 +18,7 @@ struct SnapshotJson<'a> {
     incomplete: bool,
     parent: Option<String>,
     stats: StatsJson,
+    verified_by: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -29,6 +31,13 @@ pub async fn run(url: &str, args: &SecretArgs, out: Output) -> Result<()> {
     let list = reader.list_snapshots().await?;
     warn_skipped(&list.skipped);
     let entries = list.entries;
+    let provenance = reader.provenance().await?;
+    let strict = provenance.attested_any();
+    let verified_by = |id: &[u8; 32]| match provenance.signer(id) {
+        Some(Signer::Server) => Some("server"),
+        Some(Signer::Owner) => Some("owner"),
+        None => None,
+    };
     if out.json {
         let snapshots = entries
             .iter()
@@ -45,6 +54,7 @@ pub async fn run(url: &str, args: &SecretArgs, out: Output) -> Result<()> {
                     incomplete: snap.incomplete,
                     parent: Some(hex(&snap.parent)).filter(|p| !p.is_empty()),
                     stats: snap.stats.as_ref().into(),
+                    verified_by: verified_by(&e.id),
                 }
             })
             .collect();
@@ -58,8 +68,13 @@ pub async fn run(url: &str, args: &SecretArgs, out: Output) -> Result<()> {
             .iter()
             .map(|p| String::from_utf8_lossy(p).into_owned())
             .collect();
+        let mark = match (strict, verified_by(&entry.id)) {
+            (false, _) | (true, Some("server")) => "",
+            (true, Some(_)) => "  owner",
+            (true, None) => "  unverified",
+        };
         println!(
-            "{}  {}  {}  {}",
+            "{}  {}  {}  {}{mark}",
             &hex32(&entry.id)[..8],
             utc(snap.time.as_ref()),
             String::from_utf8_lossy(&snap.hostname),
