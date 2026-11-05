@@ -287,13 +287,12 @@ async fn retry_or_give_up(
         {
             tracing::warn!(%error, job_id, "writing a verification log entry failed");
         }
-        // shortcut: a job whose log is full cannot record the event, so the window starts at
-        // its finish time; upgrade to a dedicated column if that ever matters.
-        first = Some(
-            first_retry_at(state, job_id)
-                .await?
-                .unwrap_or(finished_at(state, job_id).await?),
-        );
+        first = first_retry_at(state, job_id).await?;
+        if first.is_none() {
+            // The log is full; the window still has to start on the server's clock.
+            record_retry_past_log_limit(state, job_id, &message).await?;
+            first = Some(now_ms());
+        }
     }
     let started = first.unwrap_or_else(now_ms);
     if now_ms() - started < window_ms {
@@ -320,12 +319,28 @@ async fn first_retry_at(state: &AppState, job_id: &str) -> anyhow::Result<Option
     Ok(row.try_get("first_at")?)
 }
 
-async fn finished_at(state: &AppState, job_id: &str) -> anyhow::Result<i64> {
-    let row = sqlx::query("SELECT finished_at FROM jobs WHERE id = $1")
-        .bind(job_id)
-        .fetch_one(&state.db.pool)
-        .await?;
-    Ok(row
-        .try_get::<Option<i64>, _>("finished_at")?
-        .unwrap_or_else(now_ms))
+async fn record_retry_past_log_limit(
+    state: &AppState,
+    job_id: &str,
+    message: &str,
+) -> anyhow::Result<()> {
+    let mut tx = state.db.pool.begin().await?;
+    let seq: i64 =
+        sqlx::query("UPDATE jobs SET log_seq = log_seq + 1 WHERE id = $1 RETURNING log_seq")
+            .bind(job_id)
+            .fetch_one(&mut *tx)
+            .await?
+            .try_get("log_seq")?;
+    sqlx::query(
+        "INSERT INTO job_events (job_id, seq, at, level, kind, message) \
+         VALUES ($1, $2, $3, 'warning', 'verification_retry', $4) ON CONFLICT DO NOTHING",
+    )
+    .bind(job_id)
+    .bind(seq)
+    .bind(now_ms())
+    .bind(message)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
 }

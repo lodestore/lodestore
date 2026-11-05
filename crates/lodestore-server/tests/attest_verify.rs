@@ -414,6 +414,60 @@ async fn attest_verify_resumes_after_restart() {
     }
 }
 
+/// Checks cut short by a restart are queued again before the server
+/// accepts agents, so a job finishing meanwhile is never checked twice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn attest_verify_restart_requeues_before_serving() {
+    for backend in backends() {
+        let mut env = Env::new(&backend).await;
+        env.upgrade().await;
+        let (snapshot_id, _) = env.snapshot("requeue", Plant::None).await;
+        env.job("j1", &snapshot_id, "running").await;
+
+        env.ts.restart().await;
+
+        assert_eq!(
+            env.column("j1", "verify_state").await.as_deref(),
+            Some("pending"),
+            "{}",
+            backend.name()
+        );
+        env.ts.stop().await;
+    }
+}
+
+/// A job whose log is full still gets an hour of retries counted on the
+/// server's clock, not from the finish time its agent reported.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn attest_verify_retry_window_ignores_agent_finish_time() {
+    for backend in backends() {
+        let env = Env::new(&backend).await;
+        let keys = env.server_keys().await;
+        put_attestation(&env.store, &keys, &[], &[], Vec::new(), &mut Entropy::os())
+            .await
+            .unwrap();
+        let (snapshot_id, _) = env.snapshot("full-log", Plant::None).await;
+        env.job("j1", &snapshot_id, "pending").await;
+        sqlx::query("UPDATE jobs SET finished_at = $1, log_lines = 5000 WHERE id = 'j1'")
+            .bind(now_ms() - 86_400_000)
+            .execute(env.pool())
+            .await
+            .unwrap();
+
+        env.verify("j1").await;
+
+        assert_eq!(
+            env.column("j1", "verify_state").await.as_deref(),
+            Some("pending"),
+            "[{}] {:?}",
+            backend.name(),
+            env.column("j1", "error_message").await
+        );
+        assert_eq!(env.column("j1", "state").await.unwrap(), "succeeded");
+        env.ts.stop().await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn attest_verify_retention_waits_for_verification() {
     for backend in backends() {

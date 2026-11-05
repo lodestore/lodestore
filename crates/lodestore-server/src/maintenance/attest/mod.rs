@@ -124,6 +124,8 @@ pub async fn tick_once(state: &AppState) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Runs at startup, before agents can finish jobs: a check started after
+/// this would otherwise be reset and run a second time.
 pub async fn resume_interrupted(state: &AppState) -> anyhow::Result<()> {
     sqlx::query("UPDATE jobs SET verify_state = 'pending' WHERE verify_state = 'running'")
         .execute(&state.db.pool)
@@ -132,7 +134,6 @@ pub async fn resume_interrupted(state: &AppState) -> anyhow::Result<()> {
 }
 
 pub async fn run(state: AppState, stop: CancellationToken) -> anyhow::Result<()> {
-    resume_interrupted(&state).await?;
     let mut interval =
         tokio::time::interval(Duration::from_secs(state.config.schedule_tick_secs.max(1)));
     loop {
