@@ -32,7 +32,7 @@ fn candidate_holders(
     live: &LiveSet,
     candidates: &HashSet<BlobId>,
     listed: &HashMap<BlobId, u64>,
-) -> Result<HashMap<(BlobId, u8), BTreeSet<BlobId>>> {
+) -> HashMap<(BlobId, u8), BTreeSet<BlobId>> {
     let mut out: HashMap<(BlobId, u8), BTreeSet<BlobId>> = HashMap::new();
     for (_, shard) in &shards.shards {
         for record in &shard.packs {
@@ -42,7 +42,10 @@ fn candidate_holders(
             if !candidates.contains(&pack_id) || listed.get(&pack_id) != Some(&record.pack_size) {
                 continue;
             }
-            for e in parse_entries(&record.entries)? {
+            let Ok(entries) = parse_entries(&record.entries) else {
+                continue;
+            };
+            for e in entries {
                 if live.contains(&e.blob_id, e.blob_type) {
                     out.entry((e.blob_id, e.blob_type))
                         .or_default()
@@ -51,7 +54,7 @@ fn candidate_holders(
             }
         }
     }
-    Ok(out)
+    out
 }
 
 async fn open_at<S: BlobStore>(
@@ -136,7 +139,7 @@ pub async fn verify<S: BlobStore>(
     outside.retain_packs(&listed);
     let MarkOutcome { live, .. } = mark(store, keys, config, &full, progress).await?;
 
-    let holders = candidate_holders(&shards, &live, candidates, &listed)?;
+    let holders = candidate_holders(&shards, &live, candidates, &listed);
     let mut pack_keys = HashMap::new();
     let mut saved = BTreeSet::new();
     for (id, blob_type) in live.iter() {

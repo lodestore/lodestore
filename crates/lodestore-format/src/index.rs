@@ -195,59 +195,13 @@ impl Index {
     /// cut short cannot hide data. Which location wins does not depend on the
     /// order shards are added in, except between equally ranked copies.
     pub fn add_shard(&mut self, shard_id: BlobId, shard: &pb::IndexShard) -> Result<()> {
-        let bad = |reason: &str| Error::corrupt(index_object_key(&shard_id), reason.to_owned());
-        let supersedes = shard
-            .supersedes
-            .iter()
-            .map(|s| {
-                BlobId::try_from(s.as_slice())
-                    .map_err(|_| bad("superseded shard id must be 32 bytes"))
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let excluded = &self.excluded;
+        let (supersedes, staged, pack_sizes) =
+            read_shard(shard_id, shard, |pack| !excluded.contains(pack))?;
         let supersedes = match &self.trust {
             SupersedesTrust::Only(trusted) if !trusted.contains(&shard_id) => Vec::new(),
             _ => supersedes,
         };
-        let mut staged = Vec::new();
-        let mut pack_sizes = Vec::new();
-        for pack in &shard.packs {
-            let pack_id: BlobId = pack
-                .pack_id
-                .as_slice()
-                .try_into()
-                .map_err(|_| bad("pack id must be 32 bytes"))?;
-            let excluded = self.excluded.contains(&pack_id);
-            if !excluded {
-                pack_sizes.push((pack_id, pack.pack_size));
-            }
-            if pack.hpke_enc.len() != HPKE_ENC_LEN || pack.sealed_pack_key.len() != SEALED_KEY_LEN {
-                return Err(bad("sealed pack key has the wrong size"));
-            }
-            for e in parse_entries(&pack.entries)? {
-                let end = u64::from(e.offset) + u64::from(e.enc_len);
-                if (e.offset as usize) < PACK_PREFIX_LEN
-                    || end > pack.pack_size
-                    || e.ulen as usize > max_ulen(e.blob_type)
-                    || !frame_len_in_range(e.blob_type, e.enc_len)
-                {
-                    return Err(bad("entry lies outside its pack"));
-                }
-                if excluded {
-                    continue;
-                }
-                staged.push((
-                    e.blob_id,
-                    BlobLocation {
-                        pack_id,
-                        offset: e.offset,
-                        enc_len: e.enc_len,
-                        ulen: e.ulen,
-                        blob_type: e.blob_type,
-                        shard: shard_id,
-                    },
-                ));
-            }
-        }
         self.shards.insert(shard_id);
         let newly: HashSet<BlobId> = supersedes
             .into_iter()
@@ -471,6 +425,71 @@ impl Index {
         }
         Ok(())
     }
+}
+
+type ReadShard = (Vec<BlobId>, Vec<(BlobId, BlobLocation)>, Vec<(BlobId, u64)>);
+
+/// Checks every record of a shard and returns its `supersedes`, the
+/// locations in the packs `keep` accepts and the sizes of those packs.
+fn read_shard(
+    shard_id: BlobId,
+    shard: &pb::IndexShard,
+    keep: impl Fn(&BlobId) -> bool,
+) -> Result<ReadShard> {
+    let bad = |reason: &str| Error::corrupt(index_object_key(&shard_id), reason.to_owned());
+    let supersedes = shard
+        .supersedes
+        .iter()
+        .map(|s| {
+            BlobId::try_from(s.as_slice()).map_err(|_| bad("superseded shard id must be 32 bytes"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut staged = Vec::new();
+    let mut pack_sizes = Vec::new();
+    for pack in &shard.packs {
+        let pack_id: BlobId = pack
+            .pack_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| bad("pack id must be 32 bytes"))?;
+        let kept = keep(&pack_id);
+        if kept {
+            pack_sizes.push((pack_id, pack.pack_size));
+        }
+        if pack.hpke_enc.len() != HPKE_ENC_LEN || pack.sealed_pack_key.len() != SEALED_KEY_LEN {
+            return Err(bad("sealed pack key has the wrong size"));
+        }
+        for e in parse_entries(&pack.entries)? {
+            let end = u64::from(e.offset) + u64::from(e.enc_len);
+            if (e.offset as usize) < PACK_PREFIX_LEN
+                || end > pack.pack_size
+                || e.ulen as usize > max_ulen(e.blob_type)
+                || !frame_len_in_range(e.blob_type, e.enc_len)
+            {
+                return Err(bad("entry lies outside its pack"));
+            }
+            if !kept {
+                continue;
+            }
+            staged.push((
+                e.blob_id,
+                BlobLocation {
+                    pack_id,
+                    offset: e.offset,
+                    enc_len: e.enc_len,
+                    ulen: e.ulen,
+                    blob_type: e.blob_type,
+                    shard: shard_id,
+                },
+            ));
+        }
+    }
+    Ok((supersedes, staged, pack_sizes))
+}
+
+/// Whether [`Index::add_shard`] accepts the shard, without adding it.
+pub(crate) fn check_shard(shard_id: BlobId, shard: &pb::IndexShard) -> Result<()> {
+    read_shard(shard_id, shard, |_| false).map(drop)
 }
 
 fn same_extent(a: &BlobLocation, b: &BlobLocation) -> bool {
