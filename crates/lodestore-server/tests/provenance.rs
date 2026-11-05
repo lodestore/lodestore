@@ -504,6 +504,99 @@ async fn provenance_reconcile_restores_marks_after_db_loss() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn provenance_reconcile_skips_row_bound_to_another_host() {
+    for backend in backends() {
+        let c = Catalog::new(&backend).await;
+        c.host("host-b").await;
+        let theirs = c.linked("a", None).await;
+        ensure_provenance_backfilled(c.ts.state(), &c.repo)
+            .await
+            .unwrap();
+        c.forget_marks().await;
+        sqlx::query("UPDATE snapshots SET host_id = 'host-b' WHERE id = $1")
+            .bind(&theirs)
+            .execute(c.pool())
+            .await
+            .unwrap();
+
+        sync_repository(c.ts.state(), &c.repo).await.unwrap();
+
+        assert_eq!(
+            verified_columns(&c.ts, &theirs).await,
+            (None, None),
+            "[{}]",
+            backend.name()
+        );
+        c.ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn provenance_reconcile_skips_snapshot_that_failed_verification() {
+    for backend in backends() {
+        let c = Catalog::new(&backend).await;
+        let bad = c.linked("a", None).await;
+        ensure_provenance_backfilled(c.ts.state(), &c.repo)
+            .await
+            .unwrap();
+        c.forget_marks().await;
+        sqlx::query("UPDATE snapshots SET unverified_reason = 'bad' WHERE id = $1")
+            .bind(&bad)
+            .execute(c.pool())
+            .await
+            .unwrap();
+
+        sync_repository(c.ts.state(), &c.repo).await.unwrap();
+
+        assert_eq!(
+            verified_columns(&c.ts, &bad).await,
+            (None, None),
+            "[{}]",
+            backend.name()
+        );
+        c.ts.stop().await;
+    }
+}
+
+async fn owner_sign(c: &Catalog, snapshot: &str, seconds: i64, nanos: u32) {
+    let store = store(&c.ts);
+    let repo = Repository::open(&store, PASSWORD).await.unwrap();
+    let record = pb::ProvenanceRecord {
+        snapshot_id: parse_hex32(snapshot).unwrap().to_vec(),
+        verified_at: Some(pb::Timestamp { seconds, nanos }),
+        ..Default::default()
+    };
+    let mut entropy = Entropy::os();
+    let sealed = seal_provenance(repo.read_keys(), &record, &mut entropy).unwrap();
+    put_attestation(
+        &store,
+        repo.read_keys(),
+        &[],
+        &[],
+        vec![sealed],
+        &mut entropy,
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn provenance_reconcile_saturates_a_far_future_time() {
+    for backend in backends() {
+        let c = Catalog::new(&backend).await;
+        let snapshot = c.write("direct", None).await;
+        owner_sign(&c, &snapshot, i64::MAX, 999_000_000).await;
+
+        sync_repository(c.ts.state(), &c.repo).await.unwrap();
+
+        let (at, by) = verified_columns(&c.ts, &snapshot).await;
+        assert_eq!(at, Some(i64::MAX), "[{}]", backend.name());
+        assert_eq!(by.as_deref(), Some("owner"));
+        c.ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn provenance_reconcile_marks_owner_signed() {
     for backend in backends() {
         let c = Catalog::new(&backend).await;

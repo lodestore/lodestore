@@ -180,7 +180,9 @@ fn parts<T>(
 }
 
 /// Bucket to database only: the catalog gets the mark for every snapshot the
-/// bucket's signatures cover, including those a rebuilt catalog lost.
+/// bucket's signatures cover, including those a rebuilt catalog lost. A
+/// server record marks a row only when the row names the record's host: a
+/// rebuilt row takes its host from the manifest, which the agent wrote.
 pub async fn reconcile_provenance<S: BlobStore>(
     state: &AppState,
     repository_id: &str,
@@ -192,12 +194,15 @@ pub async fn reconcile_provenance<S: BlobStore>(
         return Ok(0);
     }
     let set = ProvenanceSet::from_attested(&attested, keys);
-    let rows =
-        sqlx::query("SELECT id FROM snapshots WHERE repository_id = $1 AND verified_at IS NULL")
-            .bind(repository_id)
-            .fetch_all(&state.db.pool)
-            .await?;
+    let rows = sqlx::query(
+        "SELECT id, host_id FROM snapshots WHERE repository_id = $1 AND verified_at IS NULL \
+         AND unverified_reason IS NULL",
+    )
+    .bind(repository_id)
+    .fetch_all(&state.db.pool)
+    .await?;
     let mut marked = 0;
+    let mut other_host = 0;
     for row in rows {
         let id: String = row.try_get("id")?;
         let Some(snapshot) = parse_hex32(&id) else {
@@ -206,14 +211,22 @@ pub async fn reconcile_provenance<S: BlobStore>(
         let (Some(record), Some(signer)) = (set.get(&snapshot), set.signer(&snapshot)) else {
             continue;
         };
-        let at = record
-            .verified_at
-            .as_ref()
-            .map_or(0, |t| t.seconds * 1000 + i64::from(t.nanos / 1_000_000));
         let by = match signer {
-            Signer::Server => "server",
+            Signer::Server => {
+                let host: Option<String> = row.try_get("host_id")?;
+                if host.as_deref() != Some(record.host_id.as_str()) {
+                    other_host += 1;
+                    continue;
+                }
+                "server"
+            }
             Signer::Owner => "owner",
         };
+        let at = record.verified_at.as_ref().map_or(0, |t| {
+            t.seconds
+                .saturating_mul(1000)
+                .saturating_add(i64::from(t.nanos / 1_000_000))
+        });
         sqlx::query(
             "UPDATE snapshots SET verified_at = $1, verified_by = $2 \
              WHERE id = $3 AND repository_id = $4 AND verified_at IS NULL",
@@ -225,6 +238,13 @@ pub async fn reconcile_provenance<S: BlobStore>(
         .execute(&state.db.pool)
         .await?;
         marked += 1;
+    }
+    if other_host > 0 {
+        tracing::warn!(
+            repository = repository_id,
+            snapshots = other_host,
+            "left snapshots unverified: the catalog names another host than their signature"
+        );
     }
     Ok(marked)
 }
