@@ -120,13 +120,17 @@ const WRITER_KEYS_UPGRADED: &str = "this repository is upgraded for server signa
 pub const MAX_CACHED_SHARDS: usize = 262_144;
 const VERIFIED_FILE: &str = "verified-shards";
 const DISTRUSTED_FILE: &str = "distrusted-shards";
+const UPGRADED_FILE: &str = "upgraded";
 
 /// Index shards this machine has opened itself or caught lying, kept between
 /// runs in `$XDG_CACHE_HOME/lode/<repo id>/`. Losing the files only makes the
-/// next strict backup download packs again.
+/// next strict backup download packs again. `upgraded` is the mark that this
+/// machine has seen the repository carry server signatures: a bucket that
+/// loses its attestations afterwards must not fall back to the unsigned rules.
 #[derive(Default)]
 pub struct ShardCache {
     dir: Option<PathBuf>,
+    pub upgraded: bool,
     pub verified: HashSet<BlobId>,
     pub distrusted: HashSet<BlobId>,
     verified_order: Vec<BlobId>,
@@ -186,6 +190,7 @@ impl ShardCache {
         let verified_order = read_ids(&dir.join(VERIFIED_FILE));
         let distrusted_order = read_ids(&dir.join(DISTRUSTED_FILE));
         Self {
+            upgraded: dir.join(UPGRADED_FILE).exists(),
             verified: verified_order.iter().copied().collect(),
             distrusted: distrusted_order.iter().copied().collect(),
             verified_order,
@@ -208,12 +213,23 @@ impl ShardCache {
         }
     }
 
+    fn save_upgraded(&self, dir: &Path) -> Result<()> {
+        if !self.upgraded {
+            return Ok(());
+        }
+        std::fs::create_dir_all(dir)?;
+        let tmp = tempfile::NamedTempFile::new_in(dir)?;
+        tmp.persist(dir.join(UPGRADED_FILE))?;
+        Ok(())
+    }
+
     pub fn save(&self) -> Result<()> {
         let Some(dir) = &self.dir else {
             return Ok(());
         };
         write_ids(dir, VERIFIED_FILE, &self.verified_order)
             .and_then(|()| write_ids(dir, DISTRUSTED_FILE, &self.distrusted_order))
+            .and_then(|()| self.save_upgraded(dir))
             .with_context(|| format!("cannot save the shard cache in {}", dir.display()))
     }
 }
@@ -277,11 +293,13 @@ pub async fn open_for_write(
     let opened = async {
         let attestations = read_attestations(&store, repo.read_keys()).await?;
         let strict = if attestations.markers.contains(&MARKER_LEGACY_SHARDS) {
+            let mut cache = ShardCache::load(repo.read_keys().repo_id());
+            cache.upgraded = true;
             Some(Strict {
                 store: open_store(url)?,
                 keys: repo.read_keys().duplicate(),
                 provenance: ProvenanceSet::from_attested(&attestations, repo.read_keys()),
-                cache: ShardCache::load(repo.read_keys().repo_id()),
+                cache,
                 attested: attestations.shards,
             })
         } else {

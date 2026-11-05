@@ -263,3 +263,72 @@ async fn cli_latest_without_signed_snapshot_asks_for_id() {
     );
     assert!(!fx.target.exists());
 }
+
+fn upgrade_marks(repo: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(common::cache_dir_of(repo).join("lode"))
+        .unwrap()
+        .map(|e| e.unwrap().path().join("upgraded"))
+        .filter(|p| p.is_file())
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cli_latest_refuses_when_attestations_vanish() {
+    let fx = fixture();
+    let honest = backup(&fx.repo, &fx.src);
+    sign(&fx.repo, &[record(honest, "host", "job")]).await;
+
+    lode(&fx.repo)
+        .args(["restore", "latest", "--target"])
+        .arg(&fx.target)
+        .assert()
+        .success();
+    assert_trees_equal(&fx.src, &restored_path(&fx.target, &fx.src));
+    assert_eq!(upgrade_marks(&fx.repo).len(), 1, "no upgrade mark");
+
+    for entry in std::fs::read_dir(fx.repo.join("locks")).unwrap() {
+        let path = entry.unwrap().path();
+        if path
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with("attest-"))
+        {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    let t2 = fx.target.with_file_name("out2");
+    let refused = lode(&fx.repo)
+        .args(["restore", "latest", "--target"])
+        .arg(&t2)
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&refused.get_output().stderr).into_owned();
+    assert!(stderr.contains("may have been deleted"), "{stderr}");
+    assert!(!t2.exists());
+    let unknown = lode(&fx.repo)
+        .args(["restore", "00000000", "--target"])
+        .arg(fx.target.with_file_name("out3"))
+        .assert()
+        .failure();
+    assert_eq!(
+        refused.get_output().status.code(),
+        unknown.get_output().status.code()
+    );
+
+    let legacy = lode(&fx.repo)
+        .env("XDG_CACHE_HOME", fx.target.with_file_name("fresh-cache"))
+        .args(["restore", "latest", "--target"])
+        .arg(fx.target.with_file_name("out4"))
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&legacy.get_output().stderr).into_owned();
+    assert!(stderr.contains("no server signatures yet"), "{stderr}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cli_strict_backup_sets_upgrade_mark() {
+    let fx = fixture();
+    sign(&fx.repo, &[]).await;
+    backup(&fx.repo, &fx.src);
+    assert_eq!(upgrade_marks(&fx.repo).len(), 1, "no upgrade mark");
+}
