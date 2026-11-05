@@ -8189,7 +8189,8 @@
           },
           "last_seen_ms": {
             "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "description": "When the server received the newest snapshot holding the file, in milliseconds."
           },
           "path": {
             "type": "string"
@@ -8242,7 +8243,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "Only snapshots taken at or after this time, in milliseconds."
+            "description": "Only snapshots received at or after this time, in milliseconds."
           },
           "until": {
             "type": [
@@ -8250,7 +8251,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "Only snapshots taken at or before this time, in milliseconds."
+            "description": "Only snapshots received at or before this time, in milliseconds."
           }
         }
       },
@@ -8377,7 +8378,8 @@
           },
           "time_ms": {
             "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "description": "When the server received the snapshot, in milliseconds."
           }
         }
       },
@@ -8430,14 +8432,16 @@
           },
           "first_ms": {
             "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "description": "When the server received the first snapshot holding this version, in milliseconds."
           },
           "kind": {
             "$ref": "#/components/schemas/EntryKind"
           },
           "last_ms": {
             "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "description": "When the server received the last snapshot holding this version, in milliseconds."
           },
           "mtime_ms": {
             "type": "integer",
@@ -8459,6 +8463,13 @@
               "$ref": "#/components/schemas/FindSnapshotRef"
             },
             "description": "The newest snapshots holding this version, newest first."
+          },
+          "verified_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Who signed the provenance of a snapshot holding this version: `server` or `owner`. Null when none is signed; such a version is listed after the signed ones."
           }
         }
       },

@@ -35,7 +35,9 @@ pub struct SnapshotRow {
     pub host_id: Option<String>,
     pub hostname: String,
     pub labels: Vec<Label>,
+    /// When the server received the snapshot; the manifest time is chosen by the host.
     pub time_ms: i64,
+    pub verified_by: Option<String>,
     /// The host and the source (policy, stdin name or paths) whose snapshots follow each other.
     pub lineage: String,
     pub incomplete: bool,
@@ -82,11 +84,11 @@ pub async fn select_snapshots(
     }
     if let Some(since) = query.since {
         binds.push(Bind::Time(since));
-        clauses.push(format!("s.time_ms >= ${}", binds.len()));
+        clauses.push(format!("s.received_at >= ${}", binds.len()));
     }
     if let Some(until) = query.until {
         binds.push(Bind::Time(until));
-        clauses.push(format!("s.time_ms <= ${}", binds.len()));
+        clauses.push(format!("s.received_at <= ${}", binds.len()));
     }
     let filter = if clauses.is_empty() {
         String::new()
@@ -95,10 +97,10 @@ pub async fn select_snapshots(
     };
     let sql = format!(
         "SELECT s.id, s.repository_id, s.host_id, s.hostname AS snap_hostname, \
-         COALESCE(a.hostname, s.hostname) AS hostname, a.labels_json, s.time_ms, \
+         COALESCE(a.hostname, s.hostname) AS hostname, a.labels_json, s.received_at AS time_ms, s.verified_by, \
          s.policy_name, s.stdin_name, s.paths_json, s.incomplete \
          FROM snapshots s LEFT JOIN agents a ON a.id = s.host_id \
-         {filter}ORDER BY s.time_ms DESC, s.id DESC"
+         {filter}ORDER BY s.received_at DESC, s.id DESC"
     );
     let mut request = sqlx::query(sqlx::AssertSqlSafe(sql));
     for bind in binds {
@@ -137,6 +139,7 @@ pub async fn select_snapshots(
                     .and_then(|json| serde_json::from_str(&json).ok())
                     .unwrap_or_default(),
                 time_ms: row.try_get("time_ms")?,
+                verified_by: row.try_get("verified_by")?,
             })
         })
         .collect::<Result<Vec<_>, sqlx::Error>>()?;
@@ -454,6 +457,7 @@ fn merge(s: &mut SessionState, snapshot: &SnapshotRow, entry: &Entry, max_groups
                 mtime_ms: entry.mtime_ms,
                 first_ms: snapshot.time_ms,
                 last_ms: snapshot.time_ms,
+                verified_by: None,
                 snapshots: Vec::new(),
             });
             group.versions.len() - 1
@@ -462,6 +466,7 @@ fn merge(s: &mut SessionState, snapshot: &SnapshotRow, entry: &Entry, max_groups
     let version = &mut group.versions[at];
     version.first_ms = version.first_ms.min(snapshot.time_ms);
     version.last_ms = version.last_ms.max(snapshot.time_ms);
+    version.verified_by = version.verified_by.take().max(snapshot.verified_by.clone());
     version
         .snapshots
         .push((snapshot.id.clone(), snapshot.time_ms));

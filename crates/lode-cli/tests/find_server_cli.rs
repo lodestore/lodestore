@@ -166,12 +166,12 @@ fn group(index: u64, host_key: &str, hostname: &str, path: &str, snapshot: &str)
         "agent": host_key.len() == 2, "labels": [], "path_b64": "", "path": path,
         "last_seen_ms": AT, "gone": null, "revision": index + 1,
         "versions": [
-            {"content_id": "01", "kind": "file", "size": 5, "mtime_ms": AT - 1000,
-             "first_ms": AT - 2000, "last_ms": AT - 1000, "snapshot_count": 1,
-             "snapshots": [{"id": "0".repeat(64), "time_ms": AT - 1000}]},
             {"content_id": "02", "kind": "file", "size": 6, "mtime_ms": AT,
              "first_ms": AT, "last_ms": AT, "snapshot_count": 2,
-             "snapshots": [{"id": snapshot, "time_ms": AT}, {"id": "1".repeat(64), "time_ms": AT - 10}]}
+             "snapshots": [{"id": snapshot, "time_ms": AT}, {"id": "1".repeat(64), "time_ms": AT - 10}]},
+            {"content_id": "01", "kind": "file", "size": 5, "mtime_ms": AT - 1000,
+             "first_ms": AT - 2000, "last_ms": AT - 1000, "snapshot_count": 1,
+             "snapshots": [{"id": "0".repeat(64), "time_ms": AT - 1000}]}
         ]
     })
 }
