@@ -54,7 +54,7 @@ function Status({ host }: { host: RestoreHost }) {
 				<UnverifiedBadge plain count={host.unverified_count} />
 			)}
 			{host.latest_snapshot_ms == null && host.unverified_count > 0 && (
-				<span className="text-sm font-normal text-muted-foreground">
+				<span className="min-w-0 truncate text-sm font-normal text-muted-foreground">
 					{copy.restore.hostPicker.noSigned}
 				</span>
 			)}
@@ -101,9 +101,9 @@ function HostItem({
 						<bdi>{displayName(label)}</bdi>
 					</code>
 				))}
-			<span className="ml-auto flex shrink-0 items-center gap-2">
+			<span className="ml-auto flex min-w-0 items-center gap-2">
 				{source && (
-					<span className="text-sm text-muted-foreground">
+					<span className="min-w-0 truncate text-sm text-muted-foreground">
 						{copy.restore.hostPicker.sourceHost}
 					</span>
 				)}
@@ -215,16 +215,16 @@ export const HostPicker = memo(function HostPicker({
 								? copy.restore.hostPicker.current(displayName(current.hostname))
 								: copy.restore.hostPicker.label
 						}
-						className="w-full justify-between"
+						className="h-auto min-h-10 w-full justify-between py-2"
 					>
 						{current ? (
 							<>
-								<bdi className="truncate font-semibold">
+								<bdi className="max-w-2/5 shrink-0 truncate font-semibold">
 									{displayName(current.hostname)}
 								</bdi>
-								<span className="ml-auto flex shrink-0 items-center gap-2">
+								<span className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-x-2 gap-y-1">
 									{current.key === sourceKey && (
-										<span className="text-sm font-normal text-muted-foreground">
+										<span className="min-w-0 truncate text-sm font-normal text-muted-foreground">
 											{copy.restore.hostPicker.sourceHost}
 										</span>
 									)}
