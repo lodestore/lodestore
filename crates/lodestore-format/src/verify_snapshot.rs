@@ -159,6 +159,9 @@ pub struct SnapshotCheck {
     /// Shards the check opened the frames of itself; the caller records them
     /// as verified.
     pub newly_verified: Vec<BlobId>,
+    /// Attested shards whose frames did not open during the check; the caller
+    /// stops trusting them for deduplication.
+    pub lying: Vec<BlobId>,
 }
 
 struct Resolver<'a, S> {
@@ -169,6 +172,7 @@ struct Resolver<'a, S> {
     index: Index,
     loaded: HashSet<BlobId>,
     newly_verified: Vec<BlobId>,
+    lying: Vec<BlobId>,
     pack_keys: HashMap<BlobId, Key32>,
     // shortcut: after the first miss the blob ids of every listed attested shard are held in
     // memory, about the size of the index the server holds for GC; upgrade to per-miss
@@ -189,6 +193,9 @@ impl<S: BlobStore> Resolver<'_, S> {
         match self.add(id, is_verified).await {
             Err(e) if is_data_error(&e) => {
                 self.loaded.insert(*id);
+                if !is_verified {
+                    self.lying.push(*id);
+                }
                 Ok(())
             }
             other => other,
@@ -375,6 +382,7 @@ pub async fn check_snapshot_resolves<S: BlobStore>(
         index,
         loaded: HashSet::new(),
         newly_verified: Vec::new(),
+        lying: Vec::new(),
         pack_keys: HashMap::new(),
         holders: None,
     };
@@ -402,5 +410,6 @@ pub async fn check_snapshot_resolves<S: BlobStore>(
         }
     }
     out.newly_verified = r.newly_verified;
+    out.lying = r.lying;
     Ok(out)
 }

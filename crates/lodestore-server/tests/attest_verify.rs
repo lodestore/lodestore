@@ -139,7 +139,7 @@ impl Env {
             self.upgrade().await;
         }
         let mut writer = if plant == Plant::BeforeUpgrade {
-            Writer::connect_attested(&self.store, keys, &HashSet::new()).await
+            Writer::connect_attested(&self.store, keys, &HashSet::new(), &HashSet::new()).await
         } else {
             Writer::connect(&self.store, keys).await
         }
