@@ -448,6 +448,55 @@ async fn retention_pools_include_stdin_needs_snapshots_delete() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retention_pools_stdin_not_last_success() {
+    for backend in backends() {
+        let pools = Pools::start(&backend, "").await;
+        let scheduled = now_ms() - 3 * DAY_MS;
+        pools
+            .seed(Seed {
+                id: &"1".repeat(64),
+                received: scheduled,
+                origin: Some("schedule"),
+                stdin: None,
+                exact: true,
+                job: "seeded",
+            })
+            .await;
+        pools
+            .seed(Seed {
+                id: &"e".repeat(64),
+                received: now_ms(),
+                origin: Some("stdin"),
+                stdin: Some("app.dump"),
+                exact: true,
+                job: "seeded",
+            })
+            .await;
+
+        let token = pools.ts.issue_token(&["metrics:read"]).await;
+        let text = bearer_client(&token)
+            .get(format!("{}/metrics", pools.ts.rest_url()))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        let series = text
+            .lines()
+            .find(|l| {
+                l.starts_with("lodestore_backup_last_success_timestamp_seconds{")
+                    && l.contains(r#"policy="pools""#)
+            })
+            .unwrap_or_else(|| panic!("no last-success series in:\n{text}"));
+        let at: f64 = series.rsplit(' ').next().unwrap().parse().unwrap();
+        let name = backend.name();
+        assert!((at - scheduled as f64 / 1000.0).abs() < 1.0, "{name} {at}");
+        pools.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn retention_pools_unconfirmed_time_keeps_all() {
     for backend in backends() {
         let pools = Pools::start(&backend, "").await;

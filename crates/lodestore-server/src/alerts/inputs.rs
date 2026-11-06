@@ -257,7 +257,7 @@ async fn load_policies(state: &AppState) -> anyhow::Result<(Vec<Policy>, Vec<Str
 async fn last_successes(state: &AppState) -> anyhow::Result<HashMap<Pair, i64>> {
     let rows = sqlx::query(
         "SELECT policy_name, host_id, MAX(received_at) AS at FROM snapshots \
-         WHERE incomplete = 0 AND verified_at IS NOT NULL \
+         WHERE incomplete = 0 AND verified_at IS NOT NULL AND stdin_name IS NULL \
          AND policy_name IS NOT NULL AND host_id IS NOT NULL \
          GROUP BY policy_name, host_id",
     )
