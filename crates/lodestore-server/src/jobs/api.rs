@@ -16,7 +16,7 @@ use super::{
     enqueue, gc_select, gc_summary, job_spec, load_agent_update, load_download, load_job,
     summary_from_row,
 };
-use crate::auth::tokens::{JobsRead, JobsRun, RestoreScope, Scoped};
+use crate::auth::tokens::{JobsRead, JobsRun, RestoreWrite, Scope, Scoped};
 use crate::browse::AGENTLESS;
 use crate::browse::tree::decode_b64;
 use crate::db::now_ms;
@@ -854,6 +854,11 @@ fn downloads_refused() -> ApiError {
     ApiError::Conflict("Downloads cannot be cancelled or run again.".into())
 }
 
+const RESTORE_HOST_PURPOSE: &str = "restore into a folder on the host";
+const RESTORE_IN_PLACE_PURPOSE: &str = "restore in place";
+const RESTORE_OWNERS_PURPOSE: &str =
+    "restore file owners, setuid/setgid bits or file capabilities";
+
 #[derive(Deserialize, ToSchema)]
 pub struct RestoreBody {
     pub snapshot_id: String,
@@ -864,6 +869,7 @@ pub struct RestoreBody {
     pub destination: String,
     pub in_place: bool,
     pub conflict: ConflictPolicyDto,
+    /// Restores file owners, setuid/setgid bits and file capabilities. An API token needs the `restore:in-place` scope for it.
     pub restore_owners: bool,
     /// Must be true to restore a snapshot that nothing signed; such a snapshot cannot be restored in place.
     #[serde(default)]
@@ -879,12 +885,13 @@ pub struct RestoreCreated {
     post,
     tag = "Restore",
     summary = "Restore selected paths of a snapshot to a host",
-    security(("session" = [], "csrf" = []), ("bearer" = ["restore"])),
+    security(("session" = [], "csrf" = []), ("bearer" = ["restore:host"]), ("bearer" = ["restore:in-place"])),
     path = "/api/v1/restores",
     request_body = RestoreBody,
     responses(
         (status = 201, description = "The restore job is queued", body = RestoreCreated),
         (status = 400, description = "`restore_destination_root`: a restore into a new folder names `/`; `restore_in_place_not_empty`: a restore in place with `stop_if_not_empty`; `restore_unverified_in_place`: nothing signed the snapshot, so it cannot be restored in place; `restore_unverified_not_confirmed`: nothing signed the snapshot and `accept_unverified` is not set", body = ErrorBody),
+        (status = 403, description = "The token lacks `restore:host` for a new folder, or `restore:in-place` for a restore in place or with `restore_owners`", body = ErrorBody),
         (status = 404, description = "Unknown snapshot or host, or a selected path is missing", body = ErrorBody),
         (status = 422, description = "The selection, destination or host is not valid", body = ErrorBody),
         (status = 502, description = "The repository storage is unavailable", body = ErrorBody),
@@ -892,7 +899,7 @@ pub struct RestoreCreated {
 )]
 pub async fn create_restore(
     State(state): State<AppState>,
-    auth: Scoped<RestoreScope>,
+    auth: Scoped<RestoreWrite>,
     Json(body): Json<RestoreBody>,
 ) -> Result<(StatusCode, Json<RestoreCreated>), ApiError> {
     let items = body
@@ -900,6 +907,14 @@ pub async fn create_restore(
         .iter()
         .map(|item| decode_b64(item))
         .collect::<Result<Vec<_>, _>>()?;
+    if body.in_place {
+        auth.require_also(Scope::RestoreInPlace, RESTORE_IN_PLACE_PURPOSE)?;
+    } else {
+        auth.require_also(Scope::RestoreHost, RESTORE_HOST_PURPOSE)?;
+    }
+    if body.restore_owners {
+        auth.require_also(Scope::RestoreInPlace, RESTORE_OWNERS_PURPOSE)?;
+    }
     let job_id = enqueue_restore(
         &state,
         RestoreRequest {

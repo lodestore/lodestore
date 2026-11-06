@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::marker::PhantomData;
 
 use axum::Json;
@@ -40,6 +41,8 @@ pub enum Scope {
     PoliciesRead,
     #[serde(rename = "policies:write")]
     PoliciesWrite,
+    #[serde(rename = "hooks:write")]
+    HooksWrite,
     #[serde(rename = "jobs:read")]
     JobsRead,
     #[serde(rename = "jobs:run")]
@@ -50,27 +53,34 @@ pub enum Scope {
     SnapshotsRead,
     #[serde(rename = "snapshots:delete")]
     SnapshotsDelete,
-    #[serde(rename = "restore")]
-    Restore,
+    #[serde(rename = "restore:download")]
+    RestoreDownload,
+    #[serde(rename = "restore:host")]
+    RestoreHost,
+    #[serde(rename = "restore:in-place")]
+    RestoreInPlace,
 }
 
 impl Scope {
-    pub const ALL: [Scope; 12] = [
+    pub const ALL: [Scope; 15] = [
         Scope::HostsRead,
         Scope::HostsWrite,
         Scope::AlertsWrite,
         Scope::AgentsUpdate,
         Scope::PoliciesRead,
         Scope::PoliciesWrite,
+        Scope::HooksWrite,
         Scope::JobsRead,
         Scope::JobsRun,
         Scope::MetricsRead,
         Scope::SnapshotsRead,
         Scope::SnapshotsDelete,
-        Scope::Restore,
+        Scope::RestoreDownload,
+        Scope::RestoreHost,
+        Scope::RestoreInPlace,
     ];
 
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Scope::HostsRead => "hosts:read",
             Scope::HostsWrite => "hosts:write",
@@ -78,18 +88,22 @@ impl Scope {
             Scope::AgentsUpdate => "agents:update",
             Scope::PoliciesRead => "policies:read",
             Scope::PoliciesWrite => "policies:write",
+            Scope::HooksWrite => "hooks:write",
             Scope::JobsRead => "jobs:read",
             Scope::JobsRun => "jobs:run",
             Scope::MetricsRead => "metrics:read",
             Scope::SnapshotsRead => "snapshots:read",
             Scope::SnapshotsDelete => "snapshots:delete",
-            Scope::Restore => "restore",
+            Scope::RestoreDownload => "restore:download",
+            Scope::RestoreHost => "restore:host",
+            Scope::RestoreInPlace => "restore:in-place",
         }
     }
 }
 
 pub trait ScopeName {
-    const SCOPE: Scope;
+    const SCOPES: &'static [Scope];
+    const NAME: &'static str;
 }
 
 macro_rules! scope_markers {
@@ -97,7 +111,8 @@ macro_rules! scope_markers {
         $(
             pub struct $marker;
             impl ScopeName for $marker {
-                const SCOPE: Scope = Scope::$scope;
+                const SCOPES: &'static [Scope] = &[Scope::$scope];
+                const NAME: &'static str = Scope::$scope.as_str();
             }
         )*
     };
@@ -115,7 +130,14 @@ scope_markers! {
     MetricsRead => MetricsRead,
     SnapshotsRead => SnapshotsRead,
     SnapshotsDelete => SnapshotsDelete,
-    RestoreScope => Restore,
+    RestoreDownload => RestoreDownload,
+}
+
+pub struct RestoreWrite;
+
+impl ScopeName for RestoreWrite {
+    const SCOPES: &'static [Scope] = &[Scope::RestoreHost, Scope::RestoreInPlace];
+    const NAME: &'static str = "restore:host or restore:in-place";
 }
 
 #[derive(Debug, Clone)]
@@ -135,10 +157,14 @@ impl<S: ScopeName> Scoped<S> {
         &self.0
     }
 
-    pub fn require_also(&self, scope: Scope, purpose: &'static str) -> Result<(), ApiError> {
+    pub fn require_also(
+        &self,
+        scope: Scope,
+        purpose: impl Into<Cow<'static, str>>,
+    ) -> Result<(), ApiError> {
         match &self.0 {
             Principal::Token { scopes, .. } if !scopes.contains(&scope) => {
-                Err(ApiError::MissingScopeFor(scope.as_str(), purpose))
+                Err(ApiError::MissingScopeFor(scope.as_str(), purpose.into()))
             }
             _ => Ok(()),
         }
@@ -155,7 +181,8 @@ impl<S: ScopeName> Scoped<S> {
 async fn verify_token(
     state: &AppState,
     secret: &str,
-    needed: Scope,
+    needed: &[Scope],
+    name: &'static str,
 ) -> Result<Principal, ApiError> {
     if !secret.starts_with(TOKEN_PREFIX) {
         return Err(ApiError::Unauthorized);
@@ -178,8 +205,8 @@ async fn verify_token(
         .into_iter()
         .filter_map(|s| serde_json::from_value(s).ok())
         .collect();
-    if !scopes.contains(&needed) {
-        return Err(ApiError::MissingScope(needed.as_str()));
+    if !needed.iter().any(|n| scopes.contains(n)) {
+        return Err(ApiError::MissingScope(name));
     }
     let last_used_at: Option<i64> = row.try_get("last_used_at")?;
     if last_used_at.is_none_or(|t| now - t >= LAST_USED_TOUCH_MS)
@@ -203,7 +230,7 @@ impl<S: ScopeName> FromRequestParts<AppState> for Scoped<S> {
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
         let principal = match super::bearer_secret(&parts.headers) {
-            Some(secret) => verify_token(state, secret, S::SCOPE).await?,
+            Some(secret) => verify_token(state, secret, S::SCOPES, S::NAME).await?,
             None => Principal::Session(AuthUser::from_request_parts(parts, state).await?),
         };
         Ok(Scoped(principal, PhantomData))
@@ -425,7 +452,7 @@ mod tests {
         assert_eq!(scope, Scope::MetricsRead);
         assert_eq!(scope.as_str(), "metrics:read");
         assert_eq!(serde_json::to_string(&scope).unwrap(), "\"metrics:read\"");
-        assert_eq!(Scope::ALL.len(), 12);
+        assert_eq!(Scope::ALL.len(), 15);
         let names: Vec<&str> = Scope::ALL.iter().map(|s| s.as_str()).collect();
         let at = names.iter().position(|n| *n == "metrics:read").unwrap();
         assert_eq!(names[at - 1], "jobs:run");
