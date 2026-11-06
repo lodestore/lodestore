@@ -17,7 +17,12 @@ export function findSnapshotRef(
 	n: number,
 	over: Partial<FindSnapshotRef> = {},
 ): FindSnapshotRef {
-	return { id: findId(n), time_ms: Date.UTC(2026, 9, 21, 2, 0), ...over };
+	return {
+		id: findId(n),
+		time_ms: Date.UTC(2026, 9, 21, 2, 0),
+		verified_by: "server",
+		...over,
+	};
 }
 
 export function findVersion(over: Partial<FindVersion> = {}): FindVersion {
