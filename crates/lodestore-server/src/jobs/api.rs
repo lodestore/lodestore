@@ -856,8 +856,7 @@ fn downloads_refused() -> ApiError {
 
 const RESTORE_HOST_PURPOSE: &str = "restore into a folder on the host";
 const RESTORE_IN_PLACE_PURPOSE: &str = "restore in place";
-const RESTORE_OWNERS_PURPOSE: &str =
-    "restore file owners, setuid/setgid bits or file capabilities";
+const RESTORE_OWNERS_PURPOSE: &str = "restore file owners, setuid/setgid bits or file capabilities";
 
 #[derive(Deserialize, ToSchema)]
 pub struct RestoreBody {

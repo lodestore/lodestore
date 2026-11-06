@@ -356,11 +356,7 @@ const MATRIX: &[(&str, &str, &str)] = &[
     ),
     ("GET", "/api/v1/hosts/nope/snapshots", "snapshots:read"),
     ("POST", "/api/v1/downloads", "restore:download"),
-    (
-        "GET",
-        "/api/v1/downloads/nope/archive",
-        "restore:download",
-    ),
+    ("GET", "/api/v1/downloads/nope/archive", "restore:download"),
 ];
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -485,7 +481,13 @@ async fn tokens_actor_recorded() {
             .expect("ingest");
         let item = b64(format!("{}/b.txt", data.canonicalize().unwrap().display()).as_bytes());
 
-        let created = create(&api, "ci", &["restore:host", "restore:download"], Value::Null).await;
+        let created = create(
+            &api,
+            "ci",
+            &["restore:host", "restore:download"],
+            Value::Null,
+        )
+        .await;
         let client = bearer_client(created["token"].as_str().unwrap());
         let base = ts.rest_url();
 
