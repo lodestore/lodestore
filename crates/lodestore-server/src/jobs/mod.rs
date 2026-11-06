@@ -478,12 +478,13 @@ async fn enqueue_one(
     policy_name: &str,
     (host_id, hostname): &(String, String),
     spec: &[u8],
+    origin: &str,
 ) -> Result<RunJob, ApiError> {
     for _ in 0..3 {
         let id = uuid::Uuid::now_v7().to_string();
         let inserted = sqlx::query(
-            "INSERT INTO jobs (id, host_id, policy_id, policy_name, source, state, spec, queued_at) \
-             VALUES ($1, $2, $3, $4, 'manual', 'queued', $5, $6) ON CONFLICT DO NOTHING",
+            "INSERT INTO jobs (id, host_id, policy_id, policy_name, source, state, spec, queued_at, origin) \
+             VALUES ($1, $2, $3, $4, 'manual', 'queued', $5, $6, $7) ON CONFLICT DO NOTHING",
         )
         .bind(&id)
         .bind(host_id)
@@ -491,6 +492,7 @@ async fn enqueue_one(
         .bind(policy_name)
         .bind(spec.to_vec())
         .bind(now_ms())
+        .bind(origin)
         .execute(&state.db.pool)
         .await?
         .rows_affected()
@@ -528,10 +530,21 @@ pub async fn enqueue(
     hosts: &[(String, String)],
     spec: &JobSpec,
 ) -> Result<Vec<RunJob>, ApiError> {
+    enqueue_with_origin(state, policy_id, policy_name, hosts, spec, "manual").await
+}
+
+pub async fn enqueue_with_origin(
+    state: &AppState,
+    policy_id: &str,
+    policy_name: &str,
+    hosts: &[(String, String)],
+    spec: &JobSpec,
+    origin: &str,
+) -> Result<Vec<RunJob>, ApiError> {
     let spec = spec.encode_to_vec();
     let mut out = Vec::with_capacity(hosts.len());
     for host in hosts {
-        out.push(enqueue_one(state, policy_id, policy_name, host, &spec).await?);
+        out.push(enqueue_one(state, policy_id, policy_name, host, &spec, origin).await?);
     }
     Ok(out)
 }
