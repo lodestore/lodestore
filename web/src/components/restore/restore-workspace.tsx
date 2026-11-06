@@ -17,6 +17,7 @@ import {
 	useSnapshotTimeline,
 } from "@/components/restore/snapshot-timeline";
 import { useSelection } from "@/components/restore/use-selection";
+import { isPendingVerification } from "@/components/snapshots/suspicious-badge";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
@@ -51,7 +52,14 @@ function ByHostTab() {
 		query: { refetchInterval: REFRESH_MS, refetchIntervalInBackground: false },
 	});
 	const detail = useGetSnapshot(snapshot ?? "", {
-		query: { enabled: snapshot !== undefined },
+		query: {
+			enabled: snapshot !== undefined,
+			refetchInterval: (query) =>
+				query.state.data && isPendingVerification(query.state.data)
+					? REFRESH_MS
+					: false,
+			refetchIntervalInBackground: false,
+		},
 	});
 
 	const newest = (hosts.data ?? [])

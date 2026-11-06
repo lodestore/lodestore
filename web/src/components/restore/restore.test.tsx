@@ -240,6 +240,27 @@ describe("Restore timeline", () => {
 		expect(unsigned).toHaveAccessibleDescription(/Unverified/);
 	});
 
+	it("does not call a snapshot the server is still checking unsigned", async () => {
+		mockRestore({
+			web: [
+				snapshot(1, noon(0), WEB, { verified_by: null, job_id: "job-1" }),
+				...webSnapshots.slice(1),
+			],
+			latestVerified: id(2),
+		});
+		await openRestore(`/restore?host=${WEB}&snapshot=${id(1)}`);
+
+		expect(
+			await screen.findByRole("heading", {
+				name: new RegExp(`Snapshot ${short(1)}`),
+			}),
+		).toBeInTheDocument();
+		expect(screen.getAllByText("Verifying").length).toBeGreaterThan(0);
+		expect(
+			screen.queryByText("Nothing signed this snapshot"),
+		).not.toBeInTheDocument();
+	});
+
 	it("host with only unsigned snapshots has no default snapshot", async () => {
 		mockRestore({
 			hosts: hosts.map((host) =>

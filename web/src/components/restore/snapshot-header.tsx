@@ -8,6 +8,7 @@ import {
 	SnapshotDialogs,
 } from "@/components/snapshots/snapshot-dialogs";
 import {
+	isPendingVerification,
 	PolicyDeletedBadge,
 	ProvenanceBadge,
 	SuspiciousBadge,
@@ -114,7 +115,7 @@ export const SnapshotHeader = memo(function SnapshotHeader({
 					</p>
 				)}
 			</div>
-			{snapshot.verified_by == null && (
+			{snapshot.verified_by == null && !isPendingVerification(snapshot) && (
 				<Alert role="status">
 					<ShieldQuestion aria-hidden className="text-warning" />
 					<AlertTitle>{copy.restore.header.unverifiedTitle}</AlertTitle>
