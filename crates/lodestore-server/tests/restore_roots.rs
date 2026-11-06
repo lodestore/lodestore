@@ -16,6 +16,19 @@ async fn seed(env: &AgentEnv) -> Seeded {
     let dir = dir.canonicalize().unwrap();
     std::fs::write(dir.join("a.txt"), b"alpha").unwrap();
     let snapshot = env.backup(&[&dir]).await;
+    let verified = wait_until(WAIT, || async {
+        sqlx::query("SELECT verified_at FROM snapshots WHERE id = $1")
+            .bind(&snapshot)
+            .fetch_one(&env.ts().state().db.pool)
+            .await
+            .is_ok_and(|row| {
+                row.try_get::<Option<i64>, _>("verified_at")
+                    .unwrap()
+                    .is_some()
+            })
+    })
+    .await;
+    assert!(verified, "the agent signs the snapshot");
     Seeded {
         snapshot,
         item: BASE64URL_NOPAD.encode(dir.to_string_lossy().as_bytes()),
@@ -185,6 +198,46 @@ async fn restore_roots_unknown_facts_pass() {
             let (status, response) = post_session(&env, &payload).await;
             assert_eq!(status, 201, "[{}] {response}", backend.name());
         }
+        env.stop().await;
+    }
+}
+
+async fn listed_host(env: &AgentEnv) -> Value {
+    let hosts: Vec<Value> = env
+        .api
+        .get("/api/v1/restore/hosts")
+        .await
+        .json()
+        .await
+        .unwrap();
+    hosts
+        .into_iter()
+        .find(|h| h["host_id"] == env.host)
+        .expect("the host is listed")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restore_roots_listed_for_restore_hosts() {
+    for backend in backends() {
+        let env = AgentEnv::start(&backend).await;
+        let stored = wait_until(WAIT, || async {
+            facts(&env)
+                .await
+                .is_some_and(|f| f.get("restore").is_some())
+        })
+        .await;
+        assert!(stored, "[{}]", backend.name());
+        let host = listed_host(&env).await;
+        assert_eq!(
+            host["restore_roots"],
+            json!([env.work.path().to_string_lossy()])
+        );
+        assert_eq!(host["allow_in_place"], true);
+
+        set_facts(&env, None).await;
+        let host = listed_host(&env).await;
+        assert_eq!(host["restore_roots"], json!([]));
+        assert!(host["allow_in_place"].is_null());
         env.stop().await;
     }
 }

@@ -889,7 +889,7 @@ pub struct RestoreCreated {
     request_body = RestoreBody,
     responses(
         (status = 201, description = "The restore job is queued", body = RestoreCreated),
-        (status = 400, description = "`restore_destination_root`: a restore into a new folder names `/`; `restore_in_place_not_empty`: a restore in place with `stop_if_not_empty`; `restore_unverified_in_place`: nothing signed the snapshot, so it cannot be restored in place; `restore_unverified_not_confirmed`: nothing signed the snapshot and `accept_unverified` is not set", body = ErrorBody),
+        (status = 400, description = "`restore_destination_root`: a restore into a new folder names `/`; `restore_in_place_not_empty`: a restore in place with `stop_if_not_empty`; `restore_unverified_in_place`: nothing signed the snapshot, so it cannot be restored in place; `restore_unverified_not_confirmed`: nothing signed the snapshot and `accept_unverified` is not set; `restore_outside_roots`: the new folder is outside the folders the agent restores into; `restore_in_place_disabled`: the agent does not allow restores in place; `restore_agent_outdated`: a token cannot restore to an agent that does not check restore folders", body = ErrorBody),
         (status = 403, description = "The token lacks `restore:host` for a new folder, or `restore:in-place` for a restore in place or with `restore_owners`", body = ErrorBody),
         (status = 404, description = "Unknown snapshot or host, or a selected path is missing", body = ErrorBody),
         (status = 422, description = "The selection, destination or host is not valid", body = ErrorBody),

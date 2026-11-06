@@ -46,6 +46,29 @@ pub struct RestoreHost {
     pub latest_snapshot_ms: Option<i64>,
     /// Snapshots of this host that nothing signed; they are never offered as the latest.
     pub unverified_count: u64,
+    /// Folders the agent restores into, as it reports them; the agent checks them itself.
+    pub restore_roots: Vec<String>,
+    /// Whether the agent allows restores in place; null when unknown.
+    pub allow_in_place: Option<bool>,
+}
+
+fn reported_restore_settings(facts_json: Option<&str>) -> (Vec<String>, Option<bool>) {
+    let restore = facts_json
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+        .and_then(|facts| facts.get("restore").cloned());
+    let Some(restore) = restore else {
+        return (Vec::new(), None);
+    };
+    let roots = restore["roots"]
+        .as_array()
+        .map(|roots| {
+            roots
+                .iter()
+                .filter_map(|root| root.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    (roots, restore["allow_in_place"].as_bool())
 }
 
 #[derive(Serialize, ToSchema)]
@@ -99,12 +122,12 @@ async fn list_restore_hosts(
         .collect();
     let mut hosts = Vec::new();
     let agents = sqlx::query(
-        "SELECT a.id, a.hostname, a.repository_id, a.labels_json, a.status, \
+        "SELECT a.id, a.hostname, a.repository_id, a.labels_json, a.status, a.facts_json, \
          COUNT(s.id) AS n, \
          MAX(CASE WHEN s.verified_at IS NOT NULL THEN s.received_at END) AS latest, \
          CAST(COALESCE(SUM(CASE WHEN s.id IS NOT NULL AND s.verified_at IS NULL THEN 1 ELSE 0 END), 0) AS BIGINT) AS unverified \
          FROM agents a LEFT JOIN snapshots s ON s.host_id = a.id \
-         GROUP BY a.id, a.hostname, a.repository_id, a.labels_json, a.status \
+         GROUP BY a.id, a.hostname, a.repository_id, a.labels_json, a.status, a.facts_json \
          ORDER BY a.hostname, a.id",
     )
     .fetch_all(&state.db.pool)
@@ -119,6 +142,8 @@ async fn list_restore_hosts(
             HostStatus::Offline
         };
         let repository_id: String = row.try_get("repository_id")?;
+        let (restore_roots, allow_in_place) =
+            reported_restore_settings(row.try_get::<Option<String>, _>("facts_json")?.as_deref());
         hosts.push(RestoreHost {
             key: id.clone(),
             host_id: Some(id),
@@ -132,6 +157,8 @@ async fn list_restore_hosts(
             snapshot_count: count(row, "n")?,
             latest_snapshot_ms: row.try_get("latest")?,
             unverified_count: count(row, "unverified")?,
+            restore_roots,
+            allow_in_place,
         });
     }
     let groups = sqlx::query(
@@ -160,6 +187,8 @@ async fn list_restore_hosts(
             snapshot_count: count(row, "n")?,
             latest_snapshot_ms: row.try_get("latest")?,
             unverified_count: count(row, "unverified")?,
+            restore_roots: Vec::new(),
+            allow_in_place: None,
         });
     }
     Ok(Json(hosts))
