@@ -13,10 +13,11 @@ use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 use crate::auth::AuthUser;
-use crate::auth::tokens::{HostsRead, HostsWrite, Scoped};
+use crate::auth::tokens::{HostsRead, HostsWrite, Principal, Scope, Scoped};
 use crate::db::now_ms;
 use crate::error::{ApiError, ErrorBody};
 use crate::hosts::labels::Label;
+use crate::policies::{hook_policies_gained_by_labels, hooks_purpose};
 use crate::repos::db::get_repository;
 use crate::state::AppState;
 
@@ -258,7 +259,7 @@ pub struct SetLabels {
 )]
 async fn set_labels(
     State(state): State<AppState>,
-    _auth: Scoped<HostsWrite>,
+    auth: Scoped<HostsWrite>,
     Path(id): Path<String>,
     Json(req): Json<SetLabels>,
 ) -> Result<Json<HostDetail>, ApiError> {
@@ -266,6 +267,12 @@ async fn set_labels(
     let current = load_detail(&state, &id).await?;
     if current.host.status == HostStatus::Revoked {
         return Err(ApiError::Conflict("the host is revoked".into()));
+    }
+    if matches!(auth.principal(), Principal::Token { .. }) {
+        let names = hook_policies_gained_by_labels(&state, &id, &req.labels).await?;
+        if !names.is_empty() {
+            auth.require_also(Scope::HooksWrite, hooks_purpose(&names))?;
+        }
     }
     sqlx::query("UPDATE agents SET labels_json = $1 WHERE id = $2 AND status <> 'revoked'")
         .bind(serde_json::to_string(&req.labels).map_err(|e| ApiError::Internal(e.into()))?)

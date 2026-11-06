@@ -7,6 +7,7 @@
 mod common;
 
 use common::{TestServer, backends, bearer_client};
+use lodestore_agent::{EnrollArgs, NetOptions};
 use serde_json::{Value, json};
 
 const HOOKS_REFUSED: &str = "The token needs the hooks:write scope to change hooks or the hosts they run on (policies: nightly).";
@@ -52,6 +53,50 @@ async fn adv_policies_write_token_cannot_add_hooks() {
             .await
             .unwrap();
         assert!(stored["policy"]["spec"].get("hooks").is_none(), "{stored}");
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adv_hosts_write_token_cannot_widen_hook_coverage() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let repo = ts.create_local_repository("main").await;
+        let api = ts.api().await;
+        let created = api
+            .post(
+                "/api/v1/policies",
+                &json!({ "yaml": policy("db", "  hooks:\n    before:\n      - script: dump-db\n") }),
+            )
+            .await;
+        assert_eq!(created.status(), 201);
+
+        let join = api.join_token(&repo, json!([])).await;
+        let host = lodestore_agent::enroll(EnrollArgs {
+            token: join,
+            paths: ts.agent_paths("victim"),
+            hostname: Some("victim".into()),
+            net: NetOptions::default(),
+        })
+        .await
+        .expect("enroll")
+        .agent_id;
+
+        let token = ts.issue_token(&["hosts:read", "hosts:write"]).await;
+        let response = bearer_client(&token)
+            .put(format!("{}/api/v1/hosts/{host}/labels", ts.rest_url()))
+            .json(&json!({ "labels": [{ "key": "role", "value": "db" }] }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 403, "[{}]", backend.name());
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(body["code"], "forbidden");
+        assert_eq!(body["message"], HOOKS_REFUSED);
+
+        let hosts = api.hosts().await;
+        let labels = &hosts.iter().find(|h| h["id"] == host.as_str()).unwrap()["labels"];
+        assert_eq!(labels, &json!([]));
         ts.stop().await;
     }
 }

@@ -327,7 +327,7 @@ pub async fn policy_for_rerun(
     Ok(Some(row.policy))
 }
 
-pub(crate) async fn all_policies(state: &AppState) -> Result<Vec<PolicyRow>, ApiError> {
+async fn all_policies(state: &AppState) -> Result<Vec<PolicyRow>, ApiError> {
     sqlx::query(sqlx::AssertSqlSafe(format!(
         "{POLICY_SELECT} ORDER BY p.name"
     )))
@@ -336,6 +336,39 @@ pub(crate) async fn all_policies(state: &AppState) -> Result<Vec<PolicyRow>, Api
     .iter()
     .map(policy_from_row)
     .collect()
+}
+
+pub(crate) async fn hook_policies_gained_by_labels(
+    state: &AppState,
+    host_id: &str,
+    labels: &[Label],
+) -> Result<Vec<String>, ApiError> {
+    let Some(before) = load_agents(state)
+        .await?
+        .into_iter()
+        .find(|a| a.id == host_id)
+    else {
+        return Ok(Vec::new());
+    };
+    let after = AgentRow {
+        id: before.id.clone(),
+        hostname: before.hostname.clone(),
+        repository_id: before.repository_id.clone(),
+        repository_name: before.repository_name.clone(),
+        labels: labels.to_vec(),
+        facts: serde_json::Value::Null,
+    };
+    Ok(all_policies(state)
+        .await?
+        .iter()
+        .filter(|row| row.policy.spec.hooks != Hooks::default())
+        .filter(|row| {
+            let selector = &row.policy.spec.selector;
+            after.applies(&row.repository_id, selector)
+                && !before.applies(&row.repository_id, selector)
+        })
+        .map(|row| row.policy.metadata.name.clone())
+        .collect())
 }
 
 async fn detail(state: &AppState, row: PolicyRow) -> Result<PolicyDetail, ApiError> {

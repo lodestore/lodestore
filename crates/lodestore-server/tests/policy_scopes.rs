@@ -347,3 +347,69 @@ async fn policy_scopes_delete_policy_with_hooks_allowed() {
         ts.stop().await;
     }
 }
+
+fn role(value: &str) -> Value {
+    json!({ "labels": [{ "key": "role", "value": value }] })
+}
+
+async fn labels_of(session: &Session<'_>, id: &str) -> Value {
+    let (_, host) = session
+        .send(reqwest::Method::GET, &format!("/api/v1/hosts/{id}"), None)
+        .await;
+    host["labels"].clone()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn policy_scopes_labels_widening_needs_hooks_write() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let repo = ts.create_local_repository("main").await;
+        let session = Session {
+            api: ts.api().await,
+            ts: &ts,
+        };
+        let id = session.enroll(&repo, "web-1", "web").await;
+        session.create(yaml("db", "main", "db", DUMP)).await;
+        let path = format!("/api/v1/hosts/{id}/labels");
+        let what = backend.name();
+
+        let plain = Token::new(&ts, &["hosts:read", "hosts:write"]).await;
+        let got = plain.put(&path, &role("db")).await;
+        assert_refused(&got, "db", what);
+        assert_eq!(labels_of(&session, &id).await, role("web")["labels"]);
+
+        let with = Token::new(&ts, &["hosts:read", "hosts:write", "hooks:write"]).await;
+        let got = with.put(&path, &role("db")).await;
+        assert_eq!(got.0, 200, "[{what}] {}", got.1);
+
+        let (status, body) = session.put(&path, &role("web")).await;
+        assert_eq!(status, 200, "[{what}] session: {body}");
+        let (status, body) = session.put(&path, &role("db")).await;
+        assert_eq!(status, 200, "[{what}] session: {body}");
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn policy_scopes_labels_not_widening_allowed() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let repo = ts.create_local_repository("main").await;
+        let session = Session {
+            api: ts.api().await,
+            ts: &ts,
+        };
+        let id = session.enroll(&repo, "db-1", "db").await;
+        session.create(yaml("db", "main", "db", DUMP)).await;
+        session.create(yaml("web", "main", "web", "")).await;
+        let path = format!("/api/v1/hosts/{id}/labels");
+        let plain = Token::new(&ts, &["hosts:read", "hosts:write"]).await;
+        let what = backend.name();
+
+        let got = plain.put(&path, &role("web")).await;
+        assert_eq!(got.0, 200, "[{what}] to a policy without hooks: {}", got.1);
+        let got = plain.put(&path, &json!({ "labels": [] })).await;
+        assert_eq!(got.0, 200, "[{what}] dropping labels: {}", got.1);
+        ts.stop().await;
+    }
+}
