@@ -55,6 +55,8 @@ const TOAST_MS = 8000;
 const text = copy.restore.restoreDialog;
 const CONFLICTS = Object.keys(text.conflictOptions) as ConflictPolicyDto[];
 
+const DEFAULT_ROOT = "/var/lib/lodestore/restore";
+
 const pad = (n: number) => String(n).padStart(2, "0");
 
 /** `YYYY-MM-DD` in local time, the day the timeline groups the snapshot under. */
@@ -70,6 +72,10 @@ export function checkFolder(path: string): { error?: string; folder: string } {
 	if (!path.startsWith("/")) return { error: text.pathInvalid, folder };
 	if (parts.includes("..")) return { error: text.pathDotDot, folder };
 	return { error: folder === "/" ? text.pathRoot : undefined, folder };
+}
+
+function isUnder(path: string, root: string) {
+	return root === "/" || path === root || path.startsWith(`${root}/`);
 }
 
 function FieldMessage({ id, children }: { id: string; children: string }) {
@@ -105,13 +111,16 @@ function RestoreForm({
 
 	const unverified = snapshot.verified_by == null;
 	const [acceptUnverified, setAcceptUnverified] = useState(false);
-	const [inPlace, setInPlace] = useState(false);
+	const [wantInPlace, setInPlace] = useState(false);
+	const inPlaceOff = target?.allow_in_place === false;
+	const inPlace = wantInPlace && !inPlaceOff;
 	const [confirmedFor, setConfirmedFor] = useState<string>();
 	const confirmed =
 		inPlace && targetKey !== undefined && confirmedFor === targetKey;
-	const [path, setPath] = useState(
-		`/var/lodestore/restore/${localDate(snapshot.time)}-${shortId(snapshot.id)}`,
-	);
+	const [edited, setPath] = useState<string>();
+	const path =
+		edited ??
+		`${target?.restore_roots[0] ?? DEFAULT_ROOT}/${localDate(snapshot.time)}-${shortId(snapshot.id)}`;
 	const [conflict, setConflict] =
 		useState<ConflictPolicyDto>("overwrite_changed");
 	const policy: ConflictPolicyDto =
@@ -134,6 +143,12 @@ function RestoreForm({
 
 	const { error: folderError, folder } = checkFolder(path);
 	const pathError = inPlace ? undefined : folderError;
+	const roots = target?.restore_roots ?? [];
+	const outsideRoots =
+		!inPlace &&
+		folderError === undefined &&
+		roots.length > 0 &&
+		!roots.some((root) => isUnder(folder, checkFolder(root).folder));
 	const hostError = target === undefined;
 	const canStart =
 		pathError === undefined &&
@@ -294,11 +309,27 @@ function RestoreForm({
 											className="font-mono text-sm"
 											value={path}
 											aria-invalid={pathError !== undefined}
-											aria-describedby={pathError ? `${id}-path` : undefined}
+											aria-describedby={
+												pathError
+													? `${id}-path`
+													: outsideRoots
+														? `${id}-roots`
+														: undefined
+											}
 											onChange={(event) => setPath(event.target.value)}
 										/>
 										{pathError && (
 											<FieldMessage id={`${id}-path`}>{pathError}</FieldMessage>
+										)}
+										{outsideRoots && (
+											<p
+												id={`${id}-roots`}
+												className="text-sm text-muted-foreground"
+											>
+												<TextWithPaths
+													text={text.outsideRoots(roots.join(", "))}
+												/>
+											</p>
 										)}
 									</div>
 								)}
@@ -308,19 +339,25 @@ function RestoreForm({
 									<RadioGroupItem
 										value="original"
 										id={`${id}-original`}
-										disabled={unverified}
+										disabled={unverified || inPlaceOff}
 										aria-describedby={
-											unverified ? `${id}-original-help` : undefined
+											unverified || inPlaceOff
+												? `${id}-original-help`
+												: undefined
 										}
 									/>
 									<div className="flex min-w-0 flex-col gap-1">
 										<Label htmlFor={`${id}-original`}>{text.original}</Label>
-										{unverified && (
+										{(unverified || inPlaceOff) && (
 											<p
 												id={`${id}-original-help`}
 												className="text-sm text-muted-foreground"
 											>
-												{text.unverifiedInPlaceDisabled}
+												{unverified ? (
+													text.unverifiedInPlaceDisabled
+												) : (
+													<TextWithPaths text={text.inPlaceOff} />
+												)}
 											</p>
 										)}
 									</div>

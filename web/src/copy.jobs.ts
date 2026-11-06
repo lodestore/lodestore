@@ -374,6 +374,10 @@ export const jobs = {
 			`The destination folder is not empty. ${path} on ${host} has content and the restore was set to stop. Choose an empty folder or another option, then restore again.`,
 		restore_disk_full: (host: string, path: string) =>
 			`The host ran out of space. ${host} has no space left at ${path}. Free some space or choose another folder, then restore again.`,
+		restore_outside_roots: (host: string, path: string) =>
+			`The destination is outside the allowed folders. The agent on ${host} only restores into the folders in its restore.allowed_restore_roots setting, and ${path} is not one of them. Choose a folder under an allowed root, then restore again.`,
+		restore_in_place_disabled: (host: string) =>
+			`Restoring over the original files is turned off on ${host}. Set restore.allow_in_place: true in /etc/lodestore/agent.yaml on that host, or restore into a new folder.`,
 		restore_data_missing:
 			"Data is missing from storage. A pack this snapshot needs was not found in the bucket. Run a storage check in Settings, or restore another snapshot.",
 		restore_integrity:
