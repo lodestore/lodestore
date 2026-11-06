@@ -205,7 +205,7 @@ impl Pools {
         plan.hosts
             .iter()
             .flat_map(|h| &h.items)
-            .map(|i| i.id[..1].to_string())
+            .map(|i| i.id.clone())
             .collect()
     }
 }
@@ -347,7 +347,10 @@ async fn retention_pools_stdin_never_forgotten() {
         assert_eq!(pools.count(stdin, &[]).await, 2, "{name}");
         let policy = pools.policy_with(keep_last(1)).await;
         assert!(
-            pools.planned(&policy).await.is_disjoint(&set(&["e", "f"])),
+            pools
+                .planned(&policy)
+                .await
+                .is_disjoint(&set(&["e".repeat(64).as_str(), "f".repeat(64).as_str()])),
             "{name}"
         );
         pools.stop().await;
