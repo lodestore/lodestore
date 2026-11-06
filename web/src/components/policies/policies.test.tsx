@@ -2455,6 +2455,21 @@ describe("Retention section", () => {
 	}, 20_000);
 });
 
+describe("Retention includeStdin", () => {
+	it("includeStdin survives the form round trip", () => {
+		const stored = { keepLast: 3, includeStdin: true };
+		const policy = makePolicy("nightly", { retention: stored });
+		expect(policyFromDraft(draftFromPolicy(policy)).spec.retention).toEqual(
+			stored,
+		);
+
+		const plain = makePolicy("nightly", { retention: { keepLast: 3 } });
+		expect(policyFromDraft(draftFromPolicy(plain)).spec.retention).toEqual({
+			keepLast: 3,
+		});
+	});
+});
+
 describe("Retention preview", () => {
 	it("retention preview summary and suspicious", async () => {
 		const bodies = mockPreview("nightly", () =>
