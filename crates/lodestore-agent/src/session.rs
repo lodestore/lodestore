@@ -32,7 +32,7 @@ const STABLE_STREAM: Duration = Duration::from_secs(60);
 const RENEW_RETRY: Duration = Duration::from_secs(60);
 const MAX_SKEW_SECS: i64 = 300;
 const JOBS_DRAIN: Duration = Duration::from_secs(30);
-pub const CAPABILITIES: [&str; 3] = ["restore_v1", "limits_v1", "gc_v1"];
+pub const CAPABILITIES: [&str; 4] = ["restore_v1", "limits_v1", "gc_v1", "restore_roots_v1"];
 const CAP_UPDATE: &str = "update_v1";
 
 pub struct RunArgs {
@@ -397,6 +397,7 @@ async fn session_once(
             _ = ticker.tick() => {
                 let mut heartbeat = facts.next().await;
                 heartbeat.hook_facts = Some(facts::hook_facts(paths));
+                heartbeat.restore_facts = Some(facts::restore_facts(paths));
                 let message = AgentMessage { body: Some(AgentBody::Heartbeat(heartbeat)) };
                 if tx.send(message).await.is_err() {
                     return Ok(Outcome::Closed { lived: started.elapsed() });
