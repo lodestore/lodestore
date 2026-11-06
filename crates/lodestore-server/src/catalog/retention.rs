@@ -62,7 +62,14 @@ pub struct RetentionPlan {
     pub hosts: Vec<HostPlan>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pool {
+    Scheduled,
+    Manual,
+}
+
 struct PairRow {
+    pool: Pool,
     host_id: String,
     hostname: String,
     time_ms: i64,
@@ -71,12 +78,12 @@ struct PairRow {
 }
 
 const PAIRS_SQL: &str = "SELECT s.id, s.host_id, a.hostname, s.time_ms, s.received_at, \
-     s.received_exact, s.suspicious, s.incomplete FROM snapshots s \
+     s.received_exact, s.suspicious, s.incomplete, s.origin, s.stdin_name FROM snapshots s \
      JOIN agents a ON a.id = s.host_id \
      WHERE s.policy_name = $1 AND s.repository_id = $2 AND s.job_id IS NOT NULL \
      AND s.verified_at IS NOT NULL";
 const HOST_SQL: &str = "SELECT s.id, s.host_id, a.hostname, s.time_ms, s.received_at, \
-     s.received_exact, s.suspicious, s.incomplete FROM snapshots s \
+     s.received_exact, s.suspicious, s.incomplete, s.origin, s.stdin_name FROM snapshots s \
      JOIN agents a ON a.id = s.host_id \
      WHERE s.policy_name = $1 AND s.repository_id = $2 AND s.host_id = $3 \
      AND s.job_id IS NOT NULL AND s.verified_at IS NOT NULL";
@@ -108,21 +115,34 @@ async fn load_pairs(
         .fetch_all(&state.db.pool)
         .await?
         .iter()
-        .map(|r| {
-            Ok(PairRow {
-                host_id: r.try_get("host_id")?,
-                hostname: r.try_get("hostname")?,
-                time_ms: r.try_get("time_ms")?,
-                exact: r.try_get::<i64, _>("received_exact")? != 0,
-                candidate: Candidate {
-                    id: r.try_get("id")?,
-                    received_at_ms: r.try_get("received_at")?,
-                    suspicious: r.try_get::<i64, _>("suspicious")? != 0,
-                    incomplete: r.try_get::<i64, _>("incomplete")? != 0,
-                },
-            })
-        })
+        .filter_map(|r| pair_row(r).transpose())
         .collect()
+}
+
+fn pair_row(r: &sqlx::any::AnyRow) -> anyhow::Result<Option<PairRow>> {
+    let origin: Option<String> = r.try_get("origin")?;
+    let stdin_name: Option<String> = r.try_get("stdin_name")?;
+    if origin.as_deref() == Some("stdin") || stdin_name.is_some() {
+        return Ok(None);
+    }
+    let pool = if origin.as_deref() == Some("manual") {
+        Pool::Manual
+    } else {
+        Pool::Scheduled
+    };
+    Ok(Some(PairRow {
+        pool,
+        host_id: r.try_get("host_id")?,
+        hostname: r.try_get("hostname")?,
+        time_ms: r.try_get("time_ms")?,
+        exact: r.try_get::<i64, _>("received_exact")? != 0,
+        candidate: Candidate {
+            id: r.try_get("id")?,
+            received_at_ms: r.try_get("received_at")?,
+            suspicious: r.try_get::<i64, _>("suspicious")? != 0,
+            incomplete: r.try_get::<i64, _>("incomplete")? != 0,
+        },
+    }))
 }
 
 fn times_unconfirmed(rows: &[&PairRow]) -> bool {
@@ -140,8 +160,28 @@ fn decide(policy: &BackupPolicy, rules: &Retention, rows: &[&PairRow]) -> Vec<De
             })
             .collect();
     }
-    let candidates: Vec<Candidate> = rows.iter().map(|r| r.candidate.clone()).collect();
-    evaluate(rules, &timezone_of(&policy.spec), &candidates)
+    let timezone = timezone_of(&policy.spec);
+    let mut decisions: Vec<Decision> = [Pool::Scheduled, Pool::Manual]
+        .into_iter()
+        .flat_map(|pool| {
+            let candidates: Vec<Candidate> = rows
+                .iter()
+                .filter(|r| r.pool == pool)
+                .map(|r| r.candidate.clone())
+                .collect();
+            evaluate(rules, &timezone, &candidates)
+        })
+        .collect();
+    let received: BTreeMap<&str, i64> = rows
+        .iter()
+        .map(|r| (r.candidate.id.as_str(), r.candidate.received_at_ms))
+        .collect();
+    decisions.sort_by(|a, b| {
+        received[b.id.as_str()]
+            .cmp(&received[a.id.as_str()])
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    decisions
 }
 
 pub async fn plan_policy(

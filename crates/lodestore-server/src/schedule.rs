@@ -191,7 +191,8 @@ async fn pair(
     };
     let hosts = [(agent.id.clone(), agent.hostname.clone())];
     let spec = jobs::job_spec(&entry.policy);
-    let queued = jobs::enqueue(state, &entry.id, name, &hosts, &spec).await?;
+    let queued =
+        jobs::enqueue_with_origin(state, &entry.id, name, &hosts, &spec, origin.as_str()).await?;
     let Some(job) = queued.into_iter().next() else {
         return Ok(None);
     };
