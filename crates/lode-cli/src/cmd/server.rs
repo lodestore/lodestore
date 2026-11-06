@@ -944,7 +944,7 @@ async fn restore(client: &Client, out: Output, args: ServerRestoreArgs) -> Resul
                 .get_json(&format!("/api/v1/snapshots/{}", seg(id)), &[])
                 .await?;
             format!(
-                "/var/lodestore/restore/{}-{}",
+                "/var/lib/lodestore/restore/{}-{}",
                 &time(Some(snapshot.time))[..10],
                 &id[..8]
             )

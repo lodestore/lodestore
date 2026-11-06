@@ -256,7 +256,7 @@ first_backup() {
 
 restore() {
   local body created
-  body=$(jq -n --arg s "$snapshot_id" --arg i "$(b64url "$data_dir/data")" --arg h "$host_id" --arg d "$data_dir/restored" \
+  body=$(jq -n --arg s "$snapshot_id" --arg i "$(b64url "$data_dir/data")" --arg h "$host_id" --arg d /var/lib/lodestore/restore/quickstart \
     '{snapshot_id: $s, items: [$i], target_host_id: $h, destination: $d, in_place: false,
       conflict: "skip_existing", restore_owners: true}')
   created=$(api POST /api/v1/restores "$body")
@@ -278,7 +278,7 @@ compare_restored() {
 }
 
 verify_bytes() {
-  compare_restored "$data_dir/restored"
+  compare_restored /var/lib/lodestore/restore/quickstart
 }
 
 prepare_lode() {

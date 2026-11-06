@@ -688,7 +688,7 @@ fn server_cli_restore_defaults() {
             "snapshot_id": SNAPSHOT_ID,
             "items": ["Lw"],
             "target_host_id": "h2",
-            "destination": "/var/lodestore/restore/2020-09-13-01234567",
+            "destination": "/var/lib/lodestore/restore/2020-09-13-01234567",
             "in_place": false,
             "conflict": "overwrite_changed",
             "restore_owners": true,

@@ -342,7 +342,7 @@ pub struct ServerRestoreArgs {
     /// Restore only this absolute path of the snapshot; may be repeated
     #[arg(long, value_name = "PATH")]
     pub path: Vec<String>,
-    /// Folder on the host to restore into (default /var/lodestore/restore/<date>-<id>)
+    /// Folder on the host to restore into (default /var/lib/lodestore/restore/<date>-<id>)
     #[arg(long, value_name = "DIR", conflicts_with = "in_place")]
     pub target: Option<String>,
     /// Restore over the original files; needs --yes
