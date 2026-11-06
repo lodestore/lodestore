@@ -523,6 +523,46 @@ async fn enqueue_one(
     ))
 }
 
+pub const RUN_NOW_PER_HOUR: i64 = 6;
+
+const RUN_NOW_WINDOW_MS: i64 = 3_600_000;
+
+pub async fn check_run_rate(
+    state: &AppState,
+    policy_id: &str,
+    hosts: &[(String, String)],
+) -> Result<(), ApiError> {
+    let now = now_ms();
+    for (host_id, hostname) in hosts {
+        let row = sqlx::query(
+            "SELECT COUNT(*) AS n, MIN(queued_at) AS oldest FROM jobs \
+             WHERE policy_id = $1 AND host_id = $2 AND kind = 'backup' \
+             AND source = 'manual' AND origin = 'manual' AND queued_at > $3",
+        )
+        .bind(policy_id)
+        .bind(host_id)
+        .bind(now - RUN_NOW_WINDOW_MS)
+        .fetch_one(&state.db.pool)
+        .await?;
+        let runs: i64 = row.try_get("n")?;
+        if runs < RUN_NOW_PER_HOUR {
+            continue;
+        }
+        let oldest: i64 = row.try_get("oldest")?;
+        let retry_after_s = u64::try_from((oldest + RUN_NOW_WINDOW_MS - now) / 1000 + 1)
+            .unwrap_or(1)
+            .max(1);
+        let minutes = retry_after_s.div_ceil(60);
+        return Err(ApiError::TooManyRuns {
+            message: format!(
+                "This token started this policy on {hostname} {RUN_NOW_PER_HOUR} times in the last hour. Try again in {minutes} minutes."
+            ),
+            retry_after_s,
+        });
+    }
+    Ok(())
+}
+
 pub async fn enqueue(
     state: &AppState,
     policy_id: &str,

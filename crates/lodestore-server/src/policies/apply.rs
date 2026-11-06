@@ -12,8 +12,8 @@ use utoipa::ToSchema;
 
 use super::matching::{AgentRow, load_agents};
 use super::{
-    Checked, Failure, PolicyRow, RETENTION_PURPOSE, all_policies, gains_hook_hosts, hooks_purpose,
-    resolve, retention_of,
+    Checked, Failure, PolicyRow, RETENTION_PURPOSE, SCHEDULE_PURPOSE, all_policies,
+    gains_hook_hosts, hooks_purpose, resolve, retention_of, runs_more_often,
 };
 use crate::auth::tokens::{PoliciesWrite, Scope, Scoped};
 use crate::db::now_ms;
@@ -298,6 +298,7 @@ struct Plan {
     steps: Vec<Step>,
     unchanged: u64,
     retention_changed: bool,
+    schedule_faster: bool,
     hooks_policies: Vec<String>,
 }
 
@@ -324,6 +325,7 @@ fn plan(
     let mut updates = Vec::new();
     let mut unchanged = 0;
     let mut retention_changed = false;
+    let mut schedule_faster = false;
     let mut hooks_policies = Vec::new();
     let mut wanted = BTreeSet::new();
     for input in inputs {
@@ -387,6 +389,8 @@ fn plan(
             continue;
         }
         retention_changed |= retention_of(&row.policy) != retention_of(&input.checked.policy);
+        schedule_faster |= retention_of(&input.checked.policy).is_some()
+            && runs_more_often(&row.policy, &input.checked.policy);
         if gains_hook_hosts(
             Some((&row.repository_id, &row.policy)),
             (&input.checked.repository_id, &input.checked.policy),
@@ -433,6 +437,7 @@ fn plan(
         steps,
         unchanged,
         retention_changed,
+        schedule_faster,
         hooks_policies,
     })
 }
@@ -568,6 +573,7 @@ pub async fn apply_policies(
         steps,
         unchanged,
         retention_changed,
+        schedule_faster,
         hooks_policies,
     } = plan(
         &req,
@@ -578,6 +584,9 @@ pub async fn apply_policies(
     )?;
     if retention_changed {
         auth.require_also(Scope::SnapshotsDelete, RETENTION_PURPOSE)?;
+    }
+    if schedule_faster {
+        auth.require_also(Scope::SnapshotsDelete, SCHEDULE_PURPOSE)?;
     }
     if !hooks_policies.is_empty() {
         auth.require_also(Scope::HooksWrite, hooks_purpose(&hooks_policies))?;

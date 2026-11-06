@@ -4,7 +4,7 @@ pub mod matching;
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use lodestore_policy::jiff::Timestamp;
+use lodestore_policy::jiff::{SignedDuration, Timestamp};
 use lodestore_policy::schedule::DstNote;
 use lodestore_policy::{
     BackupPolicy, Hooks, Problem, Retention, Schedule, parse_yaml, to_yaml, validate,
@@ -21,13 +21,58 @@ use crate::auth::tokens::{JobsRun, PoliciesRead, PoliciesWrite, Principal, Scope
 use crate::db::now_ms;
 use crate::error::{ApiError, ErrorBody};
 use crate::hosts::labels::Label;
-use crate::jobs::{ACTIVE_STATES, JobBrief, RunResult, enqueue, job_spec, last_job};
+use crate::jobs::{
+    ACTIVE_STATES, JobBrief, RunResult, check_run_rate, enqueue, job_spec, last_job,
+};
 use crate::state::AppState;
 
 pub(crate) const RETENTION_PURPOSE: &str = "set or change retention";
 
 pub(crate) fn retention_of(policy: &BackupPolicy) -> Option<&Retention> {
     policy.spec.retention.as_ref().filter(|r| !r.is_empty())
+}
+
+pub(crate) const SCHEDULE_PURPOSE: &str = "run a policy with retention more often";
+pub(crate) const SCHEDULE_HORIZON_DAYS: i64 = 366;
+
+const SHORTEST_GAP: SignedDuration = SignedDuration::from_secs(60);
+
+fn cadence(policy: &BackupPolicy) -> Option<(&str, &str)> {
+    let schedule = policy.spec.schedule.as_ref()?;
+    Some((
+        schedule.cron.trim(),
+        schedule.timezone.as_deref().unwrap_or("UTC"),
+    ))
+}
+
+fn min_gap(
+    policy: &BackupPolicy,
+    from: Timestamp,
+    stop_at: SignedDuration,
+) -> Option<SignedDuration> {
+    policy.spec.schedule.as_ref()?.compile().ok()?.min_gap(
+        from,
+        SignedDuration::from_hours(24 * SCHEDULE_HORIZON_DAYS),
+        stop_at,
+    )
+}
+
+pub(crate) fn runs_more_often(old: &BackupPolicy, new: &BackupPolicy) -> bool {
+    if cadence(old) == cadence(new) {
+        return false;
+    }
+    let from = Timestamp::now();
+    let old_gap = min_gap(old, from, SHORTEST_GAP);
+    if old_gap.is_some_and(|gap| gap <= SHORTEST_GAP) {
+        return false;
+    }
+    let stop_at = old_gap.map_or(SignedDuration::MAX, |gap| {
+        gap - SignedDuration::from_secs(1)
+    });
+    match min_gap(new, from, stop_at) {
+        Some(gap) => old_gap.is_none_or(|old| gap < old),
+        None => false,
+    }
 }
 
 pub(crate) fn hooks_purpose(names: &[String]) -> String {
@@ -622,6 +667,11 @@ pub async fn update_policy(
         if retention_of(&current.policy) != retention_of(&checked.policy) {
             auth.require_also(Scope::SnapshotsDelete, RETENTION_PURPOSE)?;
         }
+        if retention_of(&checked.policy).is_some()
+            && runs_more_often(&current.policy, &checked.policy)
+        {
+            auth.require_also(Scope::SnapshotsDelete, SCHEDULE_PURPOSE)?;
+        }
         let agents = load_agents(&state).await?;
         let old = (current.repository_id.as_str(), &current.policy);
         if gains_hook_hosts(
@@ -721,15 +771,19 @@ fn hosts_of(agents: &[AgentRow], row: &PolicyRow) -> Vec<(String, String)> {
     responses(
         (status = 200, description = "One job per matching host; existing active jobs are returned as is", body = RunResult),
         (status = 404, description = "Unknown policy", body = ErrorBody),
+        (status = 429, description = "A token started a policy on a host more than 6 times in the last hour (code rate_limited, Retry-After in seconds)", body = ErrorBody),
     )
 )]
 pub async fn run_policy(
     State(state): State<AppState>,
-    _auth: Scoped<JobsRun>,
+    auth: Scoped<JobsRun>,
     Path(name): Path<String>,
 ) -> Result<Json<RunResult>, ApiError> {
     let row = find_policy(&state, &name).await?;
     let hosts = hosts_of(&load_agents(&state).await?, &row);
+    if matches!(auth.principal(), Principal::Token { .. }) {
+        check_run_rate(&state, &row.id, &hosts).await?;
+    }
     let jobs = enqueue(&state, &row.id, &name, &hosts, &job_spec(&row.policy)).await?;
     Ok(Json(RunResult { jobs }))
 }
@@ -766,11 +820,12 @@ fn policies_of_host<'a>(host: &AgentRow, rows: &'a [PolicyRow]) -> Vec<&'a Polic
         (status = 404, description = "Unknown host", body = ErrorBody),
         (status = 409, description = "The host is revoked", body = ErrorBody),
         (status = 422, description = "A policy does not apply to the host", body = ErrorBody),
+        (status = 429, description = "A token started a policy on this host more than 6 times in the last hour (code rate_limited, Retry-After in seconds)", body = ErrorBody),
     )
 )]
 pub async fn run_host(
     State(state): State<AppState>,
-    _auth: Scoped<JobsRun>,
+    auth: Scoped<JobsRun>,
     Path(id): Path<String>,
     request: Option<Json<HostRunRequest>>,
 ) -> Result<Json<RunResult>, ApiError> {
@@ -791,6 +846,11 @@ pub async fn run_host(
         chosen = picked;
     }
     let target = [(host.id.clone(), host.hostname.clone())];
+    if matches!(auth.principal(), Principal::Token { .. }) {
+        for row in &chosen {
+            check_run_rate(&state, &row.id, &target).await?;
+        }
+    }
     let mut jobs = Vec::new();
     for row in chosen {
         jobs.extend(

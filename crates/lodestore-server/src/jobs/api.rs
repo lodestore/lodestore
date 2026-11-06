@@ -12,9 +12,9 @@ use super::restore::{RestoreRequest, enqueue_restore, require_roots_capability};
 use super::{
     ACTIVE_STATES, AGENT_UPDATE_COLUMNS, AGENT_UPDATE_FROM, ConflictPolicyDto, DOWNLOAD_COLUMNS,
     JOB_COLUMNS, JOB_FROM, JobDetail, JobKind, JobProgressDto, JobSource, JobState, JobSummary,
-    RunJob, agent_update_summary, busy_hosts, check_select, check_summary, download_summary,
-    enqueue, gc_select, gc_summary, job_spec, load_agent_update, load_download, load_job,
-    summary_from_row,
+    RunJob, agent_update_summary, busy_hosts, check_run_rate, check_select, check_summary,
+    download_summary, enqueue, gc_select, gc_summary, job_spec, load_agent_update, load_download,
+    load_job, summary_from_row,
 };
 use crate::auth::tokens::{JobsRead, JobsRun, Principal, RestoreWrite, Scope, Scoped};
 use crate::browse::AGENTLESS;
@@ -798,11 +798,12 @@ pub async fn cancel_job(
         (status = 200, description = "The queued job of the same host and policy", body = RunJob),
         (status = 404, description = "Unknown job", body = ErrorBody),
         (status = 409, description = "The job cannot be repeated", body = ErrorBody),
+        (status = 429, description = "A token started this policy on this host more than 6 times in the last hour (code rate_limited, Retry-After in seconds)", body = ErrorBody),
     )
 )]
 pub async fn rerun_job(
     State(state): State<AppState>,
-    _auth: Scoped<JobsRun>,
+    auth: Scoped<JobsRun>,
     Path(id): Path<String>,
 ) -> Result<Json<RunJob>, ApiError> {
     let Some(job) = load_job(&state, &id).await? else {
@@ -837,6 +838,9 @@ pub async fn rerun_job(
         ));
     };
     let host = [(job.summary.host_id.clone(), job.summary.hostname.clone())];
+    if matches!(auth.principal(), Principal::Token { .. }) {
+        check_run_rate(&state, &policy_id, &host).await?;
+    }
     let run = enqueue(
         &state,
         &policy_id,

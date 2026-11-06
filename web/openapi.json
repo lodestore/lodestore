@@ -1751,6 +1751,16 @@
                 }
               }
             }
+          },
+          "429": {
+            "description": "A token started a policy on this host more than 6 times in the last hour (code rate_limited, Retry-After in seconds)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -2292,6 +2302,16 @@
           },
           "409": {
             "description": "The job cannot be repeated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "A token started this policy on this host more than 6 times in the last hour (code rate_limited, Retry-After in seconds)",
             "content": {
               "application/json": {
                 "schema": {
@@ -3361,6 +3381,16 @@
           },
           "404": {
             "description": "Unknown policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "A token started a policy on a host more than 6 times in the last hour (code rate_limited, Retry-After in seconds)",
             "content": {
               "application/json": {
                 "schema": {
