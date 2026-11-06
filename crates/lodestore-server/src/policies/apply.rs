@@ -10,7 +10,11 @@ use serde_json::Value;
 use sqlx::Row;
 use utoipa::ToSchema;
 
-use super::{Checked, Failure, PolicyRow, RETENTION_PURPOSE, all_policies, resolve, retention_of};
+use super::matching::{AgentRow, load_agents};
+use super::{
+    Checked, Failure, PolicyRow, RETENTION_PURPOSE, all_policies, gains_hook_hosts, hooks_purpose,
+    resolve, retention_of,
+};
 use crate::auth::tokens::{PoliciesWrite, Scope, Scoped};
 use crate::db::now_ms;
 use crate::error::{ApiError, ErrorBody};
@@ -294,6 +298,7 @@ struct Plan {
     steps: Vec<Step>,
     unchanged: u64,
     retention_changed: bool,
+    hooks_policies: Vec<String>,
 }
 
 fn plan(
@@ -301,6 +306,7 @@ fn plan(
     manager: &str,
     mut inputs: Vec<Input>,
     current: Vec<PolicyRow>,
+    agents: &[AgentRow],
 ) -> Result<Plan, ApplyFailure> {
     inputs.sort_by(|a, b| {
         a.checked
@@ -318,6 +324,7 @@ fn plan(
     let mut updates = Vec::new();
     let mut unchanged = 0;
     let mut retention_changed = false;
+    let mut hooks_policies = Vec::new();
     let mut wanted = BTreeSet::new();
     for input in inputs {
         let name = input.checked.policy.metadata.name.clone();
@@ -332,6 +339,13 @@ fn plan(
         };
         let Some(row) = by_name.get(name.as_str()) else {
             retention_changed |= retention_of(&input.checked.policy).is_some();
+            if gains_hook_hosts(
+                None,
+                (&input.checked.repository_id, &input.checked.policy),
+                agents,
+            ) {
+                hooks_policies.push(name.clone());
+            }
             creates.push((
                 change(ChangeAction::Create, false, Vec::new()),
                 Step::Create(input.checked),
@@ -373,6 +387,13 @@ fn plan(
             continue;
         }
         retention_changed |= retention_of(&row.policy) != retention_of(&input.checked.policy);
+        if gains_hook_hosts(
+            Some((&row.repository_id, &row.policy)),
+            (&input.checked.repository_id, &input.checked.policy),
+            agents,
+        ) {
+            hooks_policies.push(name.clone());
+        }
         updates.push((
             change(ChangeAction::Update, adopted, fields),
             Step::Update {
@@ -412,6 +433,7 @@ fn plan(
         steps,
         unchanged,
         retention_changed,
+        hooks_policies,
     })
 }
 
@@ -546,9 +568,19 @@ pub async fn apply_policies(
         steps,
         unchanged,
         retention_changed,
-    } = plan(&req, &manager, inputs, all_policies(&state).await?)?;
+        hooks_policies,
+    } = plan(
+        &req,
+        &manager,
+        inputs,
+        all_policies(&state).await?,
+        &load_agents(&state).await?,
+    )?;
     if retention_changed {
         auth.require_also(Scope::SnapshotsDelete, RETENTION_PURPOSE)?;
+    }
+    if !hooks_policies.is_empty() {
+        auth.require_also(Scope::HooksWrite, hooks_purpose(&hooks_policies))?;
     }
     if !req.dry_run && !steps.is_empty() {
         execute(&state, &manager, steps).await?;
