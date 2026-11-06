@@ -55,6 +55,8 @@ const TOAST_MS = 8000;
 const text = copy.restore.restoreDialog;
 const CONFLICTS = Object.keys(text.conflictOptions) as ConflictPolicyDto[];
 
+const DEFAULT_ROOT = "/var/lib/lodestore/restore";
+
 const pad = (n: number) => String(n).padStart(2, "0");
 
 /** `YYYY-MM-DD` in local time, the day the timeline groups the snapshot under. */
@@ -109,9 +111,10 @@ function RestoreForm({
 	const [confirmedFor, setConfirmedFor] = useState<string>();
 	const confirmed =
 		inPlace && targetKey !== undefined && confirmedFor === targetKey;
-	const [path, setPath] = useState(
-		`/var/lodestore/restore/${localDate(snapshot.time)}-${shortId(snapshot.id)}`,
-	);
+	const [edited, setPath] = useState<string>();
+	const path =
+		edited ??
+		`${target?.restore_roots[0] ?? DEFAULT_ROOT}/${localDate(snapshot.time)}-${shortId(snapshot.id)}`;
 	const [conflict, setConflict] =
 		useState<ConflictPolicyDto>("overwrite_changed");
 	const policy: ConflictPolicyDto =
