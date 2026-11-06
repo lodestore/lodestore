@@ -221,7 +221,18 @@ fn tmp_name() -> Result<String> {
 impl Restorer {
     /// Opens the target once, creating it unless this is a dry run.
     pub fn open(target: &Path, settings: RestoreSettings) -> Result<Self> {
-        let virtual_root = settings.dry_run && !target.exists();
+        Self::open_with(target, None, settings)
+    }
+
+    /// Opens `below` inside `root` without following any symlink under `root`:
+    /// a restore into a folder can never leave it.
+    pub fn open_in(root: &Path, below: &Path, settings: RestoreSettings) -> Result<Self> {
+        Self::open_with(root, Some(below), settings)
+    }
+
+    fn open_with(target: &Path, below: Option<&Path>, settings: RestoreSettings) -> Result<Self> {
+        let full = below.map_or_else(|| target.to_path_buf(), |b| target.join(b));
+        let virtual_root = settings.dry_run && !full.exists();
         let root = if virtual_root {
             Level {
                 fd: None,
@@ -231,7 +242,21 @@ impl Restorer {
             }
         } else {
             let me = rustix::process::geteuid().as_raw();
-            let fd = open_target(target, !settings.dry_run, |uid| uid == 0 || uid == me)?;
+            let trusted = |uid| uid == 0 || uid == me;
+            let create = !settings.dry_run;
+            let fd = match below {
+                None => open_target(target, create, trusted)?,
+                Some(below) => {
+                    if below.is_absolute() {
+                        return Err(Error::Io(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            format!("{} is not relative to the restore root", below.display()),
+                        )));
+                    }
+                    let root_fd = open_target(target, create, trusted)?;
+                    open_below(root_fd, below, create, trusted, false)?
+                }
+            };
             if !settings.dry_run && settings.overwrite != Overwrite::Never {
                 remove_leftovers(&fd);
             }
@@ -938,7 +963,7 @@ fn open_target(
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
         Mode::empty(),
     )?;
-    open_below(dir, target, create, trusted)
+    open_below(dir, target, create, trusted, true)
 }
 
 fn open_below(
@@ -946,6 +971,7 @@ fn open_below(
     target: &Path,
     create: bool,
     trusted: impl Fn(u32) -> bool,
+    follow_trusted_symlinks: bool,
 ) -> std::io::Result<OwnedFd> {
     use std::path::Component;
 
@@ -982,6 +1008,9 @@ fn open_below(
                 let st = statat(&dir, name, AtFlags::SYMLINK_NOFOLLOW)?;
                 if FileType::from_raw_mode(st.st_mode) != FileType::Symlink {
                     return Err(Errno::NOTDIR.into());
+                }
+                if !follow_trusted_symlinks {
+                    return Err(refused(name, "is a symlink inside the restore root"));
                 }
                 if !trusted(st.st_uid) {
                     return Err(refused(name, "is a symlink owned by another user"));
@@ -1037,6 +1066,17 @@ mod tests {
         .unwrap()
     }
 
+    fn settings() -> RestoreSettings {
+        RestoreSettings {
+            overwrite: Overwrite::IfChanged,
+            verify: false,
+            dry_run: false,
+            k_id: zeroize::Zeroizing::new([0; 32]),
+            seed: 0,
+            restore_owners: false,
+        }
+    }
+
     fn mode(path: &Path) -> u32 {
         std::fs::metadata(path).unwrap().permissions().mode() & 0o7777
     }
@@ -1044,12 +1084,33 @@ mod tests {
     #[test]
     fn open_target_creates_missing_folders_private() {
         let tmp = tempfile::tempdir().unwrap();
-        open_below(base(&tmp), Path::new("a/./b"), true, |_| true).unwrap();
+        open_below(base(&tmp), Path::new("a/./b"), true, |_| true, true).unwrap();
         assert_eq!(mode(&tmp.path().join("a")), 0o700);
         assert_eq!(mode(&tmp.path().join("a/b")), 0o700);
-        let missing = open_below(base(&tmp), Path::new("c"), false, |_| true).unwrap_err();
+        let missing = open_below(base(&tmp), Path::new("c"), false, |_| true, true).unwrap_err();
         assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
-        assert!(open_below(base(&tmp), Path::new("a/../a"), true, |_| true).is_err());
+        assert!(open_below(base(&tmp), Path::new("a/../a"), true, |_| true, true).is_err());
+    }
+
+    #[test]
+    fn open_in_refuses_symlink_below_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("r");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, root.join("a")).unwrap();
+
+        let err = Restorer::open_in(&root, Path::new("a/x"), settings())
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("symlink"), "{err}");
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+
+        Restorer::open_in(&root, Path::new("b/c"), settings()).unwrap();
+        assert_eq!(mode(&root.join("b/c")), 0o700);
+        assert!(Restorer::open_in(&root, Path::new("../x"), settings()).is_err());
+        assert!(Restorer::open_in(&root, Path::new("/x"), settings()).is_err());
     }
 
     #[test]
@@ -1064,22 +1125,22 @@ mod tests {
         std::fs::write(root.join("file"), b"x").unwrap();
 
         let mine = |_| true;
-        open_below(base(&tmp), Path::new("link/sub"), true, mine).unwrap();
+        open_below(base(&tmp), Path::new("link/sub"), true, mine, true).unwrap();
         assert!(
             root.join("real/sub").is_dir(),
             "a trusted symlink is followed"
         );
-        open_below(base(&tmp), Path::new("open"), false, mine).unwrap();
+        open_below(base(&tmp), Path::new("open"), false, mine, true).unwrap();
 
         let foreign = |_| false;
         for (path, why) in [("link", "symlink"), ("open", "could be swapped")] {
-            let err = open_below(base(&tmp), Path::new(path), false, foreign).unwrap_err();
+            let err = open_below(base(&tmp), Path::new(path), false, foreign, true).unwrap_err();
             assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{path}");
             assert!(err.to_string().contains(why), "{path}: {err}");
         }
-        open_below(base(&tmp), Path::new("real"), false, foreign).unwrap();
+        open_below(base(&tmp), Path::new("real"), false, foreign, true).unwrap();
 
-        let not_dir = open_below(base(&tmp), Path::new("file/x"), true, mine).unwrap_err();
+        let not_dir = open_below(base(&tmp), Path::new("file/x"), true, mine, true).unwrap_err();
         assert_eq!(not_dir.raw_os_error(), Some(Errno::NOTDIR.raw_os_error()));
     }
 }
