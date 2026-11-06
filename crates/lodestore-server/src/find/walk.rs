@@ -467,9 +467,11 @@ fn merge(s: &mut SessionState, snapshot: &SnapshotRow, entry: &Entry, max_groups
     version.first_ms = version.first_ms.min(snapshot.time_ms);
     version.last_ms = version.last_ms.max(snapshot.time_ms);
     version.verified_by = version.verified_by.take().max(snapshot.verified_by.clone());
-    version
-        .snapshots
-        .push((snapshot.id.clone(), snapshot.time_ms));
+    version.snapshots.push((
+        snapshot.id.clone(),
+        snapshot.time_ms,
+        snapshot.verified_by.clone(),
+    ));
     true
 }
 

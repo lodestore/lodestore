@@ -8380,6 +8380,13 @@
             "type": "integer",
             "format": "int64",
             "description": "When the server received the snapshot, in milliseconds."
+          },
+          "verified_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Who signed the provenance of this snapshot: `server` or `owner`; null when nothing signed it."
           }
         }
       },
@@ -8462,7 +8469,7 @@
             "items": {
               "$ref": "#/components/schemas/FindSnapshotRef"
             },
-            "description": "The newest snapshots holding this version, newest first."
+            "description": "Snapshots holding this version, signed ones first, then newest first; the first is the one to restore."
           },
           "verified_by": {
             "type": [

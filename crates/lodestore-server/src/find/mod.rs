@@ -148,7 +148,8 @@ pub struct Version {
     pub last_ms: i64,
     /// Who signed the provenance of a snapshot holding this version; none when none is signed.
     pub verified_by: Option<String>,
-    pub snapshots: Vec<(String, i64)>,
+    /// Each snapshot holding this version: id, server receive time and who signed it.
+    pub snapshots: Vec<(String, i64, Option<String>)>,
 }
 
 pub struct Group {

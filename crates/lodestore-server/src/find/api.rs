@@ -78,6 +78,8 @@ pub struct FindSnapshotRef {
     pub id: String,
     /// When the server received the snapshot, in milliseconds.
     pub time_ms: i64,
+    /// Who signed the provenance of this snapshot: `server` or `owner`; null when nothing signed it.
+    pub verified_by: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -95,7 +97,7 @@ pub struct FindVersion {
     /// Who signed the provenance of a snapshot holding this version: `server` or `owner`. Null when none is signed; such a version is listed after the signed ones.
     pub verified_by: Option<String>,
     pub snapshot_count: u64,
-    /// The newest snapshots holding this version, newest first.
+    /// Snapshots holding this version, signed ones first, then newest first; the first is the one to restore.
     pub snapshots: Vec<FindSnapshotRef>,
 }
 
@@ -191,8 +193,8 @@ fn b64(bytes: &[u8]) -> String {
 }
 
 fn version_dto(version: &Version, limit: usize) -> FindVersion {
-    let mut snapshots: Vec<&(String, i64)> = version.snapshots.iter().collect();
-    snapshots.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
+    let mut snapshots: Vec<&(String, i64, Option<String>)> = version.snapshots.iter().collect();
+    snapshots.sort_by(|a, b| (b.2.is_some(), b.1, &b.0).cmp(&(a.2.is_some(), a.1, &a.0)));
     FindVersion {
         content_id: match version.key {
             VersionKey::Content(id) => Some(HEXLOWER.encode(&id)),
@@ -208,9 +210,10 @@ fn version_dto(version: &Version, limit: usize) -> FindVersion {
         snapshots: snapshots
             .into_iter()
             .take(limit)
-            .map(|(id, time_ms)| FindSnapshotRef {
+            .map(|(id, time_ms, verified_by)| FindSnapshotRef {
                 id: id.clone(),
                 time_ms: *time_ms,
+                verified_by: verified_by.clone(),
             })
             .collect(),
     }
