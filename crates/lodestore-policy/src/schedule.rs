@@ -186,6 +186,42 @@ impl CompiledSchedule {
         count
     }
 
+    /// Smallest gap between consecutive runs within the horizon; stops at the first gap no longer than `stop_at`.
+    pub fn min_gap(
+        &self,
+        from: Timestamp,
+        horizon: SignedDuration,
+        stop_at: SignedDuration,
+    ) -> Option<SignedDuration> {
+        let end = from.checked_add(horizon).ok()?;
+        let mut cursor = from.to_zoned(self.tz.clone());
+        let mut previous: Option<Timestamp> = None;
+        let mut smallest: Option<SignedDuration> = None;
+        loop {
+            let Ok(next) = self.cron.find_next_occurrence(&cursor, false) else {
+                break;
+            };
+            let at = next.timestamp();
+            if at > end {
+                break;
+            }
+            if !self.is_repeat(&next) {
+                if let Some(previous) = previous {
+                    let gap = at.duration_since(previous);
+                    if smallest.is_none_or(|s| gap < s) {
+                        smallest = Some(gap);
+                    }
+                    if gap <= stop_at {
+                        break;
+                    }
+                }
+                previous = Some(at);
+            }
+            cursor = next;
+        }
+        smallest
+    }
+
     pub fn dst_notes(&self, from: Timestamp, horizon_days: u32) -> Vec<DstNote> {
         let Ok(end) = from.checked_add(SignedDuration::from_hours(24 * i64::from(horizon_days)))
         else {
