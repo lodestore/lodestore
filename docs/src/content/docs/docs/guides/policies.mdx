@@ -148,6 +148,6 @@ A web session may change everything on this page. An API token, for example in a
 | Run a policy with retention more often | `snapshots:delete`. The server compares the shortest gap between two runs of the schedule over the next 366 days, in the time zone of the policy, before and after the change. That also catches `0 3 * 12 *`, which runs daily but only in December, in place of a weekly schedule. A schedule that runs less often, or at another time of day, needs only `policies:write` |
 | Add, change or remove `hooks`, or bring more hosts under a policy that has hooks, by `hosts`, a selector, the `repository` or by changing host labels | `hooks:write`, because hooks run commands as root on the hosts. Deleting a whole policy needs only `policies:write` |
 
-The server answers 403 and names the scope; for hooks it also lists the policies. `lode apply` refuses the whole run in these cases, and `--dry-run` shows the refusal beforehand. A token that creates a join token whose labels put the new host under a policy with hooks needs `hooks:write` as well.
+The server answers 403 and names the scope; for hooks it also lists the policies. `lode apply` refuses the whole run in these cases, and `--dry-run` shows the refusal beforehand.
 
 A token can start the same policy on the same host at most 6 times per hour. The seventh request gets a 429 with `Retry-After`. Sessions are not limited, and scheduled runs do not count.
