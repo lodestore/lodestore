@@ -408,6 +408,10 @@ export function restoreFailureText(
 			return e.restore_target_not_empty(host, path);
 		case "restore_disk_full":
 			return e.restore_disk_full(host, path);
+		case "restore_outside_roots":
+			return e.restore_outside_roots(host, path);
+		case "restore_in_place_disabled":
+			return e.restore_in_place_disabled(host);
 		case "restore_data_missing":
 			return e.restore_data_missing;
 		case "restore_integrity":

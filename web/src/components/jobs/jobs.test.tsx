@@ -1101,6 +1101,34 @@ describe("Restore job page", () => {
 		expect(alert.querySelector("wbr")).not.toBeNull();
 	});
 
+	it("explains a destination outside the allowed roots with host and path", async () => {
+		mockJob(
+			makeRestore({
+				state: "failed",
+				error_code: "restore_outside_roots",
+				error_message: "outside roots",
+			}),
+		);
+		await openJob();
+		expect(await screen.findByRole("alert")).toHaveTextContent(
+			"The agent on web-1 only restores into the folders in its restore.allowed_restore_roots setting, and /var/tmp/restore is not one of them.",
+		);
+	});
+
+	it("explains a disabled in-place restore with the host", async () => {
+		mockJob(
+			makeRestore({
+				state: "failed",
+				error_code: "restore_in_place_disabled",
+				error_message: "in place disabled",
+			}),
+		);
+		await openJob();
+		expect(await screen.findByRole("alert")).toHaveTextContent(
+			"Restoring over the original files is turned off on web-1. Set restore.allow_in_place: true",
+		);
+	});
+
 	it("falls back to the server message for other restore errors", async () => {
 		mockJob(
 			makeRestore({

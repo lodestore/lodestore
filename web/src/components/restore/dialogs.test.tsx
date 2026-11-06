@@ -256,6 +256,63 @@ describe("Restore dialog", { timeout: 30_000 }, () => {
 		).toHaveValue("/srv/mine");
 	});
 
+	it("turns the original location off when the host forbids in-place", async () => {
+		mockServer([host({ allow_in_place: false })]);
+		const { dialog } = await openRestore();
+		const view = within(dialog);
+
+		const radio = view.getByRole("radio", { name: /Original location/ });
+		expect(radio).toBeDisabled();
+		expect(view.getByText(/restore\.allow_in_place: true/)).toHaveTextContent(
+			"--allow-in-place-restore",
+		);
+	});
+
+	it("leaves the original location on when the host allows or does not say", async () => {
+		mockServer([host({ allow_in_place: null })]);
+		const { dialog } = await openRestore();
+		const view = within(dialog);
+
+		expect(
+			view.getByRole("radio", { name: /Original location/ }),
+		).toBeEnabled();
+		expect(view.queryByText(/allow_in_place/)).toBeNull();
+	});
+
+	it("hints about the roots for a folder outside them without blocking", async () => {
+		mockServer([
+			host({ restore_roots: ["/var/lib/lodestore/restore", "/srv/r"] }),
+		]);
+		const { dialog, user } = await openRestore();
+		const view = within(dialog);
+		const field = view.getByRole("textbox", { name: "Folder on web-1" });
+
+		expect(view.queryByText(/outside the folders/)).toBeNull();
+		await user.clear(field);
+		await user.type(field, "/tmp/x");
+		expect(view.getByText(/outside the folders/)).toHaveTextContent(
+			"/var/lib/lodestore/restore, /srv/r",
+		);
+		expect(view.getByRole("button", { name: "Start restore" })).toBeEnabled();
+
+		await user.clear(field);
+		await user.type(field, "/srv/rx");
+		expect(view.getByText(/outside the folders/)).toBeVisible();
+		await user.clear(field);
+		await user.type(field, "/srv/r/deeper/./x");
+		expect(view.queryByText(/outside the folders/)).toBeNull();
+	});
+
+	it("gives no roots hint when the host reports none", async () => {
+		mockServer([host({ restore_roots: [] })]);
+		const { dialog, user } = await openRestore();
+		const view = within(dialog);
+		const field = view.getByRole("textbox", { name: "Folder on web-1" });
+		await user.clear(field);
+		await user.type(field, "/tmp/x");
+		expect(view.queryByText(/outside the folders/)).toBeNull();
+	});
+
 	it("warns about another host and another repository", async () => {
 		mockServer();
 		const { dialog, user } = await openRestore();

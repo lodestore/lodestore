@@ -141,6 +141,10 @@ export const restore = {
 		unverifiedConfirm: "Restore this unsigned snapshot into another folder",
 		unverifiedInPlaceDisabled:
 			"An unsigned snapshot cannot be restored over the original files.",
+		inPlaceOff:
+			"Restoring over the original files is turned off on this host. To allow it, set restore.allow_in_place: true in /etc/lodestore/agent.yaml, or run install.sh with --allow-in-place-restore.",
+		outsideRoots: (roots: string) =>
+			`This folder is outside the folders this host allows restores into: ${roots}. The agent may refuse it.`,
 		from: "From",
 		fromValue: (host: string, id: string, when: string) =>
 			`${isolate(host)} · snapshot ${id} · ${when}`,
