@@ -5,6 +5,7 @@ pub mod fake_agent;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::net::SocketAddr;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -456,6 +457,17 @@ impl AgentEnv {
             .as_str()
             .unwrap()
             .to_string();
+        let work = tempfile::tempdir().unwrap();
+        let yaml = paths.agent_yaml();
+        std::fs::write(
+            &yaml,
+            format!(
+                "restore:\n  allowed_restore_roots: [\"{}\"]\n  allow_in_place: true\n",
+                work.path().display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&yaml, std::fs::Permissions::from_mode(0o600)).unwrap();
         AgentEnv {
             server: None,
             api,
@@ -464,7 +476,7 @@ impl AgentEnv {
             repo: repo.to_string(),
             repo_name: repo_name.to_string(),
             paths,
-            work: tempfile::tempdir().unwrap(),
+            work,
             agent: None,
             policies: AtomicUsize::new(0),
         }
