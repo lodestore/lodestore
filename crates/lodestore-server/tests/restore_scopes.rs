@@ -161,3 +161,93 @@ async fn restore_scopes_host_cannot_restore_owners() {
 async fn post_session(api: &Api, body: Value) -> u16 {
     api.post("/api/v1/restores", &body).await.status().as_u16()
 }
+
+const OUTDATED: &str = "Update the agent on this host to restore to it with an API token.";
+const CAPS_V01: &str = r#"["restore_v1","limits_v1","gc_v1"]"#;
+const CAPS_ROOTS: &str = r#"["restore_v1","limits_v1","gc_v1","restore_roots_v1"]"#;
+
+async fn enrolled_host(ts: &TestServer, api: &Api, capabilities: &str) -> String {
+    let repo = ts.create_local_repository("main").await;
+    lodestore_agent::enroll(lodestore_agent::EnrollArgs {
+        token: api.join_token(&repo, json!([])).await,
+        paths: ts.agent_paths("host-a"),
+        hostname: Some("host-a".to_string()),
+        net: lodestore_agent::NetOptions::default(),
+    })
+    .await
+    .expect("enroll");
+    let host = api.hosts().await[0]["id"].as_str().unwrap().to_string();
+    set_capabilities(ts, &host, capabilities).await;
+    host
+}
+
+async fn set_capabilities(ts: &TestServer, host: &str, capabilities: &str) {
+    sqlx::query("UPDATE agents SET capabilities_json = $1 WHERE id = $2")
+        .bind(capabilities)
+        .bind(host)
+        .execute(&ts.state().db.pool)
+        .await
+        .unwrap();
+}
+
+async fn code_and_message(
+    client: Option<&reqwest::Client>,
+    ts: &TestServer,
+    api: &Api,
+    body: Value,
+) -> (u16, String, String) {
+    let response = match client {
+        Some(client) => client
+            .post(format!("{}/api/v1/restores", ts.rest_url()))
+            .json(&body)
+            .send()
+            .await
+            .expect("request"),
+        None => api.post("/api/v1/restores", &body).await,
+    };
+    let status = response.status().as_u16();
+    let body: Value = response.json().await.unwrap_or(Value::Null);
+    (
+        status,
+        body["code"].as_str().unwrap_or("").to_string(),
+        body["message"].as_str().unwrap_or("").to_string(),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restore_scopes_token_needs_new_agent() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let host = enrolled_host(&ts, &api, CAPS_V01).await;
+        let client = token(&api, &["restore:host"]).await;
+        let mut body = restore_body(false, false);
+        body["target_host_id"] = json!(host);
+
+        let (status, code, message) =
+            code_and_message(Some(&client), &ts, &api, body.clone()).await;
+        assert_eq!(status, 400, "[{}]", backend.name());
+        assert_eq!(code, "restore_agent_outdated");
+        assert_eq!(message, OUTDATED);
+
+        set_capabilities(&ts, &host, CAPS_ROOTS).await;
+        let (status, code, _) = code_and_message(Some(&client), &ts, &api, body).await;
+        assert_ne!(code, "restore_agent_outdated", "[{}]", backend.name());
+        assert_ne!(status, 400, "[{}]", backend.name());
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restore_scopes_session_ignores_capability() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let host = enrolled_host(&ts, &api, CAPS_V01).await;
+        let mut body = restore_body(false, false);
+        body["target_host_id"] = json!(host);
+        let (_, code, _) = code_and_message(None, &ts, &api, body).await;
+        assert_ne!(code, "restore_agent_outdated", "[{}]", backend.name());
+        ts.stop().await;
+    }
+}

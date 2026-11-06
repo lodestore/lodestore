@@ -8,7 +8,7 @@ use utoipa::{IntoParams, ToSchema};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use super::restore::{RestoreRequest, enqueue_restore};
+use super::restore::{RestoreRequest, enqueue_restore, require_roots_capability};
 use super::{
     ACTIVE_STATES, AGENT_UPDATE_COLUMNS, AGENT_UPDATE_FROM, ConflictPolicyDto, DOWNLOAD_COLUMNS,
     JOB_COLUMNS, JOB_FROM, JobDetail, JobKind, JobProgressDto, JobSource, JobState, JobSummary,
@@ -16,7 +16,7 @@ use super::{
     enqueue, gc_select, gc_summary, job_spec, load_agent_update, load_download, load_job,
     summary_from_row,
 };
-use crate::auth::tokens::{JobsRead, JobsRun, RestoreWrite, Scope, Scoped};
+use crate::auth::tokens::{JobsRead, JobsRun, Principal, RestoreWrite, Scope, Scoped};
 use crate::browse::AGENTLESS;
 use crate::browse::tree::decode_b64;
 use crate::db::now_ms;
@@ -913,6 +913,9 @@ pub async fn create_restore(
     }
     if body.restore_owners {
         auth.require_also(Scope::RestoreInPlace, RESTORE_OWNERS_PURPOSE)?;
+    }
+    if matches!(auth.principal(), Principal::Token { .. }) {
+        require_roots_capability(&state, &body.target_host_id).await?;
     }
     let job_id = enqueue_restore(
         &state,

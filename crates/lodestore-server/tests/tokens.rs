@@ -459,6 +459,12 @@ async fn tokens_actor_recorded() {
         .await
         .expect("enroll");
         let host = api.hosts().await[0]["id"].as_str().unwrap().to_string();
+        sqlx::query("UPDATE agents SET capabilities_json = $1 WHERE id = $2")
+            .bind(r#"["restore_v1","restore_roots_v1"]"#)
+            .bind(&host)
+            .execute(&ts.state().db.pool)
+            .await
+            .unwrap();
 
         let store = LocalFsStore::new(ts.local_repo_root("main"));
         let opened = Repository::open(&store, b"test-password").await.unwrap();

@@ -8,6 +8,7 @@ use sqlx::Row;
 use crate::browse::tree::{read_error, reader, require_items_exist};
 use crate::db::now_ms;
 use crate::error::ApiError;
+use crate::grpc::registry::CAP_RESTORE_ROOTS;
 use crate::state::AppState;
 
 pub const MAX_ITEMS: usize = 10_000;
@@ -142,6 +143,33 @@ fn check_agent_roots(
             "{destination} is outside the folders {hostname} restores into: {listed}. Add the \
              folder to restore.allowed_restore_roots in the agent's agent.yaml."
         ),
+    ))
+}
+
+/// An agent that has not declared `restore_roots_v1` writes wherever a job
+/// says, so an API token must not queue a restore on it. An unknown host is
+/// left to `enqueue_restore` to report.
+pub(crate) async fn require_roots_capability(
+    state: &AppState,
+    host_id: &str,
+) -> Result<(), ApiError> {
+    let Some(row) = sqlx::query("SELECT capabilities_json FROM agents WHERE id = $1")
+        .bind(host_id)
+        .fetch_optional(&state.db.pool)
+        .await?
+    else {
+        return Ok(());
+    };
+    let capabilities: Vec<String> = row
+        .try_get::<Option<String>, _>("capabilities_json")?
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default();
+    if capabilities.iter().any(|c| c == CAP_RESTORE_ROOTS) {
+        return Ok(());
+    }
+    Err(ApiError::BadRequest(
+        "restore_agent_outdated",
+        "Update the agent on this host to restore to it with an API token.".into(),
     ))
 }
 
