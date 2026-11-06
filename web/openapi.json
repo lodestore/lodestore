@@ -5109,7 +5109,7 @@
             }
           },
           "400": {
-            "description": "`restore_destination_root`: a restore into a new folder names `/`; `restore_in_place_not_empty`: a restore in place with `stop_if_not_empty`; `restore_unverified_in_place`: nothing signed the snapshot, so it cannot be restored in place; `restore_unverified_not_confirmed`: nothing signed the snapshot and `accept_unverified` is not set",
+            "description": "`restore_destination_root`: a restore into a new folder names `/`; `restore_in_place_not_empty`: a restore in place with `stop_if_not_empty`; `restore_unverified_in_place`: nothing signed the snapshot, so it cannot be restored in place; `restore_unverified_not_confirmed`: nothing signed the snapshot and `accept_unverified` is not set; `restore_outside_roots`: the new folder is outside the folders the agent restores into; `restore_in_place_disabled`: the agent does not allow restores in place; `restore_agent_outdated`: a token cannot restore to an agent that does not check restore folders",
             "content": {
               "application/json": {
                 "schema": {
@@ -11630,11 +11630,19 @@
           "agent",
           "labels",
           "snapshot_count",
-          "unverified_count"
+          "unverified_count",
+          "restore_roots"
         ],
         "properties": {
           "agent": {
             "type": "boolean"
+          },
+          "allow_in_place": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the agent allows restores in place; null when unknown."
           },
           "host_id": {
             "type": [
@@ -11673,6 +11681,13 @@
               "string",
               "null"
             ]
+          },
+          "restore_roots": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Folders the agent restores into, as it reports them; the agent checks them itself."
           },
           "snapshot_count": {
             "type": "integer",

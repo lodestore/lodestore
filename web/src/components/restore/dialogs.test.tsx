@@ -69,6 +69,7 @@ const host = (over: Partial<RestoreHost>): RestoreHost => ({
 	snapshot_count: 1,
 	latest_snapshot_ms: snapshot.time,
 	unverified_count: 0,
+	restore_roots: [],
 	...over,
 });
 
