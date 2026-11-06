@@ -897,7 +897,7 @@
           },
           {
             "bearer": [
-              "restore"
+              "restore:download"
             ]
           }
         ]
@@ -994,7 +994,7 @@
           },
           {
             "bearer": [
-              "restore"
+              "restore:download"
             ]
           }
         ]
@@ -5118,6 +5118,16 @@
               }
             }
           },
+          "403": {
+            "description": "The token lacks `restore:host` for a new folder, or `restore:in-place` for a restore in place or with `restore_owners`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "404": {
             "description": "Unknown snapshot or host, or a selected path is missing",
             "content": {
@@ -5156,7 +5166,12 @@
           },
           {
             "bearer": [
-              "restore"
+              "restore:host"
+            ]
+          },
+          {
+            "bearer": [
+              "restore:in-place"
             ]
           }
         ]
@@ -11585,7 +11600,8 @@
             "description": "Selected paths as base64url bytes without padding."
           },
           "restore_owners": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Restores file owners, setuid/setgid bits and file capabilities. An API token needs the `restore:in-place` scope for it."
           },
           "snapshot_id": {
             "type": "string"
@@ -11868,6 +11884,10 @@
       "Retention": {
         "type": "object",
         "properties": {
+          "includeStdin": {
+            "type": "boolean",
+            "description": "Also applies the rules to stdin snapshots that name this policy; they form the manual pool."
+          },
           "keepDaily": {
             "type": [
               "integer",
@@ -12363,12 +12383,15 @@
           "agents:update",
           "policies:read",
           "policies:write",
+          "hooks:write",
           "jobs:read",
           "jobs:run",
           "metrics:read",
           "snapshots:read",
           "snapshots:delete",
-          "restore"
+          "restore:download",
+          "restore:host",
+          "restore:in-place"
         ]
       },
       "SearchDone": {
