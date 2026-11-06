@@ -206,3 +206,144 @@ async fn policy_scopes_session_unrestricted() {
         ts.stop().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn policy_scopes_selector_widening_needs_hooks_write() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let repo = ts.create_local_repository("main").await;
+        let session = Session {
+            api: ts.api().await,
+            ts: &ts,
+        };
+        session.enroll(&repo, "db-1", "db").await;
+        session.enroll(&repo, "web-1", "web").await;
+        session.create(yaml("db", "main", "db", DUMP)).await;
+        let plain = Token::new(&ts, &["policies:read", "policies:write"]).await;
+        let what = backend.name();
+
+        let got = plain
+            .put(
+                "/api/v1/policies/db",
+                &update(yaml("db", "main", "web", DUMP), 1),
+            )
+            .await;
+        assert_refused(&got, "db", what);
+
+        let narrowed = yaml("db", "main", "db", DUMP).replace("role: db\n", "role: nobody\n");
+        let got = plain.put("/api/v1/policies/db", &update(narrowed, 1)).await;
+        assert_eq!(got.0, 200, "[{what}] narrowing: {}", got.1);
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn policy_scopes_repository_change_needs_hooks_write() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let main = ts.create_local_repository("main").await;
+        ts.create_local_repository("other").await;
+        let session = Session {
+            api: ts.api().await,
+            ts: &ts,
+        };
+        session.enroll(&main, "db-1", "db").await;
+        session.create(yaml("db", "other", "db", DUMP)).await;
+        let plain = Token::new(&ts, &["policies:read", "policies:write"]).await;
+
+        let got = plain
+            .put(
+                "/api/v1/policies/db",
+                &update(yaml("db", "main", "db", DUMP), 1),
+            )
+            .await;
+        assert_refused(&got, "db", backend.name());
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn policy_scopes_apply_dry_run_names_policies() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        ts.create_local_repository("main").await;
+        let session = Session {
+            api: ts.api().await,
+            ts: &ts,
+        };
+        for name in ["b", "a", "c"] {
+            session.create(yaml(name, "main", "db", DUMP)).await;
+        }
+        let plain = Token::new(&ts, &["policies:read", "policies:write"]).await;
+        let docs = [
+            yaml("a", "main", "db", DUMP_ARGS),
+            yaml("b", "main", "db", ""),
+            yaml("c", "main", "db", DUMP),
+        ]
+        .join("---\n");
+        let body = |dry_run: bool| {
+            json!({
+                "documents": [{ "source": "p.yaml", "yaml": docs }],
+                "adopt": true,
+                "dry_run": dry_run,
+            })
+        };
+        for dry_run in [true, false] {
+            let got = plain.post("/api/v1/policies/apply", &body(dry_run)).await;
+            assert_refused(
+                &got,
+                "a, b",
+                &format!("dry_run={dry_run} [{}]", backend.name()),
+            );
+        }
+        let (_, stored) = session
+            .send(reqwest::Method::GET, "/api/v1/policies/a", None)
+            .await;
+        assert_eq!(
+            stored["policy"]["spec"]["hooks"]["before"][0].get("args"),
+            None
+        );
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn policy_scopes_delete_policy_with_hooks_allowed() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        ts.create_local_repository("main").await;
+        let session = Session {
+            api: ts.api().await,
+            ts: &ts,
+        };
+        session.create(yaml("db", "main", "db", DUMP)).await;
+        session.create(yaml("web", "main", "web", "")).await;
+        let plain = Token::new(&ts, &["policies:read", "policies:write"]).await;
+        let what = backend.name();
+
+        let (status, body) = plain
+            .send(reqwest::Method::DELETE, "/api/v1/policies/db", None)
+            .await;
+        assert_eq!(status, 204, "[{what}] {body}");
+
+        let hooked = Token::new(&ts, &["policies:read", "policies:write", "hooks:write"]).await;
+        let apply = json!({
+            "documents": [{ "source": "p.yaml", "yaml": yaml("kept", "main", "db", DUMP) }],
+        });
+        let got = hooked.post("/api/v1/policies/apply", &apply).await;
+        assert_eq!(got.0, 200, "[{what}] {}", got.1);
+        let prune = json!({
+            "documents": [{ "source": "p.yaml", "yaml": yaml("other", "main", "db", "") }],
+            "prune": true,
+        });
+        let got = plain.post("/api/v1/policies/apply", &prune).await;
+        assert_eq!(got.0, 200, "[{what}] prune a hooked policy: {}", got.1);
+        let removed = got.1["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["action"] == "delete" && c["name"] == "kept");
+        assert!(removed, "{}", got.1);
+        ts.stop().await;
+    }
+}
