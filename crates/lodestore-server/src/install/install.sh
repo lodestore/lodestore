@@ -9,6 +9,7 @@ UNIT=/etc/systemd/system/lodestore-agent.service
 CONF_DIR=/etc/lodestore
 STATE_DIR=/var/lib/lodestore
 ENV_FILE=$CONF_DIR/agent.env
+AGENT_YAML=$CONF_DIR/agent.yaml
 IDENTITY=$STATE_DIR/identity.json
 tmp=
 backup=
@@ -40,6 +41,9 @@ Usage: curl --proto '=https' --tlsv1.2 -fsSL <server>/install.sh | sh -s -- --jo
   --trust-key <file>
                    install a public key the agent trusts for updates, for your own
                    builds; the file name must end in .pub, repeat the option for more keys
+  --allow-in-place-restore
+                   enable restores in place for this host: writes restore.allow_in_place: true
+                   to /etc/lodestore/agent.yaml
   --uninstall      stop and remove the agent service and binary
   --purge          with --uninstall, also remove /etc/lodestore and /var/lib/lodestore
   --help           show this help
@@ -121,6 +125,21 @@ write_env_file() {
   )
   chmod 0600 "$ENV_FILE.new"
   mv "$ENV_FILE.new" "$ENV_FILE"
+}
+
+in_place_enabled() {
+  grep -q '^ *allow_in_place: *true' "$AGENT_YAML"
+}
+
+write_agent_yaml() {
+  [ "$allow_in_place" = 1 ] && [ ! -e "$AGENT_YAML" ] || return 0
+  (
+    umask 077
+    printf 'restore:\n  allow_in_place: true\n' >"$AGENT_YAML.new"
+  )
+  chmod 0600 "$AGENT_YAML.new"
+  chown root:root "$AGENT_YAML.new"
+  mv "$AGENT_YAML.new" "$AGENT_YAML"
 }
 
 write_unit() {
@@ -211,6 +230,7 @@ main() {
   github=0
   remove=0
   insecure=0
+  allow_in_place=0
   trust_keys=
   nl='
 '
@@ -226,6 +246,7 @@ main() {
       --purge) purge=1; shift ;;
       --from-github) github=1; shift ;;
       --insecure) insecure=1; shift ;;
+      --allow-in-place-restore) allow_in_place=1; shift ;;
       --trust-key)
         [ $# -ge 2 ] || die "--trust-key needs a readable .pub file"
         case $2 in
@@ -249,6 +270,9 @@ main() {
     uninstall
     exit 0
   fi
+  if [ "$allow_in_place" = 1 ] && [ -e "$AGENT_YAML" ] && ! in_place_enabled; then
+    die "$AGENT_YAML already exists; add \"restore:\" with \"allow_in_place: true\" to it by hand"
+  fi
   [ -d /run/systemd/system ] || die "systemd is required"
   detect_arch
 
@@ -270,6 +294,7 @@ main() {
   clear_pending_update
   mv "$BIN.new" "$BIN"
   install_trust_keys
+  write_agent_yaml
   write_env_file
   write_unit
   systemctl daemon-reload </dev/null

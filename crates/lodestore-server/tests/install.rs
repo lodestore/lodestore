@@ -116,6 +116,40 @@ async fn install_script_trust_key_rejects_non_pub() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn install_script_allow_in_place_restore() {
+    let ts = TestServer::start(&Backend::Sqlite).await;
+    let body = reqwest::get(format!("{}/install.sh", ts.rest_url()))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    for needle in [
+        "--allow-in-place-restore) allow_in_place=1",
+        "allow_in_place: true",
+        "chmod 0600 \"$AGENT_YAML.new\"",
+        "chown root:root \"$AGENT_YAML.new\"",
+        "add \\\"restore:\\\" with \\\"allow_in_place: true\\\" to it by hand",
+    ] {
+        assert!(body.contains(needle), "install.sh lacks {needle}");
+    }
+    assert!(body.matches("--allow-in-place-restore").count() >= 2);
+
+    let mut sh = Command::new("sh")
+        .args(["-s", "--", "--allow-in-place-restore", "--bogus"])
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    sh.stdin.take().unwrap().write_all(body.as_bytes()).unwrap();
+    let out = sh.wait_with_output().unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("unknown option --bogus"), "{stderr}");
+    ts.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn install_script_refuses_plain_http_without_insecure() {
     let ts = TestServer::start(&Backend::Sqlite).await;
     let body = reqwest::get(format!("{}/install.sh", ts.rest_url()))
