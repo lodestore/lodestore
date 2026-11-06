@@ -221,6 +221,18 @@ function CreateTokenBody({
 									{text.dialog.deletesData}
 								</Badge>
 							)}
+							{scope === Scope["restore:in-place"] && (
+								<Badge variant="outline" className="text-warning">
+									<TriangleAlert aria-hidden />
+									{text.dialog.writesOverHost}
+								</Badge>
+							)}
+							{scope === Scope["hooks:write"] && (
+								<Badge variant="outline" className="text-warning">
+									<TriangleAlert aria-hidden />
+									{text.dialog.runsCommandsAsRoot}
+								</Badge>
+							)}
 						</div>
 					))}
 				</div>

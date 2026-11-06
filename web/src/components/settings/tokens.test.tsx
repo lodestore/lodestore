@@ -209,6 +209,44 @@ describe("API tokens: create", () => {
 		expect(within(row).queryByText("Deletes data")).toBeNull();
 	});
 
+	it("warns on the scopes that write over hosts", async () => {
+		const calls = mockTokens([]);
+		const user = userEvent.setup();
+		await openTokens();
+		await user.click(createButton());
+		const dialog = await screen.findByRole("dialog", {
+			name: "Create API token",
+		});
+		const rowOf = (name: string) =>
+			within(dialog)
+				.getByRole("checkbox", { name })
+				.closest("div") as HTMLElement;
+		expect(
+			within(rowOf("restore:in-place")).getByText("Overwrites files on hosts"),
+		).toBeVisible();
+		expect(
+			within(rowOf("hooks:write")).getByText("Runs commands as root on hosts"),
+		).toBeVisible();
+		for (const safe of ["restore:download", "restore:host"]) {
+			expect(within(rowOf(safe)).queryByText(/hosts$|Deletes data/)).toBeNull();
+		}
+
+		await user.type(within(dialog).getByLabelText("Name"), "ci");
+		await user.click(
+			within(dialog).getByRole("checkbox", { name: "restore:host" }),
+		);
+		await user.click(
+			within(dialog).getByRole("checkbox", { name: "hooks:write" }),
+		);
+		await user.click(
+			within(dialog).getByRole("button", { name: "Create token" }),
+		);
+		await screen.findByRole("dialog", { name: "Token created" });
+		expect(calls.created).toMatchObject([
+			{ scopes: ["hooks:write", "restore:host"] },
+		]);
+	});
+
 	it("offers the alerts scope after hosts:write", async () => {
 		const user = userEvent.setup();
 		mockTokens([]);
