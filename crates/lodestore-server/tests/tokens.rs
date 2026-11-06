@@ -12,18 +12,21 @@ use reqwest::{Client, Method, Response};
 use serde_json::{Value, json};
 use sqlx::Row;
 
-const ALL_SCOPES: [&str; 11] = [
+const ALL_SCOPES: [&str; 14] = [
     "hosts:read",
     "hosts:write",
     "alerts:write",
     "agents:update",
     "policies:read",
     "policies:write",
+    "hooks:write",
     "jobs:read",
     "jobs:run",
     "snapshots:read",
     "snapshots:delete",
-    "restore",
+    "restore:download",
+    "restore:host",
+    "restore:in-place",
 ];
 
 async fn send(client: &Client, base: &str, method: &str, path: &str) -> Response {
@@ -323,7 +326,6 @@ const MATRIX: &[(&str, &str, &str)] = &[
     ("GET", "/api/v1/jobs/nope/events", "jobs:read"),
     ("POST", "/api/v1/jobs/nope/cancel", "jobs:run"),
     ("POST", "/api/v1/jobs/nope/rerun", "jobs:run"),
-    ("POST", "/api/v1/restores", "restore"),
     ("GET", "/api/v1/hosts", "hosts:read"),
     ("GET", "/api/v1/agent-updates", "hosts:read"),
     ("POST", "/api/v1/agent-updates", "agents:update"),
@@ -353,8 +355,8 @@ const MATRIX: &[(&str, &str, &str)] = &[
         "snapshots:delete",
     ),
     ("GET", "/api/v1/hosts/nope/snapshots", "snapshots:read"),
-    ("POST", "/api/v1/downloads", "restore"),
-    ("GET", "/api/v1/downloads/nope/archive", "restore"),
+    ("POST", "/api/v1/downloads", "restore:download"),
+    ("GET", "/api/v1/downloads/nope/archive", "restore:download"),
 ];
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -479,7 +481,13 @@ async fn tokens_actor_recorded() {
             .expect("ingest");
         let item = b64(format!("{}/b.txt", data.canonicalize().unwrap().display()).as_bytes());
 
-        let created = create(&api, "ci", &["restore"], Value::Null).await;
+        let created = create(
+            &api,
+            "ci",
+            &["restore:host", "restore:download"],
+            Value::Null,
+        )
+        .await;
         let client = bearer_client(created["token"].as_str().unwrap());
         let base = ts.rest_url();
 

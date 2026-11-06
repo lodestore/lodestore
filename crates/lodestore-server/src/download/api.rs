@@ -24,7 +24,7 @@ use utoipa_axum::routes;
 
 use super::archive::{ArchiveFormat, write_archive};
 use crate::api::CSP_SAME_ORIGIN_FRAME;
-use crate::auth::tokens::{RestoreScope, Scoped};
+use crate::auth::tokens::{RestoreDownload, Scoped};
 use crate::browse::tree::{
     decode_items, decode_paths, read_error, reader, require_items_exist, snapshot_repository,
 };
@@ -103,7 +103,7 @@ fn file_name(hostname: &str, snapshot_id: &str, format: ArchiveFormat) -> String
     post,
     tag = "Restore",
     summary = "Prepare an archive download",
-    security(("session" = [], "csrf" = []), ("bearer" = ["restore"])),
+    security(("session" = [], "csrf" = []), ("bearer" = ["restore:download"])),
     path = "/api/v1/downloads",
     request_body = DownloadBody,
     responses(
@@ -115,7 +115,7 @@ fn file_name(hostname: &str, snapshot_id: &str, format: ArchiveFormat) -> String
 )]
 async fn create_download(
     State(state): State<AppState>,
-    auth: Scoped<RestoreScope>,
+    auth: Scoped<RestoreDownload>,
     Json(mut body): Json<DownloadBody>,
 ) -> Result<(StatusCode, Json<DownloadCreated>), ApiError> {
     body.items.sort_unstable();
@@ -314,7 +314,7 @@ async fn finish(state: &AppState, id: &str, sent: u64, error_code: Option<&str>)
     get,
     tag = "Restore",
     summary = "Download the archive",
-    security(("session" = []), ("bearer" = ["restore"])),
+    security(("session" = []), ("bearer" = ["restore:download"])),
     path = "/api/v1/downloads/{id}/archive",
     params(("id" = String, Path, description = "Download id from the link")),
     responses(
@@ -334,7 +334,7 @@ async fn finish(state: &AppState, id: &str, sent: u64, error_code: Option<&str>)
 )]
 async fn download_archive(
     State(state): State<AppState>,
-    _auth: Scoped<RestoreScope>,
+    _auth: Scoped<RestoreDownload>,
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
     let repository_id: Option<String> =

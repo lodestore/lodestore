@@ -163,7 +163,9 @@ describe("API tokens: create", () => {
 		expect(calls.created).toEqual([]);
 
 		await user.type(within(dialog).getByLabelText("Name"), "ci");
-		await user.click(within(dialog).getByRole("checkbox", { name: "restore" }));
+		await user.click(
+			within(dialog).getByRole("checkbox", { name: "restore:download" }),
+		);
 		expect(
 			within(dialog).queryByText("Enter a name for the token."),
 		).toBeNull();
@@ -247,7 +249,7 @@ describe("API tokens: table", () => {
 	it("table renders scopes and expiry", async () => {
 		mockTokens([
 			makeToken("deploy", {
-				scopes: ["hosts:read", "hosts:write", "jobs:run", "restore"],
+				scopes: ["hosts:read", "hosts:write", "jobs:run", "restore:download"],
 				expires_at: Date.now() + 5 * DAY - 60_000,
 				last_used_at: Date.now() - 3_600_000,
 			}),
@@ -267,7 +269,7 @@ describe("API tokens: table", () => {
 		expect(within(deploy).getByText("+2")).toBeInTheDocument();
 		expect(
 			within(deploy).getByRole("group", {
-				name: "Scopes: hosts:read, hosts:write, jobs:run, restore",
+				name: "Scopes: hosts:read, hosts:write, jobs:run, restore:download",
 			}),
 		).toBeInTheDocument();
 		const expiring = within(deploy).getByText("In 5 days");

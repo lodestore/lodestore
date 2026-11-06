@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -13,7 +15,7 @@ pub enum ApiError {
     #[error("The token needs the {0} scope.")]
     MissingScope(&'static str),
     #[error("The token needs the {0} scope to {1}.")]
-    MissingScopeFor(&'static str, &'static str),
+    MissingScopeFor(&'static str, Cow<'static, str>),
     #[error("CSRF check failed")]
     Csrf,
     #[error("setup required")]
