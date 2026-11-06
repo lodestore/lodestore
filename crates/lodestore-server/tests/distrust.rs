@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use adv_support::{attacker_keys, plant_attestation_hint, plant_blobs};
-use common::{AgentEnv, Backend, TestServer, WAIT, wait_until};
+use common::{AgentEnv, Backend, TestServer, WAIT, backends, wait_until};
 use lodestore_format::chunker::blob_id;
 use lodestore_format::crypto::{BLOB_TYPE_DATA, BlobId};
 use lodestore_format::index::{hex32, index_object_key, open_shard, parse_hex32};
@@ -35,8 +35,8 @@ struct Env {
 }
 
 impl Env {
-    async fn new() -> Env {
-        let ts = TestServer::start_with(&Backend::Sqlite, |c| c.schedule_tick_secs = 0).await;
+    async fn new(backend: &Backend) -> Env {
+        let ts = TestServer::start_with(backend, |c| c.schedule_tick_secs = 0).await;
         let repo = ts.create_local_repository("main").await;
         let store = LocalFsStore::new(ts.local_repo_root("main"));
         sqlx::query(
@@ -120,7 +120,7 @@ impl Env {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn distrust_recorded_only_for_data_errors() {
-    let env = Env::new().await;
+    let env = Env::new(&Backend::Sqlite).await;
     env.upgrade().await;
     let (snapshot, planted) = env.snapshot("planted", true).await;
     let planted = planted.unwrap();
@@ -138,7 +138,7 @@ async fn distrust_recorded_only_for_data_errors() {
     assert!(!reason.is_empty());
     env.ts.stop().await;
 
-    let env = Env::new().await;
+    let env = Env::new(&Backend::Sqlite).await;
     let (snapshot, _) = env.snapshot("honest", false).await;
     env.upgrade().await;
     let keys = open_repository(env.ts.state(), &env.repo)
@@ -167,43 +167,48 @@ async fn distrust_recorded_only_for_data_errors() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn distrust_redetection_returns_to_the_sent_window() {
-    let env = Env::new().await;
-    env.upgrade().await;
-    let (snapshot1, planted) = env.snapshot("planted", true).await;
-    let planted = planted.unwrap();
-    env.job("j1", &snapshot1).await;
-    verify_then_retain(env.ts.state().clone(), "j1".into()).await;
-    assert_eq!(env.verify_state("j1").await, "failed");
-    assert_eq!(env.distrusted().await, vec![planted]);
+    for backend in backends() {
+        let env = Env::new(&backend).await;
+        env.upgrade().await;
+        let (snapshot1, planted) = env.snapshot("planted", true).await;
+        let planted = planted.unwrap();
+        env.job("j1", &snapshot1).await;
+        verify_then_retain(env.ts.state().clone(), "j1".into()).await;
+        assert_eq!(env.verify_state("j1").await, "failed");
+        assert_eq!(env.distrusted().await, vec![planted]);
 
-    sqlx::query("UPDATE distrusted_shards SET at = 1 WHERE repository_id = $1 AND shard_id = $2")
+        sqlx::query(
+            "UPDATE distrusted_shards SET at = 1 WHERE repository_id = $1 AND shard_id = $2",
+        )
         .bind(&env.repo)
         .bind(hex32(&planted))
         .execute(&env.ts.state().db.pool)
         .await
         .unwrap();
-    let junk: BlobId = [0; 32];
-    record_distrusted(env.ts.state(), &env.repo, &junk, "test")
-        .await
-        .unwrap();
-    assert_eq!(env.distrusted().await, vec![junk, planted]);
+        let junk: BlobId = [0; 32];
+        record_distrusted(env.ts.state(), &env.repo, &junk, "test")
+            .await
+            .unwrap();
+        assert_eq!(env.distrusted().await, vec![junk, planted]);
 
-    tokio::time::sleep(Duration::from_millis(5)).await;
-    let (snapshot2, _) = env.snapshot("planted", false).await;
-    env.job("j2", &snapshot2).await;
-    verify_then_retain(env.ts.state().clone(), "j2".into()).await;
-    assert_eq!(env.verify_state("j2").await, "failed");
-    assert_eq!(env.distrusted().await, vec![planted, junk]);
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let (snapshot2, _) = env.snapshot("planted", false).await;
+        env.job("j2", &snapshot2).await;
+        verify_then_retain(env.ts.state().clone(), "j2".into()).await;
+        assert_eq!(env.verify_state("j2").await, "failed");
+        assert_eq!(env.distrusted().await, vec![planted, junk]);
 
-    let rows: i64 = sqlx::query("SELECT COUNT(*) AS n FROM distrusted_shards WHERE shard_id = $1")
-        .bind(hex32(&planted))
-        .fetch_one(&env.ts.state().db.pool)
-        .await
-        .unwrap()
-        .try_get("n")
-        .unwrap();
-    assert_eq!(rows, 1);
-    env.ts.stop().await;
+        let rows: i64 =
+            sqlx::query("SELECT COUNT(*) AS n FROM distrusted_shards WHERE shard_id = $1")
+                .bind(hex32(&planted))
+                .fetch_one(&env.ts.state().db.pool)
+                .await
+                .unwrap()
+                .try_get("n")
+                .unwrap();
+        assert_eq!(rows, 1);
+        env.ts.stop().await;
+    }
 }
 
 fn frame(stream: &mut UnixStream, data: &[u8]) {
