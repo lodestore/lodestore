@@ -103,6 +103,7 @@ async fn load_pairs(
     repository_id: &str,
     policy: &str,
     host_id: Option<&str>,
+    include_stdin: bool,
 ) -> anyhow::Result<Vec<PairRow>> {
     let query = match host_id {
         Some(host) => sqlx::query(HOST_SQL)
@@ -115,17 +116,18 @@ async fn load_pairs(
         .fetch_all(&state.db.pool)
         .await?
         .iter()
-        .filter_map(|r| pair_row(r).transpose())
+        .filter_map(|r| pair_row(r, include_stdin).transpose())
         .collect()
 }
 
-fn pair_row(r: &sqlx::any::AnyRow) -> anyhow::Result<Option<PairRow>> {
+fn pair_row(r: &sqlx::any::AnyRow, include_stdin: bool) -> anyhow::Result<Option<PairRow>> {
     let origin: Option<String> = r.try_get("origin")?;
     let stdin_name: Option<String> = r.try_get("stdin_name")?;
-    if origin.as_deref() == Some("stdin") || stdin_name.is_some() {
+    let is_stdin = origin.as_deref() == Some("stdin") || stdin_name.is_some();
+    if is_stdin && !include_stdin {
         return Ok(None);
     }
-    let pool = if origin.as_deref() == Some("manual") {
+    let pool = if is_stdin || origin.as_deref() == Some("manual") {
         Pool::Manual
     } else {
         Pool::Scheduled
@@ -190,7 +192,14 @@ pub async fn plan_policy(
     rules: &Retention,
 ) -> anyhow::Result<RetentionPlan> {
     let repository_id = repository_of(state, policy).await?;
-    let rows = load_pairs(state, &repository_id, &policy.metadata.name, None).await?;
+    let rows = load_pairs(
+        state,
+        &repository_id,
+        &policy.metadata.name,
+        None,
+        rules.include_stdin,
+    )
+    .await?;
     let mut by_host: BTreeMap<(&str, &str), Vec<&PairRow>> = BTreeMap::new();
     for row in &rows {
         by_host
@@ -349,7 +358,14 @@ pub async fn run_for_pair(
     let repository_id = repository_of(state, policy).await?;
     let lock = state.catalog.pair_lock(&policy.metadata.name, host_id);
     let _pair = lock.lock().await;
-    let rows = load_pairs(state, &repository_id, &policy.metadata.name, Some(host_id)).await?;
+    let rows = load_pairs(
+        state,
+        &repository_id,
+        &policy.metadata.name,
+        Some(host_id),
+        rules.include_stdin,
+    )
+    .await?;
     let refs: Vec<&PairRow> = rows.iter().collect();
     let mut outcome = PairOutcome::default();
     if times_unconfirmed(&refs) {

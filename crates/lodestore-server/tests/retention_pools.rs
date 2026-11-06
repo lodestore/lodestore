@@ -3,7 +3,7 @@ mod common;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use common::{AgentEnv, Backend, TestServer, backends};
+use common::{AgentEnv, Backend, TestServer, backends, bearer_client};
 use lodestore_policy::jiff::Timestamp;
 use lodestore_policy::{BackupPolicy, Retention};
 use lodestore_server::catalog::retention::plan_policy;
@@ -353,6 +353,96 @@ async fn retention_pools_stdin_never_forgotten() {
                 .is_disjoint(&set(&["e".repeat(64).as_str(), "f".repeat(64).as_str()])),
             "{name}"
         );
+        pools.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retention_pools_include_stdin_joins_manual_pool() {
+    for backend in backends() {
+        let pools = Pools::start(&backend, "").await;
+        pools.seed_pools(&["1", "2", "3"], &["a"], true).await;
+        let base = now_ms() - 30 * DAY_MS;
+        for (n, id) in ["d", "e", "f"].into_iter().enumerate() {
+            pools
+                .seed(Seed {
+                    id: &id.repeat(64),
+                    received: base + (n as i64 + 1) * DAY_MS,
+                    origin: Some("stdin"),
+                    stdin: Some("app.dump"),
+                    exact: true,
+                    job: "seeded",
+                })
+                .await;
+        }
+        let name = backend.name();
+
+        let off = pools.policy_with(keep_last(2)).await;
+        assert_eq!(pools.forgotten(&off).await, set(&["1"]), "{name}");
+
+        let on = pools
+            .policy_with(Retention {
+                include_stdin: true,
+                ..keep_last(2)
+            })
+            .await;
+        assert_eq!(pools.forgotten(&on).await, set(&["1", "a", "d"]), "{name}");
+        pools.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retention_pools_include_stdin_needs_snapshots_delete() {
+    for backend in backends() {
+        let pools = Pools::start(&backend, "  retention:\n    keepLast: 2\n").await;
+        let name = backend.name();
+        let yaml: String = sqlx::query("SELECT yaml FROM policies WHERE name = $1")
+            .bind(POLICY)
+            .fetch_one(pools.pool())
+            .await
+            .unwrap()
+            .try_get("yaml")
+            .unwrap();
+        let on = yaml.replace("keepLast: 2\n", "keepLast: 2\n    includeStdin: true\n");
+        let off = yaml.clone();
+        assert_ne!(on, yaml, "{name}");
+        let url = format!("{}/api/v1/policies/{POLICY}", pools.ts.rest_url());
+        let put = |client: reqwest::RequestBuilder, revision: i64, yaml: &String| {
+            client
+                .json(&json!({ "base_revision": revision, "yaml": yaml }))
+                .send()
+        };
+        let limited = bearer_client(
+            &pools
+                .ts
+                .issue_token(&["policies:read", "policies:write"])
+                .await,
+        );
+        let deleter = bearer_client(
+            &pools
+                .ts
+                .issue_token(&["policies:read", "policies:write", "snapshots:delete"])
+                .await,
+        );
+
+        let denied = put(limited.put(&url), 1, &on).await.unwrap();
+        assert_eq!(denied.status(), 403, "{name}");
+        let body: Value = denied.json().await.unwrap();
+        assert_eq!(
+            body["message"],
+            "The token needs the snapshots:delete scope to set or change retention.",
+            "{name}"
+        );
+
+        let allowed = put(deleter.put(&url), 1, &on).await.unwrap();
+        assert_eq!(allowed.status(), 200, "{name}");
+
+        let session = reqwest::Client::new()
+            .put(&url)
+            .header("cookie", pools.env.api.cookie())
+            .header("x-csrf-token", &pools.env.api.csrf);
+        let allowed = put(session, 2, &off).await.unwrap();
+        assert_eq!(allowed.status(), 200, "{name}");
         pools.stop().await;
     }
 }
