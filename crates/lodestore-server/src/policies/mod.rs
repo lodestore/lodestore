@@ -6,7 +6,9 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use lodestore_policy::jiff::Timestamp;
 use lodestore_policy::schedule::DstNote;
-use lodestore_policy::{BackupPolicy, Problem, Retention, Schedule, parse_yaml, to_yaml, validate};
+use lodestore_policy::{
+    BackupPolicy, Hooks, Problem, Retention, Schedule, parse_yaml, to_yaml, validate,
+};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use sqlx::any::AnyRow;
@@ -26,6 +28,36 @@ pub(crate) const RETENTION_PURPOSE: &str = "set or change retention";
 
 pub(crate) fn retention_of(policy: &BackupPolicy) -> Option<&Retention> {
     policy.spec.retention.as_ref().filter(|r| !r.is_empty())
+}
+
+pub(crate) fn hooks_purpose(names: &[String]) -> String {
+    format!(
+        "change hooks or the hosts they run on (policies: {})",
+        names.join(", ")
+    )
+}
+
+pub(crate) fn gains_hook_hosts(
+    old: Option<(&str, &BackupPolicy)>,
+    new: (&str, &BackupPolicy),
+    agents: &[AgentRow],
+) -> bool {
+    let (new_repository, new_policy) = new;
+    let no_hooks = Hooks::default();
+    let old_hooks = old.map_or(&no_hooks, |(_, policy)| &policy.spec.hooks);
+    if *old_hooks != new_policy.spec.hooks {
+        return true;
+    }
+    let Some((old_repository, old_policy)) = old else {
+        return false;
+    };
+    if new_policy.spec.hooks == no_hooks {
+        return false;
+    }
+    agents.iter().any(|a| {
+        a.applies(new_repository, &new_policy.spec.selector)
+            && !a.applies(old_repository, &old_policy.spec.selector)
+    })
 }
 
 const RESERVED_NAMES: [&str; 2] = ["validate", "apply"];
@@ -295,7 +327,7 @@ pub async fn policy_for_rerun(
     Ok(Some(row.policy))
 }
 
-async fn all_policies(state: &AppState) -> Result<Vec<PolicyRow>, ApiError> {
+pub(crate) async fn all_policies(state: &AppState) -> Result<Vec<PolicyRow>, ApiError> {
     sqlx::query(sqlx::AssertSqlSafe(format!(
         "{POLICY_SELECT} ORDER BY p.name"
     )))
@@ -476,6 +508,12 @@ pub async fn create_policy(
         auth.require_also(Scope::SnapshotsDelete, RETENTION_PURPOSE)?;
     }
     let name = checked.policy.metadata.name.clone();
+    if gains_hook_hosts(None, (&checked.repository_id, &checked.policy), &[]) {
+        auth.require_also(
+            Scope::HooksWrite,
+            hooks_purpose(std::slice::from_ref(&name)),
+        )?;
+    }
     let now = now_ms();
     let inserted = sqlx::query(
         "INSERT INTO policies (id, name, repository_id, yaml, spec_json, revision, created_at, \
@@ -550,6 +588,18 @@ pub async fn update_policy(
         let current = find_policy(&state, &name).await?;
         if retention_of(&current.policy) != retention_of(&checked.policy) {
             auth.require_also(Scope::SnapshotsDelete, RETENTION_PURPOSE)?;
+        }
+        let agents = load_agents(&state).await?;
+        let old = (current.repository_id.as_str(), &current.policy);
+        if gains_hook_hosts(
+            Some(old),
+            (&checked.repository_id, &checked.policy),
+            &agents,
+        ) {
+            auth.require_also(
+                Scope::HooksWrite,
+                hooks_purpose(std::slice::from_ref(&name)),
+            )?;
         }
     }
     let updated = sqlx::query(
