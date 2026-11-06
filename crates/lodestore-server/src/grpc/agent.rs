@@ -64,6 +64,7 @@ async fn agent_status(state: &AppState, agent_id: &str) -> Result<(String, Strin
 
 const MAX_MOUNTS: usize = 64;
 const MAX_HOOK_SCRIPTS: usize = 256;
+const MAX_RESTORE_ROOTS: usize = 32;
 const MAX_FIELD_BYTES: usize = 255;
 
 fn clip(text: &str) -> String {
@@ -110,6 +111,12 @@ async fn write_seen(state: &AppState, agent_id: &str, heartbeat: Option<&Heartbe
             });
             if let Some(hooks) = hooks {
                 facts["hooks"] = hooks;
+            }
+            if let Some(restore) = &hb.restore_facts {
+                facts["restore"] = serde_json::json!({
+                    "roots": restore.roots.iter().take(MAX_RESTORE_ROOTS).map(|r| clip(r)).collect::<Vec<_>>(),
+                    "allow_in_place": restore.allow_in_place,
+                });
             }
             sqlx::query(
                 "UPDATE agents SET last_seen_at = $1, kernel = $2, distro = $3, facts_json = $4 WHERE id = $5",
