@@ -232,7 +232,7 @@ web-1   /etc/nginx/nginx.conf   3         2026-10-29 12:00:00  4f0c...
 old-box /srv/nginx.conf         1         2026-10-02 03:10:00  9a1d...
 ```
 
-`VERSIONS` counts the different contents the file had. `SNAPSHOT` is the full id of the newest snapshot that holds the newest version. Versions that a signature covers (`verified_by` in the JSON) come before those that nothing signed, and `LAST SEEN` is when the server received the snapshot, so a snapshot with a manifest time far in the future does not become the newest version. Below the table the command prints how to restore the first row. When the host has an agent that is online, this is a ready command:
+`VERSIONS` counts the different contents the file had. `SNAPSHOT` is the full id of the snapshot the command restores: the first one the server lists for the first version, a signed one whenever the version has any, otherwise the newest. Versions that a signature covers (`verified_by` in the JSON) come before those that nothing signed, and `LAST SEEN` is when the server received the snapshot, so a snapshot with a manifest time far in the future does not become the newest version. Below the table the command prints how to restore the first row. When the host has an agent that is online, this is a ready command:
 
 ```
 lode server restore <snapshot> --host web-1 --path /etc/nginx/nginx.conf
@@ -242,7 +242,7 @@ For a host without an agent, or with an agent that is offline, it says so and sh
 
 A search that hits a limit prints `Stopped at N matches.` or `Stopped after N minutes.` on stderr, prints what it found and exits with 0: the result is incomplete, not wrong. Narrow it with `--host`, `--label` or a longer pattern. With no match the command prints `No files match "<pattern>".` and exits with 0.
 
-With `--json` the command prints one `find_session` line after the search ends. It has the fields of the REST `FindSession` (`state`, `stop_reason`, `limit`, `scanned`, `total`, `error`, and so on) and all groups in `groups`, each with its `versions` and their newest snapshots. Scripts check `state` (`done` or `incomplete`) and `stop_reason` (`limit` or `timeout`).
+With `--json` the command prints one `find_session` line after the search ends. It has the fields of the REST `FindSession` (`state`, `stop_reason`, `limit`, `scanned`, `total`, `error`, and so on) and all groups in `groups`, each with its `versions` and their snapshots, signed ones first. Scripts check `state` (`done` or `incomplete`) and `stop_reason` (`limit` or `timeout`).
 
 Exit codes: 0 when the search finished or stopped at a limit, 1 when the search failed (the message is the server's) or the network failed, 2 for an unknown host, a label without `=` or an invalid pattern, 13 when the token lacks `snapshots:read`.
 
