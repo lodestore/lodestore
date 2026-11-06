@@ -251,3 +251,63 @@ async fn adv_two_lying_shards_cost_one_backup() {
     ])
     .await;
 }
+
+/// A snapshot naming many lying shards, each several times, records a bounded
+/// number of them per backup, so one backup cannot flush older revocations.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adv_one_backup_records_a_bounded_number_of_lies() {
+    let env = AgentEnv::start(&Backend::Sqlite).await;
+    let first = source(&env, "first", b"the first backup, nothing planted");
+    let job = run_backup(&env, 0, &first).await;
+    let job = env.wait_job_settled(&job).await;
+    assert!(
+        job["state"] == "succeeded" || job["state"] == "warnings",
+        "{job}"
+    );
+    let pool = &env.ts().state().db.pool;
+    let upgraded = wait_until(WAIT, || async {
+        sqlx::query("SELECT attest_upgraded_at FROM repositories WHERE id = $1")
+            .bind(&env.repo)
+            .fetch_one(pool)
+            .await
+            .and_then(|row| row.try_get::<Option<i64>, _>("attest_upgraded_at"))
+            .is_ok_and(|marker| marker.is_some())
+    })
+    .await;
+    assert!(upgraded, "the server did not record the upgrade marker");
+
+    let keys = WriteKeys::from_file_text(
+        &std::fs::read_to_string(env.paths.writer_keys()).expect("the agent's writer keys"),
+    )
+    .unwrap();
+    let root = env.ts().local_repo_root("main");
+    let store = LocalFsStore::new(root.clone());
+    let dir = env.work.path().join("planted");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut shards = Vec::new();
+    for n in 0..80 {
+        let content = format!("planted file number {n}");
+        std::fs::write(dir.join(format!("file-{n}.txt")), &content).unwrap();
+        let id = blob_id(&keys.k_id, content.as_bytes());
+        let shard = plant_blobs(&store, &keys, &[(id, BLOB_TYPE_DATA)]).await;
+        shards.push(shard);
+        shards.push(shard);
+    }
+    plant_attestation_hint(&store, &shards).await;
+
+    let job = run_backup(&env, 1, &dir).await;
+    let job = env.wait_job_settled(&job).await;
+    assert_eq!(job["error_code"], "verification_failed", "{job}");
+    let recorded: i64 =
+        sqlx::query("SELECT COUNT(*) AS n FROM distrusted_shards WHERE repository_id = $1")
+            .bind(&env.repo)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+            .get("n");
+    assert!(
+        (1..=64).contains(&recorded),
+        "one backup recorded {recorded} lying shards"
+    );
+    env.stop().await;
+}

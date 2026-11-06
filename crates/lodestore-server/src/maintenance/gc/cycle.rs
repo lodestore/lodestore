@@ -41,7 +41,7 @@ use crate::jobs::ACTIVE_STATES;
 use crate::jobs::restore::RestoreRecord;
 use crate::maintenance::attest::verify::SWEEP;
 use crate::maintenance::attest::{
-    ensure_upgraded, load_distrusted, load_verified, record_verified,
+    ensure_upgraded, load_all_distrusted, load_verified, record_verified,
 };
 use crate::state::AppState;
 
@@ -722,7 +722,7 @@ async fn verifying(state: &AppState, cycle: &CycleRow) -> anyhow::Result<StepOut
         return finished(state, &cycle.id).await;
     }
 
-    let revoked: HashSet<BlobId> = load_distrusted(state, &cycle.repository_id)
+    let revoked: HashSet<BlobId> = load_all_distrusted(state, &cycle.repository_id)
         .await
         .context("loading the distrusted shards")?
         .into_iter()

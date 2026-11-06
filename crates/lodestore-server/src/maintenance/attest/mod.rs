@@ -296,6 +296,8 @@ pub async fn record_verified(
 
 pub const MAX_DISTRUSTED_SENT: usize = 65_536;
 
+pub const MAX_LIES_PER_PASS: usize = 64;
+
 pub async fn record_distrusted(
     state: &AppState,
     repository_id: &str,
@@ -315,9 +317,29 @@ pub async fn record_distrusted(
     Ok(())
 }
 
-/// Newest first, at most [`MAX_DISTRUSTED_SENT`].
+/// Newest first, at most [`MAX_DISTRUSTED_SENT`]: the list sent to agents.
 pub async fn load_distrusted(state: &AppState, repository_id: &str) -> anyhow::Result<Vec<BlobId>> {
-    let limit = i64::try_from(MAX_DISTRUSTED_SENT).unwrap_or(i64::MAX);
+    load_distrusted_up_to(
+        state,
+        repository_id,
+        i64::try_from(MAX_DISTRUSTED_SENT).unwrap_or(i64::MAX),
+    )
+    .await
+}
+
+/// Every distrusted shard of a repository, for cleanup.
+pub async fn load_all_distrusted(
+    state: &AppState,
+    repository_id: &str,
+) -> anyhow::Result<Vec<BlobId>> {
+    load_distrusted_up_to(state, repository_id, i64::MAX).await
+}
+
+async fn load_distrusted_up_to(
+    state: &AppState,
+    repository_id: &str,
+    limit: i64,
+) -> anyhow::Result<Vec<BlobId>> {
     let rows = sqlx::query(
         "SELECT shard_id FROM distrusted_shards WHERE repository_id = $1 \
          ORDER BY at DESC, shard_id LIMIT $2",

@@ -22,8 +22,8 @@ use sqlx::Row;
 use tokio::sync::{RwLock, Semaphore};
 
 use super::{
-    ensure_provenance_backfilled, ensure_upgraded, load_verified, record_distrusted,
-    record_verified,
+    MAX_LIES_PER_PASS, ensure_provenance_backfilled, ensure_upgraded, load_verified,
+    record_distrusted, record_verified,
 };
 use crate::catalog::retention::{after_backup, append_event};
 use crate::catalog::{self, JobLink, open_repository};
@@ -290,9 +290,13 @@ async fn verify_job(state: &AppState, job_id: &str, target: &Target) -> anyhow::
     let mut verified = load_verified(state, repository).await?;
     // Every lying shard of this pass is recorded, so a hint naming many costs one backup.
     let mut lies = Vec::new();
+    let mut seen = HashSet::new();
     for shard in &refs {
-        if verified.contains(shard) {
+        if verified.contains(shard) || !seen.insert(*shard) {
             continue;
+        }
+        if lies.len() >= MAX_LIES_PER_PASS {
+            break;
         }
         match verify_shard(store, keys, shard).await {
             Ok(Some(_)) => {
