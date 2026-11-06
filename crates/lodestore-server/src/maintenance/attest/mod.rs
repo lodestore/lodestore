@@ -306,7 +306,8 @@ pub async fn record_distrusted(
 ) -> anyhow::Result<()> {
     sqlx::query(
         "INSERT INTO distrusted_shards (repository_id, shard_id, at, reason) \
-         VALUES ($1, $2, $3, $4) ON CONFLICT (repository_id, shard_id) DO NOTHING",
+         VALUES ($1, $2, $3, $4) \
+         ON CONFLICT (repository_id, shard_id) DO UPDATE SET at = excluded.at",
     )
     .bind(repository_id)
     .bind(hex32(shard))

@@ -165,6 +165,47 @@ async fn distrust_recorded_only_for_data_errors() {
     env.ts.stop().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn distrust_redetection_returns_to_the_sent_window() {
+    let env = Env::new().await;
+    env.upgrade().await;
+    let (snapshot1, planted) = env.snapshot("planted", true).await;
+    let planted = planted.unwrap();
+    env.job("j1", &snapshot1).await;
+    verify_then_retain(env.ts.state().clone(), "j1".into()).await;
+    assert_eq!(env.verify_state("j1").await, "failed");
+    assert_eq!(env.distrusted().await, vec![planted]);
+
+    sqlx::query("UPDATE distrusted_shards SET at = 1 WHERE repository_id = $1 AND shard_id = $2")
+        .bind(&env.repo)
+        .bind(hex32(&planted))
+        .execute(&env.ts.state().db.pool)
+        .await
+        .unwrap();
+    let junk: BlobId = [0; 32];
+    record_distrusted(env.ts.state(), &env.repo, &junk, "test")
+        .await
+        .unwrap();
+    assert_eq!(env.distrusted().await, vec![junk, planted]);
+
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let (snapshot2, _) = env.snapshot("planted", false).await;
+    env.job("j2", &snapshot2).await;
+    verify_then_retain(env.ts.state().clone(), "j2".into()).await;
+    assert_eq!(env.verify_state("j2").await, "failed");
+    assert_eq!(env.distrusted().await, vec![planted, junk]);
+
+    let rows: i64 = sqlx::query("SELECT COUNT(*) AS n FROM distrusted_shards WHERE shard_id = $1")
+        .bind(hex32(&planted))
+        .fetch_one(&env.ts.state().db.pool)
+        .await
+        .unwrap()
+        .try_get("n")
+        .unwrap();
+    assert_eq!(rows, 1);
+    env.ts.stop().await;
+}
+
 fn frame(stream: &mut UnixStream, data: &[u8]) {
     stream
         .write_all(&u32::try_from(data.len()).unwrap().to_be_bytes())
