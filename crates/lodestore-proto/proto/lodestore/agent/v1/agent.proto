@@ -90,6 +90,7 @@ message Heartbeat {
   string distro = 3;
   repeated Mount mounts = 4;
   HookFacts hook_facts = 5;
+  RestoreFacts restore_facts = 6;
 }
 
 message Mount {
@@ -150,6 +151,11 @@ message RenewResponse {
 message HookFacts {
   bool allow_inline = 1;
   repeated HookScript scripts = 2;
+}
+
+message RestoreFacts {
+  repeated string roots = 1;
+  bool allow_in_place = 2;
 }
 
 message HookScript {
