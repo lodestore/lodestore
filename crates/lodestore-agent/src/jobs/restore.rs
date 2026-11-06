@@ -898,7 +898,7 @@ pub fn run_restore_job(ctx: JobCtx, mut spec: RestoreSpec) {
     let options = RestoreOptions {
         roots: settings.roots(ctx.paths()),
         allow_in_place: settings.allow_in_place,
-        ..RestoreOptions::default()
+        ..Default::default()
     };
     let finished = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
