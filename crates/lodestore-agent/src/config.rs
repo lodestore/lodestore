@@ -143,7 +143,10 @@ mod tests {
         let (_tmp, paths, settings) = load(
             "socket: /run/x.sock\nhooks:\n  allow_inline: true\nrestore:\n  allowed_restore_roots: [/srv/r, rel, /a/../b, /c/, /d/./e]\n",
         );
-        assert_eq!(settings.restore.roots(&paths), vec![PathBuf::from("/srv/r")]);
+        assert_eq!(
+            settings.restore.roots(&paths),
+            vec![PathBuf::from("/srv/r")]
+        );
         assert_eq!(settings.socket, Some(PathBuf::from("/run/x.sock")));
         assert!(settings.hooks.allow_inline);
     }

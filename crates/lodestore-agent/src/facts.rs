@@ -223,7 +223,13 @@ mod tests {
         let facts = restore_facts(&paths);
         assert_eq!(
             facts.roots,
-            vec![paths.state_dir.join("restore").to_string_lossy().into_owned()]
+            vec![
+                paths
+                    .state_dir
+                    .join("restore")
+                    .to_string_lossy()
+                    .into_owned()
+            ]
         );
         assert!(!facts.allow_in_place);
 
