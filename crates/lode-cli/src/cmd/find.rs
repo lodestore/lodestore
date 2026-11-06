@@ -27,7 +27,6 @@ struct RestoreHost {
 #[derive(Deserialize)]
 struct Snapshot {
     id: String,
-    time_ms: i64,
 }
 
 #[derive(Deserialize)]
@@ -45,11 +44,10 @@ struct Group {
 }
 
 impl Group {
-    /// The newest snapshot of the first version, which the server lists signed ones first.
-    fn newest_snapshot(&self) -> Option<&str> {
-        let version = self.versions.first()?;
-        let snapshot = version.snapshots.iter().max_by_key(|s| s.time_ms)?;
-        Some(&snapshot.id)
+    /// The first snapshot of the first version: the server lists signed versions first and,
+    /// within a version, signed snapshots first.
+    fn target_snapshot(&self) -> Option<&str> {
+        Some(&self.versions.first()?.snapshots.first()?.id)
     }
 }
 
@@ -144,7 +142,7 @@ async fn poll(client: &Client, path: &str, after: u64) -> Result<Value> {
 }
 
 fn restore_hint(group: &Group, known: &[RestoreHost]) -> Option<String> {
-    let snapshot = group.newest_snapshot()?;
+    let snapshot = group.target_snapshot()?;
     if group
         .path
         .chars()
@@ -275,7 +273,7 @@ pub async fn run_server(client: &Client, out: Output, args: ServerFindArgs) -> R
                 clean(&g.path),
                 g.versions.len().to_string(),
                 time(Some(g.last_seen_ms)),
-                g.newest_snapshot().unwrap_or("-").to_owned(),
+                g.target_snapshot().unwrap_or("-").to_owned(),
             ]
         })
         .collect();
@@ -302,6 +300,30 @@ mod tests {
             "versions": [{ "snapshots": [{ "id": "ab", "time_ms": 1 }] }],
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn restore_hint_takes_the_signed_snapshot_listed_first() {
+        let group: Group = serde_json::from_value(json!({
+            "host_key": "agent-1",
+            "hostname": "web",
+            "path": "/etc/hosts",
+            "last_seen_ms": 2,
+            "versions": [{ "snapshots": [
+                { "id": "signed", "time_ms": 1, "verified_by": "server" },
+                { "id": "planted", "time_ms": 2, "verified_by": null },
+            ] }],
+        }))
+        .unwrap();
+        let known = [RestoreHost {
+            key: "agent-1".into(),
+            hostname: "web".into(),
+            agent: true,
+            status: Some("online".into()),
+        }];
+        assert_eq!(group.target_snapshot(), Some("signed"));
+        let hint = restore_hint(&group, &known).unwrap();
+        assert!(hint.contains("lode server restore signed"), "{hint}");
     }
 
     #[test]
