@@ -199,7 +199,7 @@ describe("Find file tab", { timeout: 30_000 }, () => {
 			findHandlers([
 				findSession({
 					state: "done",
-					groups: [findGroup(0, { versions: [older, newest] })],
+					groups: [findGroup(0, { versions: [newest, older] })],
 				}),
 			]);
 			return renderApp("/restore?tab=find&find=nginx.conf");

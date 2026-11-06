@@ -205,6 +205,27 @@ describe("Find file version provenance", { timeout: 30_000 }, () => {
 		expect(badges[0].closest("[data-status=unverified]")).toBeInTheDocument();
 	});
 
+	it("keeps the server order so a signed version comes before a newer unsigned one", async () => {
+		openFind([
+			findGroup(0, {
+				versions: [
+					findVersion({ last_ms: Date.UTC(2026, 9, 20, 2, 0) }),
+					findVersion({
+						content_id: "ab".repeat(16),
+						last_ms: Date.UTC(2026, 9, 21, 2, 0),
+						verified_by: null,
+					}),
+				],
+			}),
+		]);
+		const unsigned = (await screen.findByText("Unverified")).closest("li");
+		const [first, second] = screen.getAllByRole("button", {
+			name: /^Restore /,
+		});
+		expect(unsigned).not.toContainElement(first);
+		expect(unsigned).toContainElement(second);
+	});
+
 	it("marks a version signed with the repository password", async () => {
 		openFind([
 			findGroup(0, { versions: [findVersion({ verified_by: "owner" })] }),
