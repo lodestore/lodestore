@@ -48,7 +48,7 @@ const READ_CONCURRENCY: usize = 8;
 pub(crate) const SNAPSHOT_COLUMNS: &str = "id, time_ms, hostname, paths_json, tags_json, \
      policy_name, stdin_name, job_id, parent_id, incomplete, errors_total, warnings_total, \
      stats_json, received_at, suspicious, suspicious_by, suspicious_reason, suspicious_at, \
-     anomaly_json, unverified_reason, CAST(CASE WHEN policy_name IS NOT NULL AND NOT EXISTS \
+     anomaly_json, unverified_reason, verified_by, CAST(CASE WHEN policy_name IS NOT NULL AND NOT EXISTS \
      (SELECT 1 FROM policies p WHERE p.name = snapshots.policy_name) THEN 1 ELSE 0 END AS BIGINT) \
      AS policy_deleted";
 
@@ -845,6 +845,16 @@ async fn rebuild(state: &AppState, repository_id: &str) -> anyhow::Result<SyncRe
         .fetch_one(&state.db.pool)
         .await?
         .try_get("n")?;
+    if let Err(error) = crate::maintenance::attest::reconcile_provenance(
+        state,
+        repository_id,
+        &source.store,
+        &source.keys,
+    )
+    .await
+    {
+        tracing::warn!(repository = repository_id, error = %format!("{error:#}"), "reconciling snapshot provenance failed");
+    }
     Ok(SyncReport {
         added: status.added,
         skipped: status.skipped.len() as u64,
@@ -977,6 +987,8 @@ pub struct SnapshotItem {
     pub suspicious: Option<SuspicionDto>,
     /// Why the server marked this snapshot unverified: its data failed the server's check after the backup, or the check could not complete within an hour. Null when the snapshot is not marked.
     pub unverified_reason: Option<String>,
+    /// Who signed this snapshot's provenance: `server` (the server checked a backup job of the host named by its certificate) or `owner` (a `lode backup` run with the repository password). Null when nothing signed it; such a snapshot is never the latest, is not counted by retention and cannot be restored in place.
+    pub verified_by: Option<String>,
     pub policy_deleted: bool,
 }
 
@@ -1054,6 +1066,7 @@ pub(crate) fn item_from_row(row: &sqlx::any::AnyRow) -> Result<SnapshotItem, Api
         received_at: row.try_get("received_at")?,
         suspicious: suspicion_from_row(row)?,
         unverified_reason: row.try_get("unverified_reason")?,
+        verified_by: row.try_get("verified_by")?,
         policy_deleted: row.try_get::<i64, _>("policy_deleted")? != 0,
     })
 }
@@ -1089,7 +1102,7 @@ async fn list_host_snapshots(
         .try_get("n")?;
     let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT {SNAPSHOT_COLUMNS} FROM snapshots \
-         WHERE host_id = $1 ORDER BY time_ms DESC, id LIMIT $2 OFFSET $3"
+         WHERE host_id = $1 ORDER BY received_at DESC, id DESC LIMIT $2 OFFSET $3"
     )))
     .bind(&id)
     .bind(PAGE_SIZE)

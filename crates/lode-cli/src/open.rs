@@ -1,12 +1,20 @@
-use std::path::Path;
+use std::collections::HashSet;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use lodestore_format::Error;
-use lodestore_format::crypto::Entropy;
-use lodestore_format::keys::WriteKeys;
+use lodestore_format::attest::{
+    AttestedSet, MARKER_LEGACY_SHARDS, UnverifiedAttestations, peek_attestations,
+    read_attestations_complete,
+};
+use lodestore_format::crypto::{BlobId, Entropy};
+use lodestore_format::index::{hex32, parse_hex32};
+use lodestore_format::keys::{ReadKeys, WriteKeys};
 use lodestore_format::locks::{
     LockId, UNMARKED_WRITER_LIMIT, close_writer_marker, put_writer_marker, writer_marker_key,
 };
+use lodestore_format::provenance::{ATTESTATIONS_MISSING, ProvenanceSet};
 use lodestore_format::reader::Reader;
 use lodestore_format::repo::Repository;
 use lodestore_format::store::{BlobError, BlobStore, Store, open_url};
@@ -105,6 +113,146 @@ pub struct Opened {
     /// read the parent snapshot; with writer keys it is `None`.
     pub reader: Option<Reader<Store>>,
     pub marker: Marker,
+    /// `Some` when the repository is upgraded for server signatures and the
+    /// backup deduplicates and checks itself accordingly.
+    pub strict: Option<Strict>,
+}
+
+const WRITER_KEYS_UPGRADED: &str = "this repository is upgraded for server signatures, and writer keys cannot check a backup here. Back up through the agent (`lode backup --stdin` over its socket) or with the repository password or recovery key.";
+const WRITER_KEYS_DENIED: &str = "cannot read locks/ in the repository (access denied), so writer keys cannot tell whether a server has upgraded it for signatures. Update the key policy (see https://lodestore.dev/docs/guides/gc/) or pass --no-gc-check if no Lodestore server manages this repository.";
+
+pub const MAX_CACHED_SHARDS: usize = 262_144;
+const VERIFIED_FILE: &str = "verified-shards";
+const DISTRUSTED_FILE: &str = "distrusted-shards";
+const UPGRADED_FILE: &str = "upgraded";
+
+/// Index shards this machine has opened itself or caught lying, kept between
+/// runs in `$XDG_CACHE_HOME/lode/<repo id>/`. Losing the files only makes the
+/// next strict backup download packs again. `upgraded` is the mark that this
+/// machine has seen the repository carry server signatures: a bucket that
+/// loses its attestations afterwards must not fall back to the unsigned rules.
+#[derive(Default)]
+pub struct ShardCache {
+    dir: Option<PathBuf>,
+    pub upgraded: bool,
+    pub verified: HashSet<BlobId>,
+    pub distrusted: HashSet<BlobId>,
+    verified_order: Vec<BlobId>,
+    distrusted_order: Vec<BlobId>,
+}
+
+fn cache_base() -> Option<PathBuf> {
+    std::env::var_os("XDG_CACHE_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|v| !v.is_empty())
+                .map(|home| PathBuf::from(home).join(".cache"))
+        })
+}
+
+fn cache_dir(repo_id: &[u8]) -> Option<PathBuf> {
+    cache_base().map(|base| {
+        base.join("lode")
+            .join(data_encoding::HEXLOWER.encode(repo_id))
+    })
+}
+
+/// This machine has seen the repository carry server signatures.
+fn upgrade_marked(repo_id: &[u8]) -> bool {
+    cache_dir(repo_id).is_some_and(|dir| dir.join(UPGRADED_FILE).exists())
+}
+
+fn read_ids(path: &Path) -> Vec<BlobId> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let mut ids: Vec<BlobId> = text
+        .lines()
+        .filter_map(|line| parse_hex32(line.trim()))
+        .collect();
+    if ids.len() > MAX_CACHED_SHARDS {
+        ids.drain(..ids.len() - MAX_CACHED_SHARDS);
+    }
+    ids
+}
+
+fn write_ids(dir: &Path, name: &str, ids: &[BlobId]) -> Result<()> {
+    let ids = &ids[ids.len().saturating_sub(MAX_CACHED_SHARDS)..];
+    let mut text = String::with_capacity(ids.len() * 65);
+    for id in ids {
+        text.push_str(&hex32(id));
+        text.push('\n');
+    }
+    std::fs::create_dir_all(dir)?;
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+    tmp.write_all(text.as_bytes())?;
+    tmp.persist(dir.join(name))?;
+    Ok(())
+}
+
+impl ShardCache {
+    pub fn load(repo_id: &[u8]) -> Self {
+        let Some(dir) = cache_dir(repo_id) else {
+            eprintln!(
+                "warning: no cache folder (set HOME or XDG_CACHE_HOME); every backup in this repository downloads the packs of its signed shards again"
+            );
+            return Self::default();
+        };
+        let verified_order = read_ids(&dir.join(VERIFIED_FILE));
+        let distrusted_order = read_ids(&dir.join(DISTRUSTED_FILE));
+        Self {
+            upgraded: dir.join(UPGRADED_FILE).exists(),
+            verified: verified_order.iter().copied().collect(),
+            distrusted: distrusted_order.iter().copied().collect(),
+            verified_order,
+            distrusted_order,
+            dir: Some(dir),
+        }
+    }
+
+    pub fn add_verified(&mut self, ids: impl IntoIterator<Item = BlobId>) {
+        for id in ids {
+            if self.verified.insert(id) {
+                self.verified_order.push(id);
+            }
+        }
+    }
+
+    pub fn add_distrusted(&mut self, id: BlobId) {
+        if self.distrusted.insert(id) {
+            self.distrusted_order.push(id);
+        }
+    }
+
+    fn save_upgraded(&self, dir: &Path) -> Result<()> {
+        if !self.upgraded {
+            return Ok(());
+        }
+        std::fs::create_dir_all(dir)?;
+        let tmp = tempfile::NamedTempFile::new_in(dir)?;
+        tmp.persist(dir.join(UPGRADED_FILE))?;
+        Ok(())
+    }
+
+    pub fn save(&self) -> Result<()> {
+        let Some(dir) = &self.dir else {
+            return Ok(());
+        };
+        write_ids(dir, VERIFIED_FILE, &self.verified_order)
+            .and_then(|()| write_ids(dir, DISTRUSTED_FILE, &self.distrusted_order))
+            .and_then(|()| self.save_upgraded(dir))
+            .with_context(|| format!("cannot save the shard cache in {}", dir.display()))
+    }
+}
+
+pub struct Strict {
+    pub store: Store,
+    pub keys: ReadKeys,
+    pub attested: HashSet<BlobId>,
+    pub provenance: ProvenanceSet,
+    pub cache: ShardCache,
 }
 
 async fn put_marker(url: &str, keys: &WriteKeys, hostname: &[u8]) -> Result<Marker> {
@@ -140,6 +288,12 @@ fn check_locks_readable(writer: &Writer<Store>, no_gc_check: bool) -> Result<()>
     )
 }
 
+/// The attestations, read whole, and whether the upgrade marker is among them.
+async fn read_upgraded(store: &Store, keys: &ReadKeys) -> Result<(bool, AttestedSet)> {
+    let set = read_attestations_complete(store, keys).await?;
+    Ok((set.markers.contains(&MARKER_LEGACY_SHARDS), set))
+}
+
 /// Writes the writer marker before anything is read from the repository, so a
 /// manifest published after that is seen by the writer or held back by the
 /// marker. Whatever fails afterwards closes the marker again.
@@ -154,9 +308,38 @@ pub async fn open_for_write(
     }
     let (store, repo) = open_repository(url, args).await?;
     let keys = repo.read_keys().write_keys(repo.config_hash());
+    // Checked before the marker so a refused run writes nothing, and again
+    // after it, from the read the backup then relies on.
+    let marked = upgrade_marked(repo.read_keys().repo_id());
+    if marked && !read_upgraded(&store, repo.read_keys()).await?.0 {
+        anyhow::bail!(ATTESTATIONS_MISSING);
+    }
     let marker = put_marker(url, &keys, hostname).await?;
     let opened = async {
-        let mut writer = Writer::new(store, keys, repo.config()).await?;
+        let (is_upgraded, attestations) = read_upgraded(&store, repo.read_keys()).await?;
+        if marked && !is_upgraded {
+            anyhow::bail!(ATTESTATIONS_MISSING);
+        }
+        let strict = if is_upgraded {
+            let mut cache = ShardCache::load(repo.read_keys().repo_id());
+            cache.upgraded = true;
+            Some(Strict {
+                store: open_store(url)?,
+                keys: repo.read_keys().duplicate(),
+                provenance: ProvenanceSet::from_attested(&attestations, repo.read_keys()),
+                cache,
+                attested: attestations.shards,
+            })
+        } else {
+            None
+        };
+        let mut writer = match &strict {
+            Some(s) => {
+                Writer::new_attested(store, keys, repo.config(), &s.attested, &s.cache.distrusted)
+                    .await?
+            }
+            None => Writer::new(store, keys, repo.config()).await?,
+        };
         check_locks_readable(&writer, no_gc_check)?;
         warn_skipped(writer.skipped_index_shards());
         let dropped = writer.drop_unbacked_packs().await?;
@@ -170,14 +353,15 @@ pub async fn open_for_write(
             repo.read_keys().duplicate(),
             repo.config(),
         )?;
-        anyhow::Ok((writer, Some(reader)))
+        anyhow::Ok((writer, Some(reader), strict))
     }
     .await;
     match opened {
-        Ok((writer, reader)) => Ok(Opened {
+        Ok((writer, reader, strict)) => Ok(Opened {
             writer,
             reader,
             marker,
+            strict,
         }),
         Err(e) => {
             marker.close().await;
@@ -206,6 +390,12 @@ async fn open_with_writer_keys(
     };
     keys.verify_config(&config)
         .with_context(|| format!("cannot back up to {url}"))?;
+    let hints = peek_attestations(&store)
+        .await
+        .with_context(|| format!("cannot back up to {url}"))?;
+    if let Some(refusal) = writer_keys_refusal(&hints, upgrade_marked(&keys.repo_id), no_gc_check) {
+        anyhow::bail!(refusal);
+    }
     let marker = put_marker(url, &keys, hostname).await?;
     let opened = async {
         let writer = Writer::connect(store, keys)
@@ -221,10 +411,54 @@ async fn open_with_writer_keys(
             writer,
             reader: None,
             marker,
+            strict: None,
         }),
         Err(e) => {
             marker.close().await;
             Err(e)
         }
+    }
+}
+
+/// Writer keys cannot check a backup in an upgraded repository (D-32). One
+/// they cannot tell about counts as upgraded unless `--no-gc-check` says no
+/// server manages it, and only a server upgrades a repository.
+fn writer_keys_refusal(
+    hints: &UnverifiedAttestations,
+    marked: bool,
+    no_gc_check: bool,
+) -> Option<&'static str> {
+    if marked || hints.markers.contains(&MARKER_LEGACY_SHARDS) {
+        Some(WRITER_KEYS_UPGRADED)
+    } else if hints.denied && !no_gc_check {
+        Some(WRITER_KEYS_DENIED)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn writer_keys_refuse_when_locks_cannot_be_read() {
+        let mut hints = UnverifiedAttestations::default();
+        assert_eq!(writer_keys_refusal(&hints, false, false), None);
+        assert_eq!(
+            writer_keys_refusal(&hints, true, true),
+            Some(WRITER_KEYS_UPGRADED)
+        );
+        hints.denied = true;
+        assert_eq!(
+            writer_keys_refusal(&hints, false, false),
+            Some(WRITER_KEYS_DENIED)
+        );
+        assert_eq!(writer_keys_refusal(&hints, false, true), None);
+        hints.markers.insert(MARKER_LEGACY_SHARDS);
+        assert_eq!(
+            writer_keys_refusal(&hints, false, true),
+            Some(WRITER_KEYS_UPGRADED)
+        );
     }
 }

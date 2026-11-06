@@ -78,8 +78,8 @@ async fn seed(pool: &AnyPool, repository: &str) {
     sqlx::query(
         "INSERT INTO snapshots (id, repository_id, host_id, hostname, time_ms, paths_json, \
          tags_json, policy_name, incomplete, errors_total, warnings_total, stats_json, \
-         discovered_at, received_at, received_exact) \
-         VALUES ('s1', $1, 'h1', 'web-1', $2, '[]', '[]', 'daily', 0, 0, 0, $3, $2, $2, 1)",
+         discovered_at, received_at, received_exact, verified_at, verified_by) \
+         VALUES ('s1', $1, 'h1', 'web-1', $2, '[]', '[]', 'daily', 0, 0, 0, $3, $2, $2, 1, $2, 'server')",
     )
     .bind(repository)
     .bind(done)

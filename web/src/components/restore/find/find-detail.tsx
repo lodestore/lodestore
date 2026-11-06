@@ -29,7 +29,6 @@ export function FindDetail({
 		group.gone != null &&
 		formatMonthDay(group.gone.last_ms) === formatMonthDay(group.gone.next_ms);
 	const goneDate = sameDay ? formatMonthDayTime : formatMonthDay;
-	const versions = [...group.versions].sort((a, b) => b.last_ms - a.last_ms);
 	return (
 		<Card className="min-w-0 px-6">
 			<div className="flex flex-col gap-1">
@@ -67,7 +66,7 @@ export function FindDetail({
 				</Alert>
 			)}
 			<ol className="flex flex-col">
-				{versions.map((version, i) => (
+				{group.versions.map((version, i) => (
 					<VersionEntry
 						key={`${version.first_ms}-${version.content_id}`}
 						sessionId={sessionId}

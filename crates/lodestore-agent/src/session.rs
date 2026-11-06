@@ -352,6 +352,7 @@ async fn session_once(
                     "the local clock differs from the server's by more than 5 minutes"
                 );
             }
+            crate::jobs::distrusted::record_or_warn(paths, &ack.distrusted_shards);
             ack.server_time
         }
         _ => {

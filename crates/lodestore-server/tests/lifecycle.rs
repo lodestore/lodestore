@@ -170,6 +170,17 @@ async fn revoke_case(backend: &Backend) {
     let api = ts.api().await;
     let repo = ts.create_local_repository("main").await;
     let agent = start_agent(&ts, &api, &repo, "revoke").await;
+    // The agent records the server's distrusted-shard list right after it connects.
+    let state = agent.paths.state_dir.clone();
+    assert!(
+        wait_until(Duration::from_secs(10), || async {
+            state.join("distrusted-shards").exists()
+                && !state.join(".distrusted-shards.tmp").exists()
+        })
+        .await,
+        "[{}] the agent did not record the distrusted-shard list",
+        backend.name()
+    );
     let before = snapshot(&agent.paths);
     assert!(!before.is_empty());
 

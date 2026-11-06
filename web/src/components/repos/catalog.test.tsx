@@ -209,6 +209,7 @@ describe("restore timeline during a rebuild", () => {
 						repository_name: "main",
 						snapshot_count: 1,
 						latest_snapshot_ms: Date.now(),
+						unverified_count: 0,
 					},
 				]),
 			),

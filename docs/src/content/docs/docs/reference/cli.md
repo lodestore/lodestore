@@ -232,7 +232,7 @@ web-1   /etc/nginx/nginx.conf   3         2026-10-29 12:00:00  4f0c...
 old-box /srv/nginx.conf         1         2026-10-02 03:10:00  9a1d...
 ```
 
-`VERSIONS` counts the different contents the file had. `SNAPSHOT` is the full id of the newest snapshot that holds the newest version. Below the table the command prints how to restore the first row. When the host has an agent that is online, this is a ready command:
+`VERSIONS` counts the different contents the file had. `SNAPSHOT` is the full id of the snapshot the command restores: the first one the server lists for the first version, a signed one whenever the version has any, otherwise the newest. Versions that a signature covers (`verified_by` in the JSON) come before those that nothing signed, and `LAST SEEN` is when the server received the snapshot, so a snapshot with a manifest time far in the future does not become the newest version. Below the table the command prints how to restore the first row. When the host has an agent that is online, this is a ready command:
 
 ```
 lode server restore <snapshot> --host web-1 --path /etc/nginx/nginx.conf
@@ -242,7 +242,7 @@ For a host without an agent, or with an agent that is offline, it says so and sh
 
 A search that hits a limit prints `Stopped at N matches.` or `Stopped after N minutes.` on stderr, prints what it found and exits with 0: the result is incomplete, not wrong. Narrow it with `--host`, `--label` or a longer pattern. With no match the command prints `No files match "<pattern>".` and exits with 0.
 
-With `--json` the command prints one `find_session` line after the search ends. It has the fields of the REST `FindSession` (`state`, `stop_reason`, `limit`, `scanned`, `total`, `error`, and so on) and all groups in `groups`, each with its `versions` and their newest snapshots. Scripts check `state` (`done` or `incomplete`) and `stop_reason` (`limit` or `timeout`).
+With `--json` the command prints one `find_session` line after the search ends. It has the fields of the REST `FindSession` (`state`, `stop_reason`, `limit`, `scanned`, `total`, `error`, and so on) and all groups in `groups`, each with its `versions` and their snapshots, signed ones first. Scripts check `state` (`done` or `incomplete`) and `stop_reason` (`limit` or `timeout`).
 
 Exit codes: 0 when the search finished or stopped at a limit, 1 when the search failed (the message is the server's) or the network failed, 2 for an unknown host, a label without `=` or an invalid pattern, 13 when the token lacks `snapshots:read`.
 
@@ -257,6 +257,9 @@ Exit codes: 0 when the search finished or stopped at a limit, 1 when the search 
 | `--in-place` | Restore over the original files. Needs `--yes` |
 | `--conflict POLICY` | `overwrite-changed` (default), `skip-existing` or `stop-if-not-empty` |
 | `--no-owners` | Do not restore file owners, setuid/setgid bits or file capabilities |
+| `--accept-unverified` | Restore a snapshot that nothing signed (see [Snapshot provenance](/docs/security/threat-model/#snapshot-provenance-and-latest)). Without it the server refuses with `restore_unverified_not_confirmed`; an unsigned snapshot is never restored in place, with or without the flag (`restore_unverified_in_place`). A signed snapshot ignores the flag |
+
+`lode server snapshots list` shows the snapshots newest first by the time the server received them, not by the time written in the manifest.
 
 ### Output
 
@@ -272,3 +275,41 @@ Lists print a table with the same columns and status words as the web interface.
 | 3 | `lode check` or `lode server check` found problems in the repository |
 | 4 | `lode apply --dry-run` found changes |
 | 13 | The token was refused: unknown, expired or revoked, or it lacks the scope named in the message |
+
+## Backup and restore without the server
+
+`lode backup`, `lode snapshots`, `lode ls`, `lode dump` and `lode restore` work straight against a repository, with its password or recovery key and no server. See [Restoring without the server](/docs/recipes/restore-without-server/). This section covers what changed with snapshot signatures; [Snapshot provenance and `latest`](/docs/security/threat-model/#snapshot-provenance-and-latest) explains what they protect and where they stop.
+
+### Which snapshot is `latest`
+
+`latest` (also `latest:/path`) in `lode restore`, `lode ls` and `lode dump` is not the newest by the time in the manifest, which the host that wrote it sets. It is the newest snapshot that carries a signature, ordered by the time the storage reports for the snapshot object. Equal times are broken by the larger snapshot id.
+
+- A snapshot is signed when the Lodestore server has checked it, or when `lode backup` with the repository password has checked and signed it itself. `lode snapshots` marks the rest.
+- `lode` explains the choice on stderr. It warns about snapshots that claim a time in the future, about unsigned snapshots stored after the chosen one (name one by id to restore it), and about signature records that could not be opened. A signed snapshot stored more than ten minutes in the future is skipped with a warning; if every signed snapshot is, the command exits with code 1.
+- If the repository holds signatures but no snapshot is signed, the command exits with code 1, like an unknown id, and asks for an id. `lode snapshots` lists them.
+- In a repository that no Lodestore 0.2 server has opened, nothing is signed yet. `latest` is then the snapshot the storage wrote last, ignoring any stored more than ten minutes in the future, and `lode` warns that a host with writer credentials could have written it. If every snapshot is stored in the future, the command exits with code 1 and asks for an id. In this mode `latest` protects against nothing a host with writer credentials can do; name the snapshot by its id, or open the repository with a 0.2 server first.
+- On a machine where `lode` has already seen signatures in a repository, it remembers that in a cache file (below). If the signatures later disappear, as when `locks/attest-*` objects are deleted from a folder repository, `latest` exits with code 1 and asks for an id instead of falling back to the rule above, and `lode backup` exits with an error and writes nothing. A machine without that file cannot know, and falls back.
+
+```sh
+lode snapshots
+lode snapshots --json
+```
+
+`lode snapshots` prints a mark after the paths when the repository holds signatures: `unverified` for a snapshot nothing signed and `owner` for one signed with the repository password. A snapshot signed by the server has no mark. In a repository without signatures there are no marks. With `--json`, each snapshot has `verified_by`: `"server"`, `"owner"` or `null`.
+
+### Backup in a repository the server has upgraded
+
+When a 0.2 server has opened a repository, `lode backup` with a password or recovery key changes in four ways. A repository that no 0.2 server has opened behaves as before.
+
+- It deduplicates only against index shards the server signed, and against shards this machine opened itself, not against every shard in `index/`. A shard planted by a compromised host cannot make the backup unrestorable.
+- Before it exits with 0, it opens the frames its snapshot depends on and checks that the snapshot resolves, the way the server does after an agent backup. If the data does not check out, `lode backup` exits with code 1: the snapshot is left unsigned, `latest` skips it, the failing shard is remembered and the next run does not use it. A backup that could not be checked says so and also exits with 1.
+- When the check passes, it signs the snapshot with the repository password (`owner` in `lode snapshots`) by adding one object `locks/attest-*`. With cleanup turned off, these objects accumulate, one per `lode backup`; see [Cleanup](/docs/guides/gc/#attestations-and-cleanup).
+- An incremental backup picks its parent only among snapshots signed for this host name, ordered by the time the storage reports. `--parent latest` follows the rules of `latest` above. An explicit `--parent` is used as given, with a warning when it is not signed.
+
+The first strict backup on a machine opens the frames of every shard its snapshot depends on, so in a large repository it reads much of the stored data and costs that much transfer. Later runs check only shards not seen before. Every open for writing, like every `latest`, also reads all `locks/attest-*` objects; with cleanup turned off their number grows with every backup, and the read grows with it.
+
+The memory of the checks is in `$XDG_CACHE_HOME/lode/<repository id>/` (`$HOME/.cache/lode/...` when the variable is not set): `verified-shards`, `distrusted-shards` and `upgraded`, readable by you only. Deleting the folder costs a repeat of the first run and the loss of the `upgraded` memory above, and of the list of shards caught lying, which the next backup finds again. With neither `XDG_CACHE_HOME` nor `HOME` set, `lode` warns and checks the whole set on every backup.
+
+`lode backup --writer-keys` cannot check the backup, so in such a repository it exits with an error and writes nothing. It also refuses when the key cannot read `locks/`, so it cannot tell, unless `--no-gc-check` says no server cleans up the repository, and on a machine that remembers the repository was upgraded. Back up through the agent (`lode backup --stdin` over its socket), or use the password or recovery key. In a repository no 0.2 server has opened, `--writer-keys` works as before and nothing checks the backup.
+
+`lode backup --stdin` through the agent is signed by the server for the host of the agent; see [Agent local socket](/docs/reference/local-socket/).

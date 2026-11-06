@@ -57,6 +57,7 @@ function makeSnapshot(over: Partial<SnapshotItem> = {}): SnapshotItem {
 		policy_name: "etc",
 		policy_deleted: false,
 		received_at: Date.now() - 7_100_000,
+		verified_by: "server",
 		incomplete: false,
 		errors_total: 0,
 		warnings_total: 0,
@@ -159,6 +160,63 @@ describe("Host snapshots: suspicious", () => {
 		);
 		expect(order).toEqual(["suspicious", "warning"]);
 		expect(within(rows[2]).queryByText("Suspicious")).toBeNull();
+	});
+
+	it("unverified snapshot shows the badge with its tooltip", async () => {
+		const table = await openSnapshots([
+			makeSnapshot({ verified_by: null }),
+			makeSnapshot({ id: "bbbbbbbb00000000" }),
+		]);
+		const rows = within(table).getAllByRole("row").slice(1);
+
+		const badge = within(rows[0])
+			.getByText("Unverified")
+			.closest("[data-status]");
+		expect(badge).toHaveAttribute("data-status", "unverified");
+		expect(badge?.getAttribute("aria-label")).toContain(
+			"Not linked to a server job.",
+		);
+		expect(within(rows[1]).queryByText("Unverified")).toBeNull();
+	});
+
+	it("snapshot awaiting verification shows the pending label, not the unbound text", async () => {
+		const table = await openSnapshots([
+			makeSnapshot({ verified_by: null, job_id: "job-1" }),
+			makeSnapshot({
+				id: "bbbbbbbb00000000",
+				verified_by: null,
+				job_id: "job-2",
+				unverified_reason: "verify_failed",
+			}),
+		]);
+		const rows = within(table).getAllByRole("row").slice(1);
+
+		const pending = within(rows[0])
+			.getByText("Verifying")
+			.closest("[data-status]");
+		expect(pending?.getAttribute("aria-label")).toContain(
+			"still checking this backup",
+		);
+		expect(pending?.getAttribute("aria-label")).not.toContain(
+			"Not linked to a server job",
+		);
+		expect(within(rows[1]).getByText("Unverified")).toBeInTheDocument();
+	});
+
+	it("owner-signed snapshot shows the owner badge", async () => {
+		const table = await openSnapshots([
+			makeSnapshot({ verified_by: "owner" }),
+			makeSnapshot({ id: "bbbbbbbb00000000" }),
+		]);
+		const rows = within(table).getAllByRole("row").slice(1);
+
+		expect(
+			within(rows[0])
+				.getByText("Signed with password")
+				.closest("[data-status]"),
+		).toHaveAttribute("data-status", "owner-signed");
+		expect(within(rows[0]).queryByText("Unverified")).toBeNull();
+		expect(within(rows[1]).queryByText("Signed with password")).toBeNull();
 	});
 
 	it("policy deleted badge in source", async () => {
@@ -418,6 +476,7 @@ describe("Restore: suspicious", () => {
 		repository_name: "main",
 		snapshot_count: 3,
 		latest_snapshot_ms: Date.now(),
+		unverified_count: 0,
 	};
 
 	function mockRestore(snapshots: RestoreSnapshot[]) {

@@ -11,12 +11,13 @@ use std::path::{Path, PathBuf};
 
 use adv_support::{attacker_keys, open_all_shards, plant_blobs, plant_shard_where};
 use gc_support::{Fx, assert_same_files};
-use lodestore_format::attest::ensure_upgraded;
+use lodestore_format::attest::{ensure_upgraded, read_attestations};
 use lodestore_format::chunker::blob_id;
 use lodestore_format::crypto::{BLOB_TYPE_DATA, BlobId, Entropy};
 use lodestore_format::index::index_object_key;
 use lodestore_format::reader::{Reader, RestoreOptions};
 use lodestore_format::store::{BlobDelete, put_named};
+use lodestore_format::verify_snapshot::{check_snapshot_resolves, snapshot_index_refs};
 use lodestore_format::writer::{BackupOptions, BackupOutcome, Writer};
 use rand_chacha::ChaCha20Rng;
 use rand_chacha::rand_core::{Rng, SeedableRng};
@@ -46,10 +47,33 @@ async fn attested_writer<'a>(
     fx: &'a Fx,
     own: &HashSet<BlobId>,
 ) -> Writer<&'a lodestore_format::store::LocalFsStore> {
+    distrusting_writer(fx, own, &HashSet::new()).await
+}
+
+async fn distrusting_writer<'a>(
+    fx: &'a Fx,
+    own: &HashSet<BlobId>,
+    distrusted: &HashSet<BlobId>,
+) -> Writer<&'a lodestore_format::store::LocalFsStore> {
     let keys = fx.repo.read_keys().write_keys(fx.repo.config_hash());
-    Writer::connect_attested(&fx.store, keys, own)
+    Writer::connect_attested(&fx.store, keys, own, distrusted)
         .await
         .unwrap()
+}
+
+async fn strict_writer<'a>(
+    fx: &'a Fx,
+    attested: &HashSet<BlobId>,
+    distrusted: &HashSet<BlobId>,
+) -> Writer<&'a lodestore_format::store::LocalFsStore> {
+    let keys = fx.repo.read_keys().write_keys(fx.repo.config_hash());
+    Writer::new_attested(&fx.store, keys, fx.repo.config(), attested, distrusted)
+        .await
+        .unwrap()
+}
+
+fn data_id(fx: &Fx, seed: u8) -> BlobId {
+    blob_id(fx.repo.read_keys().k_id(), &content(seed))
 }
 
 async fn backup(
@@ -200,4 +224,166 @@ async fn attested_writer_ignores_every_supersedes() {
     let via_connect = backup(&mut attested, &src).await;
     assert_restores(&fx, &via_connect, &src).await;
     assert_restores(&fx, &first, &src).await;
+}
+
+#[tokio::test]
+async fn attested_dedup_new_attested_ignores_unattested_planted_shard() {
+    let fx = Fx::new().await;
+    fx.backup("host-a", &[("a", 1, 200 << 10)]).await;
+    upgrade(&fx).await;
+
+    let planted = plant_blobs(
+        &fx.store,
+        &attacker_keys(&fx.repo),
+        &[(data_id(&fx, 7), BLOB_TYPE_DATA)],
+    )
+    .await;
+    let attested = read_attestations(&fx.store, fx.repo.read_keys())
+        .await
+        .unwrap()
+        .shards;
+    assert!(!attested.contains(&planted));
+
+    let src = src_with(&fx, "host-b", 7);
+    let mut w = strict_writer(&fx, &attested, &HashSet::new()).await;
+    let out = backup(&mut w, &src).await;
+    assert!(out.stats.bytes_added as usize >= FILE_SIZE);
+
+    let refs = snapshot_index_refs(&fx.store, fx.repo.read_keys(), &out.snapshot_id)
+        .await
+        .unwrap();
+    assert!(!refs.contains(&planted));
+    let verified: HashSet<BlobId> = w.written_shards().iter().copied().collect();
+    check_snapshot_resolves(
+        &fx.store,
+        fx.repo.read_keys(),
+        &out.snapshot_id,
+        &verified,
+        &attested,
+    )
+    .await
+    .unwrap();
+    assert_restores(&fx, &out, &src).await;
+}
+
+#[tokio::test]
+async fn attested_dedup_lying_attested_shard_is_reported_and_excluded() {
+    let fx = Fx::new().await;
+    let honest = {
+        let mut w = fx.open_writer().await;
+        let out = backup(&mut w, &src_with(&fx, "host-a", 7)).await;
+        let shards: HashSet<BlobId> = w.written_shards().iter().copied().collect();
+        (out, shards)
+    };
+    let real = honest.1;
+    let liar = plant_blobs(
+        &fx.store,
+        &attacker_keys(&fx.repo),
+        &[(data_id(&fx, 7), BLOB_TYPE_DATA)],
+    )
+    .await;
+    let mut attested = real.clone();
+    attested.insert(liar);
+
+    let src = src_with(&fx, "host-b", 7);
+    let mut w = strict_writer(&fx, &HashSet::from([liar]), &HashSet::new()).await;
+    let out = backup(&mut w, &src).await;
+    let refs = snapshot_index_refs(&fx.store, fx.repo.read_keys(), &out.snapshot_id)
+        .await
+        .unwrap();
+    assert!(refs.contains(&liar));
+
+    let own: HashSet<BlobId> = w.written_shards().iter().copied().collect();
+    let check = check_snapshot_resolves(
+        &fx.store,
+        fx.repo.read_keys(),
+        &out.snapshot_id,
+        &own,
+        &attested,
+    )
+    .await
+    .unwrap();
+    assert_eq!(check.lying, vec![liar]);
+    assert!(real.iter().all(|r| check.newly_verified.contains(r)));
+
+    let src = src_with(&fx, "host-c", 7);
+    let mut w = strict_writer(&fx, &attested, &HashSet::from([liar])).await;
+    let again = backup(&mut w, &src).await;
+    let refs = snapshot_index_refs(&fx.store, fx.repo.read_keys(), &again.snapshot_id)
+        .await
+        .unwrap();
+    assert!(!refs.contains(&liar));
+    let own: HashSet<BlobId> = w.written_shards().iter().copied().collect();
+    let check = check_snapshot_resolves(
+        &fx.store,
+        fx.repo.read_keys(),
+        &again.snapshot_id,
+        &own,
+        &attested,
+    )
+    .await
+    .unwrap();
+    assert!(check.lying.is_empty());
+    assert_restores(&fx, &again, &src).await;
+}
+
+#[tokio::test]
+async fn attested_dedup_connect_attested_skips_distrusted() {
+    let fx = Fx::new().await;
+    fx.backup("host-a", &[("a", 1, 200 << 10)]).await;
+    let liar = plant_blobs(
+        &fx.store,
+        &attacker_keys(&fx.repo),
+        &[(data_id(&fx, 7), BLOB_TYPE_DATA)],
+    )
+    .await;
+    upgrade(&fx).await;
+    let distrusted = HashSet::from([liar]);
+
+    let src = src_with(&fx, "host-b", 7);
+    let mut trusting = attested_writer(&fx, &HashSet::new()).await;
+    let out = backup(&mut trusting, &src).await;
+    let refs = snapshot_index_refs(&fx.store, fx.repo.read_keys(), &out.snapshot_id)
+        .await
+        .unwrap();
+    assert!(refs.contains(&liar));
+
+    let src = src_with(&fx, "host-c", 7);
+    let mut w = distrusting_writer(&fx, &HashSet::new(), &distrusted).await;
+    assert!(!w.attested_shards().contains(&liar));
+    let out = backup(&mut w, &src).await;
+    let refs = snapshot_index_refs(&fx.store, fx.repo.read_keys(), &out.snapshot_id)
+        .await
+        .unwrap();
+    assert!(!refs.contains(&liar));
+    assert_restores(&fx, &out, &src).await;
+}
+
+#[tokio::test]
+async fn attested_dedup_distrusted_skipped_before_upgrade() {
+    let fx = Fx::new().await;
+    fx.backup("host-a", &[("a", 1, 200 << 10)]).await;
+    let liar = plant_blobs(
+        &fx.store,
+        &attacker_keys(&fx.repo),
+        &[(data_id(&fx, 7), BLOB_TYPE_DATA)],
+    )
+    .await;
+
+    let src = src_with(&fx, "host-b", 7);
+    let mut trusting = attested_writer(&fx, &HashSet::new()).await;
+    let out = backup(&mut trusting, &src).await;
+    let refs = snapshot_index_refs(&fx.store, fx.repo.read_keys(), &out.snapshot_id)
+        .await
+        .unwrap();
+    assert!(refs.contains(&liar));
+
+    let src = src_with(&fx, "host-c", 7);
+    let mut w = distrusting_writer(&fx, &HashSet::new(), &HashSet::from([liar])).await;
+    let out = backup(&mut w, &src).await;
+    let refs = snapshot_index_refs(&fx.store, fx.repo.read_keys(), &out.snapshot_id)
+        .await
+        .unwrap();
+    assert!(!refs.contains(&liar));
+    assert_restores(&fx, &out, &src).await;
 }

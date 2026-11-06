@@ -63,6 +63,7 @@ function makeSnapshot(over: Partial<SnapshotItem> = {}): SnapshotItem {
 		policy_name: "etc",
 		policy_deleted: false,
 		received_at: Date.now() - 7_100_000,
+		verified_by: "server",
 		incomplete: false,
 		errors_total: 0,
 		warnings_total: 0,

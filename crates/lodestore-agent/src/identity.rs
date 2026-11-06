@@ -67,6 +67,9 @@ impl Paths {
     pub fn own_shards(&self) -> PathBuf {
         self.state_dir.join("own-shards")
     }
+    pub fn distrusted_shards(&self) -> PathBuf {
+        self.state_dir.join("distrusted-shards")
+    }
     pub fn cache_dir(&self) -> PathBuf {
         self.state_dir.join("cache")
     }

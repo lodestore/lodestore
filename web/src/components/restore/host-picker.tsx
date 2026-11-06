@@ -2,6 +2,7 @@ import { ChevronDown, ChevronsUpDown, Server } from "lucide-react";
 import { memo, useState } from "react";
 import { useListRestoreHosts } from "@/api/gen/endpoints";
 import type { RestoreHost } from "@/api/gen/model";
+import { UnverifiedBadge } from "@/components/snapshots/suspicious-badge";
 import { StatusBadge } from "@/components/status-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -47,10 +48,22 @@ function matches(hosts: RestoreHost[], query: string) {
 }
 
 function Status({ host }: { host: RestoreHost }) {
-	return host.agent && host.status ? (
-		<StatusBadge status={host.status} />
-	) : (
-		<Badge variant="outline">{copy.restore.hostPicker.noAgentBadge}</Badge>
+	return (
+		<>
+			{host.unverified_count > 0 && (
+				<UnverifiedBadge plain count={host.unverified_count} />
+			)}
+			{host.latest_snapshot_ms == null && host.unverified_count > 0 && (
+				<span className="min-w-0 truncate text-sm font-normal text-muted-foreground">
+					{copy.restore.hostPicker.noSigned}
+				</span>
+			)}
+			{host.agent && host.status ? (
+				<StatusBadge status={host.status} />
+			) : (
+				<Badge variant="outline">{copy.restore.hostPicker.noAgentBadge}</Badge>
+			)}
+		</>
 	);
 }
 
@@ -88,9 +101,9 @@ function HostItem({
 						<bdi>{displayName(label)}</bdi>
 					</code>
 				))}
-			<span className="ml-auto flex shrink-0 items-center gap-2">
+			<span className="ml-auto flex min-w-0 items-center gap-2">
 				{source && (
-					<span className="text-sm text-muted-foreground">
+					<span className="min-w-0 truncate text-sm text-muted-foreground">
 						{copy.restore.hostPicker.sourceHost}
 					</span>
 				)}
@@ -202,16 +215,16 @@ export const HostPicker = memo(function HostPicker({
 								? copy.restore.hostPicker.current(displayName(current.hostname))
 								: copy.restore.hostPicker.label
 						}
-						className="w-full justify-between"
+						className="h-auto min-h-10 w-full justify-between py-2"
 					>
 						{current ? (
 							<>
-								<bdi className="truncate font-semibold">
+								<bdi className="max-w-2/5 shrink-0 truncate font-semibold">
 									{displayName(current.hostname)}
 								</bdi>
-								<span className="ml-auto flex shrink-0 items-center gap-2">
+								<span className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-x-2 gap-y-1">
 									{current.key === sourceKey && (
-										<span className="text-sm font-normal text-muted-foreground">
+										<span className="min-w-0 truncate text-sm font-normal text-muted-foreground">
 											{copy.restore.hostPicker.sourceHost}
 										</span>
 									)}

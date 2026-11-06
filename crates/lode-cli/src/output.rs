@@ -4,8 +4,10 @@ use std::time::{Duration, Instant};
 
 use data_encoding::BASE64;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use lodestore_format::crypto::BlobId;
 use lodestore_format::index::hex32;
 use lodestore_format::pb;
+use lodestore_format::provenance::LatestWarning;
 use serde::Serialize;
 use serde::ser::{SerializeMap, Serializer};
 
@@ -34,6 +36,39 @@ fn line<T: Serialize>(ty: &str, body: T) -> String {
 pub fn warn_skipped(skipped: &[(String, String)]) {
     for (key, reason) in skipped {
         eprintln!("warning: skipped {key}: {reason}");
+    }
+}
+
+/// Explains on stderr why `latest` is `chosen`.
+pub fn warn_latest(chosen: &BlobId, warnings: &[LatestWarning]) {
+    let short = |id: &BlobId| hex32(id)[..8].to_owned();
+    for warning in warnings {
+        match warning {
+            LatestWarning::Legacy => eprintln!(
+                "warning: this repository has no server signatures yet (no Lodestore 0.2 server \
+has opened it), so `latest` is the snapshot the storage wrote last. A host with writer \
+credentials could have written it; check it with `lode snapshots` or name a snapshot by id."
+            ),
+            LatestWarning::FutureTime { count, newest } => eprintln!(
+                "warning: {count} snapshot(s) claim a time in the future (newest {}); `latest` \
+ignores the times snapshots claim.",
+                short(newest)
+            ),
+            LatestWarning::FutureStored { count, newest } => eprintln!(
+                "warning: {count} snapshot(s) were stored with a time in the future and were \
+skipped (newest {}); name one by id to restore it.",
+                short(newest)
+            ),
+            LatestWarning::NewerUnverified { count, newest } => eprintln!(
+                "warning: {count} unsigned snapshot(s) were written after {} and were skipped \
+(newest {}); name one by id to restore it.",
+                short(chosen),
+                short(newest)
+            ),
+            LatestWarning::UnreadableProvenance { count } => eprintln!(
+                "warning: {count} provenance record(s) could not be opened and were ignored."
+            ),
+        }
     }
 }
 

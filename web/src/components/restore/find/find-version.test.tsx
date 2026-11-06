@@ -30,6 +30,7 @@ const snapshot: RestoreSnapshot = {
 	policy_name: "etc",
 	policy_deleted: false,
 	received_at: Date.UTC(2026, 9, 21, 2, 1),
+	verified_by: "server",
 	tags: [],
 	warnings_total: 0,
 	errors_total: 0,
@@ -54,6 +55,7 @@ const host: RestoreHost = {
 	repository_name: "main",
 	snapshot_count: 2,
 	latest_snapshot_ms: snapshot.time,
+	unverified_count: 0,
 };
 
 function mockRestore() {
@@ -185,6 +187,51 @@ describe("Find file version actions", { timeout: 30_000 }, () => {
 			await screen.findByText("This snapshot no longer exists."),
 		).toBeVisible();
 		expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+	});
+});
+
+describe("Find file version provenance", { timeout: 30_000 }, () => {
+	it("marks a version that nothing signed as Unverified", async () => {
+		openFind([
+			findGroup(0, {
+				versions: [
+					findVersion(),
+					findVersion({ content_id: "ab".repeat(16), verified_by: null }),
+				],
+			}),
+		]);
+		const badges = await screen.findAllByText("Unverified");
+		expect(badges).toHaveLength(1);
+		expect(badges[0].closest("[data-status=unverified]")).toBeInTheDocument();
+	});
+
+	it("keeps the server order so a signed version comes before a newer unsigned one", async () => {
+		openFind([
+			findGroup(0, {
+				versions: [
+					findVersion({ last_ms: Date.UTC(2026, 9, 20, 2, 0) }),
+					findVersion({
+						content_id: "ab".repeat(16),
+						last_ms: Date.UTC(2026, 9, 21, 2, 0),
+						verified_by: null,
+					}),
+				],
+			}),
+		]);
+		const unsigned = (await screen.findByText("Unverified")).closest("li");
+		const [first, second] = screen.getAllByRole("button", {
+			name: /^Restore /,
+		});
+		expect(unsigned).not.toContainElement(first);
+		expect(unsigned).toContainElement(second);
+	});
+
+	it("marks a version signed with the repository password", async () => {
+		openFind([
+			findGroup(0, { versions: [findVersion({ verified_by: "owner" })] }),
+		]);
+		expect(await screen.findByText("Signed with password")).toBeVisible();
+		expect(screen.queryByText("Unverified")).not.toBeInTheDocument();
 	});
 });
 

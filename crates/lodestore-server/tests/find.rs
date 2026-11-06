@@ -63,6 +63,12 @@ async fn seed(ts: &TestServer, api: &Api) -> Vec<String> {
         )
         .await;
     assert_eq!(response.status(), 200);
+    sqlx::query(
+        "UPDATE snapshots SET received_at = time_ms, verified_at = time_ms, verified_by = 'server'",
+    )
+    .execute(&ts.state().db.pool)
+    .await
+    .unwrap();
     vec![first, second, third]
 }
 
@@ -902,6 +908,89 @@ async fn find_cache_evicts_oldest() {
         let found = finished_with(&api, &only_a).await;
         assert_eq!(found["state"], "done", "{found}");
         assert_eq!(cache_files(&ts, ".bin").len(), 1, "[{}]", backend.name());
+        ts.stop().await;
+    }
+}
+
+async fn plant(ts: &TestServer, api: &Api, content: &[u8], received_at: i64) -> String {
+    let store = LocalFsStore::new(ts.local_repo_root("main"));
+    let opened = Repository::open(&store, PASSWORD).await.unwrap();
+    let keys = opened.read_keys().write_keys(opened.config_hash());
+    let mut writer = Writer::new(&store, keys, opened.config()).await.unwrap();
+    let data = ts.dir.path().join("tree");
+    write(&data.join("etc/nginx/nginx.conf"), content);
+    let planted = backup(&mut writer, &data, "host-a", 253_402_300_799).await;
+    let repo: String = sqlx::query_scalar("SELECT repository_id FROM snapshots LIMIT 1")
+        .fetch_one(&ts.state().db.pool)
+        .await
+        .unwrap();
+    let response = api
+        .post(
+            &format!("/api/v1/repositories/{repo}/catalog/sync"),
+            &json!({}),
+        )
+        .await;
+    assert_eq!(response.status(), 200);
+    sqlx::query("UPDATE snapshots SET received_at = $1 WHERE id = $2")
+        .bind(received_at)
+        .bind(&planted)
+        .execute(&ts.state().db.pool)
+        .await
+        .unwrap();
+    planted
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn find_lists_the_signed_snapshot_of_a_version_first() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let ids = seed(&ts, &api).await;
+        let planted = plant(&ts, &api, b"worker 1;", 1_700_000_300_000).await;
+
+        let found = finished_with(
+            &api,
+            &json!({ "pattern": "nginx.conf", "hosts": ["agentless:host-a"] }),
+        )
+        .await;
+        let versions = found["groups"][0]["versions"].as_array().unwrap();
+        let version = versions
+            .iter()
+            .find(|v| v["verified_by"] == "server" && v["snapshot_count"] == 3)
+            .unwrap_or_else(|| panic!("{found}"));
+        let snapshots = version["snapshots"].as_array().unwrap();
+        assert_eq!(snapshots[0]["id"], ids[1].as_str());
+        assert_eq!(snapshots[0]["verified_by"], "server");
+        let last = snapshots.last().unwrap();
+        assert_eq!(last["id"], planted.as_str());
+        assert_eq!(last["verified_by"], Value::Null);
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn find_orders_by_server_time_and_marks_unsigned_versions() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        seed(&ts, &api).await;
+
+        let forged = plant(&ts, &api, b"forged by the host", 1_700_000_300_000).await;
+
+        let found = finished_with(
+            &api,
+            &json!({ "pattern": "nginx.conf", "hosts": ["agentless:host-a"] }),
+        )
+        .await;
+        let group = &found["groups"][0];
+        assert_eq!(group["last_seen_ms"], 1_700_000_300_000i64);
+        let versions = group["versions"].as_array().unwrap();
+        assert_eq!(versions.len(), 2);
+        assert_eq!(versions[0]["verified_by"], "server");
+        assert_eq!(versions[0]["last_ms"], 1_700_000_100_000i64);
+        assert_eq!(versions[1]["verified_by"], Value::Null);
+        assert_eq!(versions[1]["snapshots"][0]["id"], forged.as_str());
+        assert_eq!(versions[1]["snapshots"][0]["time_ms"], 1_700_000_300_000i64);
         ts.stop().await;
     }
 }

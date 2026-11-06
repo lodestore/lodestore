@@ -18,6 +18,7 @@ use tonic::{Code, Request, Response, Status, Streaming};
 
 use crate::db::now_ms;
 use crate::grpc::{internal, peer_agent_id, restore, select_version, status_with};
+use crate::maintenance::attest::load_distrusted;
 use crate::repos::db::writer_material;
 use crate::state::AppState;
 
@@ -205,12 +206,22 @@ impl Agent for AgentService {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
+        let distrusted_shards = load_distrusted(&state, &repository_id)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, %agent_id, "could not load the distrusted shards");
+                Vec::new()
+            })
+            .into_iter()
+            .map(|id| id.to_vec())
+            .collect();
         state.registry.send(
             &agent_id,
             ServerMessage {
                 body: Some(ServerBody::HelloAck(HelloAck {
                     selected_version,
                     server_time,
+                    distrusted_shards,
                 })),
             },
         );

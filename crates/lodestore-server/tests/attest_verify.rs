@@ -139,13 +139,20 @@ impl Env {
             self.upgrade().await;
         }
         let mut writer = if plant == Plant::BeforeUpgrade {
-            Writer::connect_attested(&self.store, keys, &HashSet::new()).await
+            Writer::connect_attested(&self.store, keys, &HashSet::new(), &HashSet::new()).await
         } else {
             Writer::connect(&self.store, keys).await
         }
         .unwrap();
         let out = writer
-            .backup(&[dir], BackupOptions::default(), &|_| {})
+            .backup(
+                &[dir],
+                BackupOptions {
+                    agent_id: Some(HOST.as_bytes().to_vec()),
+                    ..BackupOptions::default()
+                },
+                &|_| {},
+            )
             .await
             .expect("backup");
         let refs = snapshot_index_refs(&self.store, repo.read_keys(), &out.snapshot_id)

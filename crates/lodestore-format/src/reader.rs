@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use crate::Fut;
-use crate::attest::read_attestations;
+use crate::attest::{read_attestations, read_attestations_complete};
 use crate::check::is_data_error;
 use crate::chunker::blob_id;
 use crate::config;
@@ -26,6 +26,7 @@ use crate::index::{
 use crate::keys::ReadKeys;
 use crate::pack::{PACK_PREFIX_LEN, decompress, open_prefix, pack_object_key};
 use crate::pb;
+use crate::provenance::{LatestPick, ProvenanceSet, pick_latest};
 use crate::selection::Selection;
 use crate::snapshot::{
     SnapshotEntry, SnapshotList, TreeSource, list_snapshots, open_snapshot, snapshot_object_key,
@@ -266,15 +267,32 @@ impl<S: BlobStore> Reader<S> {
         list_snapshots(&self.store, &self.keys).await
     }
 
+    /// What the server and the password holder have signed. A read that a
+    /// cleanup cycle keeps changing is an error, never a partial set.
+    pub async fn provenance(&self) -> Result<ProvenanceSet> {
+        let set = read_attestations_complete(&self.store, &self.keys).await?;
+        Ok(ProvenanceSet::from_attested(&set, &self.keys))
+    }
+
+    /// The `latest` snapshot with the warnings that go with the choice.
+    /// `expect_upgraded` is true for a caller that knows the repository
+    /// carried server signatures before.
+    pub async fn resolve_latest(&self, expect_upgraded: bool) -> Result<LatestPick> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|d| i64::try_from(d.as_millis()).ok())
+            .unwrap_or(0);
+        let entries = self.list_snapshots().await?.entries;
+        pick_latest(entries, &self.provenance().await?, now_ms, expect_upgraded)
+    }
+
     /// Finds a snapshot by `latest`, its full id or a unique hex prefix.
+    /// `latest` here assumes the caller knows nothing of an earlier upgrade;
+    /// a caller that keeps that knowledge calls [`Reader::resolve_latest`].
     pub async fn resolve_snapshot(&self, spec: &str) -> Result<SnapshotEntry> {
         if spec == "latest" {
-            return self
-                .list_snapshots()
-                .await?
-                .entries
-                .pop()
-                .ok_or_else(|| Error::InvalidInput("the repository has no snapshots".into()));
+            return Ok(self.resolve_latest(false).await?.entry);
         }
         let spec = spec.to_ascii_lowercase();
         if spec.is_empty() || !spec.bytes().all(|b| b.is_ascii_hexdigit()) {

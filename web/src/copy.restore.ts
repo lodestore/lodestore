@@ -16,6 +16,7 @@ export const restore = {
 		noAgentGroupHint:
 			"Snapshots from hosts that have not enrolled on this server.",
 		noAgentBadge: "No agent",
+		noSigned: "No signed snapshots",
 		sourceHost: "Source host",
 		noMatch: (query: string) => `No host matches "${query}".`,
 		keepTyping: "Keep typing to narrow the list.",
@@ -43,6 +44,8 @@ export const restore = {
 		selected: "Selected",
 		emptyHeading: (host: string) => `No snapshots for ${isolate(host)} yet`,
 		emptyBody: "Once a backup finishes, its snapshot is listed here.",
+		noSignedBody:
+			"Nothing signed any of this host's snapshots. Pick one from the list to restore it into another folder.",
 		loadFailed:
 			"Couldn't load snapshots. Check that the server is reachable, then retry.",
 	},
@@ -57,6 +60,9 @@ export const restore = {
 		suspiciousTitle: "This snapshot looks unusual.",
 		suspiciousBody:
 			"Retention does not count it and does not forget it. Review it, then clear the mark or delete the snapshot.",
+		unverifiedTitle: "Nothing signed this snapshot",
+		unverifiedBody:
+			"It may not come from this host. You can restore it into another folder or download it after confirming.",
 		clearMark: "Clear mark…",
 		deleteSnapshot: "Delete snapshot…",
 	},
@@ -132,6 +138,9 @@ export const restore = {
 		title: (n: number) => `Restore ${itemCount(n)}`,
 		suspiciousWarning:
 			"This snapshot is marked suspicious. Files in it may be encrypted or damaged.",
+		unverifiedConfirm: "Restore this unsigned snapshot into another folder",
+		unverifiedInPlaceDisabled:
+			"An unsigned snapshot cannot be restored over the original files.",
 		from: "From",
 		fromValue: (host: string, id: string, when: string) =>
 			`${isolate(host)} · snapshot ${id} · ${when}`,
@@ -177,6 +186,7 @@ export const restore = {
 	downloadDialog: {
 		title: (n: number) => `Download ${itemCount(n)}`,
 		body: "The server decrypts the data as it streams the archive to your browser. Nothing is written to disk on the server.",
+		unverifiedConfirm: "Download this unsigned snapshot",
 		format: "Format",
 		formats: {
 			tar_gz: {

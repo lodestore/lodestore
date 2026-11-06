@@ -81,6 +81,8 @@ A stream is a job of its own on the host with source `cli`, no policy, a generat
 
 The job is stored on the agent. While the server is unreachable the job and its result are kept and reported after the agent reconnects. The snapshot appears under the host with its `stdin_name`. A snapshot written directly to the repository with `lode backup --stdin -r ...` appears after the next catalog sync.
 
+The server signs the snapshot of a stream that went through the agent, after it has checked it like any other backup. The host in the signature comes from the agent's client certificate, not from the snapshot, so a stream written through one agent is never signed as another host's, and it counts as a signed snapshot in `latest`, in the last-backup time and in the host picker. A snapshot written directly with `lode backup --stdin -r ...` is checked and signed by `lode` itself with the repository password in a repository the server has upgraded, and then shows as signed with the password, without a host. See [Snapshot provenance and `latest`](/docs/security/threat-model/#snapshot-provenance-and-latest).
+
 A stream has a fixed time limit of 12 hours. A stream that is still being written after that is stopped and writes no snapshot (`time_limit`). The `maxRuntime` of the policy named in the header does not apply to it: the agent does not know the policies, and the limit is what lets garbage collection prove that no running backup references data about to be deleted. Backups that need longer than 12 hours have to run as policy jobs.
 
 The snapshot written through the agent has no parent snapshot, because the agent cannot read the repository.

@@ -6,7 +6,7 @@
 #   scripts/adversarial-vs-release.sh [TAG]      (default: v0.1.0)
 #
 # The current adv_*.rs files and the helper modules they share (adv_support,
-# gc_support, common) are copied into a detached worktree of TAG, built and
+# gc_support, common, forge_support) are copied into a detached worktree of TAG, built and
 # run there with the default nextest profile. The run exits non-zero if any
 # scenario passes, is not run, or does not compile on TAG.
 #
@@ -31,7 +31,7 @@ git worktree add --detach "$WT" "$TAG" >/dev/null
 
 for tests in crates/*/tests; do
     [ -d "$tests" ] || continue
-    for support in adv_support gc_support common; do
+    for support in adv_support gc_support common forge_support; do
         if [ -d "$tests/$support" ]; then
             mkdir -p "$WT/$tests"
             rm -rf "${WT:?}/$tests/$support"

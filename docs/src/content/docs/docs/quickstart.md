@@ -106,7 +106,7 @@ export LODE_PASSWORD_FILE=./repository-password
 lode restore latest --target ./restored
 ```
 
-On AWS, set `AWS_REGION` to the region of the bucket, or the request is refused; `us-east-1` suits most other S3-compatible stores. Files land under the target folder at their original absolute path.
+On AWS, set `AWS_REGION` to the region of the bucket, or the request is refused; `us-east-1` suits most other S3-compatible stores. Files land under the target folder at their original absolute path. `latest` is the newest snapshot the server signed, ordered by the time the storage wrote it, not by the time written in the snapshot, so a snapshot that a compromised host planted with a date in the future is not chosen. If `lode` warns that the repository has no server signatures yet, no Lodestore 0.2 server has opened it; see [Restoring without the server](/docs/recipes/restore-without-server/).
 
 ## Using a local or network folder
 

@@ -117,6 +117,9 @@ message ServerMessage {
 message HelloAck {
   uint32 selected_version = 1;
   int64 server_time = 2;
+  // Shards the server caught lying; writers must not deduplicate against them.
+  // The full current list, newest first.
+  repeated bytes distrusted_shards = 3;
 }
 
 message UpdateS3Credentials {
@@ -174,6 +177,9 @@ message JobSpec {
   Limits limits = 10;
   uint64 max_runtime_s = 11;
   bool gc_locks_required = 12;
+  // Shards the server caught lying; writers must not deduplicate against them.
+  // The full current list, newest first.
+  repeated bytes distrusted_shards = 13;
 }
 
 enum IoniceClass {

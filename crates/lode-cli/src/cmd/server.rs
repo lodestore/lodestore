@@ -914,6 +914,7 @@ struct RestoreRequest<'a> {
     in_place: bool,
     conflict: ConflictArg,
     restore_owners: bool,
+    accept_unverified: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -966,6 +967,7 @@ async fn restore(client: &Client, out: Output, args: ServerRestoreArgs) -> Resul
         in_place: args.in_place,
         conflict: args.conflict,
         restore_owners: !args.no_owners,
+        accept_unverified: args.accept_unverified,
     };
     let created: RestoreCreated = client.post_json("/api/v1/restores", Some(&request)).await?;
     if out.json {

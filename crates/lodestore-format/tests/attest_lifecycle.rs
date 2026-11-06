@@ -3,7 +3,7 @@
 
 mod gc_support;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::ops::Range;
@@ -18,6 +18,7 @@ use gc_support::Fx;
 use lodestore_format::attest::{
     MARKER_LEGACY_SHARDS, MARKER_UPGRADE_PART, attest_key, consolidate_attestations,
     ensure_upgraded, open_attestation, put_attestation, read_attestations, seal_attestation,
+    seal_provenance,
 };
 use lodestore_format::crypto::{BlobId, Entropy};
 use lodestore_format::fs::filter::PathMatcher;
@@ -27,8 +28,9 @@ use lodestore_format::locks::new_lock_id;
 use lodestore_format::pb;
 use lodestore_format::reader::{Reader, RestoreOptions};
 use lodestore_format::repo::Repository;
+use lodestore_format::snapshot::snapshot_object_key;
 use lodestore_format::store::{
-    BlobDelete, BlobError, BlobPurge, BlobStore, ListEntry, LocalFsStore, PurgeOutcome,
+    BlobDelete, BlobError, BlobPurge, BlobStore, ListEntry, LocalFsStore, PurgeOutcome, put_named,
 };
 use serde_json::Value;
 
@@ -433,6 +435,28 @@ async fn attest_upgrade_not_needed_to_restore_v1_fixture() {
     assert!(locks(&store).await.iter().all(|k| !k.contains("attest-")));
 }
 
+fn snapshot_id(n: u32) -> BlobId {
+    let mut id = [0u8; 32];
+    id[..4].copy_from_slice(&n.to_be_bytes());
+    id
+}
+
+fn sealed_for(keys: &ReadKeys, id: BlobId, job: &str) -> Vec<u8> {
+    let record = pb::ProvenanceRecord {
+        snapshot_id: id.to_vec(),
+        host_id: "host".into(),
+        job_id: job.into(),
+        ..Default::default()
+    };
+    seal_provenance(keys, &record, &mut Entropy::os()).unwrap()
+}
+
+async fn plant_snapshot(store: &LocalFsStore, id: BlobId) {
+    put_named(store, &snapshot_object_key(&id), b"x".to_vec())
+        .await
+        .unwrap();
+}
+
 struct Five {
     _tmp: tempfile::TempDir,
     store: LocalFsStore,
@@ -452,7 +476,11 @@ async fn five() -> Five {
     put(&store, &keys, &[[1u8; 32]], &[MARKER_UPGRADE_PART]).await;
     put(&store, &keys, &[[2u8; 32], [3u8; 32]], &[]).await;
     put(&store, &keys, &[[4u8; 32], [9u8; 32]], &[]).await;
-    let provenance = vec![b"sealed one".to_vec(), b"sealed two".to_vec()];
+    let mut provenance = Vec::new();
+    for n in 1..=2 {
+        plant_snapshot(&store, snapshot_id(n)).await;
+        provenance.push(sealed_for(&keys, snapshot_id(n), "job"));
+    }
     put_attestation(
         &store,
         &keys,
@@ -477,9 +505,15 @@ async fn attest_consolidate_merges_and_deletes_sources() {
     let before = locks(&f.store).await;
     assert_eq!(before.len(), 5);
 
-    let out = consolidate_attestations(&f.store, &f.keys, false, &mut Entropy::os())
-        .await
-        .unwrap();
+    let out = consolidate_attestations(
+        &f.store,
+        &f.keys,
+        false,
+        &HashSet::new(),
+        &mut Entropy::os(),
+    )
+    .await
+    .unwrap();
     assert_eq!((out.read, out.written.len(), out.deleted), (5, 1, 5));
     let after = locks(&f.store).await;
     assert_eq!(after, out.written.iter().cloned().collect());
@@ -501,9 +535,10 @@ async fn attest_consolidate_merges_and_deletes_sources() {
 async fn attest_consolidate_dry_run_changes_nothing() {
     let f = five().await;
     let before = locks(&f.store).await;
-    let out = consolidate_attestations(&f.store, &f.keys, true, &mut Entropy::os())
-        .await
-        .unwrap();
+    let out =
+        consolidate_attestations(&f.store, &f.keys, true, &HashSet::new(), &mut Entropy::os())
+            .await
+            .unwrap();
     assert_eq!((out.read, out.written.len(), out.deleted), (5, 0, 0));
     assert_eq!(locks(&f.store).await, before);
 }
@@ -530,9 +565,10 @@ async fn attest_consolidate_keeps_attestation_written_meanwhile() {
         fs::write(&path, &bytes).unwrap();
     }));
 
-    let out = consolidate_attestations(&hooked, &f.keys, false, &mut Entropy::os())
-        .await
-        .unwrap();
+    let out =
+        consolidate_attestations(&hooked, &f.keys, false, &HashSet::new(), &mut Entropy::os())
+            .await
+            .unwrap();
     assert_eq!(out.deleted, 5);
     let after = locks(&f.store).await;
     assert!(after.contains(&key));
@@ -566,7 +602,7 @@ async fn attest_consolidate_reader_never_sees_less() {
         sink.lock().unwrap().push(union);
     }));
 
-    consolidate_attestations(&hooked, &f.keys, false, &mut Entropy::os())
+    consolidate_attestations(&hooked, &f.keys, false, &HashSet::new(), &mut Entropy::os())
         .await
         .unwrap();
     let seen = seen.lock().unwrap();
@@ -597,9 +633,15 @@ async fn attest_consolidate_skips_rejected() {
         .await
         .unwrap();
 
-    let out = consolidate_attestations(&f.store, &f.keys, false, &mut Entropy::os())
-        .await
-        .unwrap();
+    let out = consolidate_attestations(
+        &f.store,
+        &f.keys,
+        false,
+        &HashSet::new(),
+        &mut Entropy::os(),
+    )
+    .await
+    .unwrap();
     assert_eq!(out.read, 5);
     let after = locks(&f.store).await;
     assert!(after.contains(&key));
@@ -617,9 +659,72 @@ async fn attest_consolidate_waits_for_upgrade_marker() {
     put(&store, &keys, &[[1u8; 32]], &[MARKER_UPGRADE_PART]).await;
     put(&store, &keys, &[[1u8; 32]], &[MARKER_UPGRADE_PART]).await;
     let before = locks(&store).await;
-    let out = consolidate_attestations(&store, &keys, false, &mut Entropy::os())
+    let out = consolidate_attestations(&store, &keys, false, &HashSet::new(), &mut Entropy::os())
         .await
         .unwrap();
     assert_eq!((out.written.len(), out.deleted), (0, 0));
     assert_eq!(locks(&store).await, before);
+}
+
+#[tokio::test]
+async fn attest_consolidate_drops_revoked_shards() {
+    let (_tmp, store) = bare();
+    let keys = keys();
+    let x = plant(&store, 1).await;
+    let y = plant(&store, 2).await;
+    put(&store, &keys, &[], &[MARKER_LEGACY_SHARDS]).await;
+    put(&store, &keys, &[x, y], &[]).await;
+
+    let revoked = HashSet::from([y]);
+    let out = consolidate_attestations(&store, &keys, false, &revoked, &mut Entropy::os())
+        .await
+        .unwrap();
+    assert_eq!(out.read, 2);
+    let set = read_attestations(&store, &keys).await.unwrap();
+    assert_eq!(set.shards, HashSet::from([x]));
+}
+
+#[tokio::test]
+async fn attest_consolidate_drops_revoked_shard_from_a_single_object() {
+    let (_tmp, store) = bare();
+    let keys = keys();
+    let x = plant(&store, 1).await;
+    let y = plant(&store, 2).await;
+    put(&store, &keys, &[x, y], &[MARKER_LEGACY_SHARDS]).await;
+
+    let revoked = HashSet::from([y]);
+    let out = consolidate_attestations(&store, &keys, false, &revoked, &mut Entropy::os())
+        .await
+        .unwrap();
+    assert_eq!(out.read, 1);
+    let set = read_attestations(&store, &keys).await.unwrap();
+    assert_eq!(set.shards, HashSet::from([x]));
+    assert!(set.markers.contains(&MARKER_LEGACY_SHARDS));
+}
+
+#[tokio::test]
+async fn attest_consolidate_drops_provenance_of_gone_snapshots() {
+    let (_tmp, store) = bare();
+    let keys = keys();
+    put(&store, &keys, &[], &[MARKER_LEGACY_SHARDS]).await;
+    plant_snapshot(&store, snapshot_id(1)).await;
+    let kept = sealed_for(&keys, snapshot_id(1), "job");
+    let sealed = vec![
+        kept.clone(),
+        sealed_for(&keys, snapshot_id(2), "job"),
+        sealed_for(&keys, snapshot_id(1), "job"),
+        b"not a record".to_vec(),
+    ];
+    put_attestation(&store, &keys, &[], &[], sealed, &mut Entropy::os())
+        .await
+        .unwrap();
+
+    let out = consolidate_attestations(&store, &keys, false, &HashSet::new(), &mut Entropy::os())
+        .await
+        .unwrap();
+    assert_eq!(out.provenance_dropped, 2);
+    let set = read_attestations(&store, &keys).await.unwrap();
+    assert_eq!(set.sealed_provenance.len(), 1);
+    let record = lodestore_format::attest::open_provenance(&keys, &set.sealed_provenance[0]);
+    assert_eq!(record.unwrap().snapshot_id, snapshot_id(1).to_vec());
 }

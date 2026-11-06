@@ -153,6 +153,27 @@ pub async fn plant_blobs<S: BlobStore>(
     plant_shard(store, keys, vec![record], Vec::new()).await
 }
 
+/// A `locks/attest-*` object an agent will read as a deduplication hint but
+/// the server rejects: protobuf body written by hand (id = 1, shard ids = 3),
+/// random MAC. Returns its key.
+pub async fn plant_attestation_hint<S: BlobStore>(store: &S, shards: &[BlobId]) -> String {
+    let mut entropy = Entropy::os();
+    let id: [u8; 16] = entropy.bytes();
+    let mut body = vec![0x0a, 16];
+    body.extend_from_slice(&id);
+    for shard in shards {
+        body.extend_from_slice(&[0x1a, 32]);
+        body.extend_from_slice(shard);
+    }
+    let mut bytes = vec![1u8];
+    bytes.extend_from_slice(&entropy.bytes::<32>());
+    bytes.extend_from_slice(&body);
+    let hex: String = id.iter().map(|b| format!("{b:02x}")).collect();
+    let key = format!("locks/attest-{hex}");
+    put_named(store, &key, bytes).await.unwrap();
+    key
+}
+
 fn entropy_bytes(entropy: &mut Entropy, len: usize) -> Vec<u8> {
     let mut out = vec![0u8; len];
     entropy.fill(&mut out);

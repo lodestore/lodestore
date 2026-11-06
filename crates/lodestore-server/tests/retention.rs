@@ -138,8 +138,9 @@ impl AgentEnv {
         sqlx::query(
             "INSERT INTO snapshots (id, repository_id, host_id, hostname, time_ms, paths_json, \
              tags_json, policy_name, job_id, incomplete, errors_total, warnings_total, \
-             stats_json, discovered_at, received_at, received_exact) \
-             SELECT $1, id, $2, 'inserted', $3, '[]', '[]', $4, $5, 0, 0, 0, '{}', $3, $3, 1 \
+             stats_json, discovered_at, received_at, received_exact, verified_at, verified_by) \
+             SELECT $1, id, $2, 'inserted', $3, '[]', '[]', $4, $5, 0, 0, 0, '{}', $3, $3, 1, \
+             $3, 'server' \
              FROM repositories WHERE name = 'main'",
         )
         .bind(id)
@@ -571,6 +572,37 @@ async fn retention_ignores_snapshots_not_linked_to_a_job() {
             .await
             .unwrap();
         assert_eq!(plan.hosts[0].items.len(), 2, "{name}");
+        env.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retention_never_forgets_unverified() {
+    for backend in backends() {
+        let env = AgentEnv::start(&backend).await;
+        let data = env.retention_data("data");
+        env.retention_policy("p", &data, "").await;
+        let jobs = env.retention_runs("p", 4).await;
+        let ids: Vec<String> = jobs.iter().map(snapshot_of).collect();
+        env.run_sql(
+            "UPDATE snapshots SET verified_at = NULL, verified_by = NULL, \
+             unverified_reason = 'verification_failed' WHERE id = $1",
+            &[&ids[0]],
+        )
+        .await;
+
+        let policy = env.stored_policy("p", 1).await;
+        let job_id = jobs[3]["id"].as_str().unwrap();
+        let outcome = run_for_pair(env.ts().state(), &policy, &env.host, job_id)
+            .await
+            .unwrap();
+
+        assert_eq!((outcome.forgot, outcome.kept), (1, 2), "{}", backend.name());
+        let mut remaining = env.catalog_ids().await;
+        remaining.sort();
+        let mut expected = vec![ids[0].clone(), ids[2].clone(), ids[3].clone()];
+        expected.sort();
+        assert_eq!(remaining, expected, "{}", backend.name());
         env.stop().await;
     }
 }

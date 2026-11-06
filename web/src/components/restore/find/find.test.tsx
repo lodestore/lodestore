@@ -166,6 +166,7 @@ describe("Find file tab", { timeout: 30_000 }, () => {
 			policy_name: "etc",
 			policy_deleted: false,
 			received_at: Date.UTC(2026, 9, 21, 2, 1),
+			verified_by: "server",
 			tags: [],
 			warnings_total: 0,
 			errors_total: 0,
@@ -190,6 +191,7 @@ describe("Find file tab", { timeout: 30_000 }, () => {
 			repository_name: "main",
 			snapshot_count: 3,
 			latest_snapshot_ms: snapshot.time,
+			unverified_count: 0,
 		};
 
 		function open() {
@@ -197,7 +199,7 @@ describe("Find file tab", { timeout: 30_000 }, () => {
 			findHandlers([
 				findSession({
 					state: "done",
-					groups: [findGroup(0, { versions: [older, newest] })],
+					groups: [findGroup(0, { versions: [newest, older] })],
 				}),
 			]);
 			return renderApp("/restore?tab=find&find=nginx.conf");

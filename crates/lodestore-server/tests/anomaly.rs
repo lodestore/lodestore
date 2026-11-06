@@ -43,8 +43,8 @@ impl AgentEnv {
         sqlx::query(
             "INSERT INTO snapshots (id, repository_id, host_id, hostname, time_ms, paths_json, \
              tags_json, policy_name, job_id, incomplete, errors_total, warnings_total, \
-             stats_json, discovered_at, received_at, received_exact) \
-             SELECT $1, id, $2, 'inserted', $3, $4, '[]', 'p', 'seeded', $5, 0, 0, $6, $3, $3, 1 \
+             stats_json, discovered_at, received_at, received_exact, verified_at, verified_by) \
+             SELECT $1, id, $2, 'inserted', $3, $4, '[]', 'p', 'seeded', $5, 0, 0, $6, $3, $3, 1, $3, 'server' \
              FROM repositories WHERE name = 'main'",
         )
         .bind(&id)
@@ -152,9 +152,10 @@ impl AgentEnv {
             sqlx::query(
                 "INSERT INTO snapshots (id, repository_id, host_id, hostname, time_ms, paths_json, \
                  tags_json, policy_name, job_id, incomplete, errors_total, warnings_total, \
-                 stats_json, discovered_at, received_at, received_exact) \
+                 stats_json, discovered_at, received_at, received_exact, verified_at, verified_by) \
                  SELECT $1, repository_id, host_id, hostname, time_ms, paths_json, tags_json, \
-                 policy_name, 'seeded', 0, 0, 0, $2, discovered_at, received_at - $3, 1 \
+                 policy_name, 'seeded', 0, 0, 0, $2, discovered_at, received_at - $3, 1, \
+                 received_at - $3, 'server' \
                  FROM snapshots WHERE id = $4",
             )
             .bind(id(n))

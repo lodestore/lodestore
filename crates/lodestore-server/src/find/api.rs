@@ -34,9 +34,9 @@ pub struct FindRequest {
     /// Also search hosts whose agent carries all of these labels, as `key=value`; at most 20.
     #[serde(default)]
     pub labels: Vec<String>,
-    /// Only snapshots taken at or after this time, in milliseconds.
+    /// Only snapshots received at or after this time, in milliseconds.
     pub since: Option<i64>,
-    /// Only snapshots taken at or before this time, in milliseconds.
+    /// Only snapshots received at or before this time, in milliseconds.
     pub until: Option<i64>,
 }
 
@@ -76,7 +76,10 @@ pub struct FindGone {
 #[derive(Serialize, ToSchema)]
 pub struct FindSnapshotRef {
     pub id: String,
+    /// When the server received the snapshot, in milliseconds.
     pub time_ms: i64,
+    /// Who signed the provenance of this snapshot: `server` or `owner`; null when nothing signed it.
+    pub verified_by: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -87,10 +90,14 @@ pub struct FindVersion {
     pub kind: EntryKind,
     pub size: u64,
     pub mtime_ms: i64,
+    /// When the server received the first snapshot holding this version, in milliseconds.
     pub first_ms: i64,
+    /// When the server received the last snapshot holding this version, in milliseconds.
     pub last_ms: i64,
+    /// Who signed the provenance of a snapshot holding this version: `server` or `owner`. Null when none is signed; such a version is listed after the signed ones.
+    pub verified_by: Option<String>,
     pub snapshot_count: u64,
-    /// The newest snapshots holding this version, newest first.
+    /// Snapshots holding this version, signed ones first, then newest first; the first is the one to restore.
     pub snapshots: Vec<FindSnapshotRef>,
 }
 
@@ -107,6 +114,7 @@ pub struct FindGroup {
     /// Exact path bytes, base64url without padding.
     pub path_b64: String,
     pub path: String,
+    /// When the server received the newest snapshot holding the file, in milliseconds.
     pub last_seen_ms: i64,
     /// Set when a newer snapshot of the host exists without this file; known once the search is over.
     pub gone: Option<FindGone>,
@@ -185,8 +193,8 @@ fn b64(bytes: &[u8]) -> String {
 }
 
 fn version_dto(version: &Version, limit: usize) -> FindVersion {
-    let mut snapshots: Vec<&(String, i64)> = version.snapshots.iter().collect();
-    snapshots.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
+    let mut snapshots: Vec<&(String, i64, Option<String>)> = version.snapshots.iter().collect();
+    snapshots.sort_by(|a, b| (b.2.is_some(), b.1, &b.0).cmp(&(a.2.is_some(), a.1, &a.0)));
     FindVersion {
         content_id: match version.key {
             VersionKey::Content(id) => Some(HEXLOWER.encode(&id)),
@@ -197,13 +205,15 @@ fn version_dto(version: &Version, limit: usize) -> FindVersion {
         mtime_ms: version.mtime_ms,
         first_ms: version.first_ms,
         last_ms: version.last_ms,
+        verified_by: version.verified_by.clone(),
         snapshot_count: version.snapshots.len() as u64,
         snapshots: snapshots
             .into_iter()
             .take(limit)
-            .map(|(id, time_ms)| FindSnapshotRef {
+            .map(|(id, time_ms, verified_by)| FindSnapshotRef {
                 id: id.clone(),
                 time_ms: *time_ms,
+                verified_by: verified_by.clone(),
             })
             .collect(),
     }
@@ -212,7 +222,7 @@ fn version_dto(version: &Version, limit: usize) -> FindVersion {
 fn group_dto(index: usize, s: &SessionState, limit: usize) -> FindGroup {
     let group = &s.groups[index];
     let mut versions: Vec<&Version> = group.versions.iter().collect();
-    versions.sort_by_key(|v| std::cmp::Reverse(v.last_ms));
+    versions.sort_by_key(|v| std::cmp::Reverse((v.verified_by.is_some(), v.last_ms)));
     FindGroup {
         index: index as u64,
         host_key: group.host_key.clone(),

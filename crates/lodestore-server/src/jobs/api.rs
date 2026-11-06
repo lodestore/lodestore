@@ -865,6 +865,9 @@ pub struct RestoreBody {
     pub in_place: bool,
     pub conflict: ConflictPolicyDto,
     pub restore_owners: bool,
+    /// Must be true to restore a snapshot that nothing signed; such a snapshot cannot be restored in place.
+    #[serde(default)]
+    pub accept_unverified: bool,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -881,7 +884,7 @@ pub struct RestoreCreated {
     request_body = RestoreBody,
     responses(
         (status = 201, description = "The restore job is queued", body = RestoreCreated),
-        (status = 400, description = "`restore_destination_root`: a restore into a new folder names `/`; `restore_in_place_not_empty`: a restore in place with `stop_if_not_empty`", body = ErrorBody),
+        (status = 400, description = "`restore_destination_root`: a restore into a new folder names `/`; `restore_in_place_not_empty`: a restore in place with `stop_if_not_empty`; `restore_unverified_in_place`: nothing signed the snapshot, so it cannot be restored in place; `restore_unverified_not_confirmed`: nothing signed the snapshot and `accept_unverified` is not set", body = ErrorBody),
         (status = 404, description = "Unknown snapshot or host, or a selected path is missing", body = ErrorBody),
         (status = 422, description = "The selection, destination or host is not valid", body = ErrorBody),
         (status = 502, description = "The repository storage is unavailable", body = ErrorBody),
@@ -907,6 +910,7 @@ pub async fn create_restore(
             in_place: body.in_place,
             conflict: body.conflict.to_proto(),
             restore_owners: body.restore_owners,
+            accept_unverified: body.accept_unverified,
         },
         &auth.actor(),
     )

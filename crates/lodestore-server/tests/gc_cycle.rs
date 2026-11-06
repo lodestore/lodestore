@@ -20,6 +20,7 @@ use lodestore_format::repo::Repository;
 use lodestore_format::snapshot::snapshot_object_key;
 use lodestore_format::store::{LocalFsStore, put_named};
 use lodestore_format::writer::{BackupOptions, Writer};
+use lodestore_server::maintenance::attest::record_distrusted;
 use lodestore_server::maintenance::gc::cycle::{StepOutcome, step};
 use serde_json::{Value, json};
 use sqlx::Row;
@@ -1787,6 +1788,68 @@ async fn gc_cycle_consolidates_attestations() {
             .await
             .unwrap();
         assert!(attested.markers.contains(&MARKER_LEGACY_SHARDS));
+        assert_restores(&ts, "main", &b).await;
+        assert_restores(&ts, "main", &c).await;
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_cycle_drops_distrusted_shard_from_summary() {
+    for backend in backends() {
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let (b, c) = forgotten_a(&ts, "main").await;
+        let lying = put_shard(&ts, "main", (0..3).map(fake_pack_record).collect(), vec![]).await;
+        enable(&ts, &api, &repo).await;
+        lodestore_server::maintenance::attest::ensure_upgraded(ts.state(), &repo)
+            .await
+            .unwrap();
+        let store = LocalFsStore::new(ts.local_repo_root("main"));
+        let repository = Repository::open(&store, PASSWORD).await.unwrap();
+        let keys = repository.read_keys();
+        assert!(
+            read_attestations(&store, keys)
+                .await
+                .unwrap()
+                .shards
+                .contains(&lying),
+            "the upgrade must have attested the planted shard"
+        );
+        record_distrusted(ts.state(), &repo, &lying, "test")
+            .await
+            .unwrap();
+
+        let id = run_cycle(&api, &repo).await;
+        let later = after_pause(&ts, &id).await;
+        assert_eq!(
+            steps(&ts, &id, later).await,
+            StepOutcome::Finished(lodestore_server::maintenance::gc::GcState::Done),
+            "[{}] {:?}",
+            backend.name(),
+            cycle(&ts, &id).await.error
+        );
+
+        let after = read_attestations(&store, keys).await.unwrap();
+        assert!(
+            !after.shards.contains(&lying),
+            "[{}] the distrusted shard is still attested",
+            backend.name()
+        );
+        assert!(!after.shards.is_empty(), "[{}]", backend.name());
+        let planted: Vec<Vec<u8>> = (0..3).map(|n| fake_pack_record(n).pack_id).collect();
+        for shard in index_ids(&ts, "main") {
+            if !after.shards.contains(&shard) {
+                continue;
+            }
+            let packs = pack_ids_of_shard(&ts, "main", &shard).await;
+            assert!(
+                planted.iter().all(|p| !packs.contains(p)),
+                "[{}] the compaction re-attested the distrusted shard's records",
+                backend.name()
+            );
+        }
         assert_restores(&ts, "main", &b).await;
         assert_restores(&ts, "main", &c).await;
         ts.stop().await;

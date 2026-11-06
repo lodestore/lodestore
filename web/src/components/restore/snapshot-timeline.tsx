@@ -10,7 +10,11 @@ import {
 	isRebuilding,
 	useCatalogStatus,
 } from "@/components/repos/catalog-card";
-import { SuspiciousBadge } from "@/components/snapshots/suspicious-badge";
+import {
+	isPendingVerification,
+	SuspiciousBadge,
+	UnverifiedBadge,
+} from "@/components/snapshots/suspicious-badge";
 import { StatusBadge } from "@/components/status-badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -49,20 +53,21 @@ export function useSnapshotTimeline(hostKey?: string) {
 		select: (data) => ({
 			items: data.pages.flatMap((page) => page.items),
 			total: data.pages[0]?.total ?? 0,
+			latest_verified_id: data.pages[0]?.latest_verified_id ?? null,
 		}),
 	});
 }
 
 function groupByDay(items: RestoreSnapshot[]) {
 	const now = Date.now();
-	const groups: { day: string; items: RestoreSnapshot[] }[] = [];
+	const groups = new Map<string, RestoreSnapshot[]>();
 	for (const item of items) {
-		const day = formatDay(item.time, now);
-		const last = groups.at(-1);
-		if (last?.day === day) last.items.push(item);
-		else groups.push({ day, items: [item] });
+		const day = formatDay(item.received_at, now);
+		const group = groups.get(day);
+		if (group) group.push(item);
+		else groups.set(day, [item]);
 	}
-	return groups;
+	return Array.from(groups, ([day, items]) => ({ day, items }));
 }
 
 function moveFocus(event: KeyboardEvent<HTMLButtonElement>) {
@@ -98,6 +103,7 @@ function Stop({
 }) {
 	const id = useId();
 	const described = [
+		snapshot.verified_by == null && `${id}-unverified`,
 		snapshot.suspicious && `${id}-suspicious`,
 		snapshot.incomplete && `${id}-incomplete`,
 		selected && `${id}-selected`,
@@ -112,7 +118,7 @@ function Stop({
 			aria-current={selected ? "true" : undefined}
 			aria-label={copy.restore.timeline.stopLabel(
 				shortId(snapshot.id),
-				formatDateTime(snapshot.time),
+				formatDateTime(snapshot.received_at),
 			)}
 			aria-describedby={described || undefined}
 			onClick={onSelect}
@@ -135,8 +141,16 @@ function Stop({
 			<span className="flex min-w-0 flex-col">
 				<span className="flex flex-wrap items-center gap-x-2 gap-y-1">
 					<span className="font-semibold tabular-nums">
-						{formatClock(snapshot.time)}
+						{formatClock(snapshot.received_at)}
 					</span>
+					{snapshot.verified_by == null && (
+						<span id={`${id}-unverified`} className="flex">
+							<UnverifiedBadge
+								plain
+								pending={isPendingVerification(snapshot)}
+							/>
+						</span>
+					)}
 					{snapshot.suspicious && (
 						<span id={`${id}-suspicious`} className="flex">
 							<SuspiciousBadge snapshot={snapshot} plain />

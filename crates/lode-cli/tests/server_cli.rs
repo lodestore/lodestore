@@ -691,9 +691,30 @@ fn server_cli_restore_defaults() {
             "destination": "/var/lodestore/restore/2020-09-13-01234567",
             "in_place": false,
             "conflict": "overwrite_changed",
-            "restore_owners": true
+            "restore_owners": true,
+            "accept_unverified": false
         })
     );
+}
+
+#[test]
+fn server_cli_restore_sends_accept_unverified() {
+    let home = tempfile::tempdir().unwrap();
+    let server = fake(vec![(
+        "POST /api/v1/restores",
+        status(201, json!({"job_id": "job-10"})),
+    )]);
+    stdout(lode(&server, home.path()).args([
+        "restore",
+        SNAPSHOT_ID,
+        "--host",
+        "h2",
+        "--target",
+        "/srv/r",
+        "--accept-unverified",
+    ]));
+    let body: Value = serde_json::from_str(&server.only("POST", "/api/v1/restores").body).unwrap();
+    assert_eq!(body["accept_unverified"], true);
 }
 
 #[test]

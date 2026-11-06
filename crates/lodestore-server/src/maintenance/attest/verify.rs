@@ -7,11 +7,13 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use anyhow::Context;
-use lodestore_format::attest::{put_attestation, read_attestations};
+use lodestore_format::attest::{put_attestation, read_attestations, seal_provenance};
 use lodestore_format::check::is_data_error;
 use lodestore_format::crypto::{BlobId, Entropy};
 use lodestore_format::index::{hex32, index_object_key, open_shard, parse_hex32};
 use lodestore_format::keys::ReadKeys;
+use lodestore_format::pb;
+use lodestore_format::snapshot::{open_snapshot, snapshot_object_key};
 use lodestore_format::store::BlobStore;
 use lodestore_format::verify_snapshot::{
     check_snapshot_resolves, snapshot_index_refs, verify_shard,
@@ -19,13 +21,17 @@ use lodestore_format::verify_snapshot::{
 use sqlx::Row;
 use tokio::sync::{RwLock, Semaphore};
 
-use super::{ensure_upgraded, load_verified, record_verified};
+use super::{
+    MAX_LIES_PER_PASS, ensure_provenance_backfilled, ensure_upgraded, load_verified,
+    record_distrusted, record_verified,
+};
 use crate::catalog::retention::{after_backup, append_event};
 use crate::catalog::{self, JobLink, open_repository};
 use crate::db::now_ms;
 use crate::state::AppState;
 
 pub const VERIFICATION_FAILED: &str = "verification_failed";
+const UNCLAIMED: &str = "the snapshot does not name the host that reported it";
 pub const VERIFY_RETRY_WINDOW: Duration = Duration::from_secs(3600);
 const VERIFY_CONCURRENCY: usize = 2;
 
@@ -98,6 +104,15 @@ async fn run_one(state: &AppState, job_id: &str) -> anyhow::Result<()> {
     };
     match verdict {
         Ok(Verdict::Verified) => {
+            // The snapshot first: a job left `running` is checked again after a restart.
+            mark_verified(
+                state,
+                &target.snapshot_id,
+                &target.repository_id,
+                now_ms(),
+                "server",
+            )
+            .await?;
             set_verify_state(state, job_id, Some("verified")).await?;
             after_backup(state, job_id).await
         }
@@ -128,6 +143,53 @@ async fn load_target(state: &AppState, job_id: &str) -> anyhow::Result<Option<Ta
         host_id: row.try_get("host_id")?,
         repository_id: row.try_get("repository_id")?,
     }))
+}
+
+pub async fn mark_verified(
+    state: &AppState,
+    snapshot_id: &str,
+    repository_id: &str,
+    at_ms: i64,
+    by: &str,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE snapshots SET verified_at = $1, verified_by = $2 WHERE id = $3 AND repository_id = $4",
+    )
+    .bind(at_ms)
+    .bind(by)
+    .bind(snapshot_id)
+    .bind(repository_id)
+    .execute(&state.db.pool)
+    .await?;
+    Ok(())
+}
+
+pub(super) fn timestamp_ms(at_ms: i64) -> pb::Timestamp {
+    pb::Timestamp {
+        seconds: at_ms.div_euclid(1000),
+        nanos: u32::try_from(at_ms.rem_euclid(1000) * 1_000_000).unwrap_or(0),
+    }
+}
+
+/// Host and job come from the session's own rows; nothing is read from the manifest.
+async fn provenance_record(
+    state: &AppState,
+    job_id: &str,
+    target: &Target,
+    snapshot: &BlobId,
+) -> anyhow::Result<pb::ProvenanceRecord> {
+    let hostname: String = sqlx::query("SELECT hostname FROM agents WHERE id = $1")
+        .bind(&target.host_id)
+        .fetch_one(&state.db.pool)
+        .await?
+        .try_get("hostname")?;
+    Ok(pb::ProvenanceRecord {
+        snapshot_id: snapshot.to_vec(),
+        host_id: target.host_id.clone(),
+        hostname,
+        job_id: job_id.to_string(),
+        verified_at: Some(timestamp_ms(now_ms())),
+    })
 }
 
 async fn set_verify_state(
@@ -181,11 +243,26 @@ async fn verify_job(state: &AppState, job_id: &str, target: &Target) -> anyhow::
         tracing::warn!(%job_id, %error, "the repository is not upgraded yet, verification waits");
         return Ok(Verdict::Retry(error));
     }
+    if let Err(error) = ensure_provenance_backfilled(state, repository).await {
+        let error = format!("{error:#}");
+        tracing::warn!(%job_id, %error, "the provenance backfill is not done yet, verification waits");
+        return Ok(Verdict::Retry(error));
+    }
     let source = open_repository(state, repository)
         .await
         .context("opening the repository")?;
     let snapshot: BlobId = parse_hex32(&target.snapshot_id).context("malformed snapshot id")?;
     let (store, keys) = (&source.store, &source.keys);
+
+    let manifest = match store.get(&snapshot_object_key(&snapshot)).await {
+        Ok(bytes) => open_snapshot(keys.hpke_private_key(), keys.repo_id(), &snapshot, &bytes),
+        Err(error) => Err(error.into()),
+    };
+    match manifest {
+        Ok(manifest) if manifest.agent_id == target.host_id.as_bytes() => {}
+        Ok(_) => return Ok(Verdict::Failed(UNCLAIMED.into())),
+        Err(error) => return Ok(classify(&error)),
+    }
 
     let attested = match read_attestations(store, keys).await {
         Ok(set) if set.incomplete => {
@@ -211,9 +288,15 @@ async fn verify_job(state: &AppState, job_id: &str, target: &Target) -> anyhow::
         Err(error) => return Ok(classify(&error)),
     };
     let mut verified = load_verified(state, repository).await?;
+    // Every lying shard of this pass is recorded, so a hint naming many costs one backup.
+    let mut lies = Vec::new();
+    let mut seen = HashSet::new();
     for shard in &refs {
-        if verified.contains(shard) {
+        if verified.contains(shard) || !seen.insert(*shard) {
             continue;
+        }
+        if lies.len() >= MAX_LIES_PER_PASS {
+            break;
         }
         match verify_shard(store, keys, shard).await {
             Ok(Some(_)) => {
@@ -221,13 +304,31 @@ async fn verify_job(state: &AppState, job_id: &str, target: &Target) -> anyhow::
                 verified.insert(*shard);
             }
             Ok(None) => {}
-            Err(error) => return Ok(classify(&error)),
+            Err(error) if is_data_error(&error) => lies.push((*shard, error.to_string())),
+            Err(error) if lies.is_empty() => return Ok(classify(&error)),
+            Err(_) => break,
         }
+    }
+    if let Some((_, reason)) = lies.first() {
+        for (shard, reason) in &lies {
+            distrust(state, job_id, repository, shard, reason).await;
+        }
+        return Ok(Verdict::Failed(reason.clone()));
     }
     let check = match check_snapshot_resolves(store, keys, &snapshot, &verified, &attested).await {
         Ok(check) => check,
         Err(error) => return Ok(classify(&error)),
     };
+    for shard in &check.lying {
+        distrust(
+            state,
+            job_id,
+            repository,
+            shard,
+            "the frames of an attested shard did not open",
+        )
+        .await;
+    }
     record_verified(state, repository, &check.newly_verified).await?;
     verified.extend(check.newly_verified.iter().copied());
 
@@ -251,13 +352,25 @@ async fn verify_job(state: &AppState, job_id: &str, target: &Target) -> anyhow::
             Err(error) => return Ok(classify(&error)),
         }
     }
-    if !ids.is_empty()
-        && let Err(error) =
-            put_attestation(store, keys, &ids, &[], Vec::new(), &mut Entropy::os()).await
-    {
+    let mut entropy = Entropy::os();
+    let record = provenance_record(state, job_id, target, &snapshot).await?;
+    let sealed = match seal_provenance(keys, &record, &mut entropy) {
+        Ok(sealed) => sealed,
+        Err(error) => return Ok(Verdict::Retry(error.to_string())),
+    };
+    if let Err(error) = put_attestation(store, keys, &ids, &[], vec![sealed], &mut entropy).await {
         return Ok(Verdict::Retry(error.to_string()));
     }
     Ok(Verdict::Verified)
+}
+
+/// Best effort: the verdict stands even when the database refuses the row,
+/// and the next failing job names the shard again.
+async fn distrust(state: &AppState, job_id: &str, repository: &str, shard: &BlobId, reason: &str) {
+    tracing::warn!(%job_id, shard = %hex32(shard), reason, "a shard lied about its blobs");
+    if let Err(error) = record_distrusted(state, repository, shard, reason).await {
+        tracing::warn!(%job_id, %error, "recording a distrusted shard failed");
+    }
 }
 
 async fn supersedes_nothing<S: BlobStore>(
