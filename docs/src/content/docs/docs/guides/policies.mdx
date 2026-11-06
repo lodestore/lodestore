@@ -85,12 +85,31 @@ Retention follows `restic forget`. It runs per host, on the snapshots of this po
 
 Counts are whole numbers of 1 or more. A snapshot is kept if any rule keeps it. With no rules at all, nothing is forgotten.
 
+### Scheduled and manual snapshots
+
+The snapshots of a policy on a host form two pools, and the rules above apply to each pool on its own:
+
+- **Scheduled**: backups started by the schedule, including catch-up backups.
+- **Manual**: backups started by hand, from the web interface, `lode server policies run`, `lode server jobs run` or the API.
+
+A series of manual runs therefore rotates only the manual snapshots and never touches the scheduled history. A manual backup taken before a risky change stays until later manual backups push it out of the rules. Snapshots that were made before the server recorded how they started, and whose job records the server had already deleted (jobs are kept for 90 days), count as scheduled.
+
+### Stdin snapshots
+
+A snapshot made with `lode backup --stdin --policy NAME` is outside retention by default: it takes no slot in any rule and is never forgotten, like a stdin snapshot without a policy. It also does not count as the last successful backup of the policy for alerts and metrics. To let retention rotate them, set `includeStdin: true` under `retention`; they then join the manual pool. Setting it needs the `snapshots:delete` scope for a token, like any other retention change.
+
+```yaml
+  retention:
+    keepLast: 7
+    includeStdin: true
+```
+
 Details that matter:
 
 - Days, weeks and months are counted in the schedule's `timezone`, or in UTC when the policy has no schedule.
 - The time of a snapshot is the time the server received it (the storage object's modification time), not the time the backup started. This survives a catalog rebuild.
 - Two snapshots with the same time are ordered by id.
-- The two newest good snapshots of a host are always kept, whatever the rules say, so a bad rule or a run of failed backups cannot empty a host. A good snapshot is one that is neither suspicious nor incomplete. Incomplete snapshots take part in the rules like any other, but do not count towards these two.
+- The two newest good snapshots of each pool of a host are always kept, whatever the rules say, so a bad rule or a run of failed backups cannot empty a host. A good snapshot is one that is neither suspicious nor incomplete. Incomplete snapshots take part in the rules like any other, but do not count towards these two.
 - Suspicious snapshots (flagged by the anomaly detector or by an administrator) take no slot in any rule and are never forgotten. The good snapshots around them are counted as if they were not there.
 - If a policy is deleted, its snapshots stay.
 - Forgetting removes only the snapshot manifest. The data it referenced stays in the repository until garbage collection frees the space.
@@ -118,3 +137,17 @@ A backup that does not finish within `maxRuntime` is stopped and does not create
 Lodestore always watches for a policy that goes silent, whether or not it reports an error. Without `maxAge` the limit comes from the schedule: twice the longest gap between the next scheduled runs, plus the schedule's `jitter`. For a daily policy with the default `15m` jitter that is about 48 hours and 15 minutes, so one missed night is tolerated and two are not. Set `maxAge` when that is too loose, for example `maxAge: 36h` for a daily policy you cannot miss, or too strict, for example `maxAge: 10d` for a weekly policy that is often skipped on purpose.
 
 A policy with no schedule and no `maxAge` has no limit: it runs only by hand, so being old is not a fault. The limit is counted for each host the policy applies to. The age starts at the last successful backup, or, when the host has none yet, at the later of the time the host enrolled and the time the policy was created. See [Alerts and notifications](/docs/guides/alerts/#no-recent-backup-the-dead-man-rule).
+
+## What an API token may change
+
+A web session may change everything on this page. An API token, for example in a CI job that runs `lode apply`, needs `policies:write` to change a policy and more when the change reaches further than the policy itself:
+
+| Change | Extra scope |
+| --- | --- |
+| Add, change or remove `retention`, or `includeStdin` | `snapshots:delete`, because retention makes the server delete snapshots |
+| Run a policy with retention more often | `snapshots:delete`. The server compares the shortest gap between two runs of the schedule over the next 366 days, in the time zone of the policy, before and after the change. That also catches `0 3 * 12 *`, which runs daily but only in December, in place of a weekly schedule. A schedule that runs less often, or at another time of day, needs only `policies:write` |
+| Add, change or remove `hooks`, or bring more hosts under a policy that has hooks, by `hosts`, a selector, the `repository` or by changing host labels | `hooks:write`, because hooks run commands as root on the hosts. Deleting a whole policy needs only `policies:write` |
+
+The server answers 403 and names the scope; for hooks it also lists the policies. `lode apply` refuses the whole run in these cases, and `--dry-run` shows the refusal beforehand. A token that creates a join token whose labels put the new host under a policy with hooks needs `hooks:write` as well.
+
+A token can start the same policy on the same host at most 6 times per hour. The seventh request gets a 429 with `Retry-After`. Sessions are not limited, and scheduled runs do not count.
