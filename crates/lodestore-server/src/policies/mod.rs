@@ -5,7 +5,7 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use lodestore_policy::jiff::{SignedDuration, Timestamp};
-use lodestore_policy::schedule::DstNote;
+use lodestore_policy::schedule::{DstNote, MinGap};
 use lodestore_policy::{
     BackupPolicy, Hooks, Problem, Retention, Schedule, Selector, parse_yaml, to_yaml, validate,
 };
@@ -45,33 +45,41 @@ fn cadence(policy: &BackupPolicy) -> Option<(&str, &str)> {
     ))
 }
 
-fn min_gap(
-    policy: &BackupPolicy,
-    from: Timestamp,
-    stop_at: SignedDuration,
-) -> Option<SignedDuration> {
-    policy.spec.schedule.as_ref()?.compile().ok()?.min_gap(
+const MAX_SCHEDULE_RUNS: usize = 100_000;
+
+fn min_gap(policy: &BackupPolicy, from: Timestamp, stop_at: SignedDuration) -> Option<MinGap> {
+    Some(policy.spec.schedule.as_ref()?.compile().ok()?.min_gap(
         from,
         SignedDuration::from_hours(24 * SCHEDULE_HORIZON_DAYS),
         stop_at,
-    )
+        MAX_SCHEDULE_RUNS,
+    ))
 }
 
+/// Whether `new` may run more often than `old`. Doubt counts as more often: a
+/// schedule with no two runs in the horizon replacing one that has them, or one
+/// too dense to scan within the cap.
 pub(crate) fn runs_more_often(old: &BackupPolicy, new: &BackupPolicy) -> bool {
     if cadence(old) == cadence(new) {
         return false;
     }
     let from = Timestamp::now();
-    let old_gap = min_gap(old, from, SHORTEST_GAP);
+    let old_gap = min_gap(old, from, SHORTEST_GAP).and_then(|found| found.smallest);
     if old_gap.is_some_and(|gap| gap <= SHORTEST_GAP) {
         return false;
     }
     let stop_at = old_gap.map_or(SignedDuration::MAX, |gap| {
         gap - SignedDuration::from_secs(1)
     });
-    match min_gap(new, from, stop_at) {
+    let Some(found) = min_gap(new, from, stop_at) else {
+        return false;
+    };
+    if found.capped {
+        return true;
+    }
+    match found.smallest {
         Some(gap) => old_gap.is_none_or(|old| gap < old),
-        None => false,
+        None => old_gap.is_some(),
     }
 }
 
