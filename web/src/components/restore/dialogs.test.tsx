@@ -294,7 +294,7 @@ describe("Restore dialog", { timeout: 30_000 }, () => {
 		await user.type(field, "/tmp/x");
 		const message = view.getByText(/outside the folders/);
 		expect(message).toHaveTextContent("/var/lib/lodestore/restore, /srv/r");
-		expect(message).toHaveTextContent("The restore will be refused");
+		expect(message).toHaveTextContent("Choose a folder under one of them.");
 		expect(field).toHaveAttribute("aria-invalid", "true");
 		expect(field).toHaveAccessibleDescription(/outside the folders/);
 		expect(start).toBeDisabled();
@@ -330,6 +330,11 @@ describe("Restore dialog", { timeout: 30_000 }, () => {
 			view.getByText(/Restoring into a new folder is turned off/),
 		).toHaveTextContent("restore.allowed_restore_roots");
 		expect(view.getByRole("button", { name: "Start restore" })).toBeDisabled();
+		expect(view.getByRole("textbox", { name: "Folder on web-1" })).toHaveValue(
+			"",
+		);
+		expect(view.queryByText(/Recommended/)).toBeNull();
+		expect(view.queryByText(/Enter|absolute/i)).toBeNull();
 	});
 
 	it("warns about another host and another repository", async () => {

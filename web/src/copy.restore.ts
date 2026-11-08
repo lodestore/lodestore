@@ -144,7 +144,7 @@ export const restore = {
 		inPlaceOff:
 			"Restoring over the original files is turned off on this host. To allow it, set restore.allow_in_place: true in /etc/lodestore/agent.yaml, or run install.sh with --allow-in-place-restore.",
 		outsideRoots: (roots: string) =>
-			`This folder is outside the folders this host restores into: ${roots}. The restore will be refused; choose a folder under one of them.`,
+			`This folder is outside the folders this host restores into: ${roots}. Choose a folder under one of them.`,
 		newFolderOff:
 			"Restoring into a new folder is turned off on this host. To allow it, add a folder to restore.allowed_restore_roots in /etc/lodestore/agent.yaml.",
 		from: "From",

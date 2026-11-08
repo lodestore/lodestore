@@ -125,9 +125,13 @@ function RestoreForm({
 	const confirmed =
 		inPlace && targetKey !== undefined && confirmedFor === targetKey;
 	const [edited, setPath] = useState<string>();
+	const roots = target?.restore_roots;
+	const rootsOff = roots?.length === 0;
 	const path =
 		edited ??
-		`${target?.restore_roots?.[0] ?? DEFAULT_ROOT}/${localDate(snapshot.time)}-${shortId(snapshot.id)}`;
+		(rootsOff
+			? ""
+			: `${roots?.[0] ?? DEFAULT_ROOT}/${localDate(snapshot.time)}-${shortId(snapshot.id)}`);
 	const [conflict, setConflict] =
 		useState<ConflictPolicyDto>("overwrite_changed");
 	const policy: ConflictPolicyDto =
@@ -149,9 +153,8 @@ function RestoreForm({
 	const restore = useCreateRestore();
 
 	const { error: folderError, folder } = checkFolder(path);
-	const pathError = inPlace ? undefined : folderError;
-	const roots = target?.restore_roots;
-	const newFolderOff = !inPlace && roots?.length === 0;
+	const newFolderOff = !inPlace && rootsOff;
+	const pathError = inPlace || newFolderOff ? undefined : folderError;
 	const outsideRoots =
 		!inPlace &&
 		folderError === undefined &&
@@ -301,16 +304,18 @@ function RestoreForm({
 									<RadioGroupItem
 										value="new"
 										id={`${id}-new`}
-										aria-describedby={`${id}-new-help`}
+										aria-describedby={rootsOff ? undefined : `${id}-new-help`}
 									/>
 									<div className="flex min-w-0 flex-col gap-1">
 										<Label htmlFor={`${id}-new`}>{text.newFolder}</Label>
-										<p
-											id={`${id}-new-help`}
-											className="text-sm text-muted-foreground"
-										>
-											{text.newFolderHelp}
-										</p>
+										{!rootsOff && (
+											<p
+												id={`${id}-new-help`}
+												className="text-sm text-muted-foreground"
+											>
+												{text.newFolderHelp}
+											</p>
+										)}
 									</div>
 								</div>
 								{!inPlace && (
