@@ -174,7 +174,7 @@ describe("API tokens: create", () => {
 		).toBeNull();
 		expect(
 			within(dialog).getByText(
-				"For CI that applies policies, choose policies:read and policies:write. Policies with retention also need snapshots:delete. For Prometheus, choose metrics:read.",
+				"For CI that applies policies, choose policies:read and policies:write. Policies with retention also need snapshots:delete, and policies with hooks need hooks:write. For Prometheus, choose metrics:read.",
 			),
 		).toBeInTheDocument();
 		expect(within(dialog).getByText("Deletes data")).toBeInTheDocument();
