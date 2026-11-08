@@ -7,7 +7,7 @@ use axum::http::StatusCode;
 use lodestore_policy::jiff::{SignedDuration, Timestamp};
 use lodestore_policy::schedule::DstNote;
 use lodestore_policy::{
-    BackupPolicy, Hooks, Problem, Retention, Schedule, parse_yaml, to_yaml, validate,
+    BackupPolicy, Hooks, Problem, Retention, Schedule, Selector, parse_yaml, to_yaml, validate,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
@@ -75,6 +75,12 @@ pub(crate) fn runs_more_often(old: &BackupPolicy, new: &BackupPolicy) -> bool {
     }
 }
 
+fn policy_conflict(name: &str) -> ApiError {
+    ApiError::PolicyConflict(format!(
+        "Policy \"{name}\" was changed elsewhere. Reload it and apply your edits again."
+    ))
+}
+
 pub(crate) fn hooks_purpose(names: &[String]) -> String {
     format!(
         "change hooks or the hosts they run on (policies: {})",
@@ -82,10 +88,23 @@ pub(crate) fn hooks_purpose(names: &[String]) -> String {
     )
 }
 
+/// The selector picks no host the old one did not. Only two shapes are proven:
+/// a shorter host list, or the same labels plus more. Anything else, an empty
+/// selector or a list that appears or disappears included, counts as wider.
+fn selector_not_wider(old: &Selector, new: &Selector) -> bool {
+    match (&old.hosts, &new.hosts) {
+        (Some(old), Some(new)) => new.iter().all(|h| old.contains(h)),
+        (None, None) => old
+            .match_labels
+            .iter()
+            .all(|(k, v)| new.match_labels.get(k) == Some(v)),
+        _ => false,
+    }
+}
+
 pub(crate) fn gains_hook_hosts(
     old: Option<(&str, &BackupPolicy)>,
     new: (&str, &BackupPolicy),
-    agents: &[AgentRow],
 ) -> bool {
     let (new_repository, new_policy) = new;
     let no_hooks = Hooks::default();
@@ -99,10 +118,8 @@ pub(crate) fn gains_hook_hosts(
     if new_policy.spec.hooks == no_hooks {
         return false;
     }
-    agents.iter().any(|a| {
-        a.applies(new_repository, &new_policy.spec.selector)
-            && !a.applies(old_repository, &old_policy.spec.selector)
-    })
+    new_repository != old_repository
+        || !selector_not_wider(&old_policy.spec.selector, &new_policy.spec.selector)
 }
 
 const RESERVED_NAMES: [&str; 2] = ["validate", "apply"];
@@ -586,7 +603,7 @@ pub async fn create_policy(
         auth.require_also(Scope::SnapshotsDelete, RETENTION_PURPOSE)?;
     }
     let name = checked.policy.metadata.name.clone();
-    if gains_hook_hosts(None, (&checked.repository_id, &checked.policy), &[]) {
+    if gains_hook_hosts(None, (&checked.repository_id, &checked.policy)) {
         auth.require_also(
             Scope::HooksWrite,
             hooks_purpose(std::slice::from_ref(&name)),
@@ -664,6 +681,9 @@ pub async fn update_policy(
     }
     if matches!(auth.principal(), Principal::Token { .. }) {
         let current = find_policy(&state, &name).await?;
+        if current.revision != input.base_revision {
+            return Err(policy_conflict(&name));
+        }
         if retention_of(&current.policy) != retention_of(&checked.policy) {
             auth.require_also(Scope::SnapshotsDelete, RETENTION_PURPOSE)?;
         }
@@ -672,13 +692,8 @@ pub async fn update_policy(
         {
             auth.require_also(Scope::SnapshotsDelete, SCHEDULE_PURPOSE)?;
         }
-        let agents = load_agents(&state).await?;
         let old = (current.repository_id.as_str(), &current.policy);
-        if gains_hook_hosts(
-            Some(old),
-            (&checked.repository_id, &checked.policy),
-            &agents,
-        ) {
+        if gains_hook_hosts(Some(old), (&checked.repository_id, &checked.policy)) {
             auth.require_also(
                 Scope::HooksWrite,
                 hooks_purpose(std::slice::from_ref(&name)),
@@ -700,9 +715,7 @@ pub async fn update_policy(
     .rows_affected();
     if updated == 0 {
         return Err(if policy_exists(&state, &name).await? {
-            ApiError::PolicyConflict(format!(
-                "Policy \"{name}\" was changed elsewhere. Reload it and apply your edits again."
-            ))
+            policy_conflict(&name)
         } else {
             ApiError::NotFound("policy not found".into())
         });
