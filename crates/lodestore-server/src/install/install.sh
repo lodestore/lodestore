@@ -3,6 +3,7 @@ set -eu
 
 SERVER_URL='@@SERVER_URL@@'
 VERSION='@@VERSION@@'
+PROJECT_KEY='@@PROJECT_KEY@@'
 RELEASES_URL=${LODESTORE_RELEASES_URL:-https://github.com/lodestore/lodestore/releases/download}
 BIN=/usr/local/bin/lodestore-agent
 UNIT=/etc/systemd/system/lodestore-agent.service
@@ -88,14 +89,50 @@ require_https() {
   esac
 }
 
+have_minisign() {
+  command -v minisign >/dev/null 2>&1
+}
+
+signed_comment() {
+  if comment=$(minisign -V -Q -P "$PROJECT_KEY" -m "$1" -x "$2" 2>/dev/null); then
+    return 0
+  fi
+  old_ifs=$IFS
+  IFS=$nl
+  for key_file in $trust_keys; do
+    if comment=$(minisign -V -Q -p "$key_file" -m "$1" -x "$2" 2>/dev/null); then
+      IFS=$old_ifs
+      return 0
+    fi
+  done
+  IFS=$old_ifs
+  return 1
+}
+
+agent_comment_ok() {
+  printf '%s\n' "$comment" | awk -v a="$arch" 'NR == 1 && NF == 3 && $1 == "lodestore-agent" && $3 == a { ok = 1 } END { exit (ok ? 0 : 1) }'
+}
+
+fetch_signature() {
+  if [ "$insecure" = 1 ]; then
+    curl -fsSL -o "$2" "$1" || die "$3; nothing was installed"
+  else
+    curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL -o "$2" "$1" || die "$3; nothing was installed"
+  fi
+}
+
 download_agent() {
   name=lodestore-agent-linux-$arch
   if [ "$github" = 1 ]; then
+    have_minisign || die "--from-github checks the release signature and needs minisign; install it (apt install minisign, or dnf install minisign from EPEL) or take it from https://github.com/jedisct1/minisign/releases, then run the installer again; nothing was installed"
     base=$RELEASES_URL/v$VERSION
     fetch "$base/$name" "$tmp/agent"
     fetch "$base/SHA256SUMS" "$tmp/sums"
+    fetch_signature "$base/SHA256SUMS.minisig" "$tmp/sums.minisig" "the release v$VERSION has no SHA256SUMS.minisig"
+    signed_comment "$tmp/sums" "$tmp/sums.minisig" || die "SHA256SUMS of v$VERSION does not verify with the project key or any --trust-key; nothing was installed"
+    [ "$comment" = "lodestore release $VERSION" ] || die "SHA256SUMS is signed for \"$comment\", not lodestore release $VERSION; nothing was installed"
     expected=$(awk -v f="$name" '$2 == f || $2 == "*" f { print $1; exit }' "$tmp/sums")
-    [ -n "$expected" ] || die "SHA256SUMS has no entry for $name"
+    [ -n "$expected" ] || die "SHA256SUMS has no entry for $name; nothing was installed"
   else
     fetch "$SERVER_URL/install/agent/$arch" "$tmp/agent"
     fetch "$SERVER_URL/install/agent/$arch.sha256" "$tmp/sum"
@@ -104,6 +141,14 @@ download_agent() {
   fi
   actual=$(sha256sum "$tmp/agent" | cut -d ' ' -f 1)
   [ "$actual" = "$expected" ] || die "checksum mismatch for $name: expected $expected, got $actual; nothing was installed"
+  [ "$github" = 0 ] || return 0
+  if have_minisign; then
+    fetch_signature "$SERVER_URL/install/agent/$arch.minisig" "$tmp/agent.minisig" "the server has no signature for $name; minisign is installed, so the installer needs one"
+    signed_comment "$tmp/agent" "$tmp/agent.minisig" || die "the signature of $name does not verify with the project key or any --trust-key; nothing was installed"
+    agent_comment_ok || die "the signature of $name is for \"$comment\", not lodestore-agent for $arch; nothing was installed"
+  else
+    echo "note: minisign is not installed, so the agent was checked only against the checksum from the server" >&2
+  fi
 }
 
 write_env_file() {

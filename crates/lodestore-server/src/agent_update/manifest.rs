@@ -36,7 +36,7 @@ fn signed_version(text: &str, arch: &str) -> Option<Version> {
     Version::parse(version).ok()
 }
 
-fn read_signature(path: PathBuf) -> Option<String> {
+pub(crate) fn read_signature(path: PathBuf) -> Option<String> {
     let mut bytes = Vec::new();
     std::fs::File::open(path)
         .ok()?
