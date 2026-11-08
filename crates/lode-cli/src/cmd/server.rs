@@ -117,6 +117,8 @@ struct RestoreHost {
     host_id: Option<String>,
     repository_name: Option<String>,
     latest_snapshot_ms: Option<i64>,
+    #[serde(default)]
+    restore_roots: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -936,6 +938,7 @@ async fn restore(client: &Client, out: Output, args: ServerRestoreArgs) -> Resul
     {
         return Err(UsageError(format!("{bad:?} is not an absolute path")).into());
     }
+    let target_host_id = resolve_host(client, &args.host).await?;
     let destination = match (&args.target, args.in_place) {
         (Some(target), _) => target.clone(),
         (None, true) => "/".into(),
@@ -943,11 +946,18 @@ async fn restore(client: &Client, out: Output, args: ServerRestoreArgs) -> Resul
             let snapshot: Snapshot = client
                 .get_json(&format!("/api/v1/snapshots/{}", seg(id)), &[])
                 .await?;
-            format!(
-                "/var/lib/lodestore/restore/{}-{}",
-                &time(Some(snapshot.time))[..10],
-                &id[..8]
-            )
+            let root = client
+                .get_json::<Vec<RestoreHost>>("/api/v1/restore/hosts", &[])
+                .await
+                .ok()
+                .and_then(|hosts| {
+                    hosts
+                        .into_iter()
+                        .find(|h| h.host_id.as_deref() == Some(target_host_id.as_str()))
+                })
+                .and_then(|h| h.restore_roots.into_iter().next())
+                .unwrap_or_else(|| "/var/lib/lodestore/restore".into());
+            format!("{root}/{}-{}", &time(Some(snapshot.time))[..10], &id[..8])
         }
     };
     let items = if args.path.is_empty() {
@@ -955,7 +965,6 @@ async fn restore(client: &Client, out: Output, args: ServerRestoreArgs) -> Resul
     } else {
         args.path.clone()
     };
-    let target_host_id = resolve_host(client, &args.host).await?;
     let request = RestoreRequest {
         snapshot_id: id,
         items: items
