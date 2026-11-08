@@ -62,6 +62,8 @@ A rate is a whole number, a binary unit (`B`, `KiB`, `MiB`, `GiB`) and `/s`, for
 
 Missed slots are never replayed one by one: after an outage the host runs a single catch-up backup, or nothing if the window has passed.
 
+A slot that comes while a manual run of the same policy is queued or running on the host waits for it. The scheduled backup starts when the manual run ends (as a catch-up backup when that is more than two minutes after the slot), so a run-now does not take the scheduled snapshot's place. Past `catchUpWindow` the slot is skipped like any missed slot. A slot that comes while a scheduled backup of the policy is still running is merged into it.
+
 ### Daylight saving time
 
 The cron expression is evaluated on the wall clock of `timezone`. Every slot runs exactly once:
@@ -96,7 +98,7 @@ A series of manual runs therefore rotates only the manual snapshots and never to
 
 ### Stdin snapshots
 
-A snapshot made with `lode backup --stdin --policy NAME` is outside retention by default: it takes no slot in any rule and is never forgotten, like a stdin snapshot without a policy. It also does not count as the last successful backup of the policy for alerts and metrics. To let retention rotate them, set `includeStdin: true` under `retention`; they then join the manual pool. Setting it needs the `snapshots:delete` scope for a token, like any other retention change.
+A snapshot made with `lode backup --stdin --policy NAME` is outside retention by default: it takes no slot in any rule and is never forgotten, like a stdin snapshot without a policy. It also does not count as the last successful backup of the policy for alerts and metrics. To let retention rotate them, set `includeStdin: true` under `retention`; they then join the manual pool. Setting it needs the `snapshots:delete` scope for a token, like any other retention change. Clearing every retention rule in the policy form also turns `includeStdin` off, so rules added again in the same session do not bring it back.
 
 ```yaml
   retention:
