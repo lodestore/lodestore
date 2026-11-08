@@ -357,17 +357,14 @@ async fn schedule_coalesces_with_queued_job() {
         let manual = body["jobs"][0]["id"].as_str().unwrap().to_string();
         assert_eq!(body["jobs"][0]["created"], true);
 
-        let queued = fleet.tick("2026-06-01T10:05:10Z").await;
-        assert_eq!(queued.len(), 1);
-        assert_eq!(queued[0].job_id, manual);
-        assert!(!queued[0].created);
+        assert!(fleet.tick("2026-06-01T10:05:10Z").await.is_empty());
         assert_eq!(
             fleet.jobs("every-five").await,
             vec![(manual.clone(), "manual".to_string(), None)]
         );
         assert_eq!(
             fleet.cursor("every-five").await,
-            Some(at("2026-06-01T10:05:00Z").as_millisecond())
+            Some(at("2026-06-01T10:00:00Z").as_millisecond())
         );
 
         sqlx::query("UPDATE jobs SET state = 'succeeded' WHERE id = 'blocker'")
@@ -375,6 +372,22 @@ async fn schedule_coalesces_with_queued_job() {
             .await
             .unwrap();
         fleet.finish(&manual).await;
+
+        let queued = fleet.tick("2026-06-01T10:06:00Z").await;
+        assert_eq!(queued.len(), 1);
+        assert!(queued[0].created);
+        assert_eq!(queued[0].origin, Origin::Schedule);
+        let jobs = fleet.jobs("every-five").await;
+        assert_eq!(jobs.len(), 2);
+        assert!(
+            jobs.iter()
+                .any(|(id, origin, _)| *id == queued[0].job_id && origin == "schedule")
+        );
+        assert_eq!(
+            fleet.cursor("every-five").await,
+            Some(at("2026-06-01T10:05:00Z").as_millisecond())
+        );
+        fleet.finish(&queued[0].job_id).await;
         fleet.stop().await;
     }
 }

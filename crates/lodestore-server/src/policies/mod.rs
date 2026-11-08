@@ -796,7 +796,7 @@ fn hosts_of(agents: &[AgentRow], row: &PolicyRow) -> Vec<(String, String)> {
     responses(
         (status = 200, description = "One job per matching host; existing active jobs are returned as is", body = RunResult),
         (status = 404, description = "Unknown policy", body = ErrorBody),
-        (status = 429, description = "A token started a policy on a host more than 6 times in the last hour (code rate_limited, Retry-After in seconds)", body = ErrorBody),
+        (status = 429, description = "The policy was started on one of its hosts 6 times in the last hour (code rate_limited, Retry-After in seconds)", body = ErrorBody),
     )
 )]
 pub async fn run_policy(
@@ -845,7 +845,7 @@ fn policies_of_host<'a>(host: &AgentRow, rows: &'a [PolicyRow]) -> Vec<&'a Polic
         (status = 404, description = "Unknown host", body = ErrorBody),
         (status = 409, description = "The host is revoked", body = ErrorBody),
         (status = 422, description = "A policy does not apply to the host", body = ErrorBody),
-        (status = 429, description = "A token started a policy on this host more than 6 times in the last hour (code rate_limited, Retry-After in seconds)", body = ErrorBody),
+        (status = 429, description = "A policy was started on this host 6 times in the last hour (code rate_limited, Retry-After in seconds)", body = ErrorBody),
     )
 )]
 pub async fn run_host(

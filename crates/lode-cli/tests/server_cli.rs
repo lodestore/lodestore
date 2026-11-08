@@ -711,6 +711,7 @@ fn server_cli_restore_default_uses_first_reported_root() {
             "GET /api/v1/restore/hosts",
             ok(json!([
                 {"key": "h1", "host_id": "h1", "restore_roots": ["/other"]},
+                {"key": "h0", "host_id": "h0", "restore_roots": null},
                 {"key": "h2", "host_id": "h2", "restore_roots": ["/srv/recovery", "/srv/b"]}
             ])),
         ),
@@ -718,6 +719,55 @@ fn server_cli_restore_default_uses_first_reported_root() {
     stdout(lode(&server, home.path()).args(["restore", SNAPSHOT_ID, "--host", "h2"]));
     let body: Value = serde_json::from_str(&server.only("POST", "/api/v1/restores").body).unwrap();
     assert_eq!(body["destination"], "/srv/recovery/2020-09-13-01234567");
+}
+
+#[test]
+fn server_cli_restore_says_to_pass_the_host_id_without_hosts_read() {
+    let home = tempfile::tempdir().unwrap();
+    let server = fake(vec![
+        (
+            "GET /api/v1/hosts",
+            error(403, "forbidden", "missing scope hosts:read"),
+        ),
+        (
+            "POST /api/v1/restores",
+            error(404, "not_found", "The host was not found."),
+        ),
+    ]);
+    let stderr = failure(
+        lode(&server, home.path()).args([
+            "restore",
+            SNAPSHOT_ID,
+            "--host",
+            "web-1",
+            "--target",
+            "/srv/r",
+        ]),
+        1,
+    );
+    assert!(stderr.contains("lode server hosts list"), "{stderr}");
+    assert!(stderr.contains("hosts:read"), "{stderr}");
+
+    let server = fake(vec![
+        ("GET /api/v1/hosts", ok(json!([]))),
+        (
+            "POST /api/v1/restores",
+            error(404, "not_found", "The host was not found."),
+        ),
+    ]);
+    let stderr = failure(
+        lode(&server, home.path()).args([
+            "restore",
+            SNAPSHOT_ID,
+            "--host",
+            "web-1",
+            "--target",
+            "/srv/r",
+        ]),
+        1,
+    );
+    assert!(stderr.contains("The host was not found."), "{stderr}");
+    assert!(!stderr.contains("hosts:read"), "{stderr}");
 }
 
 #[test]

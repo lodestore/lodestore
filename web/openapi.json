@@ -1763,7 +1763,7 @@
             }
           },
           "429": {
-            "description": "A token started a policy on this host more than 6 times in the last hour (code rate_limited, Retry-After in seconds)",
+            "description": "A policy was started on this host 6 times in the last hour (code rate_limited, Retry-After in seconds)",
             "content": {
               "application/json": {
                 "schema": {
@@ -3430,7 +3430,7 @@
             }
           },
           "429": {
-            "description": "A token started a policy on a host more than 6 times in the last hour (code rate_limited, Retry-After in seconds)",
+            "description": "The policy was started on one of its hosts 6 times in the last hour (code rate_limited, Retry-After in seconds)",
             "content": {
               "application/json": {
                 "schema": {
@@ -11700,8 +11700,7 @@
           "agent",
           "labels",
           "snapshot_count",
-          "unverified_count",
-          "restore_roots"
+          "unverified_count"
         ],
         "properties": {
           "agent": {
@@ -11753,11 +11752,14 @@
             ]
           },
           "restore_roots": {
-            "type": "array",
+            "type": [
+              "array",
+              "null"
+            ],
             "items": {
               "type": "string"
             },
-            "description": "Folders the agent restores into, as it reports them; the agent checks them itself."
+            "description": "Folders the agent restores new folders into, as it reports them; null when it has not\nreported them, empty when it allows no restore into a new folder; the agent checks them itself."
           },
           "snapshot_count": {
             "type": "integer",

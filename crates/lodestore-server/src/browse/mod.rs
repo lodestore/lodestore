@@ -46,28 +46,26 @@ pub struct RestoreHost {
     pub latest_snapshot_ms: Option<i64>,
     /// Snapshots of this host that nothing signed; they are never offered as the latest.
     pub unverified_count: u64,
-    /// Folders the agent restores into, as it reports them; the agent checks them itself.
-    pub restore_roots: Vec<String>,
+    /// Folders the agent restores new folders into, as it reports them; null when it has not
+    /// reported them, empty when it allows no restore into a new folder; the agent checks them itself.
+    pub restore_roots: Option<Vec<String>>,
     /// Whether the agent allows restores in place; null when unknown.
     pub allow_in_place: Option<bool>,
 }
 
-fn reported_restore_settings(facts_json: Option<&str>) -> (Vec<String>, Option<bool>) {
+fn reported_restore_settings(facts_json: Option<&str>) -> (Option<Vec<String>>, Option<bool>) {
     let restore = facts_json
         .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
         .and_then(|facts| facts.get("restore").cloned());
     let Some(restore) = restore else {
-        return (Vec::new(), None);
+        return (None, None);
     };
-    let roots = restore["roots"]
-        .as_array()
-        .map(|roots| {
-            roots
-                .iter()
-                .filter_map(|root| root.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
+    let roots = restore["roots"].as_array().map(|roots| {
+        roots
+            .iter()
+            .filter_map(|root| root.as_str().map(str::to_string))
+            .collect()
+    });
     (roots, restore["allow_in_place"].as_bool())
 }
 
@@ -187,7 +185,7 @@ async fn list_restore_hosts(
             snapshot_count: count(row, "n")?,
             latest_snapshot_ms: row.try_get("latest")?,
             unverified_count: count(row, "unverified")?,
-            restore_roots: Vec::new(),
+            restore_roots: None,
             allow_in_place: None,
         });
     }

@@ -198,6 +198,9 @@ async fn pair(
     };
     if job.created {
         mark_origin(state, &job.id, origin, missed).await?;
+    } else if active_origin(state, &job.id).await? == "manual" {
+        // a run-now must not take the slot of the scheduled retention pool
+        return Ok(None);
     }
     store_cursor(state, &entry.id, &agent.id, fingerprint, latest_ms).await?;
     Ok(Some(ScheduledJob {
@@ -207,6 +210,14 @@ async fn pair(
         origin,
         created: job.created,
     }))
+}
+
+async fn active_origin(state: &AppState, job_id: &str) -> anyhow::Result<String> {
+    let row = sqlx::query("SELECT origin FROM jobs WHERE id = $1")
+        .bind(job_id)
+        .fetch_one(&state.db.pool)
+        .await?;
+    Ok(row.try_get("origin")?)
 }
 
 async fn mark_origin(

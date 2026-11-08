@@ -236,8 +236,17 @@ async fn restore_roots_listed_for_restore_hosts() {
 
         set_facts(&env, None).await;
         let host = listed_host(&env).await;
-        assert_eq!(host["restore_roots"], json!([]));
+        assert!(host["restore_roots"].is_null());
         assert!(host["allow_in_place"].is_null());
+
+        set_facts(
+            &env,
+            Some(json!({"restore": {"roots": [], "allow_in_place": false}})),
+        )
+        .await;
+        let host = listed_host(&env).await;
+        assert_eq!(host["restore_roots"], json!([]));
+        assert_eq!(host["allow_in_place"], false);
         env.stop().await;
     }
 }
