@@ -72,7 +72,7 @@ const hosts: RestoreHost[] = [
 		snapshot_count: 1,
 		latest_snapshot_ms: noon(30),
 		unverified_count: 0,
-		restore_roots: [],
+		restore_roots: null,
 	},
 	{
 		key: WEB,
@@ -86,7 +86,7 @@ const hosts: RestoreHost[] = [
 		snapshot_count: 5,
 		latest_snapshot_ms: noon(0),
 		unverified_count: 0,
-		restore_roots: [],
+		restore_roots: null,
 	},
 	{
 		key: "agentless:old-nas",
@@ -100,7 +100,7 @@ const hosts: RestoreHost[] = [
 		snapshot_count: 2,
 		latest_snapshot_ms: noon(10),
 		unverified_count: 0,
-		restore_roots: [],
+		restore_roots: null,
 	},
 ];
 

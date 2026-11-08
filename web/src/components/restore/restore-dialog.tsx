@@ -7,7 +7,7 @@ import {
 	ShieldAlert,
 	TriangleAlert,
 } from "lucide-react";
-import { useId, useState } from "react";
+import { type ReactNode, useId, useState } from "react";
 import { toast } from "sonner";
 import {
 	getCreateRestoreMutationKey,
@@ -74,11 +74,18 @@ export function checkFolder(path: string): { error?: string; folder: string } {
 	return { error: folder === "/" ? text.pathRoot : undefined, folder };
 }
 
+const REFUSED_CODES = new Set([
+	"restore_outside_roots",
+	"restore_in_place_disabled",
+	"restore_agent_outdated",
+	"forbidden",
+]);
+
 function isUnder(path: string, root: string) {
 	return root === "/" || path === root || path.startsWith(`${root}/`);
 }
 
-function FieldMessage({ id, children }: { id: string; children: string }) {
+function FieldMessage({ id, children }: { id: string; children: ReactNode }) {
 	return (
 		<p id={id} className="flex items-start gap-1 text-sm text-destructive">
 			<CircleAlert aria-hidden className="mt-1 size-4 shrink-0" />
@@ -120,7 +127,7 @@ function RestoreForm({
 	const [edited, setPath] = useState<string>();
 	const path =
 		edited ??
-		`${target?.restore_roots[0] ?? DEFAULT_ROOT}/${localDate(snapshot.time)}-${shortId(snapshot.id)}`;
+		`${target?.restore_roots?.[0] ?? DEFAULT_ROOT}/${localDate(snapshot.time)}-${shortId(snapshot.id)}`;
 	const [conflict, setConflict] =
 		useState<ConflictPolicyDto>("overwrite_changed");
 	const policy: ConflictPolicyDto =
@@ -143,15 +150,19 @@ function RestoreForm({
 
 	const { error: folderError, folder } = checkFolder(path);
 	const pathError = inPlace ? undefined : folderError;
-	const roots = target?.restore_roots ?? [];
+	const roots = target?.restore_roots;
+	const newFolderOff = !inPlace && roots?.length === 0;
 	const outsideRoots =
 		!inPlace &&
 		folderError === undefined &&
+		roots != null &&
 		roots.length > 0 &&
 		!roots.some((root) => isUnder(folder, checkFolder(root).folder));
 	const hostError = target === undefined;
 	const canStart =
 		pathError === undefined &&
+		!outsideRoots &&
+		!newFolderOff &&
 		!hostError &&
 		(!inPlace || confirmed) &&
 		(!unverified || acceptUnverified) &&
@@ -308,11 +319,13 @@ function RestoreForm({
 											aria-label={text.folderOn(targetName || sourceName)}
 											className="font-mono text-sm"
 											value={path}
-											aria-invalid={pathError !== undefined}
+											aria-invalid={
+												pathError !== undefined || outsideRoots || newFolderOff
+											}
 											aria-describedby={
 												pathError
 													? `${id}-path`
-													: outsideRoots
+													: outsideRoots || newFolderOff
 														? `${id}-roots`
 														: undefined
 											}
@@ -321,15 +334,17 @@ function RestoreForm({
 										{pathError && (
 											<FieldMessage id={`${id}-path`}>{pathError}</FieldMessage>
 										)}
+										{newFolderOff && (
+											<FieldMessage id={`${id}-roots`}>
+												<TextWithPaths text={text.newFolderOff} />
+											</FieldMessage>
+										)}
 										{outsideRoots && (
-											<p
-												id={`${id}-roots`}
-												className="text-sm text-muted-foreground"
-											>
+											<FieldMessage id={`${id}-roots`}>
 												<TextWithPaths
 													text={text.outsideRoots(roots.join(", "))}
 												/>
-											</p>
+											</FieldMessage>
 										)}
 									</div>
 								)}
@@ -451,7 +466,9 @@ function RestoreForm({
 					<Alert variant="destructive" role="alert">
 						<AlertDescription>
 							<TextWithPaths
-								text={copy.errors.submit(text.failed, restore.error.message)}
+								text={(REFUSED_CODES.has(restore.error.code)
+									? copy.errors.refused
+									: copy.errors.submit)(text.failed, restore.error.message)}
 							/>
 						</AlertDescription>
 					</Alert>

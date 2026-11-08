@@ -317,10 +317,12 @@ export function CreateTokenDialog({
 	open,
 	onOpenChange,
 	onFocusRow,
+	onFocusTrigger,
 }: {
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
 	onFocusRow: (id: string) => void;
+	onFocusTrigger: () => void;
 }) {
 	const createdId = useRef<string>(undefined);
 	const showingSecret = useRef(false);
@@ -340,9 +342,9 @@ export function CreateTokenDialog({
 					showingSecret.current = false;
 					const id = createdId.current;
 					createdId.current = undefined;
-					if (id === undefined) return;
 					event.preventDefault();
-					onFocusRow(id);
+					if (id === undefined) onFocusTrigger();
+					else onFocusRow(id);
 				}}
 			>
 				<CreateTokenBody

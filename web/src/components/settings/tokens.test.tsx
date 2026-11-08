@@ -283,6 +283,37 @@ describe("API tokens: create", () => {
 	});
 });
 
+describe("API tokens: closing the create dialog", () => {
+	it("returns focus to the Create token button on Escape", async () => {
+		mockTokens([makeToken("ci")]);
+		const user = userEvent.setup();
+		await openTokens();
+		await user.click(createButton());
+		await screen.findByRole("dialog", { name: "Create API token" });
+		await user.keyboard("{Escape}");
+		await waitFor(() =>
+			expect(
+				screen.queryByRole("dialog", { name: "Create API token" }),
+			).not.toBeInTheDocument(),
+		);
+		await waitFor(() => expect(createButton()).toHaveFocus());
+	});
+
+	it("returns focus there when opened with the create param", async () => {
+		mockTokens([makeToken("ci")]);
+		const user = userEvent.setup();
+		await openTokens("/settings/tokens?create=1");
+		await screen.findByRole("dialog", { name: "Create API token" });
+		await user.keyboard("{Escape}");
+		await waitFor(() =>
+			expect(
+				screen.queryByRole("dialog", { name: "Create API token" }),
+			).not.toBeInTheDocument(),
+		);
+		await waitFor(() => expect(createButton()).toHaveFocus());
+	});
+});
+
 describe("API tokens: table", () => {
 	it("table renders scopes and expiry", async () => {
 		mockTokens([

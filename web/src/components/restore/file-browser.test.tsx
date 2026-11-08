@@ -119,7 +119,7 @@ const hosts: RestoreHost[] = [
 		snapshot_count: 2,
 		latest_snapshot_ms: snapshots[0].time,
 		unverified_count: 0,
-		restore_roots: [],
+		restore_roots: null,
 	},
 ];
 

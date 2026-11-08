@@ -25,8 +25,10 @@ export function RetentionPanel({
 	children?: ReactNode;
 }) {
 	const text = copy.policies.retention;
-	const set = (patch: Partial<RetentionDraft>) =>
-		onChange({ ...draft, ...patch });
+	const set = (patch: Partial<RetentionDraft>) => {
+		const next = { ...draft, ...patch };
+		onChange(hasRetention(next) ? next : { ...next, includeStdin: false });
+	};
 	const count = (key: CountKey, label: string) => (
 		<RowField label={label} error={problems.get(`spec.retention.${key}`)}>
 			{(a11y) => (

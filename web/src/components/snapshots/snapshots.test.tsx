@@ -477,7 +477,7 @@ describe("Restore: suspicious", () => {
 		snapshot_count: 3,
 		latest_snapshot_ms: Date.now(),
 		unverified_count: 0,
-		restore_roots: [],
+		restore_roots: null,
 	};
 
 	function mockRestore(snapshots: RestoreSnapshot[]) {
