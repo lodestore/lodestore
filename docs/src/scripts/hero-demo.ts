@@ -16,13 +16,26 @@ const spin = '<svg class="icon spin" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1
 
 function rotateWord(rot: HTMLElement) {
 	const rotating = onScreen(rot);
+	let words: string[] = [];
+	try {
+		const parsed: unknown = JSON.parse(rot.dataset.words ?? '[]');
+		if (Array.isArray(parsed)) words = parsed.filter((w): w is string => typeof w === 'string');
+	} catch {}
+	if (!words.length) return;
+	const first = rot.firstElementChild?.textContent ?? '';
+	for (const w of [...words, first]) {
+		const span = document.createElement('span');
+		span.setAttribute('aria-hidden', 'true');
+		span.textContent = w;
+		rot.append(span);
+	}
 	let ri = 0;
 	setInterval(() => {
 		if (!rotating()) return;
 		ri++;
 		rot.style.transition = '';
 		rot.style.transform = `translateY(-${ri * 1.05}em)`;
-		if (ri === 4)
+		if (ri === words.length + 1)
 			setTimeout(() => {
 				rot.style.transition = 'none';
 				rot.style.transform = 'translateY(0)';

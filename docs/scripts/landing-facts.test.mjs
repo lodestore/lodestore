@@ -113,6 +113,18 @@ test('hero modal command has the shape of the quickstart agent command', () => {
 	assert.ok(real.includes('| sudo sh -s -- ') && real.includes('--join'));
 });
 
+test('the hero heading is one sentence for crawlers', () => {
+	const h1 = landing().match(/<h1\b[^>]*>[\s\S]*?<\/h1>/)?.[0];
+	assert.ok(h1, 'no h1 on the landing page');
+	assert.equal(textOf(h1).replace(/\s+/g, ' ').trim(), 'Back up every Linux host. Restore without the server.');
+	assert.ok(!/database|docker|file share/i.test(h1), 'the heading promises something 0.x does not do');
+	const raw = h1.match(/data-words="([^"]*)"/)?.[1];
+	assert.ok(raw, 'no data-words on the rotator');
+	const words = JSON.parse(decode(raw));
+	assert.ok(Array.isArray(words) && words.length > 0);
+	for (const w of words) assert.ok(typeof w === 'string' && w.length > 0 && w.endsWith('.'), `bad rotator word: ${w}`);
+});
+
 test('trust line makes no air-gapped claim', () => {
 	const text = textOf(landing());
 	assert.ok(!/air-gapped/i.test(text), 'air-gapped is back');

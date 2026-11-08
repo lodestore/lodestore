@@ -1,7 +1,7 @@
 ---
 import { liveDemoUrl } from '../site/nav';
 
-const words = ['Linux host.', 'database.', 'file share.', 'Docker host.'];
+const words = ['Linux host.', 'file server.', 'web server.', 'build server.'];
 const check =
 	'<svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8.5 12 2.5 2.5 4.5-5"/></svg>';
 const hosts = [
@@ -16,9 +16,9 @@ const hosts = [
 	<div class="wrap">
 		<div>
 			<h1 class="rise">
-				Back up every <span class="rot" aria-hidden="true"
-					><span class="rot-in" id="rot">{[...words, words[0]].map((w) => <span>{w}</span>)}</span></span
-				><span class="sr-only">Linux host, database, file share and Docker host.</span><br />Restore without the server.
+				Back up every <span class="rot"
+					><span class="rot-in" id="rot" data-words={JSON.stringify(words.slice(1))}><span>{words[0]}</span></span></span
+				><br />Restore without the server.
 			</h1>
 			<p class="lead rise d1">
 				<b>Lodestore</b> runs backups for every server in your fleet from one place. Agents encrypt on the host and write straight
