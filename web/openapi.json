@@ -4,8 +4,8 @@
     "title": "Lodestore",
     "description": "REST API of the Lodestore server. The web UI uses the same API, so everything the UI does can be scripted.\n\n## Authentication\n\n1. `POST /api/v1/auth/login` with `{\"username\": \"...\", \"password\": \"...\"}`. The response sets the `lodestore_session` cookie.\n2. `GET /api/v1/auth/session` returns the user name and a `csrf_token`.\n3. Send the cookie with every request. Requests that change data (`POST`, `PUT`, `DELETE`) also need the `X-CSRF-Token` header with that token.\n\n```sh\nURL=https://lodestore.example.com\ncurl -c jar -H 'Content-Type: application/json' \\\n  -d '{\"username\":\"admin\",\"password\":\"...\"}' \\\n  $URL/api/v1/auth/login\nTOKEN=$(curl -s -b jar $URL/api/v1/auth/session \\\n  | jq -r .csrf_token)\ncurl -b jar -H \"X-CSRF-Token: $TOKEN\" \\\n  -X POST $URL/api/v1/policies/nightly/run\n```\n\nA browser request that changes data must also come from the server's own origin (`Origin` header).\n\n## Errors\n\nErrors return a JSON body `{\"code\": \"...\", \"message\": \"...\"}`. `code` is stable and meant for programs; `message` is meant for people. `401` means there is no valid session, `403` with code `csrf` means the token or origin check failed, `422` means the request was understood but rejected.\n",
     "license": {
-      "name": "AGPL-3.0-only",
-      "identifier": "AGPL-3.0-only"
+      "name": "Apache-2.0",
+      "identifier": "Apache-2.0"
     },
     "version": "0.1.0"
   },
