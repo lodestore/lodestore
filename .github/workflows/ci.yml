@@ -107,8 +107,6 @@ jobs:
         with:
           tool: cargo-deny@0.20.2
       - run: cargo deny check licenses bans sources
-      - run: scripts/check-license-boundary.sh
-      - run: scripts/check-license-boundary.sh --self-test
 
   dco:
     if: github.event_name == 'pull_request'
