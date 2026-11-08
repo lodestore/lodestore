@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use lodestore_format::Error;
 use lodestore_format::crypto::{BLOB_TYPE_DATA, BlobId, RepoId};
-use lodestore_format::fs::restore::{Overwrite, RestoreSettings, Restorer};
+use lodestore_format::fs::restore::{Overwrite, RestoreSettings, Restorer, is_empty_below};
 use lodestore_format::keys::cdc_seed;
 use lodestore_format::pb::{Node, NodeType};
 use lodestore_format::reader::open_chunk;
@@ -27,7 +27,6 @@ use lodestore_proto::agent::v1::{
     RestorePlanBatch, RestorePlanRequest, RestoreSpec,
 };
 use prost::Message;
-use rustix::fs::{Access, access};
 use tonic::transport::Channel;
 use tonic::{Code, Streaming};
 use zeroize::{Zeroize, Zeroizing};
@@ -287,15 +286,15 @@ impl Prepared {
         if !self.stop_if_not_empty {
             return Ok(());
         }
-        match std::fs::read_dir(&self.target) {
-            Ok(mut entries) => match entries.next() {
-                Some(_) => Err(abort(
-                    "restore_target_not_empty",
-                    format!("{} is not empty", self.target.display()),
-                )),
-                None => Ok(()),
-            },
-            Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+        let Some((root, rest)) = &self.confined else {
+            return Ok(());
+        };
+        match is_empty_below(root, rest) {
+            Ok(false) => Err(abort(
+                "restore_target_not_empty",
+                format!("{} is not empty", self.target.display()),
+            )),
+            Ok(true) => Ok(()),
             Err(e) => Err(io_abort(
                 &e,
                 &format!("cannot read {}", self.target.display()),
@@ -311,6 +310,7 @@ impl Prepared {
             k_id: self.k_id.clone(),
             seed: cdc_seed(&self.k_id),
             restore_owners: self.restore_owners,
+            keep_privileges: self.in_place,
         }
     }
 }
@@ -361,8 +361,9 @@ impl<'a, F: PackFetcher> Attempt<'a, F> {
         // can be written to has to fail here. In place, parts of `/` may be
         // read-only while the rest is not.
         if !prepared.in_place {
-            access(&prepared.target, Access::WRITE_OK)
-                .map_err(|e| io_abort(&e.into(), &format!("cannot write to {target}")))?;
+            restorer
+                .check_writable()
+                .map_err(|e| io_abort(&e, &format!("cannot write to {target}")))?;
         }
         let cell = ctx.progress_cell();
         for counter in [

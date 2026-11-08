@@ -720,6 +720,120 @@ impl PackFetcher for NoFetch {
 }
 
 #[tokio::test]
+async fn restore_runner_new_folder_drops_setuid_but_keeps_owner() {
+    let fx = Fx::new().await;
+    let hub = fx.hub();
+    let ids = ids(&fx).await;
+    let planned = fx.plan(&["a/x"], 4, None).await;
+    let (uid, gid) = (
+        rustix::process::getuid().as_raw(),
+        rustix::process::getgid().as_raw(),
+    );
+    let plan = || {
+        MemPlan::new(&planned).map_nodes(move |n| {
+            n.uid = uid;
+            n.gid = gid;
+            if n.r#type == NodeType::File as i32 {
+                n.mode = 0o6755;
+                n.xattrs.push(lodestore_format::pb::Xattr {
+                    name: b"security.capability".to_vec(),
+                    value: [&[0, 0, 0, 2][..], &[0; 16]].concat(),
+                });
+            }
+        })
+    };
+    let mode_of = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o7777;
+
+    let dest = fx.root.join("fresh");
+    let id = fx.job_id();
+    let spec = fx.spec(
+        &dest,
+        ConflictPolicy::OverwriteChanged,
+        false,
+        true,
+        ids.k_id,
+        ids.repo_id,
+    );
+    let opts = RestoreOptions {
+        roots: vec![fx.root.clone()],
+        ..options()
+    };
+    let msgs = run(&hub, &id, spec, plan(), StoreFetcher::new(&fx), opts).await;
+    let f = finished_of(&msgs, &id).unwrap();
+    assert_eq!(f.outcome, JobOutcome::Succeeded as i32, "{msgs:?}");
+    let restored = fx.restored(&dest, "a/x");
+    assert_eq!(mode_of(&restored), 0o755);
+    assert_eq!(fs::metadata(&restored).unwrap().uid(), uid);
+
+    let target = fx.root.join("in-place");
+    let id = fx.job_id();
+    let spec = fx.spec(
+        Path::new("/"),
+        ConflictPolicy::OverwriteChanged,
+        true,
+        true,
+        ids.k_id,
+        ids.repo_id,
+    );
+    let options = RestoreOptions {
+        root: target.clone(),
+        allow_in_place: true,
+        ..options()
+    };
+    let msgs = run(&hub, &id, spec, plan(), StoreFetcher::new(&fx), options).await;
+    let f = finished_of(&msgs, &id).unwrap();
+    assert!(f.outcome != JobOutcome::Failed as i32, "{msgs:?}");
+    assert_eq!(mode_of(&fx.restored(&target, "a/x")), 0o6755);
+}
+
+#[tokio::test]
+async fn restore_runner_symlinked_target_is_not_read() {
+    let fx = Fx::new().await;
+    let hub = fx.hub();
+    let ids = ids(&fx).await;
+    let planned = fx.plan(&["a/x"], 4, None).await;
+    let roots = fx.root.join("r");
+    let elsewhere = fx.root.join("elsewhere");
+    fs::create_dir_all(&roots).unwrap();
+    fs::create_dir_all(&elsewhere).unwrap();
+    symlink(&elsewhere, roots.join("link")).unwrap();
+
+    let mut codes = Vec::new();
+    for secret in [false, true] {
+        if secret {
+            fs::write(elsewhere.join("secret"), b"x").unwrap();
+        }
+        let id = fx.job_id();
+        let spec = fx.spec(
+            &roots.join("link"),
+            ConflictPolicy::StopIfNotEmpty,
+            false,
+            false,
+            ids.k_id,
+            ids.repo_id,
+        );
+        let options = RestoreOptions {
+            roots: vec![roots.clone()],
+            ..options()
+        };
+        let msgs = run(
+            &hub,
+            &id,
+            spec,
+            MemPlan::new(&planned),
+            StoreFetcher::new(&fx),
+            options,
+        )
+        .await;
+        let f = finished_of(&msgs, &id).unwrap();
+        assert_eq!(f.outcome, JobOutcome::Failed as i32, "{msgs:?}");
+        codes.push(f.error_code.clone());
+    }
+    assert_eq!(codes[0], codes[1], "the outside folder's content leaks");
+    assert_ne!(codes[0], "restore_target_not_empty");
+}
+
+#[tokio::test]
 async fn restore_runner_stop_if_not_empty() {
     let fx = Fx::new().await;
     let hub = fx.hub();
