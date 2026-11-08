@@ -533,6 +533,7 @@ fn spec_json(policy: &BackupPolicy) -> Result<String, ApiError> {
     request_body = ApplyRequest,
     responses(
         (status = 200, description = "The plan; applied unless dry_run is set", body = ApplyResponse),
+        (status = 403, description = "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention or a more frequent cron", body = ErrorBody),
         (status = 409, description = "A policy to delete has jobs in progress, or policies changed while applying", body = ErrorBody),
         (status = 422, description = "Invalid input; nothing is applied", body = ApplyErrorBody),
     )

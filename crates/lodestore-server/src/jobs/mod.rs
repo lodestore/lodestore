@@ -527,6 +527,13 @@ pub const RUN_NOW_PER_HOUR: i64 = 6;
 
 const RUN_NOW_WINDOW_MS: i64 = 3_600_000;
 
+fn run_rate_message(hostname: &str, minutes: u64) -> String {
+    let unit = if minutes == 1 { "minute" } else { "minutes" };
+    format!(
+        "This policy was started on {hostname} {RUN_NOW_PER_HOUR} times in the last hour. Try again in {minutes} {unit}."
+    )
+}
+
 pub async fn check_run_rate(
     state: &AppState,
     policy_id: &str,
@@ -554,9 +561,7 @@ pub async fn check_run_rate(
             .max(1);
         let minutes = retry_after_s.div_ceil(60);
         return Err(ApiError::TooManyRuns {
-            message: format!(
-                "This token started this policy on {hostname} {RUN_NOW_PER_HOUR} times in the last hour. Try again in {minutes} minutes."
-            ),
+            message: run_rate_message(hostname, minutes),
             retry_after_s,
         });
     }
@@ -1172,4 +1177,21 @@ pub async fn last_job(
         queued_at: row.try_get("queued_at")?,
         finished_at: row.try_get("finished_at")?,
     }))
+}
+
+#[cfg(test)]
+mod run_rate_message_tests {
+    use super::run_rate_message;
+
+    #[test]
+    fn names_the_policy_not_the_token_and_pluralises() {
+        assert_eq!(
+            run_rate_message("web-1", 1),
+            "This policy was started on web-1 6 times in the last hour. Try again in 1 minute."
+        );
+        assert_eq!(
+            run_rate_message("web-1", 12),
+            "This policy was started on web-1 6 times in the last hour. Try again in 12 minutes."
+        );
+    }
 }

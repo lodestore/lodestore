@@ -798,7 +798,7 @@ pub async fn cancel_job(
         (status = 200, description = "The queued job of the same host and policy", body = RunJob),
         (status = 404, description = "Unknown job", body = ErrorBody),
         (status = 409, description = "The job cannot be repeated", body = ErrorBody),
-        (status = 429, description = "A token started this policy on this host more than 6 times in the last hour (code rate_limited, Retry-After in seconds)", body = ErrorBody),
+        (status = 429, description = "This policy was started on this host 6 times in the last hour (code rate_limited, Retry-After in seconds)", body = ErrorBody),
     )
 )]
 pub async fn rerun_job(

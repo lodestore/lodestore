@@ -253,7 +253,8 @@ pub struct SetLabels {
     responses(
         (status = 200, description = "Host with the new labels", body = HostDetail),
         (status = 404, description = "Unknown host", body = ErrorBody),
-        (status = 409, description = "The host is revoked", body = ErrorBody),
+        (status = 403, description = "The token lacks hooks:write and the new labels make a policy with hooks reach this host", body = ErrorBody),
+        (status = 409, description = "The host is revoked or its labels changed since they were read", body = ErrorBody),
         (status = 422, description = "Invalid labels", body = ErrorBody),
     )
 )]

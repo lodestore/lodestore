@@ -698,6 +698,52 @@ fn server_cli_restore_defaults() {
 }
 
 #[test]
+fn server_cli_restore_default_uses_first_reported_root() {
+    let home = tempfile::tempdir().unwrap();
+    let snapshot_route = format!("GET /api/v1/snapshots/{SNAPSHOT_ID}");
+    let server = fake(vec![
+        (
+            "POST /api/v1/restores",
+            status(201, json!({"job_id": "job-7"})),
+        ),
+        (&snapshot_route, ok(snapshot_json(SNAPSHOT_ID, false))),
+        (
+            "GET /api/v1/restore/hosts",
+            ok(json!([
+                {"key": "h1", "host_id": "h1", "restore_roots": ["/other"]},
+                {"key": "h2", "host_id": "h2", "restore_roots": ["/srv/recovery", "/srv/b"]}
+            ])),
+        ),
+    ]);
+    stdout(lode(&server, home.path()).args(["restore", SNAPSHOT_ID, "--host", "h2"]));
+    let body: Value = serde_json::from_str(&server.only("POST", "/api/v1/restores").body).unwrap();
+    assert_eq!(body["destination"], "/srv/recovery/2020-09-13-01234567");
+}
+
+#[test]
+fn server_cli_restore_default_ignores_unreadable_host_list() {
+    let home = tempfile::tempdir().unwrap();
+    let snapshot_route = format!("GET /api/v1/snapshots/{SNAPSHOT_ID}");
+    let server = fake(vec![
+        (
+            "POST /api/v1/restores",
+            status(201, json!({"job_id": "job-7"})),
+        ),
+        (&snapshot_route, ok(snapshot_json(SNAPSHOT_ID, false))),
+        (
+            "GET /api/v1/restore/hosts",
+            error(403, "forbidden", "missing scope"),
+        ),
+    ]);
+    stdout(lode(&server, home.path()).args(["restore", SNAPSHOT_ID, "--host", "h2"]));
+    let body: Value = serde_json::from_str(&server.only("POST", "/api/v1/restores").body).unwrap();
+    assert_eq!(
+        body["destination"],
+        "/var/lib/lodestore/restore/2020-09-13-01234567"
+    );
+}
+
+#[test]
 fn server_cli_restore_sends_accept_unverified() {
     let home = tempfile::tempdir().unwrap();
     let server = fake(vec![(

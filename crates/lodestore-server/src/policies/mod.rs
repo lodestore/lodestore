@@ -599,6 +599,7 @@ pub async fn list_policies(
     request_body = PolicyInput,
     responses(
         (status = 201, description = "The created policy", body = PolicyDetail),
+        (status = 403, description = "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention or a more frequent cron", body = ErrorBody),
         (status = 409, description = "The name is taken", body = ErrorBody),
         (status = 422, description = "Invalid policy", body = ErrorBody),
     )
@@ -674,6 +675,7 @@ pub async fn get_policy(
     request_body = PolicyUpdate,
     responses(
         (status = 200, description = "The updated policy", body = PolicyDetail),
+        (status = 403, description = "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention or a more frequent cron", body = ErrorBody),
         (status = 404, description = "Unknown policy", body = ErrorBody),
         (status = 409, description = "The policy changed since base_revision (code policy_conflict)", body = ErrorBody),
         (status = 422, description = "Invalid policy or changed name", body = ErrorBody),

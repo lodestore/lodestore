@@ -1521,6 +1521,16 @@
               }
             }
           },
+          "403": {
+            "description": "The token lacks hooks:write and the new labels make a policy with hooks reach this host",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "404": {
             "description": "Unknown host",
             "content": {
@@ -1532,7 +1542,7 @@
             }
           },
           "409": {
-            "description": "The host is revoked",
+            "description": "The host is revoked or its labels changed since they were read",
             "content": {
               "application/json": {
                 "schema": {
@@ -2311,7 +2321,7 @@
             }
           },
           "429": {
-            "description": "A token started this policy on this host more than 6 times in the last hour (code rate_limited, Retry-After in seconds)",
+            "description": "This policy was started on this host 6 times in the last hour (code rate_limited, Retry-After in seconds)",
             "content": {
               "application/json": {
                 "schema": {
@@ -2952,6 +2962,16 @@
               }
             }
           },
+          "403": {
+            "description": "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention or a more frequent cron",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "409": {
             "description": "The name is taken",
             "content": {
@@ -3010,6 +3030,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ApplyResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention or a more frequent cron",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -3175,6 +3205,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/PolicyDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention or a more frequent cron",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }

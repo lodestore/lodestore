@@ -265,7 +265,7 @@ The agent decides where it writes. It accepts a restore into a folder only below
 | Option | Meaning |
 |--------|---------|
 | `--path PATH` | Restore only this absolute path; repeat for more. Default: everything |
-| `--target DIR` | Folder on the host, below one of the agent's `allowed_restore_roots`. Default: `/var/lib/lodestore/restore/<date>-<first 8 of the id>` |
+| `--target DIR` | Folder on the host, below one of the agent's `allowed_restore_roots`. Default: `<date>-<first 8 of the id>` below the first restore folder the host reports, `/var/lib/lodestore/restore` when it reports none or the token cannot read the host list (`snapshots:read`) |
 | `--in-place` | Restore over the original files. Needs `--yes` and an agent with `allow_in_place` |
 | `--conflict POLICY` | `overwrite-changed` (default), `skip-existing` or `stop-if-not-empty` |
 | `--no-owners` | Do not restore file owners, setuid/setgid bits or file capabilities. Without it the command asks for them, which a token may do only with `restore:in-place` |

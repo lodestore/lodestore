@@ -148,7 +148,7 @@ restore:
 
 | Key | Meaning |
 |-----|---------|
-| `allowed_restore_roots` | Absolute paths, without `..`, `.` or a trailing `/`. A restore into a new folder must end up below one of them; symlinks below a root are not followed out of it. Default when the key is missing: the one root `/var/lib/lodestore/restore`. Folders the agent creates for a restore get mode `0700` |
+| `allowed_restore_roots` | Absolute paths, without `..`, `.` or a trailing `/`. The root `/` is not accepted: the agent ignores it with a warning, so a list with only `/` allows nothing. A restore into a new folder must end up below one of them; symlinks below a root are not followed out of it. Default when the key is missing: the one root `restore` in the agent's state directory, `/var/lib/lodestore/restore` unless you changed `--state-dir`. Folders the agent creates for a restore get mode `0700` |
 | `allow_in_place` | `true` allows restoring over the original files. Default `false`: the agent refuses with `restore_in_place_disabled` |
 
 A restore outside the roots fails with `restore_outside_roots`. The agent reports its roots and the `allow_in_place` flag to the server, so the web interface offers an allowed folder and the server refuses a wrong request with 400 before it reaches the host.
