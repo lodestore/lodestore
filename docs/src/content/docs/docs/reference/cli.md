@@ -56,7 +56,7 @@ An `http://` address that is not on the loopback interface works, but the token 
 | `lode server find <pattern> [--host HOST]... [--label KEY=VALUE]...` | `snapshots:read`; see [Find a file](#find-a-file) |
 | `lode server restore <snapshot> --host <host> [options]` | `restore:host`, or `restore:in-place` with `--in-place` or when owners are restored (see [Restore through the server](#restore-through-the-server)); and `snapshots:read` when `--target` and `--in-place` are not given |
 
-A `<host>` is a host id or a hostname. A hostname is looked up in the host list, which needs `hosts:read`; a token without that scope must pass the id, which `lode server hosts list` shows in the `ID` column. `lode server restore` says to pass the id or use a token with `hosts:read` when the server does not know the name as a host id. When several hosts share a name, `lode` asks for the id.
+A `<host>` is a host id or a hostname. A hostname is looked up in the host list, which needs `hosts:read`; a token without that scope must pass the id, which is in the address of the host's page in the web interface (and in the `ID` column of `lode server hosts list`, which itself needs `hosts:read`). `lode server restore` says to pass the id or use a token with `hosts:read` when the server does not know the name as a host id. When several hosts share a name, `lode` asks for the id.
 
 Running a policy that already has a queued or running job on a host does not queue a second one. The command prints `Job <id> on <host> is already queued` for it.
 
