@@ -2,6 +2,8 @@ mod common;
 
 use common::{Api, TestServer, backends, bearer_client};
 use lodestore_agent::{EnrollArgs, NetOptions};
+use lodestore_server::hosts::labels::Label;
+use lodestore_server::hosts::replace_labels;
 use serde_json::{Value, json};
 
 const DUMP: &str = "  hooks:\n    before:\n      - script: dump-db\n";
@@ -575,6 +577,36 @@ async fn policy_scopes_labels_widening_needs_hooks_write() {
         assert_eq!(status, 200, "[{what}] session: {body}");
         let (status, body) = session.put(&path, &role("db")).await;
         assert_eq!(status, 200, "[{what}] session: {body}");
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn policy_scopes_labels_write_is_compare_and_set() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let repo = ts.create_local_repository("main").await;
+        let session = Session {
+            api: ts.api().await,
+            ts: &ts,
+        };
+        let id = session.enroll(&repo, "web-1", "web").await;
+        let what = backend.name();
+        let label = |value: &str| {
+            vec![Label {
+                key: "role".into(),
+                value: value.into(),
+            }]
+        };
+        let stored = |value: &str| serde_json::to_string(&label(value)).unwrap();
+
+        let stale = replace_labels(ts.state(), &id, &stored("old"), &label("db")).await;
+        assert!(!stale.unwrap(), "[{what}] a stale write must not land");
+        assert_eq!(labels_of(&session, &id).await, role("web")["labels"]);
+
+        let fresh = replace_labels(ts.state(), &id, &stored("web"), &label("db")).await;
+        assert!(fresh.unwrap(), "[{what}]");
+        assert_eq!(labels_of(&session, &id).await, role("db")["labels"]);
         ts.stop().await;
     }
 }

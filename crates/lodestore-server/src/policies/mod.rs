@@ -403,15 +403,17 @@ async fn all_policies(state: &AppState) -> Result<Vec<PolicyRow>, ApiError> {
 pub(crate) async fn hook_policies_gained_by_labels(
     state: &AppState,
     host_id: &str,
+    current_labels: &[Label],
     labels: &[Label],
 ) -> Result<Vec<String>, ApiError> {
-    let Some(before) = load_agents(state)
+    let Some(mut before) = load_agents(state)
         .await?
         .into_iter()
         .find(|a| a.id == host_id)
     else {
         return Ok(Vec::new());
     };
+    before.labels = current_labels.to_vec();
     let after = AgentRow {
         id: before.id.clone(),
         hostname: before.hostname.clone(),
