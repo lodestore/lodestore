@@ -41,9 +41,11 @@ export const tokens = {
 		namePlaceholder: "ci-gitops",
 		permissions: "Permissions",
 		scopesHint:
-			"For CI that applies policies, choose policies:read and policies:write. Policies with retention also need snapshots:delete. For Prometheus, choose metrics:read.",
+			"For CI that applies policies, choose policies:read and policies:write. Policies with retention also need snapshots:delete, and policies with hooks need hooks:write. For Prometheus, choose metrics:read.",
 		forPrometheus: "For Prometheus",
 		deletesData: "Deletes data",
+		writesOverHost: "Overwrites files on hosts",
+		runsCommandsAsRoot: "Runs commands as root on hosts",
 		options: "Options",
 		optionsValue: (period: string) => `· expires in ${period}`,
 		expires: "Expires",

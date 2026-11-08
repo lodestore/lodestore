@@ -133,3 +133,32 @@ sudo install -m 0644 lodestore-agent-linux-$ARCH.minisig /usr/share/lodestore/ag
 ```
 
 Without them the server answers that the agent for that architecture is not available. In that case run the install command with `--from-github`, which fetches the agent and its `SHA256SUMS` from the release instead. The Docker image already holds both architectures.
+
+## Restoring on the host
+
+An agent writes restored files only where its own `/etc/lodestore/agent.yaml` allows it. The server cannot change this file, and the agent checks the rule itself for every restore, whoever started it: a token, the web interface, or a server that someone else controls.
+
+```yaml
+restore:
+  allowed_restore_roots:
+    - /var/lib/lodestore/restore
+    - /srv/recovery
+  allow_in_place: false
+```
+
+| Key | Meaning |
+|-----|---------|
+| `allowed_restore_roots` | Absolute paths, without `..`, `.` or a trailing `/`. The root `/` is not accepted: the agent ignores it with a warning, so a list with only `/` allows nothing. A restore into a new folder must end up below one of them; symlinks below a root are not followed out of it. Default when the key is missing: the one root `restore` in the agent's state directory, `/var/lib/lodestore/restore` unless you changed `--state-dir`. Folders the agent creates for a restore get mode `0700` |
+| `allow_in_place` | `true` allows restoring over the original files. Default `false`: the agent refuses with `restore_in_place_disabled` |
+
+A restore outside the roots fails with `restore_outside_roots`. The agent reports its roots and the `allow_in_place` flag to the server, so the web interface offers an allowed folder and the server refuses a wrong request with 400 before it reaches the host.
+
+The file belongs to root and must not be writable by group or others; otherwise the agent ignores it with a warning and uses the defaults.
+
+To allow restores in place when installing a host, add `--allow-in-place-restore` to the install command:
+
+```sh
+curl -fsSL https://lodestore.example.com/install.sh | sudo sh -s -- --join <token> --allow-in-place-restore
+```
+
+On a host without `agent.yaml` the installer writes it with `restore: { allow_in_place: true }`, mode `0600`, owner root. When `agent.yaml` already exists and does not enable `allow_in_place`, the installer stops with an error and changes nothing; add the key by hand and run it again.

@@ -83,6 +83,7 @@ export type RetentionDraft = {
 	keepDaily: string;
 	keepWeekly: string;
 	keepMonthly: string;
+	includeStdin: boolean;
 };
 
 export const BLANK_RETENTION: RetentionDraft = {
@@ -91,6 +92,7 @@ export const BLANK_RETENTION: RetentionDraft = {
 	keepDaily: "",
 	keepWeekly: "",
 	keepMonthly: "",
+	includeStdin: false,
 };
 
 export const BLANK_SCHEDULE: ScheduleDraft = {
@@ -179,6 +181,7 @@ export function draftFromPolicy(policy: BackupPolicy): PolicyDraft {
 			keepDaily: countToDraft(spec.retention?.keepDaily),
 			keepWeekly: countToDraft(spec.retention?.keepWeekly),
 			keepMonthly: countToDraft(spec.retention?.keepMonthly),
+			includeStdin: spec.retention?.includeStdin ?? false,
 		},
 		limits: {
 			uploadRate: spec.limits?.uploadRate ?? "",
@@ -237,14 +240,15 @@ export function retentionFromDraft(
 ): Retention | undefined {
 	const within = draft.keepWithin.trim();
 	const count = (value: string) => (value === "" ? undefined : Number(value));
-	const retention = {
+	const rules = {
 		...(draft.keepLast !== "" && { keepLast: count(draft.keepLast) }),
 		...(within !== "" && { keepWithin: within }),
 		...(draft.keepDaily !== "" && { keepDaily: count(draft.keepDaily) }),
 		...(draft.keepWeekly !== "" && { keepWeekly: count(draft.keepWeekly) }),
 		...(draft.keepMonthly !== "" && { keepMonthly: count(draft.keepMonthly) }),
 	};
-	return Object.keys(retention).length > 0 ? retention : undefined;
+	if (Object.keys(rules).length === 0) return undefined;
+	return draft.includeStdin ? { ...rules, includeStdin: true } : rules;
 }
 
 function limitsFromDraft(draft: LimitsDraft): BackupPolicy["spec"]["limits"] {

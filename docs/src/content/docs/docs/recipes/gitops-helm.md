@@ -25,7 +25,8 @@ Create an API token in the web interface under Settings, API tokens. It is shown
 | --- | --- |
 | `policies:read` | `lode apply` reads the current policies to plan the change |
 | `policies:write` | `lode apply` creates, updates and, with `--prune`, deletes them |
-| `snapshots:delete` | Only if your files set or change a `retention` block. Retention makes the server delete snapshots, so the server refuses the change without it (exit code 13) |
+| `snapshots:delete` | Only if your files set or change a `retention` block, or make the schedule of a policy with retention run more often. Retention makes the server delete snapshots, so the server refuses the change without it (exit code 13) |
+| `hooks:write` | Only if your files add, change or remove `hooks`, or widen a policy with hooks (another `repository`, or a selector that is not narrower: an empty one, a changed label, a new host id). Hooks run commands as root on the hosts, so the server refuses the change without it (exit code 13) |
 
 Store the token as a secret of your CI system, and the server address as an ordinary variable. `lode` reads them from `LODESTORE_SERVER` and `LODESTORE_TOKEN`. There is no flag for the token, so it does not show in the process list. Use an `https://` address; over plain HTTP the token travels unprotected and `lode` warns about it.
 

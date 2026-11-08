@@ -8,15 +8,15 @@ use utoipa::{IntoParams, ToSchema};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use super::restore::{RestoreRequest, enqueue_restore};
+use super::restore::{RestoreRequest, enqueue_restore, require_roots_capability};
 use super::{
     ACTIVE_STATES, AGENT_UPDATE_COLUMNS, AGENT_UPDATE_FROM, ConflictPolicyDto, DOWNLOAD_COLUMNS,
     JOB_COLUMNS, JOB_FROM, JobDetail, JobKind, JobProgressDto, JobSource, JobState, JobSummary,
-    RunJob, agent_update_summary, busy_hosts, check_select, check_summary, download_summary,
-    enqueue, gc_select, gc_summary, job_spec, load_agent_update, load_download, load_job,
-    summary_from_row,
+    RunJob, agent_update_summary, busy_hosts, check_run_rate, check_select, check_summary,
+    download_summary, enqueue, gc_select, gc_summary, job_spec, load_agent_update, load_download,
+    load_job, summary_from_row,
 };
-use crate::auth::tokens::{JobsRead, JobsRun, RestoreScope, Scoped};
+use crate::auth::tokens::{JobsRead, JobsRun, Principal, RestoreWrite, Scope, Scoped};
 use crate::browse::AGENTLESS;
 use crate::browse::tree::decode_b64;
 use crate::db::now_ms;
@@ -798,11 +798,12 @@ pub async fn cancel_job(
         (status = 200, description = "The queued job of the same host and policy", body = RunJob),
         (status = 404, description = "Unknown job", body = ErrorBody),
         (status = 409, description = "The job cannot be repeated", body = ErrorBody),
+        (status = 429, description = "This policy was started on this host 6 times in the last hour (code rate_limited, Retry-After in seconds)", body = ErrorBody),
     )
 )]
 pub async fn rerun_job(
     State(state): State<AppState>,
-    _auth: Scoped<JobsRun>,
+    auth: Scoped<JobsRun>,
     Path(id): Path<String>,
 ) -> Result<Json<RunJob>, ApiError> {
     let Some(job) = load_job(&state, &id).await? else {
@@ -837,6 +838,9 @@ pub async fn rerun_job(
         ));
     };
     let host = [(job.summary.host_id.clone(), job.summary.hostname.clone())];
+    if matches!(auth.principal(), Principal::Token { .. }) {
+        check_run_rate(&state, &policy_id, &host).await?;
+    }
     let run = enqueue(
         &state,
         &policy_id,
@@ -854,6 +858,10 @@ fn downloads_refused() -> ApiError {
     ApiError::Conflict("Downloads cannot be cancelled or run again.".into())
 }
 
+const RESTORE_HOST_PURPOSE: &str = "restore into a folder on the host";
+const RESTORE_IN_PLACE_PURPOSE: &str = "restore in place";
+const RESTORE_OWNERS_PURPOSE: &str = "restore file owners, setuid/setgid bits or file capabilities";
+
 #[derive(Deserialize, ToSchema)]
 pub struct RestoreBody {
     pub snapshot_id: String,
@@ -864,6 +872,7 @@ pub struct RestoreBody {
     pub destination: String,
     pub in_place: bool,
     pub conflict: ConflictPolicyDto,
+    /// Restores file owners, setuid/setgid bits and file capabilities. An API token needs the `restore:in-place` scope for it.
     pub restore_owners: bool,
     /// Must be true to restore a snapshot that nothing signed; such a snapshot cannot be restored in place.
     #[serde(default)]
@@ -879,12 +888,13 @@ pub struct RestoreCreated {
     post,
     tag = "Restore",
     summary = "Restore selected paths of a snapshot to a host",
-    security(("session" = [], "csrf" = []), ("bearer" = ["restore"])),
+    security(("session" = [], "csrf" = []), ("bearer" = ["restore:host"]), ("bearer" = ["restore:in-place"])),
     path = "/api/v1/restores",
     request_body = RestoreBody,
     responses(
         (status = 201, description = "The restore job is queued", body = RestoreCreated),
-        (status = 400, description = "`restore_destination_root`: a restore into a new folder names `/`; `restore_in_place_not_empty`: a restore in place with `stop_if_not_empty`; `restore_unverified_in_place`: nothing signed the snapshot, so it cannot be restored in place; `restore_unverified_not_confirmed`: nothing signed the snapshot and `accept_unverified` is not set", body = ErrorBody),
+        (status = 400, description = "`restore_destination_root`: a restore into a new folder names `/`; `restore_in_place_not_empty`: a restore in place with `stop_if_not_empty`; `restore_unverified_in_place`: nothing signed the snapshot, so it cannot be restored in place; `restore_unverified_not_confirmed`: nothing signed the snapshot and `accept_unverified` is not set; `restore_outside_roots`: the new folder is outside the folders the agent restores into; `restore_in_place_disabled`: the agent does not allow restores in place; `restore_agent_outdated`: a token cannot restore to an agent that does not check restore folders", body = ErrorBody),
+        (status = 403, description = "The token lacks `restore:host` for a new folder, or `restore:in-place` for a restore in place or with `restore_owners`", body = ErrorBody),
         (status = 404, description = "Unknown snapshot or host, or a selected path is missing", body = ErrorBody),
         (status = 422, description = "The selection, destination or host is not valid", body = ErrorBody),
         (status = 502, description = "The repository storage is unavailable", body = ErrorBody),
@@ -892,7 +902,7 @@ pub struct RestoreCreated {
 )]
 pub async fn create_restore(
     State(state): State<AppState>,
-    auth: Scoped<RestoreScope>,
+    auth: Scoped<RestoreWrite>,
     Json(body): Json<RestoreBody>,
 ) -> Result<(StatusCode, Json<RestoreCreated>), ApiError> {
     let items = body
@@ -900,6 +910,17 @@ pub async fn create_restore(
         .iter()
         .map(|item| decode_b64(item))
         .collect::<Result<Vec<_>, _>>()?;
+    if body.in_place {
+        auth.require_also(Scope::RestoreInPlace, RESTORE_IN_PLACE_PURPOSE)?;
+    } else {
+        auth.require_also(Scope::RestoreHost, RESTORE_HOST_PURPOSE)?;
+    }
+    if body.restore_owners {
+        auth.require_also(Scope::RestoreInPlace, RESTORE_OWNERS_PURPOSE)?;
+    }
+    if matches!(auth.principal(), Principal::Token { .. }) {
+        require_roots_capability(&state, &body.target_host_id).await?;
+    }
     let job_id = enqueue_restore(
         &state,
         RestoreRequest {

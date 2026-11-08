@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use lodestore_format::Error;
 use lodestore_format::crypto::{BLOB_TYPE_DATA, BlobId, RepoId};
-use lodestore_format::fs::restore::{Overwrite, RestoreSettings, Restorer};
+use lodestore_format::fs::restore::{Overwrite, RestoreSettings, Restorer, is_empty_below};
 use lodestore_format::keys::cdc_seed;
 use lodestore_format::pb::{Node, NodeType};
 use lodestore_format::reader::open_chunk;
@@ -27,13 +27,13 @@ use lodestore_proto::agent::v1::{
     RestorePlanBatch, RestorePlanRequest, RestoreSpec,
 };
 use prost::Message;
-use rustix::fs::{Access, access};
 use tonic::transport::Channel;
 use tonic::{Code, Streaming};
 use zeroize::{Zeroize, Zeroizing};
 
 use super::fetch::{FetchError, Fetchers, PackAccess, PackFetcher, Span, coalesce};
 use super::{JobCtx, ProgressCell, failed, now_ms};
+use crate::config::AgentSettings;
 use crate::session::agent_channel;
 
 const CANCEL_POLL: Duration = Duration::from_millis(50);
@@ -127,6 +127,10 @@ pub struct RestoreOptions {
     pub root: PathBuf,
     /// Waits before opening the plan again after it broke; one entry per retry.
     pub plan_pauses: Vec<Duration>,
+    /// Folders a restore into a new folder may write under.
+    pub roots: Vec<PathBuf>,
+    /// Whether a restore in place is allowed on this host.
+    pub allow_in_place: bool,
 }
 
 impl Default for RestoreOptions {
@@ -134,6 +138,8 @@ impl Default for RestoreOptions {
         RestoreOptions {
             root: PathBuf::from("/"),
             plan_pauses: PLAN_PAUSES.to_vec(),
+            roots: Vec::new(),
+            allow_in_place: false,
         }
     }
 }
@@ -188,6 +194,7 @@ struct Prepared {
     repo_id: RepoId,
     k_id: Zeroizing<[u8; 32]>,
     target: PathBuf,
+    confined: Option<(PathBuf, PathBuf)>,
     in_place: bool,
     overwrite: Overwrite,
     restore_owners: bool,
@@ -208,7 +215,14 @@ impl Prepared {
             .map(Zeroizing::new)
             .map_err(|_| invalid("chunk key"))?;
         let policy = ConflictPolicy::try_from(spec.conflict).unwrap_or_default();
+        let mut confined = None;
         let target = if spec.in_place {
+            if !options.allow_in_place {
+                return Err(abort(
+                    "restore_in_place_disabled",
+                    "restores in place are turned off on this host; set restore.allow_in_place: true in agent.yaml",
+                ));
+            }
             if policy == ConflictPolicy::StopIfNotEmpty {
                 return Err(abort(
                     "restore_target_not_empty",
@@ -230,6 +244,26 @@ impl Prepared {
             {
                 return Err(invalid("a restore into a new folder cannot write to \"/\""));
             }
+            let found = options
+                .roots
+                .iter()
+                .find_map(|root| path.strip_prefix(root).ok().map(|rest| (root, rest)));
+            let Some((root, rest)) = found else {
+                let roots: Vec<_> = options
+                    .roots
+                    .iter()
+                    .map(|r| r.display().to_string())
+                    .collect();
+                return Err(abort(
+                    "restore_outside_roots",
+                    format!(
+                        "{} is outside the folders this host restores into: {}",
+                        path.display(),
+                        roots.join(", ")
+                    ),
+                ));
+            };
+            confined = Some((root.clone(), rest.to_path_buf()));
             path
         };
         Ok(Prepared {
@@ -237,6 +271,7 @@ impl Prepared {
             repo_id,
             k_id,
             target,
+            confined,
             in_place: spec.in_place,
             overwrite: match policy {
                 ConflictPolicy::SkipExisting => Overwrite::Never,
@@ -251,15 +286,15 @@ impl Prepared {
         if !self.stop_if_not_empty {
             return Ok(());
         }
-        match std::fs::read_dir(&self.target) {
-            Ok(mut entries) => match entries.next() {
-                Some(_) => Err(abort(
-                    "restore_target_not_empty",
-                    format!("{} is not empty", self.target.display()),
-                )),
-                None => Ok(()),
-            },
-            Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+        let Some((root, rest)) = &self.confined else {
+            return Ok(());
+        };
+        match is_empty_below(root, rest) {
+            Ok(false) => Err(abort(
+                "restore_target_not_empty",
+                format!("{} is not empty", self.target.display()),
+            )),
+            Ok(true) => Ok(()),
             Err(e) => Err(io_abort(
                 &e,
                 &format!("cannot read {}", self.target.display()),
@@ -275,6 +310,7 @@ impl Prepared {
             k_id: self.k_id.clone(),
             seed: cdc_seed(&self.k_id),
             restore_owners: self.restore_owners,
+            keep_privileges: self.in_place,
         }
     }
 }
@@ -313,17 +349,21 @@ impl<'a, F: PackFetcher> Attempt<'a, F> {
         (errors, warnings): (u64, u64),
     ) -> Result<Self, Abort> {
         let target = prepared.target.display();
-        let restorer =
-            Restorer::open(&prepared.target, prepared.settings()).map_err(|e| match e {
-                Error::Io(e) => io_abort(&e, &format!("cannot open {target}")),
-                other => abort("restore_failed", other.to_string()),
-            })?;
+        let opened = match &prepared.confined {
+            Some((root, rest)) => Restorer::open_in(root, rest, prepared.settings()),
+            None => Restorer::open(&prepared.target, prepared.settings()),
+        };
+        let restorer = opened.map_err(|e| match e {
+            Error::Io(e) => io_abort(&e, &format!("cannot open {target}")),
+            other => abort("restore_failed", other.to_string()),
+        })?;
         // Entries that cannot be written only warn, so a new folder nothing
         // can be written to has to fail here. In place, parts of `/` may be
         // read-only while the rest is not.
         if !prepared.in_place {
-            access(&prepared.target, Access::WRITE_OK)
-                .map_err(|e| io_abort(&e.into(), &format!("cannot write to {target}")))?;
+            restorer
+                .check_writable()
+                .map_err(|e| io_abort(&e, &format!("cannot write to {target}")))?;
         }
         let cell = ctx.progress_cell();
         for counter in [
@@ -735,15 +775,6 @@ fn stopped(ctx: &JobCtx, mut finished: JobFinished) -> JobFinished {
 }
 
 /// Restores what the plan describes and returns the result for the server.
-pub async fn execute<P: PlanSource, F: PackFetcher>(
-    ctx: &JobCtx,
-    spec: &RestoreSpec,
-    plan: &mut P,
-    fetch: &F,
-) -> JobFinished {
-    execute_with(ctx, spec, plan, fetch, &RestoreOptions::default()).await
-}
-
 pub async fn execute_with<P: PlanSource, F: PackFetcher>(
     ctx: &JobCtx,
     spec: &RestoreSpec,
@@ -864,7 +895,12 @@ pub fn run_restore_with<P: PlanSource, F: PackFetcher>(
 /// The executor the agent runs for a `JobAssign` with a restore.
 pub fn run_restore_job(ctx: JobCtx, mut spec: RestoreSpec) {
     ctx.event(JobEventLevel::Info, "started", b"", "", "restore started");
-    let options = RestoreOptions::default();
+    let settings = AgentSettings::load(ctx.paths()).restore;
+    let options = RestoreOptions {
+        roots: settings.roots(ctx.paths()),
+        allow_in_place: settings.allow_in_place,
+        ..Default::default()
+    };
     let finished = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

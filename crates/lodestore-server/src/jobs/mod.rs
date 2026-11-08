@@ -478,12 +478,13 @@ async fn enqueue_one(
     policy_name: &str,
     (host_id, hostname): &(String, String),
     spec: &[u8],
+    origin: &str,
 ) -> Result<RunJob, ApiError> {
     for _ in 0..3 {
         let id = uuid::Uuid::now_v7().to_string();
         let inserted = sqlx::query(
-            "INSERT INTO jobs (id, host_id, policy_id, policy_name, source, state, spec, queued_at) \
-             VALUES ($1, $2, $3, $4, 'manual', 'queued', $5, $6) ON CONFLICT DO NOTHING",
+            "INSERT INTO jobs (id, host_id, policy_id, policy_name, source, state, spec, queued_at, origin) \
+             VALUES ($1, $2, $3, $4, 'manual', 'queued', $5, $6, $7) ON CONFLICT DO NOTHING",
         )
         .bind(&id)
         .bind(host_id)
@@ -491,6 +492,7 @@ async fn enqueue_one(
         .bind(policy_name)
         .bind(spec.to_vec())
         .bind(now_ms())
+        .bind(origin)
         .execute(&state.db.pool)
         .await?
         .rows_affected()
@@ -521,6 +523,51 @@ async fn enqueue_one(
     ))
 }
 
+pub const RUN_NOW_PER_HOUR: i64 = 6;
+
+const RUN_NOW_WINDOW_MS: i64 = 3_600_000;
+
+fn run_rate_message(hostname: &str, minutes: u64) -> String {
+    let unit = if minutes == 1 { "minute" } else { "minutes" };
+    format!(
+        "This policy was started on {hostname} {RUN_NOW_PER_HOUR} times in the last hour. Try again in {minutes} {unit}."
+    )
+}
+
+pub async fn check_run_rate(
+    state: &AppState,
+    policy_id: &str,
+    hosts: &[(String, String)],
+) -> Result<(), ApiError> {
+    let now = now_ms();
+    for (host_id, hostname) in hosts {
+        let row = sqlx::query(
+            "SELECT COUNT(*) AS n, MIN(queued_at) AS oldest FROM jobs \
+             WHERE policy_id = $1 AND host_id = $2 AND kind = 'backup' \
+             AND source = 'manual' AND origin = 'manual' AND queued_at > $3",
+        )
+        .bind(policy_id)
+        .bind(host_id)
+        .bind(now - RUN_NOW_WINDOW_MS)
+        .fetch_one(&state.db.pool)
+        .await?;
+        let runs: i64 = row.try_get("n")?;
+        if runs < RUN_NOW_PER_HOUR {
+            continue;
+        }
+        let oldest: i64 = row.try_get("oldest")?;
+        let retry_after_s = u64::try_from((oldest + RUN_NOW_WINDOW_MS - now) / 1000 + 1)
+            .unwrap_or(1)
+            .max(1);
+        let minutes = retry_after_s.div_ceil(60);
+        return Err(ApiError::TooManyRuns {
+            message: run_rate_message(hostname, minutes),
+            retry_after_s,
+        });
+    }
+    Ok(())
+}
+
 pub async fn enqueue(
     state: &AppState,
     policy_id: &str,
@@ -528,10 +575,21 @@ pub async fn enqueue(
     hosts: &[(String, String)],
     spec: &JobSpec,
 ) -> Result<Vec<RunJob>, ApiError> {
+    enqueue_with_origin(state, policy_id, policy_name, hosts, spec, "manual").await
+}
+
+pub async fn enqueue_with_origin(
+    state: &AppState,
+    policy_id: &str,
+    policy_name: &str,
+    hosts: &[(String, String)],
+    spec: &JobSpec,
+    origin: &str,
+) -> Result<Vec<RunJob>, ApiError> {
     let spec = spec.encode_to_vec();
     let mut out = Vec::with_capacity(hosts.len());
     for host in hosts {
-        out.push(enqueue_one(state, policy_id, policy_name, host, &spec).await?);
+        out.push(enqueue_one(state, policy_id, policy_name, host, &spec, origin).await?);
     }
     Ok(out)
 }
@@ -1119,4 +1177,21 @@ pub async fn last_job(
         queued_at: row.try_get("queued_at")?,
         finished_at: row.try_get("finished_at")?,
     }))
+}
+
+#[cfg(test)]
+mod run_rate_message_tests {
+    use super::run_rate_message;
+
+    #[test]
+    fn names_the_policy_not_the_token_and_pluralises() {
+        assert_eq!(
+            run_rate_message("web-1", 1),
+            "This policy was started on web-1 6 times in the last hour. Try again in 1 minute."
+        );
+        assert_eq!(
+            run_rate_message("web-1", 12),
+            "This policy was started on web-1 6 times in the last hour. Try again in 12 minutes."
+        );
+    }
 }

@@ -1,5 +1,8 @@
+use std::borrow::Cow;
+
 use axum::Json;
-use axum::http::StatusCode;
+use axum::http::header::RETRY_AFTER;
+use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 use utoipa::ToSchema;
@@ -13,7 +16,7 @@ pub enum ApiError {
     #[error("The token needs the {0} scope.")]
     MissingScope(&'static str),
     #[error("The token needs the {0} scope to {1}.")]
-    MissingScopeFor(&'static str, &'static str),
+    MissingScopeFor(&'static str, Cow<'static, str>),
     #[error("CSRF check failed")]
     Csrf,
     #[error("setup required")]
@@ -33,6 +36,8 @@ pub enum ApiError {
     PolicyConflict(String),
     #[error("too many requests")]
     RateLimited,
+    #[error("{message}")]
+    TooManyRuns { message: String, retry_after_s: u64 },
     #[error("{0}")]
     Backend(String),
     #[error(transparent)]
@@ -62,6 +67,7 @@ impl ApiError {
             ApiError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
             ApiError::PolicyConflict(_) => (StatusCode::CONFLICT, "policy_conflict"),
             ApiError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
+            ApiError::TooManyRuns { .. } => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
             ApiError::Backend(_) => (StatusCode::BAD_GATEWAY, "backend"),
             ApiError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         }
@@ -77,6 +83,10 @@ impl From<sqlx::Error> for ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, code) = self.parts();
+        let retry_after = match &self {
+            ApiError::TooManyRuns { retry_after_s, .. } => Some(*retry_after_s),
+            _ => None,
+        };
         let message = match &self {
             ApiError::Internal(e) => {
                 tracing::error!(error = %e, "internal error");
@@ -84,13 +94,19 @@ impl IntoResponse for ApiError {
             }
             other => other.to_string(),
         };
-        (
+        let mut response = (
             status,
             Json(ErrorBody {
                 code: code.to_string(),
                 message,
             }),
         )
-            .into_response()
+            .into_response();
+        if let Some(secs) = retry_after {
+            response
+                .headers_mut()
+                .insert(RETRY_AFTER, HeaderValue::from(secs));
+        }
+        response
     }
 }

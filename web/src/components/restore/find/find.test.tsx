@@ -192,6 +192,7 @@ describe("Find file tab", { timeout: 30_000 }, () => {
 			snapshot_count: 3,
 			latest_snapshot_ms: snapshot.time,
 			unverified_count: 0,
+			restore_roots: null,
 		};
 
 		function open() {

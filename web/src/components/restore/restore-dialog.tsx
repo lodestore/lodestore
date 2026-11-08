@@ -7,7 +7,7 @@ import {
 	ShieldAlert,
 	TriangleAlert,
 } from "lucide-react";
-import { useId, useState } from "react";
+import { type ReactNode, useId, useState } from "react";
 import { toast } from "sonner";
 import {
 	getCreateRestoreMutationKey,
@@ -55,6 +55,8 @@ const TOAST_MS = 8000;
 const text = copy.restore.restoreDialog;
 const CONFLICTS = Object.keys(text.conflictOptions) as ConflictPolicyDto[];
 
+const DEFAULT_ROOT = "/var/lib/lodestore/restore";
+
 const pad = (n: number) => String(n).padStart(2, "0");
 
 /** `YYYY-MM-DD` in local time, the day the timeline groups the snapshot under. */
@@ -72,7 +74,18 @@ export function checkFolder(path: string): { error?: string; folder: string } {
 	return { error: folder === "/" ? text.pathRoot : undefined, folder };
 }
 
-function FieldMessage({ id, children }: { id: string; children: string }) {
+const REFUSED_CODES = new Set([
+	"restore_outside_roots",
+	"restore_in_place_disabled",
+	"restore_agent_outdated",
+	"forbidden",
+]);
+
+function isUnder(path: string, root: string) {
+	return root === "/" || path === root || path.startsWith(`${root}/`);
+}
+
+function FieldMessage({ id, children }: { id: string; children: ReactNode }) {
 	return (
 		<p id={id} className="flex items-start gap-1 text-sm text-destructive">
 			<CircleAlert aria-hidden className="mt-1 size-4 shrink-0" />
@@ -105,13 +118,20 @@ function RestoreForm({
 
 	const unverified = snapshot.verified_by == null;
 	const [acceptUnverified, setAcceptUnverified] = useState(false);
-	const [inPlace, setInPlace] = useState(false);
+	const [wantInPlace, setInPlace] = useState(false);
+	const inPlaceOff = target?.allow_in_place === false;
+	const inPlace = wantInPlace && !inPlaceOff;
 	const [confirmedFor, setConfirmedFor] = useState<string>();
 	const confirmed =
 		inPlace && targetKey !== undefined && confirmedFor === targetKey;
-	const [path, setPath] = useState(
-		`/var/lodestore/restore/${localDate(snapshot.time)}-${shortId(snapshot.id)}`,
-	);
+	const [edited, setPath] = useState<string>();
+	const roots = target?.restore_roots;
+	const rootsOff = roots?.length === 0;
+	const path =
+		edited ??
+		(rootsOff
+			? ""
+			: `${roots?.[0] ?? DEFAULT_ROOT}/${localDate(snapshot.time)}-${shortId(snapshot.id)}`);
 	const [conflict, setConflict] =
 		useState<ConflictPolicyDto>("overwrite_changed");
 	const policy: ConflictPolicyDto =
@@ -133,10 +153,19 @@ function RestoreForm({
 	const restore = useCreateRestore();
 
 	const { error: folderError, folder } = checkFolder(path);
-	const pathError = inPlace ? undefined : folderError;
+	const newFolderOff = !inPlace && rootsOff;
+	const pathError = inPlace || newFolderOff ? undefined : folderError;
+	const outsideRoots =
+		!inPlace &&
+		folderError === undefined &&
+		roots != null &&
+		roots.length > 0 &&
+		!roots.some((root) => isUnder(folder, checkFolder(root).folder));
 	const hostError = target === undefined;
 	const canStart =
 		pathError === undefined &&
+		!outsideRoots &&
+		!newFolderOff &&
 		!hostError &&
 		(!inPlace || confirmed) &&
 		(!unverified || acceptUnverified) &&
@@ -275,16 +304,18 @@ function RestoreForm({
 									<RadioGroupItem
 										value="new"
 										id={`${id}-new`}
-										aria-describedby={`${id}-new-help`}
+										aria-describedby={rootsOff ? undefined : `${id}-new-help`}
 									/>
 									<div className="flex min-w-0 flex-col gap-1">
 										<Label htmlFor={`${id}-new`}>{text.newFolder}</Label>
-										<p
-											id={`${id}-new-help`}
-											className="text-sm text-muted-foreground"
-										>
-											{text.newFolderHelp}
-										</p>
+										{!rootsOff && (
+											<p
+												id={`${id}-new-help`}
+												className="text-sm text-muted-foreground"
+											>
+												{text.newFolderHelp}
+											</p>
+										)}
 									</div>
 								</div>
 								{!inPlace && (
@@ -293,12 +324,32 @@ function RestoreForm({
 											aria-label={text.folderOn(targetName || sourceName)}
 											className="font-mono text-sm"
 											value={path}
-											aria-invalid={pathError !== undefined}
-											aria-describedby={pathError ? `${id}-path` : undefined}
+											aria-invalid={
+												pathError !== undefined || outsideRoots || newFolderOff
+											}
+											aria-describedby={
+												pathError
+													? `${id}-path`
+													: outsideRoots || newFolderOff
+														? `${id}-roots`
+														: undefined
+											}
 											onChange={(event) => setPath(event.target.value)}
 										/>
 										{pathError && (
 											<FieldMessage id={`${id}-path`}>{pathError}</FieldMessage>
+										)}
+										{newFolderOff && (
+											<FieldMessage id={`${id}-roots`}>
+												<TextWithPaths text={text.newFolderOff} />
+											</FieldMessage>
+										)}
+										{outsideRoots && (
+											<FieldMessage id={`${id}-roots`}>
+												<TextWithPaths
+													text={text.outsideRoots(roots.join(", "))}
+												/>
+											</FieldMessage>
 										)}
 									</div>
 								)}
@@ -308,19 +359,25 @@ function RestoreForm({
 									<RadioGroupItem
 										value="original"
 										id={`${id}-original`}
-										disabled={unverified}
+										disabled={unverified || inPlaceOff}
 										aria-describedby={
-											unverified ? `${id}-original-help` : undefined
+											unverified || inPlaceOff
+												? `${id}-original-help`
+												: undefined
 										}
 									/>
 									<div className="flex min-w-0 flex-col gap-1">
 										<Label htmlFor={`${id}-original`}>{text.original}</Label>
-										{unverified && (
+										{(unverified || inPlaceOff) && (
 											<p
 												id={`${id}-original-help`}
 												className="text-sm text-muted-foreground"
 											>
-												{text.unverifiedInPlaceDisabled}
+												{unverified ? (
+													text.unverifiedInPlaceDisabled
+												) : (
+													<TextWithPaths text={text.inPlaceOff} />
+												)}
 											</p>
 										)}
 									</div>
@@ -414,7 +471,9 @@ function RestoreForm({
 					<Alert variant="destructive" role="alert">
 						<AlertDescription>
 							<TextWithPaths
-								text={copy.errors.submit(text.failed, restore.error.message)}
+								text={(REFUSED_CODES.has(restore.error.code)
+									? copy.errors.refused
+									: copy.errors.submit)(text.failed, restore.error.message)}
 							/>
 						</AlertDescription>
 					</Alert>

@@ -10,7 +10,10 @@ use serde_json::Value;
 use sqlx::Row;
 use utoipa::ToSchema;
 
-use super::{Checked, Failure, PolicyRow, RETENTION_PURPOSE, all_policies, resolve, retention_of};
+use super::{
+    Checked, Failure, PolicyRow, RETENTION_PURPOSE, SCHEDULE_PURPOSE, all_policies,
+    gains_hook_hosts, hooks_purpose, resolve, retention_of, runs_more_often,
+};
 use crate::auth::tokens::{PoliciesWrite, Scope, Scoped};
 use crate::db::now_ms;
 use crate::error::{ApiError, ErrorBody};
@@ -294,6 +297,8 @@ struct Plan {
     steps: Vec<Step>,
     unchanged: u64,
     retention_changed: bool,
+    schedule_faster: bool,
+    hooks_policies: Vec<String>,
 }
 
 fn plan(
@@ -318,6 +323,8 @@ fn plan(
     let mut updates = Vec::new();
     let mut unchanged = 0;
     let mut retention_changed = false;
+    let mut schedule_faster = false;
+    let mut hooks_policies = Vec::new();
     let mut wanted = BTreeSet::new();
     for input in inputs {
         let name = input.checked.policy.metadata.name.clone();
@@ -332,6 +339,9 @@ fn plan(
         };
         let Some(row) = by_name.get(name.as_str()) else {
             retention_changed |= retention_of(&input.checked.policy).is_some();
+            if gains_hook_hosts(None, (&input.checked.repository_id, &input.checked.policy)) {
+                hooks_policies.push(name.clone());
+            }
             creates.push((
                 change(ChangeAction::Create, false, Vec::new()),
                 Step::Create(input.checked),
@@ -373,6 +383,14 @@ fn plan(
             continue;
         }
         retention_changed |= retention_of(&row.policy) != retention_of(&input.checked.policy);
+        schedule_faster |= retention_of(&input.checked.policy).is_some()
+            && runs_more_often(&row.policy, &input.checked.policy);
+        if gains_hook_hosts(
+            Some((&row.repository_id, &row.policy)),
+            (&input.checked.repository_id, &input.checked.policy),
+        ) {
+            hooks_policies.push(name.clone());
+        }
         updates.push((
             change(ChangeAction::Update, adopted, fields),
             Step::Update {
@@ -412,6 +430,8 @@ fn plan(
         steps,
         unchanged,
         retention_changed,
+        schedule_faster,
+        hooks_policies,
     })
 }
 
@@ -513,6 +533,7 @@ fn spec_json(policy: &BackupPolicy) -> Result<String, ApiError> {
     request_body = ApplyRequest,
     responses(
         (status = 200, description = "The plan; applied unless dry_run is set", body = ApplyResponse),
+        (status = 403, description = "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention or a more frequent cron", body = ErrorBody),
         (status = 409, description = "A policy to delete has jobs in progress, or policies changed while applying", body = ErrorBody),
         (status = 422, description = "Invalid input; nothing is applied", body = ApplyErrorBody),
     )
@@ -546,9 +567,17 @@ pub async fn apply_policies(
         steps,
         unchanged,
         retention_changed,
+        schedule_faster,
+        hooks_policies,
     } = plan(&req, &manager, inputs, all_policies(&state).await?)?;
     if retention_changed {
         auth.require_also(Scope::SnapshotsDelete, RETENTION_PURPOSE)?;
+    }
+    if schedule_faster {
+        auth.require_also(Scope::SnapshotsDelete, SCHEDULE_PURPOSE)?;
+    }
+    if !hooks_policies.is_empty() {
+        auth.require_also(Scope::HooksWrite, hooks_purpose(&hooks_policies))?;
     }
     if !req.dry_run && !steps.is_empty() {
         execute(&state, &manager, steps).await?;

@@ -45,6 +45,7 @@ function TokensPage() {
 	const [creating, setCreating] = useState(create === true);
 	const [revoking, setRevoking] = useState<ApiTokenItem>();
 	const origin = useRef<string>(undefined);
+	const createButton = useRef<HTMLButtonElement>(null);
 	const filter = state ?? "active";
 	const tokens = useListTokens({ state: filter });
 
@@ -64,7 +65,7 @@ function TokensPage() {
 					<h1 data-page-title className="text-2xl font-semibold">
 						{copy.tokens.title}
 					</h1>
-					<Button onClick={() => setCreating(true)}>
+					<Button ref={createButton} onClick={() => setCreating(true)}>
 						{copy.tokens.create}
 					</Button>
 				</div>
@@ -98,6 +99,7 @@ function TokensPage() {
 				open={creating}
 				onOpenChange={setCreating}
 				onFocusRow={focusRow}
+				onFocusTrigger={() => createButton.current?.focus()}
 			/>
 			<RevokeTokenDialog
 				token={revoking}

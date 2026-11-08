@@ -9,6 +9,7 @@ import {
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { delay, HttpResponse, http } from "msw";
+import { useState } from "react";
 import { describe, expect, it } from "vitest";
 import type {
 	BackupPolicy,
@@ -28,7 +29,10 @@ import { PoliciesTable } from "@/components/policies/policies-table";
 import {
 	draftFromPolicy,
 	policyFromDraft,
+	type RetentionDraft,
+	retentionFromDraft,
 } from "@/components/policies/policy-form";
+import { RetentionPanel } from "@/components/policies/retention-panel";
 import { ThemeProvider } from "@/components/theme/theme-provider";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { formatDateTime } from "@/lib/format";
@@ -2453,6 +2457,57 @@ describe("Retention section", () => {
 			(saved[0] as { policy: BackupPolicy }).policy.spec.retention,
 		).toEqual(stored);
 	}, 20_000);
+});
+
+describe("Retention includeStdin", () => {
+	it("includeStdin survives the form round trip", () => {
+		const stored = { keepLast: 3, includeStdin: true };
+		const policy = makePolicy("nightly", { retention: stored });
+		expect(policyFromDraft(draftFromPolicy(policy)).spec.retention).toEqual(
+			stored,
+		);
+
+		const plain = makePolicy("nightly", { retention: { keepLast: 3 } });
+		expect(policyFromDraft(draftFromPolicy(plain)).spec.retention).toEqual({
+			keepLast: 3,
+		});
+	});
+});
+
+describe("Retention includeStdin reset", () => {
+	let latest: RetentionDraft;
+	function Panel({ initial }: { initial: RetentionDraft }) {
+		const [draft, setDraft] = useState(initial);
+		latest = draft;
+		return (
+			<RetentionPanel draft={draft} onChange={setDraft} problems={new Map()} />
+		);
+	}
+	const base: RetentionDraft = {
+		keepLast: "3",
+		keepWithin: "",
+		keepDaily: "",
+		keepWeekly: "",
+		keepMonthly: "",
+		includeStdin: true,
+	};
+
+	it("turns includeStdin off when every rule is cleared", async () => {
+		const user = userEvent.setup();
+		render(<Panel initial={base} />);
+		const keepLast = screen.getByRole("textbox", { name: "Keep last" });
+		await user.clear(keepLast);
+		expect(latest.includeStdin).toBe(false);
+		await user.type(keepLast, "5");
+		expect(retentionFromDraft(latest)).toEqual({ keepLast: 5 });
+	});
+
+	it("keeps includeStdin while another rule stays filled", async () => {
+		const user = userEvent.setup();
+		render(<Panel initial={{ ...base, keepDaily: "7" }} />);
+		await user.clear(screen.getByRole("textbox", { name: "Keep last" }));
+		expect(latest.includeStdin).toBe(true);
+	});
 });
 
 describe("Retention preview", () => {

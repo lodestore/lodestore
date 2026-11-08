@@ -82,7 +82,7 @@ spec:
     keepWeekly: 4
 ```
 
-Create it in the web interface, or put it in git and use [`lode apply`](/docs/recipes/gitops-helm/). The schedule and retention fields are described in [Backup policies](/docs/guides/policies/).
+Create it in the web interface, or put it in git and use [`lode apply`](/docs/recipes/gitops-helm/); a token that applies a policy with hooks needs the `hooks:write` scope. The schedule and retention fields are described in [Backup policies](/docs/guides/policies/).
 
 ## When a hook fails
 

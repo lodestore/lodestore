@@ -133,6 +133,9 @@ pub struct Retention {
     pub keep_weekly: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_monthly: Option<i64>,
+    /// Also applies the rules to stdin snapshots that name this policy; they form the manual pool.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub include_stdin: bool,
 }
 
 impl Retention {
@@ -542,4 +545,30 @@ fn script_ok(script: &str) -> bool {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
         && !script.contains("..")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retention_include_stdin_default_off() {
+        let plain: Retention = yaml_serde::from_str("keepLast: 3").unwrap();
+        assert!(!plain.include_stdin);
+        assert_eq!(yaml_serde::to_string(&plain).unwrap(), "keepLast: 3\n");
+
+        let on: Retention = yaml_serde::from_str("keepLast: 3\nincludeStdin: true").unwrap();
+        assert!(on.include_stdin);
+        assert!(
+            yaml_serde::to_string(&on)
+                .unwrap()
+                .contains("includeStdin: true")
+        );
+
+        let only = Retention {
+            include_stdin: true,
+            ..Default::default()
+        };
+        assert!(only.is_empty());
+    }
 }

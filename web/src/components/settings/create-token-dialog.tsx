@@ -193,11 +193,11 @@ function CreateTokenBody({
 				className="flex flex-col gap-2"
 			>
 				<Label id={`${id}-scopes`}>{text.dialog.permissions}</Label>
-				<div className="grid grid-cols-[auto_1fr] gap-x-4">
+				<div className="grid grid-cols-1 gap-x-4 sm:grid-cols-2">
 					{SCOPES.map((scope) => (
 						<div
 							key={scope}
-							className="flex min-h-10 flex-wrap items-center gap-x-2"
+							className="flex min-h-10 min-w-0 flex-wrap items-center gap-x-2"
 						>
 							<Checkbox
 								id={`${id}-${scope}`}
@@ -219,6 +219,18 @@ function CreateTokenBody({
 								<Badge variant="outline" className="text-warning">
 									<TriangleAlert aria-hidden />
 									{text.dialog.deletesData}
+								</Badge>
+							)}
+							{scope === Scope["restore:in-place"] && (
+								<Badge variant="outline" className="text-warning">
+									<TriangleAlert aria-hidden />
+									{text.dialog.writesOverHost}
+								</Badge>
+							)}
+							{scope === Scope["hooks:write"] && (
+								<Badge variant="outline" className="text-warning">
+									<TriangleAlert aria-hidden />
+									{text.dialog.runsCommandsAsRoot}
 								</Badge>
 							)}
 						</div>
@@ -305,10 +317,12 @@ export function CreateTokenDialog({
 	open,
 	onOpenChange,
 	onFocusRow,
+	onFocusTrigger,
 }: {
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
 	onFocusRow: (id: string) => void;
+	onFocusTrigger: () => void;
 }) {
 	const createdId = useRef<string>(undefined);
 	const showingSecret = useRef(false);
@@ -328,9 +342,9 @@ export function CreateTokenDialog({
 					showingSecret.current = false;
 					const id = createdId.current;
 					createdId.current = undefined;
-					if (id === undefined) return;
 					event.preventDefault();
-					onFocusRow(id);
+					if (id === undefined) onFocusTrigger();
+					else onFocusRow(id);
 				}}
 			>
 				<CreateTokenBody

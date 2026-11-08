@@ -156,14 +156,18 @@ fn timespec(ts: Option<&pb::Timestamp>) -> rustix::fs::Timespec {
 /// touches ctime. Every failure is recorded in `out` and the rest still runs.
 /// Without `owners` the owner is left alone and nothing is reported about it,
 /// and neither setuid, setgid nor file capabilities are applied: they would
-/// grant the snapshot's privileges to whoever runs the restore.
+/// grant the snapshot's privileges to whoever runs the restore. With `owners`
+/// but without `keep_privileges` the owner is applied and the privileges are
+/// still dropped.
 pub fn apply_metadata(
     target: &Target<'_>,
     node: &pb::Node,
     path: &[u8],
     owners: bool,
+    keep_privileges: bool,
     out: &mut Vec<Unapplied>,
 ) {
+    let privileges = owners && keep_privileges;
     let mut fail = |what: String, e: Errno| {
         out.push(Unapplied {
             path: path.to_vec(),
@@ -185,7 +189,7 @@ pub fn apply_metadata(
     }
 
     for x in &node.xattrs {
-        if !owners && x.name == b"security.capability" {
+        if !privileges && x.name == b"security.capability" {
             continue;
         }
         let set = match target {
@@ -202,7 +206,7 @@ pub fn apply_metadata(
         }
     }
 
-    let bits = if owners { 0o7777 } else { 0o1777 };
+    let bits = if privileges { 0o7777 } else { 0o1777 };
     let mode = Mode::from_bits_truncate(conv(node.mode & bits));
     let chmod = match target {
         Target::Fd(fd) => Some(fchmod(fd, mode)),

@@ -11,7 +11,7 @@ use crate::cli::{
     ConflictArg, HostsCommand, JobsCommand, PoliciesCommand, ServerCommand, ServerRestoreArgs,
     ServerSnapshotsCommand, UsageError,
 };
-use crate::client::{Client, seg};
+use crate::client::{ApiFailure, Client, TokenRefused, seg};
 use crate::output::{Output, utc};
 use crate::profile::Profile;
 
@@ -117,6 +117,8 @@ struct RestoreHost {
     host_id: Option<String>,
     repository_name: Option<String>,
     latest_snapshot_ms: Option<i64>,
+    #[serde(default)]
+    restore_roots: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -146,18 +148,24 @@ struct HostDetail {
 /// unknown name, or a token that may not list hosts passes the text through,
 /// and the server answers for it.
 async fn resolve_host(client: &Client, host: &str) -> Result<String> {
-    let Ok(hosts) = client.get_json::<Vec<Host>>("/api/v1/hosts", &[]).await else {
-        return Ok(host.to_owned());
+    Ok(lookup_host(client, host).await?.0)
+}
+
+/// Like `resolve_host`, and says whether the token was refused the host list.
+async fn lookup_host(client: &Client, host: &str) -> Result<(String, bool)> {
+    let hosts = match client.get_json::<Vec<Host>>("/api/v1/hosts", &[]).await {
+        Ok(hosts) => hosts,
+        Err(e) => return Ok((host.to_owned(), e.is::<TokenRefused>())),
     };
     if hosts.iter().any(|h| h.id == host) {
-        return Ok(host.to_owned());
+        return Ok((host.to_owned(), false));
     }
     let mut named = hosts
         .into_iter()
         .filter(|h| h.hostname == host && h.status != "revoked");
     match (named.next(), named.next()) {
-        (Some(only), None) => Ok(only.id),
-        (None, _) => Ok(host.to_owned()),
+        (Some(only), None) => Ok((only.id, false)),
+        (None, _) => Ok((host.to_owned(), false)),
         (Some(_), Some(_)) => Err(UsageError(format!(
             "Several hosts are named {host:?}. Use the id from `lode server hosts list`."
         ))
@@ -936,6 +944,7 @@ async fn restore(client: &Client, out: Output, args: ServerRestoreArgs) -> Resul
     {
         return Err(UsageError(format!("{bad:?} is not an absolute path")).into());
     }
+    let (target_host_id, list_refused) = lookup_host(client, &args.host).await?;
     let destination = match (&args.target, args.in_place) {
         (Some(target), _) => target.clone(),
         (None, true) => "/".into(),
@@ -943,11 +952,18 @@ async fn restore(client: &Client, out: Output, args: ServerRestoreArgs) -> Resul
             let snapshot: Snapshot = client
                 .get_json(&format!("/api/v1/snapshots/{}", seg(id)), &[])
                 .await?;
-            format!(
-                "/var/lodestore/restore/{}-{}",
-                &time(Some(snapshot.time))[..10],
-                &id[..8]
-            )
+            let root = client
+                .get_json::<Vec<RestoreHost>>("/api/v1/restore/hosts", &[])
+                .await
+                .ok()
+                .and_then(|hosts| {
+                    hosts
+                        .into_iter()
+                        .find(|h| h.host_id.as_deref() == Some(target_host_id.as_str()))
+                })
+                .and_then(|h| h.restore_roots?.into_iter().next())
+                .unwrap_or_else(|| "/var/lib/lodestore/restore".into());
+            format!("{root}/{}-{}", &time(Some(snapshot.time))[..10], &id[..8])
         }
     };
     let items = if args.path.is_empty() {
@@ -955,7 +971,6 @@ async fn restore(client: &Client, out: Output, args: ServerRestoreArgs) -> Resul
     } else {
         args.path.clone()
     };
-    let target_host_id = resolve_host(client, &args.host).await?;
     let request = RestoreRequest {
         snapshot_id: id,
         items: items
@@ -969,13 +984,35 @@ async fn restore(client: &Client, out: Output, args: ServerRestoreArgs) -> Resul
         restore_owners: !args.no_owners,
         accept_unverified: args.accept_unverified,
     };
-    let created: RestoreCreated = client.post_json("/api/v1/restores", Some(&request)).await?;
+    let created: RestoreCreated = client
+        .post_json("/api/v1/restores", Some(&request))
+        .await
+        .map_err(|e| host_not_found_hint(e, list_refused, &args.host))?;
     if out.json {
         out.emit("restore", &created);
     } else {
         println!("Restore queued: job {}", created.job_id);
     }
     Ok(())
+}
+
+fn host_not_found_hint(e: anyhow::Error, list_refused: bool, host: &str) -> anyhow::Error {
+    match e.downcast_ref::<ApiFailure>() {
+        Some(f) if list_refused && f.status == 404 && f.message == "The host was not found." => {
+            ApiFailure {
+                status: f.status,
+                code: f.code.clone(),
+                message: format!(
+                    "The host {host:?} was not found. This token may not read the host list \
+                     (hosts:read), so the name was sent as a host id. Pass the host id, which \
+                     is in the address of the host's page in the web interface, or use a \
+                     token with hosts:read."
+                ),
+            }
+            .into()
+        }
+        _ => e,
+    }
 }
 
 fn print_job(out: Output, job: &Job) {

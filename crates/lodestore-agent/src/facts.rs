@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use lodestore_proto::agent::v1::{Heartbeat, HookFacts, HookScript, Mount};
+use lodestore_proto::agent::v1::{Heartbeat, HookFacts, HookScript, Mount, RestoreFacts};
 use tokio::task::JoinHandle;
 
 use crate::Paths;
@@ -123,6 +123,18 @@ pub fn hook_facts(paths: &Paths) -> HookFacts {
     }
 }
 
+pub fn restore_facts(paths: &Paths) -> RestoreFacts {
+    let settings = AgentSettings::load(paths).restore;
+    RestoreFacts {
+        roots: settings
+            .roots(paths)
+            .iter()
+            .map(|root| root.to_string_lossy().into_owned())
+            .collect(),
+        allow_in_place: settings.allow_in_place,
+    }
+}
+
 pub fn collect() -> Heartbeat {
     let uptime_s = std::fs::read_to_string("/proc/uptime")
         .ok()
@@ -140,6 +152,7 @@ pub fn collect() -> Heartbeat {
         distro: clip(distro()),
         mounts: mounts(),
         hook_facts: None,
+        restore_facts: None,
     }
 }
 
@@ -196,7 +209,42 @@ mod tests {
 
     use lodestore_proto::agent::v1::Heartbeat;
 
-    use super::{Collector, clip, mount_points};
+    use super::{Collector, clip, mount_points, restore_facts};
+
+    #[test]
+    fn restore_facts_reports_settings() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = crate::Paths {
+            config_dir: tmp.path().join("etc"),
+            state_dir: tmp.path().join("var"),
+        };
+        let facts = restore_facts(&paths);
+        assert_eq!(
+            facts.roots,
+            vec![
+                paths
+                    .state_dir
+                    .join("restore")
+                    .to_string_lossy()
+                    .into_owned()
+            ]
+        );
+        assert!(!facts.allow_in_place);
+
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        let file = paths.agent_yaml();
+        std::fs::write(
+            &file,
+            "restore:\n  allowed_restore_roots: [/srv/r]\n  allow_in_place: true\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let facts = restore_facts(&paths);
+        assert_eq!(facts.roots, vec!["/srv/r".to_string()]);
+        assert!(facts.allow_in_place);
+    }
 
     static RUNS: AtomicUsize = AtomicUsize::new(0);
 

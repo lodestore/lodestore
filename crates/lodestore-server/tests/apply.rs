@@ -419,7 +419,7 @@ async fn apply_atomic_on_active_jobs() {
         sqlx::query(
             "INSERT INTO agents (id, hostname, repository_id, labels_json, os, arch, version, \
              status, enrolled_at, cert_serial, cert_issued_at, cert_not_after) \
-             VALUES ('h1', 'h1', $1, '{}', 'linux', 'x86_64', 'test', 'active', 0, 'aa', 0, 0)",
+             VALUES ('h1', 'h1', $1, '[]', 'linux', 'x86_64', 'test', 'active', 0, 'aa', 0, 0)",
         )
         .bind(&repo)
         .execute(pool)

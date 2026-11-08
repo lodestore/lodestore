@@ -79,7 +79,7 @@ Open **Policies** and create a policy that names the repository and the folders 
 
 ## Restore
 
-Open **Restore**, choose the snapshot and the files, choose the host and a folder to restore into, and start the restore.
+Open **Restore**, choose the snapshot and the files, choose the host and a folder to restore into, and start the restore. The agent restores only into the folders its `agent.yaml` allows, by default below `/var/lib/lodestore/restore`, and the form suggests one of them. To restore over the original files, enable it on the host: see [Restoring on the host](/docs/install/binary/#restoring-on-the-host).
 
 ## Restore without the server
 

@@ -515,6 +515,8 @@ export const copy = {
 		retry: "Retry loading",
 		submit: (action: string, serverMessage?: string) =>
 			`Couldn't ${action}. ${sentence(serverMessage)}Try again.`,
+		refused: (action: string, serverMessage?: string) =>
+			`Couldn't ${action}. ${sentence(serverMessage)}`.trim(),
 	},
 	common: {
 		justNow: "just now",

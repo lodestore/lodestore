@@ -189,6 +189,7 @@ impl Fx {
             k_id: zeroize::Zeroizing::new(*reader.keys().k_id()),
             seed: reader.keys().cdc_seed(),
             restore_owners: true,
+            keep_privileges: true,
         }
     }
 }
@@ -233,6 +234,7 @@ fn plain_settings(overwrite: Overwrite, restore_owners: bool) -> RestoreSettings
         k_id: zeroize::Zeroizing::new([0; 32]),
         seed: 0,
         restore_owners,
+        keep_privileges: true,
     }
 }
 

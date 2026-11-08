@@ -1,4 +1,4 @@
-use lodestore_policy::jiff::Timestamp;
+use lodestore_policy::jiff::{SignedDuration, Timestamp};
 use lodestore_policy::schedule::{CompiledSchedule, DstNote, DstNoteKind};
 use lodestore_policy::{Schedule, parse_duration, parse_rate};
 
@@ -286,4 +286,65 @@ fn schedule_parse_rate_and_duration() {
     ] {
         assert_eq!(parse_rate(bad), None, "{bad}");
     }
+}
+
+fn min_gap_year(cron: &str) -> Option<i64> {
+    compile(cron, "UTC")
+        .min_gap(
+            ts("2026-11-06T00:00:00Z"),
+            SignedDuration::from_hours(24 * 366),
+            SignedDuration::from_secs(60),
+            usize::MAX,
+        )
+        .smallest
+        .map(|gap| gap.as_secs())
+}
+
+#[test]
+fn schedule_min_gap_every_minute() {
+    assert_eq!(min_gap_year("* * * * *"), Some(60));
+}
+
+#[test]
+fn schedule_min_gap_daily() {
+    assert_eq!(min_gap_year("0 3 * * *"), Some(24 * 3600));
+}
+
+#[test]
+fn schedule_min_gap_weekly() {
+    assert_eq!(min_gap_year("0 3 * * 1"), Some(7 * 24 * 3600));
+}
+
+#[test]
+fn schedule_min_gap_month_restricted() {
+    assert_eq!(min_gap_year("0 3 * 12 *"), Some(24 * 3600));
+}
+
+#[test]
+fn schedule_min_gap_yearly_none() {
+    assert_eq!(min_gap_year("0 3 1 1 *"), None);
+}
+
+#[test]
+fn schedule_min_gap_dst() {
+    let kyiv = compile("30 3 * * *", "Europe/Kyiv");
+    let gap = kyiv.min_gap(
+        ts("2026-10-24T00:00:00Z"),
+        SignedDuration::from_hours(72),
+        SignedDuration::from_secs(60),
+        usize::MAX,
+    );
+    assert_eq!(gap.smallest, Some(SignedDuration::from_hours(24)));
+}
+
+#[test]
+fn schedule_min_gap_stops_at_the_run_cap() {
+    let found = compile("*/2 * * * *", "UTC").min_gap(
+        ts("2026-11-06T00:00:00Z"),
+        SignedDuration::from_hours(24 * 366),
+        SignedDuration::from_secs(60),
+        1000,
+    );
+    assert!(found.capped);
+    assert_eq!(found.smallest, Some(SignedDuration::from_secs(120)));
 }

@@ -163,7 +163,9 @@ describe("API tokens: create", () => {
 		expect(calls.created).toEqual([]);
 
 		await user.type(within(dialog).getByLabelText("Name"), "ci");
-		await user.click(within(dialog).getByRole("checkbox", { name: "restore" }));
+		await user.click(
+			within(dialog).getByRole("checkbox", { name: "restore:download" }),
+		);
 		expect(
 			within(dialog).queryByText("Enter a name for the token."),
 		).toBeNull();
@@ -172,7 +174,7 @@ describe("API tokens: create", () => {
 		).toBeNull();
 		expect(
 			within(dialog).getByText(
-				"For CI that applies policies, choose policies:read and policies:write. Policies with retention also need snapshots:delete. For Prometheus, choose metrics:read.",
+				"For CI that applies policies, choose policies:read and policies:write. Policies with retention also need snapshots:delete, and policies with hooks need hooks:write. For Prometheus, choose metrics:read.",
 			),
 		).toBeInTheDocument();
 		expect(within(dialog).getByText("Deletes data")).toBeInTheDocument();
@@ -205,6 +207,44 @@ describe("API tokens: create", () => {
 			.closest("div") as HTMLElement;
 		expect(within(row).getByText("For Prometheus")).toBeVisible();
 		expect(within(row).queryByText("Deletes data")).toBeNull();
+	});
+
+	it("warns on the scopes that write over hosts", async () => {
+		const calls = mockTokens([]);
+		const user = userEvent.setup();
+		await openTokens();
+		await user.click(createButton());
+		const dialog = await screen.findByRole("dialog", {
+			name: "Create API token",
+		});
+		const rowOf = (name: string) =>
+			within(dialog)
+				.getByRole("checkbox", { name })
+				.closest("div") as HTMLElement;
+		expect(
+			within(rowOf("restore:in-place")).getByText("Overwrites files on hosts"),
+		).toBeVisible();
+		expect(
+			within(rowOf("hooks:write")).getByText("Runs commands as root on hosts"),
+		).toBeVisible();
+		for (const safe of ["restore:download", "restore:host"]) {
+			expect(within(rowOf(safe)).queryByText(/hosts$|Deletes data/)).toBeNull();
+		}
+
+		await user.type(within(dialog).getByLabelText("Name"), "ci");
+		await user.click(
+			within(dialog).getByRole("checkbox", { name: "restore:host" }),
+		);
+		await user.click(
+			within(dialog).getByRole("checkbox", { name: "hooks:write" }),
+		);
+		await user.click(
+			within(dialog).getByRole("button", { name: "Create token" }),
+		);
+		await screen.findByRole("dialog", { name: "Token created" });
+		expect(calls.created).toMatchObject([
+			{ scopes: ["hooks:write", "restore:host"] },
+		]);
 	});
 
 	it("offers the alerts scope after hosts:write", async () => {
@@ -243,11 +283,42 @@ describe("API tokens: create", () => {
 	});
 });
 
+describe("API tokens: closing the create dialog", () => {
+	it("returns focus to the Create token button on Escape", async () => {
+		mockTokens([makeToken("ci")]);
+		const user = userEvent.setup();
+		await openTokens();
+		await user.click(createButton());
+		await screen.findByRole("dialog", { name: "Create API token" });
+		await user.keyboard("{Escape}");
+		await waitFor(() =>
+			expect(
+				screen.queryByRole("dialog", { name: "Create API token" }),
+			).not.toBeInTheDocument(),
+		);
+		await waitFor(() => expect(createButton()).toHaveFocus());
+	});
+
+	it("returns focus there when opened with the create param", async () => {
+		mockTokens([makeToken("ci")]);
+		const user = userEvent.setup();
+		await openTokens("/settings/tokens?create=1");
+		await screen.findByRole("dialog", { name: "Create API token" });
+		await user.keyboard("{Escape}");
+		await waitFor(() =>
+			expect(
+				screen.queryByRole("dialog", { name: "Create API token" }),
+			).not.toBeInTheDocument(),
+		);
+		await waitFor(() => expect(createButton()).toHaveFocus());
+	});
+});
+
 describe("API tokens: table", () => {
 	it("table renders scopes and expiry", async () => {
 		mockTokens([
 			makeToken("deploy", {
-				scopes: ["hosts:read", "hosts:write", "jobs:run", "restore"],
+				scopes: ["hosts:read", "hosts:write", "jobs:run", "restore:download"],
 				expires_at: Date.now() + 5 * DAY - 60_000,
 				last_used_at: Date.now() - 3_600_000,
 			}),
@@ -267,7 +338,7 @@ describe("API tokens: table", () => {
 		expect(within(deploy).getByText("+2")).toBeInTheDocument();
 		expect(
 			within(deploy).getByRole("group", {
-				name: "Scopes: hosts:read, hosts:write, jobs:run, restore",
+				name: "Scopes: hosts:read, hosts:write, jobs:run, restore:download",
 			}),
 		).toBeInTheDocument();
 		const expiring = within(deploy).getByText("In 5 days");

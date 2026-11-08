@@ -4,9 +4,11 @@ pub mod matching;
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use lodestore_policy::jiff::Timestamp;
-use lodestore_policy::schedule::DstNote;
-use lodestore_policy::{BackupPolicy, Problem, Retention, Schedule, parse_yaml, to_yaml, validate};
+use lodestore_policy::jiff::{SignedDuration, Timestamp};
+use lodestore_policy::schedule::{DstNote, MinGap};
+use lodestore_policy::{
+    BackupPolicy, Hooks, Problem, Retention, Schedule, Selector, parse_yaml, to_yaml, validate,
+};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use sqlx::any::AnyRow;
@@ -19,13 +21,113 @@ use crate::auth::tokens::{JobsRun, PoliciesRead, PoliciesWrite, Principal, Scope
 use crate::db::now_ms;
 use crate::error::{ApiError, ErrorBody};
 use crate::hosts::labels::Label;
-use crate::jobs::{ACTIVE_STATES, JobBrief, RunResult, enqueue, job_spec, last_job};
+use crate::jobs::{
+    ACTIVE_STATES, JobBrief, RunResult, check_run_rate, enqueue, job_spec, last_job,
+};
 use crate::state::AppState;
 
 pub(crate) const RETENTION_PURPOSE: &str = "set or change retention";
 
 pub(crate) fn retention_of(policy: &BackupPolicy) -> Option<&Retention> {
     policy.spec.retention.as_ref().filter(|r| !r.is_empty())
+}
+
+pub(crate) const SCHEDULE_PURPOSE: &str = "run a policy with retention more often";
+pub(crate) const SCHEDULE_HORIZON_DAYS: i64 = 366;
+
+const SHORTEST_GAP: SignedDuration = SignedDuration::from_secs(60);
+
+fn cadence(policy: &BackupPolicy) -> Option<(&str, &str)> {
+    let schedule = policy.spec.schedule.as_ref()?;
+    Some((
+        schedule.cron.trim(),
+        schedule.timezone.as_deref().unwrap_or("UTC"),
+    ))
+}
+
+const MAX_SCHEDULE_RUNS: usize = 100_000;
+
+fn min_gap(policy: &BackupPolicy, from: Timestamp, stop_at: SignedDuration) -> Option<MinGap> {
+    Some(policy.spec.schedule.as_ref()?.compile().ok()?.min_gap(
+        from,
+        SignedDuration::from_hours(24 * SCHEDULE_HORIZON_DAYS),
+        stop_at,
+        MAX_SCHEDULE_RUNS,
+    ))
+}
+
+/// Whether `new` may run more often than `old`. Doubt counts as more often: a
+/// schedule with no two runs in the horizon replacing one that has them, or one
+/// too dense to scan within the cap.
+pub(crate) fn runs_more_often(old: &BackupPolicy, new: &BackupPolicy) -> bool {
+    if cadence(old) == cadence(new) {
+        return false;
+    }
+    let from = Timestamp::now();
+    let old_gap = min_gap(old, from, SHORTEST_GAP).and_then(|found| found.smallest);
+    if old_gap.is_some_and(|gap| gap <= SHORTEST_GAP) {
+        return false;
+    }
+    let stop_at = old_gap.map_or(SignedDuration::MAX, |gap| {
+        gap - SignedDuration::from_secs(1)
+    });
+    let Some(found) = min_gap(new, from, stop_at) else {
+        return false;
+    };
+    if found.capped {
+        return true;
+    }
+    match found.smallest {
+        Some(gap) => old_gap.is_none_or(|old| gap < old),
+        None => old_gap.is_some(),
+    }
+}
+
+fn policy_conflict(name: &str) -> ApiError {
+    ApiError::PolicyConflict(format!(
+        "Policy \"{name}\" was changed elsewhere. Reload it and apply your edits again."
+    ))
+}
+
+pub(crate) fn hooks_purpose(names: &[String]) -> String {
+    format!(
+        "change hooks or the hosts they run on (policies: {})",
+        names.join(", ")
+    )
+}
+
+/// The selector picks no host the old one did not. Only two shapes are proven:
+/// a shorter host list, or the same labels plus more. Anything else, an empty
+/// selector or a list that appears or disappears included, counts as wider.
+fn selector_not_wider(old: &Selector, new: &Selector) -> bool {
+    match (&old.hosts, &new.hosts) {
+        (Some(old), Some(new)) => new.iter().all(|h| old.contains(h)),
+        (None, None) => old
+            .match_labels
+            .iter()
+            .all(|(k, v)| new.match_labels.get(k) == Some(v)),
+        _ => false,
+    }
+}
+
+pub(crate) fn gains_hook_hosts(
+    old: Option<(&str, &BackupPolicy)>,
+    new: (&str, &BackupPolicy),
+) -> bool {
+    let (new_repository, new_policy) = new;
+    let no_hooks = Hooks::default();
+    let old_hooks = old.map_or(&no_hooks, |(_, policy)| &policy.spec.hooks);
+    if *old_hooks != new_policy.spec.hooks {
+        return true;
+    }
+    let Some((old_repository, old_policy)) = old else {
+        return false;
+    };
+    if new_policy.spec.hooks == no_hooks {
+        return false;
+    }
+    new_repository != old_repository
+        || !selector_not_wider(&old_policy.spec.selector, &new_policy.spec.selector)
 }
 
 const RESERVED_NAMES: [&str; 2] = ["validate", "apply"];
@@ -306,6 +408,41 @@ async fn all_policies(state: &AppState) -> Result<Vec<PolicyRow>, ApiError> {
     .collect()
 }
 
+pub(crate) async fn hook_policies_gained_by_labels(
+    state: &AppState,
+    host_id: &str,
+    current_labels: &[Label],
+    labels: &[Label],
+) -> Result<Vec<String>, ApiError> {
+    let Some(mut before) = load_agents(state)
+        .await?
+        .into_iter()
+        .find(|a| a.id == host_id)
+    else {
+        return Ok(Vec::new());
+    };
+    before.labels = current_labels.to_vec();
+    let after = AgentRow {
+        id: before.id.clone(),
+        hostname: before.hostname.clone(),
+        repository_id: before.repository_id.clone(),
+        repository_name: before.repository_name.clone(),
+        labels: labels.to_vec(),
+        facts: serde_json::Value::Null,
+    };
+    Ok(all_policies(state)
+        .await?
+        .iter()
+        .filter(|row| row.policy.spec.hooks != Hooks::default())
+        .filter(|row| {
+            let selector = &row.policy.spec.selector;
+            after.applies(&row.repository_id, selector)
+                && !before.applies(&row.repository_id, selector)
+        })
+        .map(|row| row.policy.metadata.name.clone())
+        .collect())
+}
+
 async fn detail(state: &AppState, row: PolicyRow) -> Result<PolicyDetail, ApiError> {
     let agents = load_agents(state).await?;
     let selector = &row.policy.spec.selector;
@@ -462,6 +599,7 @@ pub async fn list_policies(
     request_body = PolicyInput,
     responses(
         (status = 201, description = "The created policy", body = PolicyDetail),
+        (status = 403, description = "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention or a more frequent cron", body = ErrorBody),
         (status = 409, description = "The name is taken", body = ErrorBody),
         (status = 422, description = "Invalid policy", body = ErrorBody),
     )
@@ -476,6 +614,12 @@ pub async fn create_policy(
         auth.require_also(Scope::SnapshotsDelete, RETENTION_PURPOSE)?;
     }
     let name = checked.policy.metadata.name.clone();
+    if gains_hook_hosts(None, (&checked.repository_id, &checked.policy)) {
+        auth.require_also(
+            Scope::HooksWrite,
+            hooks_purpose(std::slice::from_ref(&name)),
+        )?;
+    }
     let now = now_ms();
     let inserted = sqlx::query(
         "INSERT INTO policies (id, name, repository_id, yaml, spec_json, revision, created_at, \
@@ -531,6 +675,7 @@ pub async fn get_policy(
     request_body = PolicyUpdate,
     responses(
         (status = 200, description = "The updated policy", body = PolicyDetail),
+        (status = 403, description = "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention or a more frequent cron", body = ErrorBody),
         (status = 404, description = "Unknown policy", body = ErrorBody),
         (status = 409, description = "The policy changed since base_revision (code policy_conflict)", body = ErrorBody),
         (status = 422, description = "Invalid policy or changed name", body = ErrorBody),
@@ -548,8 +693,23 @@ pub async fn update_policy(
     }
     if matches!(auth.principal(), Principal::Token { .. }) {
         let current = find_policy(&state, &name).await?;
+        if current.revision != input.base_revision {
+            return Err(policy_conflict(&name));
+        }
         if retention_of(&current.policy) != retention_of(&checked.policy) {
             auth.require_also(Scope::SnapshotsDelete, RETENTION_PURPOSE)?;
+        }
+        if retention_of(&checked.policy).is_some()
+            && runs_more_often(&current.policy, &checked.policy)
+        {
+            auth.require_also(Scope::SnapshotsDelete, SCHEDULE_PURPOSE)?;
+        }
+        let old = (current.repository_id.as_str(), &current.policy);
+        if gains_hook_hosts(Some(old), (&checked.repository_id, &checked.policy)) {
+            auth.require_also(
+                Scope::HooksWrite,
+                hooks_purpose(std::slice::from_ref(&name)),
+            )?;
         }
     }
     let updated = sqlx::query(
@@ -567,9 +727,7 @@ pub async fn update_policy(
     .rows_affected();
     if updated == 0 {
         return Err(if policy_exists(&state, &name).await? {
-            ApiError::PolicyConflict(format!(
-                "Policy \"{name}\" was changed elsewhere. Reload it and apply your edits again."
-            ))
+            policy_conflict(&name)
         } else {
             ApiError::NotFound("policy not found".into())
         });
@@ -638,15 +796,19 @@ fn hosts_of(agents: &[AgentRow], row: &PolicyRow) -> Vec<(String, String)> {
     responses(
         (status = 200, description = "One job per matching host; existing active jobs are returned as is", body = RunResult),
         (status = 404, description = "Unknown policy", body = ErrorBody),
+        (status = 429, description = "The policy was started on one of its hosts 6 times in the last hour (code rate_limited, Retry-After in seconds)", body = ErrorBody),
     )
 )]
 pub async fn run_policy(
     State(state): State<AppState>,
-    _auth: Scoped<JobsRun>,
+    auth: Scoped<JobsRun>,
     Path(name): Path<String>,
 ) -> Result<Json<RunResult>, ApiError> {
     let row = find_policy(&state, &name).await?;
     let hosts = hosts_of(&load_agents(&state).await?, &row);
+    if matches!(auth.principal(), Principal::Token { .. }) {
+        check_run_rate(&state, &row.id, &hosts).await?;
+    }
     let jobs = enqueue(&state, &row.id, &name, &hosts, &job_spec(&row.policy)).await?;
     Ok(Json(RunResult { jobs }))
 }
@@ -683,11 +845,12 @@ fn policies_of_host<'a>(host: &AgentRow, rows: &'a [PolicyRow]) -> Vec<&'a Polic
         (status = 404, description = "Unknown host", body = ErrorBody),
         (status = 409, description = "The host is revoked", body = ErrorBody),
         (status = 422, description = "A policy does not apply to the host", body = ErrorBody),
+        (status = 429, description = "A policy was started on this host 6 times in the last hour (code rate_limited, Retry-After in seconds)", body = ErrorBody),
     )
 )]
 pub async fn run_host(
     State(state): State<AppState>,
-    _auth: Scoped<JobsRun>,
+    auth: Scoped<JobsRun>,
     Path(id): Path<String>,
     request: Option<Json<HostRunRequest>>,
 ) -> Result<Json<RunResult>, ApiError> {
@@ -708,6 +871,11 @@ pub async fn run_host(
         chosen = picked;
     }
     let target = [(host.id.clone(), host.hostname.clone())];
+    if matches!(auth.principal(), Principal::Token { .. }) {
+        for row in &chosen {
+            check_run_rate(&state, &row.id, &target).await?;
+        }
+    }
     let mut jobs = Vec::new();
     for row in chosen {
         jobs.extend(

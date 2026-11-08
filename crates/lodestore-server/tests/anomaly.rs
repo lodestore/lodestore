@@ -449,7 +449,8 @@ async fn anomaly_suspicious_not_counted_by_retention() {
         let second_id = second["snapshot_id"].as_str().unwrap().to_string();
         let mut remaining = env.ids().await;
         remaining.sort();
-        let mut expected = vec![second_id.clone(), first_id, id(1)];
+        // Seeded rows have no origin and form the scheduled pool, which keeps its own floor of two.
+        let mut expected = vec![second_id.clone(), first_id, id(1), id(2)];
         expected.sort();
         assert_eq!(remaining, expected, "{}", backend.name());
         let row = env.mark_of(&second_id).await;

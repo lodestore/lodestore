@@ -40,23 +40,23 @@ An `http://` address that is not on the loopback interface works, but the token 
 | `lode server policies list` | `policies:read` |
 | `lode server policies get <name>` (prints the YAML) | `policies:read` |
 | `lode server policies delete <name> [--yes]` | `policies:write` |
-| `lode server policies run <name>` | `jobs:run` |
+| `lode server policies run <name>` | `jobs:run`; see [Run limit](#run-limit) |
 | `lode server policies retention <name>` | `policies:read` |
 | `lode server jobs list [--state S] [--policy NAME] [--host HOST] [--kind K] [--page N]` | `jobs:read` |
 | `lode server jobs show <id>` | `jobs:read` |
 | `lode server jobs logs <id> [--follow]` | `jobs:read` |
-| `lode server jobs run --host <host> [--policy NAME]...` | `jobs:run` |
-| `lode server jobs cancel <id>` and `lode server jobs rerun <id>` | `jobs:run` |
+| `lode server jobs run --host <host> [--policy NAME]...` | `jobs:run`; see [Run limit](#run-limit) |
+| `lode server jobs cancel <id>` and `lode server jobs rerun <id>` | `jobs:run`; `rerun` is subject to the [run limit](#run-limit) |
 | `lode server snapshots list --host <host> [--limit N]` | `snapshots:read` |
 | `lode server snapshots mark <id> --reason TEXT` and `clear <id> --reason TEXT` | `snapshots:delete` |
 | `lode server snapshots delete <id> [--yes]` | `snapshots:delete` |
-| `lode apply -f <file or folder> [--dry-run] [--prune] [--adopt] [--manager NAME] [--yes]` | `policies:read` and `policies:write`, plus `snapshots:delete` when the files set or change `retention` |
+| `lode apply -f <file or folder> [--dry-run] [--prune] [--adopt] [--manager NAME] [--yes]` | `policies:read` and `policies:write`, plus `snapshots:delete` when the files set or change `retention` or run a policy with retention more often, and `hooks:write` when they change `hooks` or bring more hosts under a policy with hooks |
 | `lode gc [--dry-run] <repo>`, `lode gc status <repo>`, `lode gc unlock <repo>` (also `lode server gc ...`) | See [Cleanup](#cleanup) |
 | `lode server check <repo> [--level structure\|packs\|restore]` | See [Integrity checks](#integrity-checks) |
 | `lode server find <pattern> [--host HOST]... [--label KEY=VALUE]...` | `snapshots:read`; see [Find a file](#find-a-file) |
-| `lode server restore <snapshot> --host <host> [options]` | `restore`, and `snapshots:read` when `--target` and `--in-place` are not given |
+| `lode server restore <snapshot> --host <host> [options]` | `restore:host`, or `restore:in-place` with `--in-place` or when owners are restored (see [Restore through the server](#restore-through-the-server)); and `snapshots:read` when `--target` and `--in-place` are not given |
 
-A `<host>` is a host id or a hostname. A hostname is looked up in the host list, which needs `hosts:read`; a token without that scope must pass the id, which `lode server hosts list` shows in the `ID` column. When several hosts share a name, `lode` asks for the id.
+A `<host>` is a host id or a hostname. A hostname is looked up in the host list, which needs `hosts:read`; a token without that scope must pass the id, which is in the address of the host's page in the web interface (and in the `ID` column of `lode server hosts list`, which itself needs `hosts:read`). `lode server restore` says to pass the id or use a token with `hosts:read` when the server does not know the name as a host id. When several hosts share a name, `lode` asks for the id.
 
 Running a policy that already has a queued or running job on a host does not queue a second one. The command prints `Job <id> on <host> is already queued` for it.
 
@@ -91,7 +91,9 @@ The last line starts with `Applied:` when something was applied. Colors appear o
 
 On a terminal, `--prune` shows the plan first and asks `Delete N policies? [y/N]`. Without a terminal, as in CI, `--prune` itself is the consent and deletes without asking. Run `--dry-run` first when you want to see the deletions before they happen. `--prune` refuses to run, with exit code 2, when the files contain no policy at all (an empty file or one with only comments), so a template that renders to nothing cannot delete every policy of the manager.
 
-The token needs `policies:read` and `policies:write`. When the files add or change a `retention` block, it also needs `snapshots:delete`, because retention makes the server delete snapshots; without it the server refuses with exit code 13. A problem in a file is printed as `file.yaml:LINE:COL: message` on stderr, with exit code 2.
+The token needs `policies:read` and `policies:write`. When the files add or change a `retention` block, it also needs `snapshots:delete`, because retention makes the server delete snapshots; without it the server refuses with exit code 13. The same scope is needed to run a policy that has retention more often: the server compares the shortest gap between two runs of the cron schedule over the next 366 days, in the time zone of the policy, before and after the change. A schedule that runs less often, or at another time of day, needs only `policies:write`.
+
+When the files add, change or remove `hooks`, or widen a policy that has hooks (change its `repository`, or its selector other than to a shorter `hosts` list or more `matchLabels`), whichever hosts are enrolled, the token also needs `hooks:write`, because hooks run commands as root on the hosts. The server then refuses the whole run with exit code 13 and names the scope and the policies. `--dry-run` shows the same refusal before anything is applied. Deleting a policy, with or without `--prune`, needs only `policies:write`. A problem in a file is printed as `file.yaml:LINE:COL: message` on stderr, with exit code 2.
 
 A CI job that fails on drift and one that applies:
 
@@ -99,6 +101,10 @@ A CI job that fails on drift and one that applies:
 lode apply -f policies/ --prune --dry-run
 lode apply -f policies/ --prune
 ```
+
+### Run limit
+
+A token can start the same policy on the same host at most 6 times per hour, through `lode server policies run`, `lode server jobs run` and `lode server jobs rerun`. The seventh request gets a `429` from the server with `Retry-After`; `lode` prints the server's message, which says how long to wait, and exits with code 1. A web session is not limited. Scheduled runs do not count.
 
 ### Snapshots
 
@@ -250,13 +256,19 @@ Exit codes: 0 when the search finished or stopped at a limit, 1 when the search 
 
 `lode server restore <snapshot> --host <host>` asks the agent on that host to restore. The snapshot is the full id from `lode server snapshots list`.
 
+The token needs `restore:host` to restore into a folder, and `restore:in-place` with `--in-place`. The two scopes are independent: `restore:in-place` does not allow a restore into a folder. Downloading files or an archive in the web interface or through the API is a third scope, `restore:download`; it does not allow a restore onto a host.
+
+By default the command also restores file owners, setuid/setgid bits and file capabilities. The agent keeps the setuid/setgid bits and the capabilities only in a restore in place; into a new folder it restores the owners and drops them. A token may ask for any of it only with `restore:in-place`; a token with `restore:host` alone must pass `--no-owners`, or the server refuses with 403 and names the scope.
+
+The agent decides where it writes. It accepts a restore into a folder only below one of the `allowed_restore_roots` in its `agent.yaml` (by default `/var/lib/lodestore/restore`), and a restore in place only when `allow_in_place` is set there; see [Restoring on the host](/docs/install/binary/#restoring-on-the-host). Otherwise the job fails with `restore_outside_roots` or `restore_in_place_disabled`, whether it was started by a token or in the web interface. The server knows the roots from the agent's heartbeat and refuses such a request at once with 400 and the same codes. A token cannot start a restore on an agent that is too old to report its roots (`restore_agent_outdated`); update the agent first.
+
 | Option | Meaning |
 |--------|---------|
 | `--path PATH` | Restore only this absolute path; repeat for more. Default: everything |
-| `--target DIR` | Folder on the host. Default: `/var/lodestore/restore/<date>-<first 8 of the id>` |
-| `--in-place` | Restore over the original files. Needs `--yes` |
+| `--target DIR` | Folder on the host, below one of the agent's `allowed_restore_roots`. Default: `<date>-<first 8 of the id>` below the first restore folder the host reports, `/var/lib/lodestore/restore` when it reports none or the token cannot read the host list (`snapshots:read`) |
+| `--in-place` | Restore over the original files. Needs `--yes` and an agent with `allow_in_place` |
 | `--conflict POLICY` | `overwrite-changed` (default), `skip-existing` or `stop-if-not-empty` |
-| `--no-owners` | Do not restore file owners, setuid/setgid bits or file capabilities |
+| `--no-owners` | Do not restore file owners, setuid/setgid bits or file capabilities. Without it the command asks for them, which a token may do only with `restore:in-place` |
 | `--accept-unverified` | Restore a snapshot that nothing signed (see [Snapshot provenance](/docs/security/threat-model/#snapshot-provenance-and-latest)). Without it the server refuses with `restore_unverified_not_confirmed`; an unsigned snapshot is never restored in place, with or without the flag (`restore_unverified_in_place`). A signed snapshot ignores the flag |
 
 `lode server snapshots list` shows the snapshots newest first by the time the server received them, not by the time written in the manifest.

@@ -8,8 +8,8 @@ import { copy } from "@/copy";
 
 const digits = (value: string) => value.replace(/\D/g, "").slice(0, 9);
 
-export const hasRetention = (draft: RetentionDraft) =>
-	Object.values(draft).some((value) => value.trim() !== "");
+export const hasRetention = ({ includeStdin: _, ...rules }: RetentionDraft) =>
+	Object.values(rules).some((value) => value.trim() !== "");
 
 type CountKey = "keepLast" | "keepDaily" | "keepWeekly" | "keepMonthly";
 
@@ -25,8 +25,10 @@ export function RetentionPanel({
 	children?: ReactNode;
 }) {
 	const text = copy.policies.retention;
-	const set = (patch: Partial<RetentionDraft>) =>
-		onChange({ ...draft, ...patch });
+	const set = (patch: Partial<RetentionDraft>) => {
+		const next = { ...draft, ...patch };
+		onChange(hasRetention(next) ? next : { ...next, includeStdin: false });
+	};
 	const count = (key: CountKey, label: string) => (
 		<RowField label={label} error={problems.get(`spec.retention.${key}`)}>
 			{(a11y) => (

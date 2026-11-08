@@ -69,6 +69,7 @@ const host = (over: Partial<RestoreHost>): RestoreHost => ({
 	snapshot_count: 1,
 	latest_snapshot_ms: snapshot.time,
 	unverified_count: 0,
+	restore_roots: ["/var/lib/lodestore/restore"],
 	...over,
 });
 
@@ -152,7 +153,7 @@ describe("Restore dialog", { timeout: 30_000 }, () => {
 		expect(view.getByRole("heading", { name: "Restore 1 item" })).toBeVisible();
 		const day = new Intl.DateTimeFormat("en-CA").format(snapshot.time);
 		expect(view.getByRole("textbox", { name: "Folder on web-1" })).toHaveValue(
-			`/var/lodestore/restore/${day}-aaaaaaaa`,
+			`/var/lib/lodestore/restore/${day}-aaaaaaaa`,
 		);
 		expect(view.getByText("Source host")).toBeVisible();
 		expect(view.getByText("Destination")).toBeVisible();
@@ -190,6 +191,150 @@ describe("Restore dialog", { timeout: 30_000 }, () => {
 		);
 		expect(view.getByRole("button", { name: "Start restore" })).toBeEnabled();
 		expect(await view.findByText("12 files · 1 MiB")).toBeVisible();
+	});
+
+	it("puts the default folder under the first root of the target host", async () => {
+		mockServer([
+			host({ restore_roots: ["/srv/restores", "/mnt/other"] }),
+			host({
+				key: "agent-db",
+				host_id: "agent-db",
+				hostname: "db-1",
+				restore_roots: null,
+				allow_in_place: null,
+			}),
+		]);
+		let body: { destination?: string } | undefined;
+		server.use(
+			http.post("/api/v1/restores", async ({ request }) => {
+				body = (await request.json()) as { destination?: string };
+				return HttpResponse.json({ job_id: "job-1" }, { status: 201 });
+			}),
+		);
+		const { dialog, user } = await openRestore();
+		const view = within(dialog);
+		const day = new Intl.DateTimeFormat("en-CA").format(snapshot.time);
+
+		expect(view.getByRole("textbox", { name: "Folder on web-1" })).toHaveValue(
+			`/srv/restores/${day}-aaaaaaaa`,
+		);
+
+		await user.click(view.getByRole("combobox", { name: "Host: web-1" }));
+		await user.click(await screen.findByRole("option", { name: /db-1/ }));
+		expect(
+			await view.findByRole("textbox", { name: "Folder on db-1" }),
+		).toHaveValue(`/var/lib/lodestore/restore/${day}-aaaaaaaa`);
+
+		await user.click(view.getByRole("button", { name: "Start restore" }));
+		await waitFor(() =>
+			expect(body?.destination).toBe(
+				`/var/lib/lodestore/restore/${day}-aaaaaaaa`,
+			),
+		);
+	});
+
+	it("keeps a folder the user typed when the host changes", async () => {
+		mockServer([
+			host({ restore_roots: ["/srv/restores"] }),
+			host({
+				key: "agent-db",
+				host_id: "agent-db",
+				hostname: "db-1",
+				restore_roots: ["/data/restores"],
+			}),
+		]);
+		const { dialog, user } = await openRestore();
+		const view = within(dialog);
+		const field = view.getByRole("textbox", { name: "Folder on web-1" });
+		await user.clear(field);
+		await user.type(field, "/srv/mine");
+
+		await user.click(view.getByRole("combobox", { name: "Host: web-1" }));
+		await user.click(await screen.findByRole("option", { name: /db-1/ }));
+		expect(
+			await view.findByRole("textbox", { name: "Folder on db-1" }),
+		).toHaveValue("/srv/mine");
+	});
+
+	it("turns the original location off when the host forbids in-place", async () => {
+		mockServer([host({ allow_in_place: false })]);
+		const { dialog } = await openRestore();
+		const view = within(dialog);
+
+		const radio = view.getByRole("radio", { name: /Original location/ });
+		expect(radio).toBeDisabled();
+		expect(view.getByText(/restore\.allow_in_place: true/)).toHaveTextContent(
+			"--allow-in-place-restore",
+		);
+	});
+
+	it("leaves the original location on when the host allows or does not say", async () => {
+		mockServer([host({ allow_in_place: null })]);
+		const { dialog } = await openRestore();
+		const view = within(dialog);
+
+		expect(
+			view.getByRole("radio", { name: /Original location/ }),
+		).toBeEnabled();
+		expect(view.queryByText(/allow_in_place/)).toBeNull();
+	});
+
+	it("refuses a folder outside the roots before the server does", async () => {
+		mockServer([
+			host({ restore_roots: ["/var/lib/lodestore/restore", "/srv/r"] }),
+		]);
+		const { dialog, user } = await openRestore();
+		const view = within(dialog);
+		const field = view.getByRole("textbox", { name: "Folder on web-1" });
+		const start = view.getByRole("button", { name: "Start restore" });
+
+		expect(view.queryByText(/outside the folders/)).toBeNull();
+		expect(start).toBeEnabled();
+		await user.clear(field);
+		await user.type(field, "/tmp/x");
+		const message = view.getByText(/outside the folders/);
+		expect(message).toHaveTextContent("/var/lib/lodestore/restore, /srv/r");
+		expect(message).toHaveTextContent("Choose a folder under one of them.");
+		expect(field).toHaveAttribute("aria-invalid", "true");
+		expect(field).toHaveAccessibleDescription(/outside the folders/);
+		expect(start).toBeDisabled();
+
+		await user.clear(field);
+		await user.type(field, "/srv/rx");
+		expect(view.getByText(/outside the folders/)).toBeVisible();
+		expect(start).toBeDisabled();
+		await user.clear(field);
+		await user.type(field, "/srv/r/deeper/./x");
+		expect(view.queryByText(/outside the folders/)).toBeNull();
+		expect(start).toBeEnabled();
+	});
+
+	it("gives no roots message when the host has not reported them", async () => {
+		mockServer([host({ restore_roots: null })]);
+		const { dialog, user } = await openRestore();
+		const view = within(dialog);
+		const field = view.getByRole("textbox", { name: "Folder on web-1" });
+		await user.clear(field);
+		await user.type(field, "/tmp/x");
+		expect(view.queryByText(/outside the folders/)).toBeNull();
+		expect(view.queryByText(/turned off on this host/)).toBeNull();
+		expect(view.getByRole("button", { name: "Start restore" })).toBeEnabled();
+	});
+
+	it("says a new folder is off when the host allows no roots", async () => {
+		mockServer([host({ restore_roots: [] })]);
+		const { dialog } = await openRestore();
+		const view = within(dialog);
+
+		expect(
+			view.getByText(/Restoring into a new folder is turned off/),
+		).toHaveTextContent("restore.allowed_restore_roots");
+		expect(view.getByRole("button", { name: "Start restore" })).toBeDisabled();
+		expect(view.getByRole("textbox", { name: "Folder on web-1" })).toHaveValue(
+			"",
+		);
+		expect(view.queryByText(/Recommended/)).toBeNull();
+		expect(view.queryByText(/Enter|absolute/i)).toBeNull();
 	});
 
 	it("warns about another host and another repository", async () => {
@@ -346,7 +491,7 @@ describe("Restore dialog", { timeout: 30_000 }, () => {
 	});
 
 	it("rejects a new folder that resolves to the root", async () => {
-		mockServer();
+		mockServer([host({ restore_roots: null })]);
 		const { dialog, user } = await openRestore();
 		const view = within(dialog);
 		const field = view.getByRole("textbox", { name: "Folder on web-1" });
@@ -370,7 +515,7 @@ describe("Restore dialog", { timeout: 30_000 }, () => {
 	});
 
 	it("rejects .. in the folder and sends it without . parts", async () => {
-		mockServer();
+		mockServer([host({ restore_roots: null })]);
 		let body: { destination?: string } = {};
 		server.use(
 			http.post("/api/v1/restores", async ({ request }) => {
@@ -533,6 +678,30 @@ describe("Restore dialog", { timeout: 30_000 }, () => {
 			),
 		).toBeVisible();
 		expect(screen.getByRole("dialog")).toBeVisible();
+	});
+
+	it("shows a refusal without asking to try again", async () => {
+		mockServer();
+		server.use(
+			http.post("/api/v1/restores", () =>
+				apiError(
+					400,
+					"restore_outside_roots",
+					"The destination is outside the allowed folders",
+				),
+			),
+		);
+		const { dialog, user } = await openRestore();
+
+		await user.click(
+			within(dialog).getByRole("button", { name: "Start restore" }),
+		);
+
+		const alert = await within(dialog).findByRole("alert");
+		expect(alert).toHaveTextContent(
+			"Couldn't start the restore. The destination is outside the allowed folders.",
+		);
+		expect(alert).not.toHaveTextContent("Try again");
 	});
 
 	it("waits for the snapshot details before the dialogs can open", async () => {

@@ -56,6 +56,7 @@ const host: RestoreHost = {
 	snapshot_count: 2,
 	latest_snapshot_ms: snapshot.time,
 	unverified_count: 0,
+	restore_roots: null,
 };
 
 function mockRestore() {
