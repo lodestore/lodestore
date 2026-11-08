@@ -14,7 +14,7 @@ Bareos is a backup system for networks of computers, a fork of Bacula 5.2 starte
 
 ## At a glance
 
-| | Bareos | Lodestore 0.1 |
+| | Bareos | Lodestore 0.2 |
 |---|--------|---------------|
 | Components | Director, a File Daemon on each client, a Storage Daemon and a PostgreSQL catalog | One server binary and an agent on each host |
 | Storage | Tape, File, Fifo, Droplet (object stores, most notably S3), Dplcompat, Dedupable | S3-compatible object storage, local or network folder |
@@ -23,4 +23,4 @@ Bareos is a backup system for networks of computers, a fork of Bacula 5.2 starte
 | Platforms | Linux, Windows, macOS, FreeBSD | Linux, x86_64 and arm64 |
 | Sources | Files, plus File Daemon plugins for PostgreSQL, MariaDB, Percona XtraBackup, Microsoft SQL Server, Proxmox VE and VMware | Files and directories; databases through a dump in a pre-backup hook |
 | Backup levels | Full, differential, incremental and Always Incremental | Deduplicated snapshots |
-| License | GNU AGPLv3 | Apache-2.0 (agent, format, CLI), AGPL-3.0 (server) |
+| License | GNU AGPLv3 | Apache-2.0 |
