@@ -34,20 +34,26 @@ usage() {
 Usage: curl --proto '=https' --tlsv1.2 -fsSL <server>/install.sh | sh -s -- --join <token> [options]
 
   --join <token>   register this host with a one-time join token
-  --insecure       allow downloading the agent over plain HTTP (a network attacker
-                   can then replace the agent binary and its checksum)
+  --insecure       allow downloading over plain HTTP;
+                   anyone on the network can then get root on this host
   --force          forget the local identity and register this host again; the previous
                    agent id is kept when the server does not know it
-  --from-github    download the agent from GitHub releases instead of the server
+  --from-github    download the agent from GitHub releases instead of the server; needs
+                   minisign to check the release signature
   --trust-key <file>
-                   install a public key the agent trusts for updates, for your own
-                   builds; the file name must end in .pub, repeat the option for more keys
+                   trust this public key, both for checking the agent in this install and
+                   for updates, for your own builds; the file name must end in .pub,
+                   repeat the option for more keys
   --allow-in-place-restore
                    enable restores in place for this host: writes restore.allow_in_place: true
                    to /etc/lodestore/agent.yaml
   --uninstall      stop and remove the agent service and binary
   --purge          with --uninstall, also remove /etc/lodestore and /var/lib/lodestore
   --help           show this help
+
+When minisign is installed, the installer checks the signature of the agent against the
+Lodestore project key (key id 8CA38864EEA52F78) and any --trust-key, and refuses to
+install an agent without a valid signature.
 
 HTTPS_PROXY, HTTP_PROXY and NO_PROXY set in the environment of the installer
 (for example "| HTTPS_PROXY=http://proxy:3128 sh -s -- --join <token>") are
