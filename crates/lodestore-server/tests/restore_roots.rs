@@ -202,6 +202,26 @@ async fn restore_roots_unknown_facts_pass() {
     }
 }
 
+// `lode server restore` matches this exact text to add its host-id hint.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restore_unknown_host_message() {
+    for backend in backends() {
+        let env = AgentEnv::start(&backend).await;
+        let seeded = seed(&env).await;
+        let mut payload = body(&env, &seeded, "/srv/elsewhere", false);
+        payload["target_host_id"] = json!("web-1");
+        let (status, response) = post_session(&env, &payload).await;
+        assert_eq!(status, 404, "[{}] {response}", backend.name());
+        assert_eq!(
+            response["message"],
+            "The host was not found.",
+            "[{}]",
+            backend.name()
+        );
+        env.stop().await;
+    }
+}
+
 async fn listed_host(env: &AgentEnv) -> Value {
     let hosts: Vec<Value> = env
         .api

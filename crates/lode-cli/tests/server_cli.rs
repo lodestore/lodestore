@@ -745,7 +745,11 @@ fn server_cli_restore_says_to_pass_the_host_id_without_hosts_read() {
         ]),
         1,
     );
-    assert!(stderr.contains("lode server hosts list"), "{stderr}");
+    assert!(
+        stderr.contains("host's page in the web interface"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("lode server hosts list"), "{stderr}");
     assert!(stderr.contains("hosts:read"), "{stderr}");
 
     let server = fake(vec![

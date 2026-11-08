@@ -1004,8 +1004,9 @@ fn host_not_found_hint(e: anyhow::Error, list_refused: bool, host: &str) -> anyh
                 code: f.code.clone(),
                 message: format!(
                     "The host {host:?} was not found. This token may not read the host list \
-                     (hosts:read), so the name was sent as a host id. Pass the host id from \
-                     the ID column of `lode server hosts list`, or use a token with hosts:read."
+                     (hosts:read), so the name was sent as a host id. Pass the host id, which \
+                     is in the address of the host's page in the web interface, or use a \
+                     token with hosts:read."
                 ),
             }
             .into()
