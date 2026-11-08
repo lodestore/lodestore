@@ -174,10 +174,12 @@ async fn retention_gates_run_now_limit_retry_after() {
         assert!((1..=3600).contains(&retry_after), "[{what}] {retry_after}");
         let body: Value = response.json().await.unwrap();
         assert_eq!(body["code"], "rate_limited", "[{what}]");
+        let message = body["message"].as_str().unwrap();
         assert!(
-            body["message"].as_str().unwrap().contains("host-a"),
+            message.starts_with("This policy was started on host-a 6 times in the last hour."),
             "{body}"
         );
+        assert!(!message.contains("token"), "{body}");
         ts.stop().await;
     }
 }
