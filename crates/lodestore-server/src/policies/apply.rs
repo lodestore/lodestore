@@ -10,7 +10,6 @@ use serde_json::Value;
 use sqlx::Row;
 use utoipa::ToSchema;
 
-use super::matching::{AgentRow, load_agents};
 use super::{
     Checked, Failure, PolicyRow, RETENTION_PURPOSE, SCHEDULE_PURPOSE, all_policies,
     gains_hook_hosts, hooks_purpose, resolve, retention_of, runs_more_often,
@@ -307,7 +306,6 @@ fn plan(
     manager: &str,
     mut inputs: Vec<Input>,
     current: Vec<PolicyRow>,
-    agents: &[AgentRow],
 ) -> Result<Plan, ApplyFailure> {
     inputs.sort_by(|a, b| {
         a.checked
@@ -341,11 +339,7 @@ fn plan(
         };
         let Some(row) = by_name.get(name.as_str()) else {
             retention_changed |= retention_of(&input.checked.policy).is_some();
-            if gains_hook_hosts(
-                None,
-                (&input.checked.repository_id, &input.checked.policy),
-                agents,
-            ) {
+            if gains_hook_hosts(None, (&input.checked.repository_id, &input.checked.policy)) {
                 hooks_policies.push(name.clone());
             }
             creates.push((
@@ -394,7 +388,6 @@ fn plan(
         if gains_hook_hosts(
             Some((&row.repository_id, &row.policy)),
             (&input.checked.repository_id, &input.checked.policy),
-            agents,
         ) {
             hooks_policies.push(name.clone());
         }
@@ -575,13 +568,7 @@ pub async fn apply_policies(
         retention_changed,
         schedule_faster,
         hooks_policies,
-    } = plan(
-        &req,
-        &manager,
-        inputs,
-        all_policies(&state).await?,
-        &load_agents(&state).await?,
-    )?;
+    } = plan(&req, &manager, inputs, all_policies(&state).await?)?;
     if retention_changed {
         auth.require_also(Scope::SnapshotsDelete, RETENTION_PURPOSE)?;
     }

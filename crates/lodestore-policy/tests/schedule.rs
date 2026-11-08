@@ -294,7 +294,9 @@ fn min_gap_year(cron: &str) -> Option<i64> {
             ts("2026-11-06T00:00:00Z"),
             SignedDuration::from_hours(24 * 366),
             SignedDuration::from_secs(60),
+            usize::MAX,
         )
+        .smallest
         .map(|gap| gap.as_secs())
 }
 
@@ -330,6 +332,19 @@ fn schedule_min_gap_dst() {
         ts("2026-10-24T00:00:00Z"),
         SignedDuration::from_hours(72),
         SignedDuration::from_secs(60),
+        usize::MAX,
     );
-    assert_eq!(gap, Some(SignedDuration::from_hours(24)));
+    assert_eq!(gap.smallest, Some(SignedDuration::from_hours(24)));
+}
+
+#[test]
+fn schedule_min_gap_stops_at_the_run_cap() {
+    let found = compile("*/2 * * * *", "UTC").min_gap(
+        ts("2026-11-06T00:00:00Z"),
+        SignedDuration::from_hours(24 * 366),
+        SignedDuration::from_secs(60),
+        1000,
+    );
+    assert!(found.capped);
+    assert_eq!(found.smallest, Some(SignedDuration::from_secs(120)));
 }

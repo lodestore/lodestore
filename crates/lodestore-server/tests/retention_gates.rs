@@ -298,6 +298,48 @@ async fn retention_gates_month_restricted_cron_needs_snapshots_delete() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retention_gates_cron_without_two_runs_in_a_year_counts_as_faster() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        ts.create_local_repository("main").await;
+        let session = Session {
+            api: ts.api().await,
+            ts: &ts,
+        };
+        session.create(yaml(Some("0 2 * * *"), true, "/etc")).await;
+        let plain = Token::new(&ts, &["policies:read", "policies:write"]).await;
+        let got = plain
+            .update(yaml(Some("* * 29 2 *"), true, "/etc"), 1)
+            .await;
+        assert_schedule_refused(&got, backend.name());
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retention_gates_dense_cron_stops_scanning_and_counts_as_faster() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        ts.create_local_repository("main").await;
+        let session = Session {
+            api: ts.api().await,
+            ts: &ts,
+        };
+        session
+            .create(yaml(Some("*/2 * * * *"), true, "/etc"))
+            .await;
+        let plain = Token::new(&ts, &["policies:read", "policies:write"]).await;
+        let started = std::time::Instant::now();
+        let got = plain
+            .update(yaml(Some("0-58/2 * * * *"), true, "/etc"), 1)
+            .await;
+        assert_schedule_refused(&got, backend.name());
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn retention_gates_slower_or_shifted_cron_allowed() {
     for backend in backends() {
         let ts = TestServer::start(&backend).await;

@@ -146,30 +146,39 @@ fn check_agent_roots(
     ))
 }
 
-/// An agent that has not declared `restore_roots_v1` writes wherever a job
-/// says, so an API token must not queue a restore on it. An unknown host is
+pub(crate) const ROOTS_OUTDATED: &str =
+    "Update the agent on this host to restore to it with an API token.";
+
+/// Whether the host can take a token's restore. An agent that has not declared
+/// `restore_roots_v1` writes wherever a job says. An unknown host passes and is
 /// left to `enqueue_restore` to report.
-pub(crate) async fn require_roots_capability(
-    state: &AppState,
-    host_id: &str,
-) -> Result<(), ApiError> {
+pub(crate) async fn agent_declares_roots(state: &AppState, host_id: &str) -> sqlx::Result<bool> {
     let Some(row) = sqlx::query("SELECT capabilities_json FROM agents WHERE id = $1")
         .bind(host_id)
         .fetch_optional(&state.db.pool)
         .await?
     else {
-        return Ok(());
+        return Ok(true);
     };
     let capabilities: Vec<String> = row
         .try_get::<Option<String>, _>("capabilities_json")?
         .and_then(|json| serde_json::from_str(&json).ok())
         .unwrap_or_default();
-    if capabilities.iter().any(|c| c == CAP_RESTORE_ROOTS) {
+    Ok(capabilities.iter().any(|c| c == CAP_RESTORE_ROOTS))
+}
+
+/// An API token must not queue a restore on an agent that does not declare
+/// `restore_roots_v1`.
+pub(crate) async fn require_roots_capability(
+    state: &AppState,
+    host_id: &str,
+) -> Result<(), ApiError> {
+    if agent_declares_roots(state, host_id).await? {
         return Ok(());
     }
     Err(ApiError::BadRequest(
         "restore_agent_outdated",
-        "Update the agent on this host to restore to it with an API token.".into(),
+        ROOTS_OUTDATED.into(),
     ))
 }
 

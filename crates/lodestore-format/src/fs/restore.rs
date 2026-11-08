@@ -48,6 +48,9 @@ pub struct RestoreSettings {
     /// Give restored entries the owner of the snapshot. Off, the owner is
     /// whoever creates them and nothing is reported about it.
     pub restore_owners: bool,
+    /// With `restore_owners`, also keep setuid, setgid and file capabilities.
+    /// Off, the owner is restored and those privileges are dropped.
+    pub keep_privileges: bool,
 }
 
 /// A file or entry that could not be restored; the rest of the restore went on.
@@ -278,6 +281,16 @@ impl Restorer {
         })
     }
 
+    /// Whether the opened target can be written, asked of the open folder
+    /// itself so no path is walked again.
+    pub fn check_writable(&self) -> std::io::Result<()> {
+        let Some(fd) = self.stack.first().and_then(|l| l.fd.as_ref()) else {
+            return Ok(());
+        };
+        rustix::fs::accessat(fd, ".", rustix::fs::Access::WRITE_OK, AtFlags::empty())
+            .map_err(Into::into)
+    }
+
     pub fn take_unapplied(&mut self) -> Vec<Unapplied> {
         std::mem::take(&mut self.unapplied)
     }
@@ -477,6 +490,7 @@ impl Restorer {
                 node,
                 &path,
                 self.settings.restore_owners,
+                self.settings.keep_privileges,
                 &mut self.unapplied,
             );
         }
@@ -611,6 +625,7 @@ impl Restorer {
                                 node,
                                 &path,
                                 self.settings.restore_owners,
+                                self.settings.keep_privileges,
                                 &mut self.unapplied,
                             );
                             self.remember_link(node);
@@ -739,6 +754,7 @@ impl Restorer {
             node,
             &path,
             self.settings.restore_owners,
+            self.settings.keep_privileges,
             &mut self.unapplied,
         );
         drop(file);
@@ -939,11 +955,33 @@ impl Restorer {
             node,
             &path,
             self.settings.restore_owners,
+            self.settings.keep_privileges,
             &mut unapplied,
         );
         self.unapplied = unapplied;
         self.place(&tmp, &node.name)
     }
+}
+
+/// Whether `below` inside `root` holds nothing, read without following any
+/// symlink under `root`. A folder that does not exist yet is empty.
+pub fn is_empty_below(root: &Path, below: &Path) -> std::io::Result<bool> {
+    let me = rustix::process::geteuid().as_raw();
+    let trusted = |uid| uid == 0 || uid == me;
+    let opened = open_target(root, false, trusted)
+        .and_then(|root_fd| open_below(root_fd, below, false, trusted, false));
+    let fd = match opened {
+        Ok(fd) => fd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(e) => return Err(e),
+    };
+    for entry in Dir::read_from(fd)? {
+        let entry = entry?;
+        if !matches!(entry.file_name().to_bytes(), b"." | b"..") {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Opens the restore target one component at a time, creating missing folders
@@ -1074,6 +1112,7 @@ mod tests {
             k_id: zeroize::Zeroizing::new([0; 32]),
             seed: 0,
             restore_owners: false,
+            keep_privileges: false,
         }
     }
 

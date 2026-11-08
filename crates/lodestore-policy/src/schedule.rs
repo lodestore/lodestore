@@ -24,6 +24,12 @@ pub enum DstNoteKind {
     Repeated,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MinGap {
+    pub smallest: Option<SignedDuration>,
+    pub capped: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DstNote {
@@ -187,16 +193,25 @@ impl CompiledSchedule {
     }
 
     /// Smallest gap between consecutive runs within the horizon; stops at the first gap no longer than `stop_at`.
+    /// Looks at no more than `max_runs` occurrences; if the horizon is not reached by then, `capped` is set and
+    /// `smallest` is only the smallest gap seen so far.
     pub fn min_gap(
         &self,
         from: Timestamp,
         horizon: SignedDuration,
         stop_at: SignedDuration,
-    ) -> Option<SignedDuration> {
-        let end = from.checked_add(horizon).ok()?;
+        max_runs: usize,
+    ) -> MinGap {
+        let mut found = MinGap {
+            smallest: None,
+            capped: false,
+        };
+        let Ok(end) = from.checked_add(horizon) else {
+            return found;
+        };
         let mut cursor = from.to_zoned(self.tz.clone());
         let mut previous: Option<Timestamp> = None;
-        let mut smallest: Option<SignedDuration> = None;
+        let mut seen = 0usize;
         loop {
             let Ok(next) = self.cron.find_next_occurrence(&cursor, false) else {
                 break;
@@ -205,11 +220,16 @@ impl CompiledSchedule {
             if at > end {
                 break;
             }
+            seen += 1;
+            if seen > max_runs {
+                found.capped = true;
+                break;
+            }
             if !self.is_repeat(&next) {
                 if let Some(previous) = previous {
                     let gap = at.duration_since(previous);
-                    if smallest.is_none_or(|s| gap < s) {
-                        smallest = Some(gap);
+                    if found.smallest.is_none_or(|s| gap < s) {
+                        found.smallest = Some(gap);
                     }
                     if gap <= stop_at {
                         break;
@@ -219,7 +239,7 @@ impl CompiledSchedule {
             }
             cursor = next;
         }
-        smallest
+        found
     }
 
     pub fn dst_notes(&self, from: Timestamp, horizon_days: u32) -> Vec<DstNote> {

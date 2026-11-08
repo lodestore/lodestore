@@ -268,18 +268,46 @@ async fn set_labels(
     if current.host.status == HostStatus::Revoked {
         return Err(ApiError::Conflict("the host is revoked".into()));
     }
+    let stored: String = sqlx::query("SELECT labels_json FROM agents WHERE id = $1")
+        .bind(&id)
+        .fetch_optional(&state.db.pool)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("host not found".into()))?
+        .try_get("labels_json")?;
     if matches!(auth.principal(), Principal::Token { .. }) {
-        let names = hook_policies_gained_by_labels(&state, &id, &req.labels).await?;
+        let before: Vec<Label> =
+            serde_json::from_str(&stored).map_err(|e| ApiError::Internal(e.into()))?;
+        let names = hook_policies_gained_by_labels(&state, &id, &before, &req.labels).await?;
         if !names.is_empty() {
             auth.require_also(Scope::HooksWrite, hooks_purpose(&names))?;
         }
     }
-    sqlx::query("UPDATE agents SET labels_json = $1 WHERE id = $2 AND status <> 'revoked'")
-        .bind(serde_json::to_string(&req.labels).map_err(|e| ApiError::Internal(e.into()))?)
-        .bind(&id)
-        .execute(&state.db.pool)
-        .await?;
+    if !replace_labels(&state, &id, &stored, &req.labels).await? {
+        return Err(ApiError::Conflict(
+            "The labels changed while this request ran. Reload the host and try again.".into(),
+        ));
+    }
     Ok(Json(load_detail(&state, &id).await?))
+}
+
+/// Writes `labels` only if the host still has the stored value the caller
+/// checked its gates against.
+pub async fn replace_labels(
+    state: &AppState,
+    host_id: &str,
+    expected_json: &str,
+    labels: &[Label],
+) -> Result<bool, ApiError> {
+    let done = sqlx::query(
+        "UPDATE agents SET labels_json = $1 WHERE id = $2 AND labels_json = $3 \
+         AND status <> 'revoked'",
+    )
+    .bind(serde_json::to_string(labels).map_err(|e| ApiError::Internal(e.into()))?)
+    .bind(host_id)
+    .bind(expected_json)
+    .execute(&state.db.pool)
+    .await?;
+    Ok(done.rows_affected() == 1)
 }
 
 #[utoipa::path(

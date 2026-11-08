@@ -5,9 +5,9 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use lodestore_policy::jiff::{SignedDuration, Timestamp};
-use lodestore_policy::schedule::DstNote;
+use lodestore_policy::schedule::{DstNote, MinGap};
 use lodestore_policy::{
-    BackupPolicy, Hooks, Problem, Retention, Schedule, parse_yaml, to_yaml, validate,
+    BackupPolicy, Hooks, Problem, Retention, Schedule, Selector, parse_yaml, to_yaml, validate,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
@@ -45,34 +45,48 @@ fn cadence(policy: &BackupPolicy) -> Option<(&str, &str)> {
     ))
 }
 
-fn min_gap(
-    policy: &BackupPolicy,
-    from: Timestamp,
-    stop_at: SignedDuration,
-) -> Option<SignedDuration> {
-    policy.spec.schedule.as_ref()?.compile().ok()?.min_gap(
+const MAX_SCHEDULE_RUNS: usize = 100_000;
+
+fn min_gap(policy: &BackupPolicy, from: Timestamp, stop_at: SignedDuration) -> Option<MinGap> {
+    Some(policy.spec.schedule.as_ref()?.compile().ok()?.min_gap(
         from,
         SignedDuration::from_hours(24 * SCHEDULE_HORIZON_DAYS),
         stop_at,
-    )
+        MAX_SCHEDULE_RUNS,
+    ))
 }
 
+/// Whether `new` may run more often than `old`. Doubt counts as more often: a
+/// schedule with no two runs in the horizon replacing one that has them, or one
+/// too dense to scan within the cap.
 pub(crate) fn runs_more_often(old: &BackupPolicy, new: &BackupPolicy) -> bool {
     if cadence(old) == cadence(new) {
         return false;
     }
     let from = Timestamp::now();
-    let old_gap = min_gap(old, from, SHORTEST_GAP);
+    let old_gap = min_gap(old, from, SHORTEST_GAP).and_then(|found| found.smallest);
     if old_gap.is_some_and(|gap| gap <= SHORTEST_GAP) {
         return false;
     }
     let stop_at = old_gap.map_or(SignedDuration::MAX, |gap| {
         gap - SignedDuration::from_secs(1)
     });
-    match min_gap(new, from, stop_at) {
-        Some(gap) => old_gap.is_none_or(|old| gap < old),
-        None => false,
+    let Some(found) = min_gap(new, from, stop_at) else {
+        return false;
+    };
+    if found.capped {
+        return true;
     }
+    match found.smallest {
+        Some(gap) => old_gap.is_none_or(|old| gap < old),
+        None => old_gap.is_some(),
+    }
+}
+
+fn policy_conflict(name: &str) -> ApiError {
+    ApiError::PolicyConflict(format!(
+        "Policy \"{name}\" was changed elsewhere. Reload it and apply your edits again."
+    ))
 }
 
 pub(crate) fn hooks_purpose(names: &[String]) -> String {
@@ -82,10 +96,23 @@ pub(crate) fn hooks_purpose(names: &[String]) -> String {
     )
 }
 
+/// The selector picks no host the old one did not. Only two shapes are proven:
+/// a shorter host list, or the same labels plus more. Anything else, an empty
+/// selector or a list that appears or disappears included, counts as wider.
+fn selector_not_wider(old: &Selector, new: &Selector) -> bool {
+    match (&old.hosts, &new.hosts) {
+        (Some(old), Some(new)) => new.iter().all(|h| old.contains(h)),
+        (None, None) => old
+            .match_labels
+            .iter()
+            .all(|(k, v)| new.match_labels.get(k) == Some(v)),
+        _ => false,
+    }
+}
+
 pub(crate) fn gains_hook_hosts(
     old: Option<(&str, &BackupPolicy)>,
     new: (&str, &BackupPolicy),
-    agents: &[AgentRow],
 ) -> bool {
     let (new_repository, new_policy) = new;
     let no_hooks = Hooks::default();
@@ -99,10 +126,8 @@ pub(crate) fn gains_hook_hosts(
     if new_policy.spec.hooks == no_hooks {
         return false;
     }
-    agents.iter().any(|a| {
-        a.applies(new_repository, &new_policy.spec.selector)
-            && !a.applies(old_repository, &old_policy.spec.selector)
-    })
+    new_repository != old_repository
+        || !selector_not_wider(&old_policy.spec.selector, &new_policy.spec.selector)
 }
 
 const RESERVED_NAMES: [&str; 2] = ["validate", "apply"];
@@ -386,15 +411,17 @@ async fn all_policies(state: &AppState) -> Result<Vec<PolicyRow>, ApiError> {
 pub(crate) async fn hook_policies_gained_by_labels(
     state: &AppState,
     host_id: &str,
+    current_labels: &[Label],
     labels: &[Label],
 ) -> Result<Vec<String>, ApiError> {
-    let Some(before) = load_agents(state)
+    let Some(mut before) = load_agents(state)
         .await?
         .into_iter()
         .find(|a| a.id == host_id)
     else {
         return Ok(Vec::new());
     };
+    before.labels = current_labels.to_vec();
     let after = AgentRow {
         id: before.id.clone(),
         hostname: before.hostname.clone(),
@@ -586,7 +613,7 @@ pub async fn create_policy(
         auth.require_also(Scope::SnapshotsDelete, RETENTION_PURPOSE)?;
     }
     let name = checked.policy.metadata.name.clone();
-    if gains_hook_hosts(None, (&checked.repository_id, &checked.policy), &[]) {
+    if gains_hook_hosts(None, (&checked.repository_id, &checked.policy)) {
         auth.require_also(
             Scope::HooksWrite,
             hooks_purpose(std::slice::from_ref(&name)),
@@ -664,6 +691,9 @@ pub async fn update_policy(
     }
     if matches!(auth.principal(), Principal::Token { .. }) {
         let current = find_policy(&state, &name).await?;
+        if current.revision != input.base_revision {
+            return Err(policy_conflict(&name));
+        }
         if retention_of(&current.policy) != retention_of(&checked.policy) {
             auth.require_also(Scope::SnapshotsDelete, RETENTION_PURPOSE)?;
         }
@@ -672,13 +702,8 @@ pub async fn update_policy(
         {
             auth.require_also(Scope::SnapshotsDelete, SCHEDULE_PURPOSE)?;
         }
-        let agents = load_agents(&state).await?;
         let old = (current.repository_id.as_str(), &current.policy);
-        if gains_hook_hosts(
-            Some(old),
-            (&checked.repository_id, &checked.policy),
-            &agents,
-        ) {
+        if gains_hook_hosts(Some(old), (&checked.repository_id, &checked.policy)) {
             auth.require_also(
                 Scope::HooksWrite,
                 hooks_purpose(std::slice::from_ref(&name)),
@@ -700,9 +725,7 @@ pub async fn update_policy(
     .rows_affected();
     if updated == 0 {
         return Err(if policy_exists(&state, &name).await? {
-            ApiError::PolicyConflict(format!(
-                "Policy \"{name}\" was changed elsewhere. Reload it and apply your edits again."
-            ))
+            policy_conflict(&name)
         } else {
             ApiError::NotFound("policy not found".into())
         });

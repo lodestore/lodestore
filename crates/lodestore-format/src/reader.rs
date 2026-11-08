@@ -803,6 +803,7 @@ impl<S: BlobStore> Reader<S> {
             k_id: Key32::new(*self.keys.k_id()),
             seed: self.keys.cdc_seed(),
             restore_owners: !options.skip_owners,
+            keep_privileges: true,
         };
         let mut restorer = Restorer::open(target, settings)?;
         let mut walk = SelectedWalk::new(TreeCursor::new(nodes, base), options.include.as_ref());

@@ -2,6 +2,8 @@ mod common;
 
 use common::{Api, TestServer, backends, bearer_client};
 use lodestore_agent::{EnrollArgs, NetOptions};
+use lodestore_server::hosts::labels::Label;
+use lodestore_server::hosts::replace_labels;
 use serde_json::{Value, json};
 
 const DUMP: &str = "  hooks:\n    before:\n      - script: dump-db\n";
@@ -230,9 +232,198 @@ async fn policy_scopes_selector_widening_needs_hooks_write() {
             .await;
         assert_refused(&got, "db", what);
 
-        let narrowed = yaml("db", "main", "db", DUMP).replace("role: db\n", "role: nobody\n");
+        let narrowed =
+            yaml("db", "main", "db", DUMP).replace("role: db\n", "role: db\n      tier: prod\n");
         let got = plain.put("/api/v1/policies/db", &update(narrowed, 1)).await;
         assert_eq!(got.0, 200, "[{what}] narrowing: {}", got.1);
+        ts.stop().await;
+    }
+}
+
+fn with_selector(yaml: String, selector: &str) -> String {
+    yaml.replace(
+        "  selector:\n    matchLabels:\n      role: db\n",
+        &format!("  selector:{selector}\n"),
+    )
+}
+
+const HOSTS_A: &str = "\n    hosts: [host-a]";
+const HOSTS_AB: &str = "\n    hosts: [host-a, host-b]";
+const NO_HOSTS: &str = " {}";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn policy_scopes_widening_counts_without_current_hosts() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        ts.create_local_repository("main").await;
+        let session = Session {
+            api: ts.api().await,
+            ts: &ts,
+        };
+        let plain = Token::new(&ts, &["policies:read", "policies:write"]).await;
+        let what = backend.name();
+        let base = || yaml("db", "main", "db", DUMP);
+
+        session.create(base()).await;
+        let got = plain
+            .put(
+                "/api/v1/policies/db",
+                &update(with_selector(base(), NO_HOSTS), 1),
+            )
+            .await;
+        assert_refused(&got, "db", &format!("empty selector [{what}]"));
+        let got = plain
+            .put(
+                "/api/v1/policies/db",
+                &update(with_selector(base(), HOSTS_A), 1),
+            )
+            .await;
+        assert_refused(&got, "db", &format!("labels to host list [{what}]"));
+        let relabelled = base().replace("role: db\n", "role: web\n");
+        let got = plain
+            .put("/api/v1/policies/db", &update(relabelled, 1))
+            .await;
+        assert_refused(&got, "db", &format!("changed label [{what}]"));
+        let dropped = base().replace("role: db\n", "tier: prod\n");
+        let got = plain.put("/api/v1/policies/db", &update(dropped, 1)).await;
+        assert_refused(&got, "db", &format!("removed label [{what}]"));
+
+        let (_, stored) = session
+            .send(reqwest::Method::GET, "/api/v1/policies/db", None)
+            .await;
+        assert_eq!(stored["revision"], 1, "[{what}] nothing was written");
+
+        let narrowed = base().replace("role: db\n", "role: db\n      tier: prod\n");
+        let got = plain.put("/api/v1/policies/db", &update(narrowed, 1)).await;
+        assert_eq!(got.0, 200, "[{what}] added label: {}", got.1);
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn policy_scopes_host_list_changes() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        ts.create_local_repository("main").await;
+        let session = Session {
+            api: ts.api().await,
+            ts: &ts,
+        };
+        let plain = Token::new(&ts, &["policies:read", "policies:write"]).await;
+        let what = backend.name();
+        let listed = |hosts: &str| with_selector(yaml("db", "main", "db", DUMP), hosts);
+
+        session.create(listed(HOSTS_AB)).await;
+        let got = plain
+            .put("/api/v1/policies/db", &update(listed(NO_HOSTS), 1))
+            .await;
+        assert_refused(&got, "db", &format!("list to everything [{what}]"));
+        let got = plain
+            .put(
+                "/api/v1/policies/db",
+                &update(listed("\n    hosts: [host-a, host-b, host-c]"), 1),
+            )
+            .await;
+        assert_refused(&got, "db", &format!("unenrolled host id [{what}]"));
+        let got = plain
+            .put("/api/v1/policies/db", &update(listed(HOSTS_A), 1))
+            .await;
+        assert_eq!(got.0, 200, "[{what}] fewer hosts: {}", got.1);
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn policy_scopes_move_to_empty_repository_needs_hooks_write() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        ts.create_local_repository("main").await;
+        ts.create_local_repository("empty").await;
+        let session = Session {
+            api: ts.api().await,
+            ts: &ts,
+        };
+        session.create(yaml("db", "main", "db", DUMP)).await;
+        let plain = Token::new(&ts, &["policies:read", "policies:write"]).await;
+
+        let got = plain
+            .put(
+                "/api/v1/policies/db",
+                &update(yaml("db", "empty", "db", DUMP), 1),
+            )
+            .await;
+        assert_refused(&got, "db", backend.name());
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn policy_scopes_apply_widening_without_current_hosts() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        ts.create_local_repository("main").await;
+        let session = Session {
+            api: ts.api().await,
+            ts: &ts,
+        };
+        session.create(yaml("db", "main", "db", DUMP)).await;
+        let plain = Token::new(&ts, &["policies:read", "policies:write"]).await;
+        let widened = with_selector(yaml("db", "main", "db", DUMP), NO_HOSTS);
+        for dry_run in [true, false] {
+            let got = plain
+                .post(
+                    "/api/v1/policies/apply",
+                    &json!({
+                        "documents": [{ "source": "p.yaml", "yaml": widened }],
+                        "adopt": true,
+                        "dry_run": dry_run,
+                    }),
+                )
+                .await;
+            assert_refused(
+                &got,
+                "db",
+                &format!("dry_run={dry_run} [{}]", backend.name()),
+            );
+        }
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn policy_scopes_stale_revision_conflicts_before_gates() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        ts.create_local_repository("main").await;
+        let session = Session {
+            api: ts.api().await,
+            ts: &ts,
+        };
+        session.create(yaml("db", "main", "db", DUMP)).await;
+        let (status, _) = session
+            .put(
+                "/api/v1/policies/db",
+                &update(
+                    yaml("db", "main", "db", DUMP).replace("- /etc", "- /srv"),
+                    1,
+                ),
+            )
+            .await;
+        assert_eq!(status, 200);
+        let plain = Token::new(&ts, &["policies:read", "policies:write"]).await;
+
+        let got = plain
+            .put(
+                "/api/v1/policies/db",
+                &update(with_selector(yaml("db", "main", "db", DUMP), NO_HOSTS), 1),
+            )
+            .await;
+        assert_eq!(got.0, 409, "[{}] {}", backend.name(), got.1);
+        assert_eq!(got.1["code"], "policy_conflict");
+        let (_, stored) = session
+            .send(reqwest::Method::GET, "/api/v1/policies/db", None)
+            .await;
+        assert_eq!(stored["revision"], 2);
         ts.stop().await;
     }
 }
@@ -386,6 +577,36 @@ async fn policy_scopes_labels_widening_needs_hooks_write() {
         assert_eq!(status, 200, "[{what}] session: {body}");
         let (status, body) = session.put(&path, &role("db")).await;
         assert_eq!(status, 200, "[{what}] session: {body}");
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn policy_scopes_labels_write_is_compare_and_set() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let repo = ts.create_local_repository("main").await;
+        let session = Session {
+            api: ts.api().await,
+            ts: &ts,
+        };
+        let id = session.enroll(&repo, "web-1", "web").await;
+        let what = backend.name();
+        let label = |value: &str| {
+            vec![Label {
+                key: "role".into(),
+                value: value.into(),
+            }]
+        };
+        let stored = |value: &str| serde_json::to_string(&label(value)).unwrap();
+
+        let stale = replace_labels(ts.state(), &id, &stored("old"), &label("db")).await;
+        assert!(!stale.unwrap(), "[{what}] a stale write must not land");
+        assert_eq!(labels_of(&session, &id).await, role("web")["labels"]);
+
+        let fresh = replace_labels(ts.state(), &id, &stored("web"), &label("db")).await;
+        assert!(fresh.unwrap(), "[{what}]");
+        assert_eq!(labels_of(&session, &id).await, role("db")["labels"]);
         ts.stop().await;
     }
 }

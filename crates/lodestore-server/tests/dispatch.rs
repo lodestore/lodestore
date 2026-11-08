@@ -2090,3 +2090,70 @@ async fn dispatch_gc_restore_not_gated() {
         ts.stop().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dispatch_token_restore_rechecks_roots_capability() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let host = enroll(&ts, &api, &repo, "host-a").await;
+        let snapshot = write_snapshot(&ts, "host-a").await;
+        ingest_snapshot(ts.state(), &repo, &snapshot, None)
+            .await
+            .unwrap();
+        let pool = &ts.state().db.pool;
+        let request = |snapshot: &String| RestoreRequest {
+            snapshot_id: snapshot.clone(),
+            items: vec![
+                ts.dir
+                    .path()
+                    .join("data-host-a/file.txt")
+                    .canonicalize()
+                    .unwrap()
+                    .into_os_string()
+                    .into_encoded_bytes(),
+            ],
+            target_host_id: host.id.clone(),
+            destination: "/srv/out".to_string(),
+            in_place: false,
+            conflict: ConflictPolicy::OverwriteChanged,
+            restore_owners: false,
+            accept_unverified: true,
+        };
+        let job = enqueue_restore(ts.state(), request(&snapshot), "token:ci")
+            .await
+            .expect("queue a restore");
+
+        let mut agent = Fake::connect_with(&ts, &host, &["restore_v1"]).await;
+        wait_state(pool, &job, "failed").await;
+        assert_eq!(
+            text(pool, "SELECT error_code FROM jobs WHERE id = $1", &job)
+                .await
+                .as_deref(),
+            Some("restore_agent_outdated"),
+            "[{}]",
+            backend.name()
+        );
+        assert!(
+            agent
+                .drain(Duration::from_millis(300))
+                .await
+                .into_iter()
+                .all(|m| is_assign(m).is_none()),
+            "[{}]",
+            backend.name()
+        );
+
+        let session_job = enqueue_restore(ts.state(), request(&snapshot), "admin")
+            .await
+            .expect("queue a restore");
+        assert_eq!(
+            agent.recv(is_assign).await,
+            session_job,
+            "[{}]",
+            backend.name()
+        );
+        ts.stop().await;
+    }
+}

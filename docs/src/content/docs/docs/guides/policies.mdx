@@ -145,8 +145,8 @@ A web session may change everything on this page. An API token, for example in a
 | Change | Extra scope |
 | --- | --- |
 | Add, change or remove `retention`, or `includeStdin` | `snapshots:delete`, because retention makes the server delete snapshots |
-| Run a policy with retention more often | `snapshots:delete`. The server compares the shortest gap between two runs of the schedule over the next 366 days, in the time zone of the policy, before and after the change. That also catches `0 3 * 12 *`, which runs daily but only in December, in place of a weekly schedule. A schedule that runs less often, or at another time of day, needs only `policies:write` |
-| Add, change or remove `hooks`, or bring more hosts under a policy that has hooks, by `hosts`, a selector, the `repository` or by changing host labels | `hooks:write`, because hooks run commands as root on the hosts. Deleting a whole policy needs only `policies:write` |
+| Run a policy with retention more often | `snapshots:delete`. The server compares the shortest gap between two runs of the schedule over the next 366 days, in the time zone of the policy, before and after the change. That also catches `0 3 * 12 *`, which runs daily but only in December, in place of a weekly schedule, and a schedule with no two runs in that year, such as `* * 29 2 *`, in place of a daily one. A schedule that runs less often, or at another time of day, needs only `policies:write` |
+| Add, change or remove `hooks`, or widen a policy that has hooks: change its `repository`, or its selector in any way other than a shorter `hosts` list or more `matchLabels` added (an empty selector, a changed or removed label and a host id that is not enrolled yet all count as wider), or change host labels so that a host joins it | `hooks:write`, because hooks run commands as root on the hosts. It does not matter which hosts are enrolled at that moment. Deleting a whole policy needs only `policies:write` |
 
 The server answers 403 and names the scope; for hooks it also lists the policies. `lode apply` refuses the whole run in these cases, and `--dry-run` shows the refusal beforehand.
 

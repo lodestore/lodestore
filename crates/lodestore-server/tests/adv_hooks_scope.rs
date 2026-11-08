@@ -100,3 +100,57 @@ async fn adv_hosts_write_token_cannot_widen_hook_coverage() {
         ts.stop().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adv_policies_write_token_cannot_widen_hooked_selector_or_repository() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        ts.create_local_repository("main").await;
+        ts.create_local_repository("spare").await;
+        let api = ts.api().await;
+        let hooks = "  hooks:\n    before:\n      - script: dump-db\n";
+        let created = api
+            .post("/api/v1/policies", &json!({ "yaml": policy("db", hooks) }))
+            .await;
+        assert_eq!(created.status(), 201);
+        let token = bearer_client(&ts.issue_token(&["policies:read", "policies:write"]).await);
+        let put = |yaml: String| {
+            token
+                .put(format!("{}/api/v1/policies/nightly", ts.rest_url()))
+                .json(&json!({ "yaml": yaml, "base_revision": 1 }))
+                .send()
+        };
+
+        let everyone = policy("db", hooks).replace(
+            "  selector:\n    matchLabels:\n      role: db\n",
+            "  selector: {}\n",
+        );
+        let ghost = policy("db", hooks).replace(
+            "  selector:\n    matchLabels:\n      role: db\n",
+            "  selector:\n    hosts: [agent-that-enrolls-later]\n",
+        );
+        let elsewhere = policy("db", hooks).replace("repository: main", "repository: spare");
+        for (what, yaml) in [
+            ("empty selector", everyone),
+            ("host id not enrolled yet", ghost),
+            ("another repository", elsewhere),
+        ] {
+            let response = put(yaml).await.unwrap();
+            assert_eq!(response.status(), 403, "{what} [{}]", backend.name());
+            let body: Value = response.json().await.unwrap();
+            assert_eq!(body["message"], HOOKS_REFUSED, "{what}");
+        }
+        let stored: Value = api
+            .get("/api/v1/policies/nightly")
+            .await
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(stored["revision"], 1, "{stored}");
+
+        let narrower = policy("db", hooks).replace("role: db\n", "role: db\n      tier: prod\n");
+        let response = put(narrower).await.unwrap();
+        assert_eq!(response.status(), 200, "[{}]", backend.name());
+        ts.stop().await;
+    }
+}
