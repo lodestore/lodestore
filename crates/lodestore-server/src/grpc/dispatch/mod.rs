@@ -190,10 +190,24 @@ pub async fn assign_queued(state: &AppState, only_agent: Option<&str>) -> anyhow
                 .await?;
                 continue;
             }
-            let source = row
+            let record = row
                 .try_get::<Option<String>, _>("restore_json")?
-                .and_then(|json| serde_json::from_str::<RestoreRecord>(&json).ok())
-                .map(|record| record.source_repository_id);
+                .and_then(|json| serde_json::from_str::<RestoreRecord>(&json).ok());
+            if record
+                .as_ref()
+                .is_some_and(|r| r.started_by.starts_with("token:"))
+                && !crate::jobs::restore::agent_declares_roots(state, &host_id).await?
+            {
+                fail_job(
+                    state,
+                    &job_id,
+                    "restore_agent_outdated",
+                    crate::jobs::restore::ROOTS_OUTDATED,
+                )
+                .await?;
+                continue;
+            }
+            let source = record.map(|record| record.source_repository_id);
             if gc_db::sweeping(state, source.as_deref()).await? {
                 continue;
             }
