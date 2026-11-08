@@ -786,6 +786,91 @@ async fn restore_runner_new_folder_drops_setuid_but_keeps_owner() {
     assert_eq!(mode_of(&fx.restored(&target, "a/x")), 0o6755);
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[ignore = "requires root; run scripts/test-linux.sh --root -p lodestore-agent --test restore"]
+async fn restore_runner_root_new_folder_gives_foreign_owner_without_privileges() {
+    use lodestore_format::pb::Xattr;
+    use rustix::fs::{XattrFlags, getxattr, lsetxattr};
+
+    assert!(is_root(), "run through scripts/test-linux.sh --root");
+    const OWNER: u32 = 54321;
+    const CAP: &str = "security.capability";
+    let value = [&[0, 0, 0, 2][..], &[0; 16]].concat();
+
+    let fx = Fx::new().await;
+    let hub = fx.hub();
+    let ids = ids(&fx).await;
+    let planned = fx.plan(&["a/x"], 4, None).await;
+    let plan = || {
+        let value = value.clone();
+        MemPlan::new(&planned).map_nodes(move |n| {
+            if n.r#type == NodeType::File as i32 {
+                n.uid = OWNER;
+                n.gid = OWNER;
+                n.mode = 0o6755;
+                n.xattrs.push(Xattr {
+                    name: CAP.as_bytes().to_vec(),
+                    value: value.clone(),
+                });
+            }
+        })
+    };
+    let probe = fx.root.join("probe");
+    fs::write(&probe, b"").unwrap();
+    if lsetxattr(&probe, CAP, &value, XattrFlags::empty()).is_err() {
+        panic!("this file system cannot hold {CAP}");
+    }
+    let has_cap = |p: &Path| getxattr(p, CAP, &mut [0u8; 64]).is_ok();
+
+    let dest = fx.root.join("fresh");
+    let id = fx.job_id();
+    let spec = fx.spec(
+        &dest,
+        ConflictPolicy::OverwriteChanged,
+        false,
+        true,
+        ids.k_id,
+        ids.repo_id,
+    );
+    let opts = RestoreOptions {
+        roots: vec![fx.root.clone()],
+        ..options()
+    };
+    let msgs = run(&hub, &id, spec, plan(), StoreFetcher::new(&fx), opts).await;
+    let f = finished_of(&msgs, &id).unwrap();
+    assert_eq!(f.outcome, JobOutcome::Succeeded as i32, "{msgs:?}");
+    let restored = fx.restored(&dest, "a/x");
+    let meta = fs::metadata(&restored).unwrap();
+    assert_eq!((meta.uid(), meta.gid()), (OWNER, OWNER));
+    assert_eq!(meta.permissions().mode() & 0o7777, 0o755);
+    assert!(!has_cap(&restored), "{CAP} must not be applied");
+
+    let target = fx.root.join("in-place");
+    let id = fx.job_id();
+    let spec = fx.spec(
+        Path::new("/"),
+        ConflictPolicy::OverwriteChanged,
+        true,
+        true,
+        ids.k_id,
+        ids.repo_id,
+    );
+    let options = RestoreOptions {
+        root: target.clone(),
+        allow_in_place: true,
+        ..options()
+    };
+    let msgs = run(&hub, &id, spec, plan(), StoreFetcher::new(&fx), options).await;
+    let f = finished_of(&msgs, &id).unwrap();
+    assert_eq!(f.outcome, JobOutcome::Succeeded as i32, "{msgs:?}");
+    let restored = fx.restored(&target, "a/x");
+    let meta = fs::metadata(&restored).unwrap();
+    assert_eq!(meta.uid(), OWNER);
+    assert_eq!(meta.permissions().mode() & 0o7777, 0o6755);
+    assert!(has_cap(&restored), "in place keeps {CAP}");
+}
+
 #[tokio::test]
 async fn restore_runner_symlinked_target_is_not_read() {
     let fx = Fx::new().await;
