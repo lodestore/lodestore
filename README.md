@@ -7,7 +7,7 @@
 **Centralized, encrypted backup for your server fleet. Your data goes straight to your own storage, and a restore needs only the repository and a password.**
 
 [![ci](https://github.com/lodestore/lodestore/actions/workflows/ci.yml/badge.svg)](https://github.com/lodestore/lodestore/actions/workflows/ci.yml)
-[![License: Apache-2.0 and AGPL-3.0](https://img.shields.io/badge/license-Apache--2.0%20%2F%20AGPL--3.0-blue)](#license)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](#license)
 [![Latest release](https://img.shields.io/github/v/release/lodestore/lodestore)](https://github.com/lodestore/lodestore/releases)
 
 **[Try the live demo](https://demo.lodestore.dev)**: a read-only server with synthetic data, no sign-up.
@@ -103,13 +103,4 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. To report
 
 ## License
 
-| Component | Crates | License |
-|---|---|---|
-| Agent | `lodestore-agent` | Apache-2.0 |
-| Repository format | `lodestore-format` | Apache-2.0 |
-| Protocol | `lodestore-proto` | Apache-2.0 |
-| CLI (`lode`) | `lode-cli` | Apache-2.0 |
-| Policy engine, test helpers | `lodestore-policy`, `lodestore-testkit` | Apache-2.0 |
-| Server | `lodestore-server` | AGPL-3.0-only |
-
-Apache-2.0 crates never depend on `lodestore-server` or any other AGPL crate; `scripts/check-license-boundary.sh` enforces this. The Apache-2.0 text is in [LICENSE](LICENSE), the AGPL-3.0 text in [crates/lodestore-server/LICENSE](crates/lodestore-server/LICENSE).
+Every crate in this repository is licensed under Apache-2.0; the text is in [LICENSE](LICENSE).
