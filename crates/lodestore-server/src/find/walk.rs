@@ -266,6 +266,16 @@ enum Outcome {
     Stopped,
 }
 
+/// A failure wins, then a user stop (unless the search stopped itself at the result limit), then any stop reason.
+fn final_state(outcome: &Outcome, stop: Option<FindStop>) -> FindState {
+    match outcome {
+        Outcome::Failed(_) => FindState::Failed,
+        Outcome::Stopped if stop != Some(FindStop::Limit) => FindState::Cancelled,
+        _ if stop.is_some() => FindState::Incomplete,
+        _ => FindState::Done,
+    }
+}
+
 pub async fn run(state: AppState, session: Arc<Session>) {
     let outcome = tokio::select! {
         () = session.cancel.cancelled() => Outcome::Stopped,
@@ -277,16 +287,11 @@ pub async fn run(state: AppState, session: Arc<Session>) {
     if matches!(outcome, Outcome::TimedOut) {
         s.stop_reason = Some(FindStop::Timeout);
     }
-    s.state = match outcome {
-        Outcome::Failed(error) => {
-            tracing::warn!(session = %session.id, %error, "find: search failed");
-            s.error = Some("the search failed; see the server log".into());
-            FindState::Failed
-        }
-        _ if s.stop_reason.is_some() => FindState::Incomplete,
-        Outcome::Stopped => FindState::Cancelled,
-        _ => FindState::Done,
-    };
+    if let Outcome::Failed(error) = &outcome {
+        tracing::warn!(session = %session.id, %error, "find: search failed");
+        s.error = Some("the search failed; see the server log".into());
+    }
+    s.state = final_state(&outcome, s.stop_reason);
     s.finished_at = Some(now_ms());
     s.revision += 1;
     let revision = s.revision;
@@ -518,6 +523,29 @@ mod tests {
         assert_eq!(stop_for(&limit), Some(FindStop::WalkLimit));
         let corrupt = anyhow::Error::from(FormatError::corrupt("tree", "bad"));
         assert_eq!(stop_for(&corrupt), None);
+    }
+
+    #[test]
+    fn cancel_wins_over_walk_limit() {
+        let state = |outcome, stop| final_state(&outcome, stop);
+        assert_eq!(
+            state(Outcome::Stopped, Some(FindStop::WalkLimit)),
+            FindState::Cancelled
+        );
+        assert_eq!(
+            state(Outcome::Stopped, Some(FindStop::Limit)),
+            FindState::Incomplete
+        );
+        assert_eq!(state(Outcome::Stopped, None), FindState::Cancelled);
+        assert_eq!(
+            state(Outcome::Complete, Some(FindStop::WalkLimit)),
+            FindState::Incomplete
+        );
+        assert_eq!(
+            state(Outcome::TimedOut, Some(FindStop::Timeout)),
+            FindState::Incomplete
+        );
+        assert_eq!(state(Outcome::Complete, None), FindState::Done);
     }
 
     #[test]
