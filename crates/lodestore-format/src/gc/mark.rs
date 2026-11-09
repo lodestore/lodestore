@@ -7,7 +7,7 @@ use crate::check::is_data_error;
 use crate::crypto::{BLOB_TYPE_DATA, BLOB_TYPE_TREE, BlobId};
 use crate::error::{Error, Result, within_size};
 use crate::index::{
-    INDEX_PREFIX, Index, MAX_SHARD_READ_SIZE, MAX_SHARD_SIZE, SupersedesTrust, check_shard,
+    INDEX_PREFIX, Index, MAX_SHARD_SIZE, SupersedesTrust, check_shard, fetch_attested_shard_bytes,
     fetch_shard_bytes, hex32, open_shard, parse_hex32,
 };
 use crate::keys::ReadKeys;
@@ -45,12 +45,12 @@ pub async fn load_shards<S: BlobStore>(store: &S, keys: &ReadKeys) -> Result<Sha
         let Some(shard_id) = entry.key.strip_prefix(INDEX_PREFIX).and_then(parse_hex32) else {
             continue;
         };
-        let max = if out.attested.contains(&shard_id) {
-            MAX_SHARD_READ_SIZE
+        let fetched = if out.attested.contains(&shard_id) {
+            fetch_attested_shard_bytes(store, &shard_id, Some(entry.size)).await
         } else {
-            MAX_SHARD_SIZE
+            fetch_shard_bytes(store, &entry.key, Some(entry.size), MAX_SHARD_SIZE).await
         };
-        let opened = match fetch_shard_bytes(store, &entry.key, Some(entry.size), max).await {
+        let opened = match fetched {
             Ok(Some(bytes)) => open_shard(keys.k_idx(), keys.repo_id(), &shard_id, &bytes)
                 .and_then(|shard| check_shard(shard_id, &shard).map(|()| shard)),
             Ok(None) => continue,

@@ -20,8 +20,8 @@ use crate::error::{Error, Result};
 use crate::fs::filter::PathMatcher;
 use crate::fs::restore::{RestoreSettings, Restorer, check_extents};
 use crate::index::{
-    BlobLocation, INDEX_PREFIX, Index, MAX_SHARD_READ_SIZE, MAX_SHARD_SIZE, SupersedesTrust, fetch_shard_bytes,
-    hex32, index_object_key, open_shard, parse_hex32,
+    BlobLocation, INDEX_PREFIX, Index, MAX_SHARD_SIZE, SupersedesTrust, fetch_attested_shard_bytes,
+    fetch_shard_bytes, hex32, index_object_key, open_shard, parse_hex32,
 };
 use crate::keys::ReadKeys;
 use crate::pack::{PACK_PREFIX_LEN, decompress, open_prefix, pack_object_key};
@@ -390,12 +390,12 @@ impl<S: BlobStore> Reader<S> {
             .await
             .contains(&shard_id);
         let key = index_object_key(&shard_id);
-        let max = if attested {
-            MAX_SHARD_READ_SIZE
+        let fetched = if attested {
+            fetch_attested_shard_bytes(&self.store, &shard_id, listed).await?
         } else {
-            MAX_SHARD_SIZE
+            fetch_shard_bytes(&self.store, &key, listed, MAX_SHARD_SIZE).await?
         };
-        match fetch_shard_bytes(&self.store, &key, listed, max).await? {
+        match fetched {
             Some(bytes) => {
                 let shard = open_shard(self.keys.k_idx(), self.keys.repo_id(), &shard_id, &bytes)?;
                 self.cache.index.write().await.add_shard(shard_id, &shard)?;

@@ -34,8 +34,6 @@ pub(crate) const MAX_RECORD_ENTRIES_LEN: usize =
     (PACK_MAX_SIZE / (ENTRY_LEN + MIN_FRAME_LEN)) * ENTRY_LEN;
 /// Largest index shard a writer, the collector or the server check reads.
 pub const MAX_SHARD_SIZE: u64 = 64 << 20;
-/// Largest index shard a restore reads, for shards written before the limit.
-pub const MAX_SHARD_READ_SIZE: u64 = 1 << 30;
 
 pub fn hex32(id: &[u8; 32]) -> String {
     blake3::Hash::from_bytes(*id).to_hex().to_string()
@@ -71,6 +69,65 @@ pub async fn fetch_shard_bytes<S: BlobStore>(
     max: u64,
 ) -> Result<Option<Bytes>> {
     match read_bounded(store, key, listed, max, "shard").await {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(Error::Store(BlobError::NotFound)) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Reads an index shard the server attested, `None` when it is gone. The
+/// attestation names the content, not the size, and on a store without
+/// conditional writes an agent can overwrite the object under that name, so a
+/// shard over `MAX_SHARD_SIZE` is first hashed in pieces of that size, which
+/// holds one piece in memory. Only when the hash is the name is it read whole,
+/// by range of exactly the length found; `open_shard` checks the hash again.
+pub async fn fetch_attested_shard_bytes<S: BlobStore>(
+    store: &S,
+    shard_id: &BlobId,
+    listed: Option<u64>,
+) -> Result<Option<Bytes>> {
+    let key = index_object_key(shard_id);
+    if listed.is_none_or(|size| size <= MAX_SHARD_SIZE) {
+        match fetch_shard_bytes(store, &key, listed, MAX_SHARD_SIZE).await {
+            Err(Error::Corrupt { .. }) if listed.is_none() => {}
+            other => return other,
+        }
+    }
+    let mut hasher = blake3::Hasher::new();
+    let mut total = 0u64;
+    loop {
+        let end = match listed {
+            Some(size) => total.saturating_add(MAX_SHARD_SIZE).min(size),
+            None => total
+                .checked_add(MAX_SHARD_SIZE)
+                .ok_or_else(|| Error::corrupt(&key, "longer than a shard can be read"))?,
+        };
+        if end <= total {
+            break;
+        }
+        let piece = match store.get_range(&key, total..end).await {
+            Ok(piece) => piece,
+            Err(BlobError::NotFound) if total == 0 => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        let asked = end - total;
+        let len = piece.len() as u64;
+        if len > asked {
+            return Err(Error::corrupt(&key, "longer than the range asked for"));
+        }
+        hasher.update(&piece);
+        total += len;
+        if len < asked {
+            break;
+        }
+    }
+    if hasher.finalize().as_bytes() != shard_id {
+        return Err(Error::corrupt(
+            &key,
+            "object name does not match its content",
+        ));
+    }
+    match read_bounded(store, &key, Some(total), total, "shard").await {
         Ok(bytes) => Ok(Some(bytes)),
         Err(Error::Store(BlobError::NotFound)) => Ok(None),
         Err(e) => Err(e),
@@ -432,14 +489,17 @@ impl Index {
         repo_id: &RepoId,
         shard_id: BlobId,
         listed: Option<u64>,
-        max: u64,
+        attested: bool,
     ) -> Result<bool> {
         if self.has_shard(&shard_id) {
             return Ok(true);
         }
-        let Some(bytes) =
-            fetch_shard_bytes(store, &index_object_key(&shard_id), listed, max).await?
-        else {
+        let fetched = if attested {
+            fetch_attested_shard_bytes(store, &shard_id, listed).await?
+        } else {
+            fetch_shard_bytes(store, &index_object_key(&shard_id), listed, MAX_SHARD_SIZE).await?
+        };
+        let Some(bytes) = fetched else {
             return Ok(false);
         };
         let shard = open_shard(k_idx, repo_id, &shard_id, &bytes)?;
@@ -464,7 +524,7 @@ impl Index {
                 .try_into()
                 .map_err(|_| Error::corrupt("snapshot", "index reference must be 32 bytes"))?;
             match self
-                .load_one(store, k_idx, repo_id, shard_id, None, MAX_SHARD_SIZE)
+                .load_one(store, k_idx, repo_id, shard_id, None, false)
                 .await
             {
                 Ok(_) => {}
@@ -492,14 +552,7 @@ impl Index {
                 continue;
             };
             match self
-                .load_one(
-                    store,
-                    k_idx,
-                    repo_id,
-                    shard_id,
-                    Some(entry.size),
-                    MAX_SHARD_SIZE,
-                )
+                .load_one(store, k_idx, repo_id, shard_id, Some(entry.size), false)
                 .await
             {
                 Ok(_) => {}
@@ -649,11 +702,6 @@ pub async fn rebuild_index<S: BlobStore>(
         else {
             continue;
         };
-        let max = if attested.shards.contains(&shard_id) {
-            MAX_SHARD_READ_SIZE
-        } else {
-            MAX_SHARD_SIZE
-        };
         match index
             .load_one(
                 store,
@@ -661,7 +709,7 @@ pub async fn rebuild_index<S: BlobStore>(
                 keys.repo_id(),
                 shard_id,
                 Some(entry.size),
-                max,
+                attested.shards.contains(&shard_id),
             )
             .await
         {

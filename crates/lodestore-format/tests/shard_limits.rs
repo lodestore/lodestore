@@ -20,8 +20,8 @@ use lodestore_format::crypto::{BlobId, Entropy, HPKE_ENC_LEN, SEALED_KEY_LEN};
 use lodestore_format::gc::mark::load_shards;
 use lodestore_format::gc::sweep::confirm_unreferenced;
 use lodestore_format::index::{
-    Index, MAX_SHARD_READ_SIZE, MAX_SHARD_SIZE, fetch_shard_bytes, index_object_key, rebuild_index,
-    seal_shard,
+    Index, MAX_SHARD_SIZE, fetch_attested_shard_bytes, fetch_shard_bytes, index_object_key,
+    rebuild_index, seal_shard,
 };
 use lodestore_format::pack::{ENTRY_LEN, PACK_MAX_SIZE, PACK_PREFIX_LEN};
 use lodestore_format::pb;
@@ -86,7 +86,7 @@ fn big_shard_with(fx: &Fx, real: Vec<pb::PackRecord>) -> (BlobId, Vec<u8>) {
     let keys = fx.repo.read_keys();
     let records: Vec<pb::PackRecord> = real.into_iter().chain(records).collect();
     let (id, bytes) = seal_shard(keys.k_idx(), keys.repo_id(), records, &mut entropy).unwrap();
-    assert!(bytes.len() as u64 > MAX_SHARD_SIZE && bytes.len() as u64 <= MAX_SHARD_READ_SIZE);
+    assert!(bytes.len() as u64 > MAX_SHARD_SIZE);
     (id, bytes)
 }
 
@@ -303,11 +303,7 @@ async fn shard_limit_reader_probe_is_bounded() {
     let ranges = probe.ranges.lock().unwrap();
     assert!(named >= 1);
     assert_eq!(ranges.len(), named);
-    assert!(
-        ranges
-            .iter()
-            .all(|(_, r)| *r == (0..MAX_SHARD_SIZE + 1))
-    );
+    assert!(ranges.iter().all(|(_, r)| *r == (0..MAX_SHARD_SIZE + 1)));
 }
 
 #[tokio::test]
@@ -397,7 +393,10 @@ async fn shard_limit_reader_skips_unattested_shard_over_limit() {
     };
     let mut reader =
         Reader::open(&probe, fx.repo.read_keys().duplicate(), fx.repo.config()).unwrap();
-    let err = reader.list_dir(&outcome.snapshot_id, b"").await.unwrap_err();
+    let err = reader
+        .list_dir(&outcome.snapshot_id, b"")
+        .await
+        .unwrap_err();
 
     assert!(matches!(err, Error::Corrupt { .. }), "{err}");
     assert!(err.to_string().contains("not in the index"), "{err}");
@@ -424,4 +423,108 @@ async fn shard_limit_swapped_shard_is_read_by_range() {
 
     assert_eq!(got.len(), 1024);
     assert_eq!(ranged.ranges_of(&key), vec![0..1024]);
+}
+
+/// Lists one object with a size of its own, as a store that lies does.
+struct Inflated {
+    inner: LocalFsStore,
+    key: String,
+    size: u64,
+}
+
+impl BlobStore for Inflated {
+    async fn put_if_absent(&self, key: &str, data: Bytes) -> Result<(), BlobError> {
+        self.inner.put_if_absent(key, data).await
+    }
+
+    async fn get(&self, key: &str) -> Result<Bytes, BlobError> {
+        self.inner.get(key).await
+    }
+
+    async fn get_range(&self, key: &str, range: Range<u64>) -> Result<Bytes, BlobError> {
+        self.inner.get_range(key, range).await
+    }
+
+    async fn list(&self, prefix: &str) -> Result<Vec<ListEntry>, BlobError> {
+        let mut out = self.inner.list(prefix).await?;
+        for e in out.iter_mut().filter(|e| e.key == self.key) {
+            e.size = self.size;
+        }
+        Ok(out)
+    }
+}
+
+#[tokio::test]
+async fn shard_limit_attested_shard_has_no_read_cap() {
+    let fx = Fx::new().await;
+    let outcome = fx.backup("a", &[("a", 1, 300 << 10)]).await;
+    let keys = attacker_keys(&fx.repo);
+    let shards = open_all_shards(&fx.store, &keys).await;
+    let real: Vec<_> = shards
+        .iter()
+        .flat_map(|(_, s)| s.packs.iter().cloned())
+        .collect();
+    for (id, _) in &shards {
+        fs::remove_file(fx.tmp.path().join("repo").join(index_object_key(id))).unwrap();
+    }
+    let (id, bytes) = big_shard_with(&fx, real);
+    let key = index_object_key(&id);
+    fx.store
+        .put_if_absent(&key, Bytes::from(bytes))
+        .await
+        .unwrap();
+    attest(&fx, &[id]).await;
+    let store = Inflated {
+        inner: LocalFsStore::new(fx.tmp.path().join("repo")),
+        key: key.clone(),
+        size: 2 << 30,
+    };
+
+    let set = load_shards(&store, fx.repo.read_keys()).await.unwrap();
+    assert!(set.shards.iter().any(|(s, _)| *s == id));
+    assert!(set.oversized.contains(&id));
+    assert!(set.skipped.iter().all(|(k, _)| *k != key));
+
+    let mut reader =
+        Reader::open(&store, fx.repo.read_keys().duplicate(), fx.repo.config()).unwrap();
+    reader.list_dir(&outcome.snapshot_id, b"").await.unwrap();
+}
+
+#[tokio::test]
+async fn shard_limit_overwritten_attested_shard_is_not_loaded() {
+    let fx = Fx::new().await;
+    let (id, mut bytes) = big_shard(&fx);
+    let last = bytes.len() - 1;
+    bytes[last] ^= 1;
+    let key = index_object_key(&id);
+    let len = bytes.len() as u64;
+    fx.store
+        .put_if_absent(&key, Bytes::from(bytes))
+        .await
+        .unwrap();
+    attest(&fx, &[id]).await;
+    let probe = IndexProbe {
+        inner: LocalFsStore::new(fx.tmp.path().join("repo")),
+        ranges: Mutex::new(Vec::new()),
+    };
+
+    for listed in [Some(len), None] {
+        let err = fetch_attested_shard_bytes(&probe, &id, listed)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Corrupt { .. }), "{err}");
+        assert!(err.to_string().contains("does not match its content"));
+    }
+    assert!(
+        probe
+            .ranges
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(_, r)| r.end - r.start <= MAX_SHARD_SIZE + 1)
+    );
+
+    let set = load_shards(&probe, fx.repo.read_keys()).await.unwrap();
+    assert!(set.shards.iter().all(|(s, _)| *s != id));
+    assert!(set.skipped.iter().any(|(k, _)| *k == key));
 }
