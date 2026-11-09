@@ -5,6 +5,7 @@ import { useListAlerts } from "@/api/gen/endpoints";
 import type { AlertDto } from "@/api/gen/model";
 import { TextWithPaths } from "@/components/path-text";
 import { formatRelative, RelativeTime } from "@/components/relative-time";
+import { RECLAIM_ANCHOR } from "@/components/repos/reclaim/reclaim-card";
 import { StatusBadge } from "@/components/status-badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -53,18 +54,20 @@ function titleOf(alert: AlertDto, now: number) {
 		hostname
 	);
 	const repository = alert.repository?.name ?? text.unknownRepository;
-	const repositoryLink = alert.repository ? (
-		<Link
-			to="/settings/repositories/$id"
-			params={{ id: alert.repository.id }}
-			hash="checks"
-			className={linkClass}
-		>
-			{repository}
-		</Link>
-	) : (
-		repository
-	);
+	const linkTo = (hash: string) =>
+		alert.repository ? (
+			<Link
+				to="/settings/repositories/$id"
+				params={{ id: alert.repository.id }}
+				hash={hash}
+				className={linkClass}
+			>
+				{repository}
+			</Link>
+		) : (
+			repository
+		);
+	const repositoryLink = linkTo("checks");
 	const titles = text.titles;
 
 	switch (alert.type) {
@@ -85,6 +88,15 @@ function titleOf(alert: AlertDto, now: number) {
 				link: repositoryLink,
 			};
 		}
+		case "snapshot_quarantined": {
+			const count = alert.facts.findings ?? 0;
+			return {
+				build: (slot: string) => titles.snapshotQuarantined(count, slot),
+				link: linkTo(RECLAIM_ANCHOR),
+			};
+		}
+		case "repository_unavailable":
+			return { build: titles.repositoryUnavailable, link: repositoryLink };
 		case "certificate_expiring": {
 			const notAfter = alert.facts.not_after;
 			if (notAfter == null) return { build: () => alert.title, link: null };

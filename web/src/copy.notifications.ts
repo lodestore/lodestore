@@ -16,6 +16,8 @@ export const notifications = {
 		check_failed: "Check failed",
 		certificate_expiring: "Certificate expiring",
 		agent_update_failed: "Agent update failed",
+		snapshot_quarantined: "Snapshot quarantined",
+		repository_unavailable: "Repository unavailable",
 	},
 	kinds: {
 		telegram: "Telegram",

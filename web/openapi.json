@@ -6533,7 +6533,9 @@
           "agent_offline",
           "check_failed",
           "certificate_expiring",
-          "agent_update_failed"
+          "agent_update_failed",
+          "snapshot_quarantined",
+          "repository_unavailable"
         ]
       },
       "Alerts": {
