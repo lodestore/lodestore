@@ -73,6 +73,69 @@ impl<S: BlobStore> BlobStore for PlantedListing<S> {
     }
 }
 
+/// A store that refuses to hand over a whole object under the given prefixes
+/// and records every range read, to prove those objects are read by range only.
+pub struct RangedOnly<S> {
+    pub inner: S,
+    pub prefixes: Vec<String>,
+    pub ranges: Mutex<Vec<(String, Range<u64>)>>,
+}
+
+impl<S> RangedOnly<S> {
+    pub fn new(inner: S, prefixes: &[&str]) -> Self {
+        Self {
+            inner,
+            prefixes: prefixes.iter().map(|p| (*p).to_owned()).collect(),
+            ranges: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn ranges_of(&self, key: &str) -> Vec<Range<u64>> {
+        self.ranges
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(k, _)| k == key)
+            .map(|(_, r)| r.clone())
+            .collect()
+    }
+
+    pub fn ranges_under(&self, prefix: &str) -> Vec<(String, Range<u64>)> {
+        self.ranges
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(k, _)| k.starts_with(prefix))
+            .cloned()
+            .collect()
+    }
+}
+
+impl<S: BlobStore> BlobStore for RangedOnly<S> {
+    async fn put_if_absent(&self, key: &str, data: bytes::Bytes) -> Result<(), BlobError> {
+        self.inner.put_if_absent(key, data).await
+    }
+
+    async fn get(&self, key: &str) -> Result<bytes::Bytes, BlobError> {
+        if self.prefixes.iter().any(|p| key.starts_with(p.as_str())) {
+            return Err(BlobError::backend("a whole object was read"));
+        }
+        self.inner.get(key).await
+    }
+
+    async fn get_range(&self, key: &str, range: Range<u64>) -> Result<bytes::Bytes, BlobError> {
+        self.ranges
+            .lock()
+            .unwrap()
+            .push((key.to_owned(), range.clone()));
+        self.inner.get_range(key, range).await
+    }
+
+    async fn list(&self, prefix: &str) -> Result<Vec<ListEntry>, BlobError> {
+        self.inner.list(prefix).await
+    }
+}
+
 /// A listing entry for an `index/` object of the given size that is not there.
 pub fn planted_shard_entry(size: u64) -> ListEntry {
     let id: [u8; 32] = Entropy::os().bytes();
