@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use zeroize::Zeroizing;
 
+use crate::catalog::RepositoryUnavailable;
 use crate::db::now_ms;
 use crate::state::AppState;
 
@@ -191,13 +192,16 @@ pub async fn writer_material(
 ) -> anyhow::Result<WriterMaterial> {
     let row = sqlx::query(
         "SELECT backend, location_json, experimental, format_repo_id, config_hash, \
-         master_secret_id, server_creds_secret_id, agent_creds_secret_id \
+         master_secret_id, server_creds_secret_id, agent_creds_secret_id, open_error \
          FROM repositories WHERE id = $1",
     )
     .bind(repository_id)
     .fetch_optional(&state.db.pool)
     .await?
     .with_context(|| format!("repository {repository_id} is missing"))?;
+    if let Some(reason) = row.try_get::<Option<String>, _>("open_error")? {
+        return Err(RepositoryUnavailable { reason }.into());
+    }
 
     let backend: String = row.try_get("backend")?;
     let mut options: BTreeMap<String, String> =
@@ -358,6 +362,15 @@ pub(crate) async fn set_open_error(
         .execute(&state.db.pool)
         .await?;
     Ok(())
+}
+
+/// For paths that do not reopen the repository themselves; `open_repository` reopens it and clears the flag.
+pub async fn server_access_checked(state: &AppState, id: &str) -> anyhow::Result<ServerAccess> {
+    let access = server_access(state, id).await?;
+    match access.open_error {
+        Some(reason) => Err(RepositoryUnavailable { reason }.into()),
+        None => Ok(access),
+    }
 }
 
 pub async fn server_access(state: &AppState, id: &str) -> anyhow::Result<ServerAccess> {

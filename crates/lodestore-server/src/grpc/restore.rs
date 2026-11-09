@@ -21,12 +21,12 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Status;
 
-use crate::catalog;
+use crate::catalog::{self, RepositoryUnavailable};
 use crate::grpc::internal;
 use crate::grpc::registry::Registry;
 use crate::jobs::restore::RestoreRecord;
 use crate::repos::checks::open_store;
-use crate::repos::db::server_access;
+use crate::repos::db::server_access_checked;
 use crate::state::AppState;
 
 pub const PRESIGN_TTL: Duration = Duration::from_secs(3600);
@@ -81,9 +81,14 @@ async fn authorize(
 }
 
 async fn source_store(state: &AppState, repository_id: &str) -> Result<Store, Status> {
-    let access = server_access(state, repository_id)
+    let access = server_access_checked(state, repository_id)
         .await
-        .map_err(internal)?;
+        .map_err(
+            |error| match error.downcast_ref::<RepositoryUnavailable>() {
+                Some(_) => Status::failed_precondition("the source repository is unavailable"),
+                None => internal(error),
+            },
+        )?;
     open_store(&access.location, access.server_creds.as_ref()).map_err(internal)
 }
 

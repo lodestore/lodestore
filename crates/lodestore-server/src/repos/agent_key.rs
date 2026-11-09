@@ -133,6 +133,9 @@ async fn recheck(
     let checks_json =
         serde_json::to_string(&result.checks).map_err(|e| ApiError::Internal(e.into()))?;
     db::update_checks(&state, &id, &checks_json, &result.agent_key_state).await?;
+    if let Err(error) = crate::catalog::open_repository(&state, &id).await {
+        tracing::warn!(repository_id = %id, error = %format!("{error:#}"), "repository is not available");
+    }
     Ok(Json(result))
 }
 

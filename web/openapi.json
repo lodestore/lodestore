@@ -859,6 +859,16 @@
               }
             }
           },
+          "400": {
+            "description": "The directory tree is larger than one walk may visit (tree_too_large)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "404": {
             "description": "Unknown snapshot, gone from storage, or a selected path is missing",
             "content": {
@@ -881,6 +891,16 @@
           },
           "502": {
             "description": "The repository storage is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The repository does not match what this server recorded (repository_unavailable)",
             "content": {
               "application/json": {
                 "schema": {
@@ -979,6 +999,16 @@
           },
           "502": {
             "description": "The repository storage is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The repository does not match what this server recorded (repository_unavailable)",
             "content": {
               "application/json": {
                 "schema": {
@@ -5661,6 +5691,16 @@
               }
             }
           },
+          "400": {
+            "description": "The directory tree is larger than one walk may visit (tree_too_large)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "404": {
             "description": "Unknown snapshot, gone from storage, or no such directory",
             "content": {
@@ -5683,6 +5723,16 @@
           },
           "502": {
             "description": "The repository storage is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The repository does not match what this server recorded (repository_unavailable)",
             "content": {
               "application/json": {
                 "schema": {
@@ -5752,6 +5802,16 @@
               }
             }
           },
+          "400": {
+            "description": "The directory tree is larger than one walk may visit (tree_too_large)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "404": {
             "description": "Unknown snapshot, gone from storage, or no such directory",
             "content": {
@@ -5774,6 +5834,16 @@
           },
           "502": {
             "description": "The repository storage is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The repository does not match what this server recorded (repository_unavailable)",
             "content": {
               "application/json": {
                 "schema": {
@@ -5834,6 +5904,16 @@
               }
             }
           },
+          "400": {
+            "description": "The directory tree is larger than one walk may visit (tree_too_large)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "404": {
             "description": "Unknown snapshot, gone from storage, or a selected path is missing",
             "content": {
@@ -5856,6 +5936,16 @@
           },
           "502": {
             "description": "The repository storage is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The repository does not match what this server recorded (repository_unavailable)",
             "content": {
               "application/json": {
                 "schema": {
@@ -7029,7 +7119,7 @@
             "items": {
               "$ref": "#/components/schemas/AlertType"
             },
-            "description": "Left out means all five alert types."
+            "description": "Left out means every alert type."
           },
           "enabled": {
             "type": "boolean"

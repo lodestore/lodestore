@@ -53,7 +53,9 @@ A restore or download started with a token records `token:<name>` as who started
 
 ## Directory tree limit
 
-A request that walks a snapshot's directory tree (`GET /api/v1/snapshots/{id}/entries`, an archive download) stops when the walk passes 2^30 entries or 512 GiB of directory data, counting every visit, and answers `400` `tree_too_large` with a message that names the limit. A restore job for an agent that hits it fails with the same message. The search reports it as `stop_reason` `walk_limit`, see [Find a file](#find-a-file).
+A request that walks a snapshot's directory tree (`GET /api/v1/snapshots/{id}/entries`, `GET /api/v1/snapshots/{id}/summary` and `POST /api/v1/downloads`) stops when the walk passes 2^30 entries or 512 GiB of directory data, counting every visit, and answers `400` `tree_too_large` with a message that names the limit. A download that hits the limit after the archive has started streaming cannot answer `400`, because the response is already `200`; the stream is cut off without the end of the archive, so a cut-off archive does not pass for a whole one. A restore job for an agent that hits the limit fails with the same message. The search reports it as `stop_reason` `walk_limit`, see [Find a file](#find-a-file).
+
+A request that needs a repository the server does not open (see the alert `repository_unavailable`) answers `503` with the code `repository_unavailable` and the reason, instead of a storage failure.
 
 ## Snapshot actions
 

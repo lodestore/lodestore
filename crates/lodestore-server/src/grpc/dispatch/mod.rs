@@ -14,12 +14,13 @@ use prost::Message;
 use sqlx::Row;
 use tokio_util::sync::CancellationToken;
 
+use crate::catalog::RepositoryUnavailable;
 use crate::db::now_ms;
 use crate::grpc::registry::{CAP_GC, CAP_LIMITS, CAP_RESTORE};
 use crate::jobs::restore::RestoreRecord;
 use crate::maintenance::attest::load_distrusted;
 use crate::maintenance::gc::db as gc_db;
-use crate::repos::db::server_access;
+use crate::repos::db::server_access_checked;
 use crate::state::AppState;
 
 const KIND_RESTORE: &str = "restore";
@@ -70,6 +71,20 @@ struct GcGate {
     /// A cleanup cycle holds its marker in the repository, or stopped while
     /// deleting and still does.
     unfinished: bool,
+}
+
+async fn host_open_error(state: &AppState, host_id: &str) -> anyhow::Result<Option<String>> {
+    let row = sqlx::query(
+        "SELECT r.open_error FROM agents a JOIN repositories r ON r.id = a.repository_id \
+         WHERE a.id = $1",
+    )
+    .bind(host_id)
+    .fetch_optional(&state.db.pool)
+    .await?;
+    Ok(row
+        .map(|row| row.try_get::<Option<String>, _>("open_error"))
+        .transpose()?
+        .flatten())
 }
 
 async fn gc_gate(state: &AppState, host_id: &str) -> anyhow::Result<GcGate> {
@@ -224,6 +239,18 @@ pub async fn assign_queued(state: &AppState, only_agent: Option<&str>) -> anyhow
                     if spec.max_runtime_s == 0 {
                         spec.max_runtime_s = DEFAULT_MAX_RUNTIME.as_secs();
                     }
+                    if let Some(reason) = host_open_error(state, &host_id).await? {
+                        fail_job(
+                            state,
+                            &job_id,
+                            "repository_unavailable",
+                            &format!(
+                                "The repository of this host is unavailable: {reason}. Open the repository page to see why."
+                            ),
+                        )
+                        .await?;
+                        continue;
+                    }
                     let gc = gc_gate(state, &host_id).await?;
                     let aware = state.registry.supports(&host_id, CAP_GC);
                     if gc.unfinished && !aware {
@@ -277,13 +304,29 @@ pub async fn assign_queued(state: &AppState, only_agent: Option<&str>) -> anyhow
                     Ok(spec) => Some(spec),
                     Err(error) => {
                         tracing::warn!(%error, job_id, "preparing a restore job failed");
-                        fail_job(
-                            state,
-                            &job_id,
-                            "restore_failed",
-                            "The source repository could not be opened.",
-                        )
-                        .await?;
+                        match error.downcast_ref::<RepositoryUnavailable>() {
+                            Some(unavailable) => {
+                                fail_job(
+                                    state,
+                                    &job_id,
+                                    "repository_unavailable",
+                                    &format!(
+                                        "The source repository is unavailable: {}. Open the repository page to see why.",
+                                        unavailable.reason
+                                    ),
+                                )
+                                .await?
+                            }
+                            None => {
+                                fail_job(
+                                    state,
+                                    &job_id,
+                                    "restore_failed",
+                                    "The source repository could not be opened.",
+                                )
+                                .await?
+                            }
+                        }
                         continue;
                     }
                 }
@@ -312,7 +355,7 @@ async fn with_source_keys(
 ) -> anyhow::Result<RestoreSpec> {
     let record: RestoreRecord =
         serde_json::from_str(record.ok_or_else(|| anyhow::anyhow!("restore_json is missing"))?)?;
-    let access = server_access(state, &record.source_repository_id).await?;
+    let access = server_access_checked(state, &record.source_repository_id).await?;
     let master: [u8; 32] = access
         .master
         .as_slice()

@@ -64,6 +64,12 @@ pub struct SyncReport {
     pub total: u64,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("the repository does not match what this server recorded, so it is unavailable: {reason}")]
+pub struct RepositoryUnavailable {
+    pub reason: String,
+}
+
 pub struct OpenRepository {
     pub store: Store,
     pub keys: ReadKeys,
@@ -102,9 +108,7 @@ pub async fn open_repository(
             {
                 tracing::warn!(repository = repository_id, %error, "recording the open error");
             }
-            return Err(anyhow::Error::new(error).context(
-                "the repository does not match what this server recorded; it is unavailable",
-            ));
+            return Err(RepositoryUnavailable { reason }.into());
         }
     };
     Ok(OpenRepository {
