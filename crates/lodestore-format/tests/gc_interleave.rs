@@ -3,12 +3,20 @@
 
 mod gc_support;
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use gc_support::*;
-use lodestore_format::crypto::BLOB_TYPE_DATA;
+use lodestore_format::crypto::{BLOB_TYPE_DATA, BlobId};
+use lodestore_format::gc::compact::{compact_plan, write_compacted};
+use lodestore_format::gc::mark::MarkPolicy;
+use lodestore_format::gc::verify::verify_with;
+use lodestore_format::gc::{Survey, survey_with};
+use lodestore_format::index::MAX_SHARD_SIZE;
 use lodestore_format::pack::pack_object_key;
-use lodestore_format::store::LocalFsStore;
+use lodestore_format::snapshot::snapshot_object_key;
+use lodestore_format::store::{BlobStore, LocalFsStore};
 use lodestore_format::writer::Writer;
 
 async fn locks_left(fx: &Fx) -> Vec<String> {
@@ -301,4 +309,171 @@ async fn gc_interleave_sweep_resume() {
         assert!(locks_left(&fx).await.is_empty(), "{stop:?}");
         assert_eq!(shape(&fx).await, expected, "{stop:?}");
     }
+}
+
+/// Junk that hashes to its name but does not open as a snapshot.
+async fn plant_junk(fx: &Fx) -> BlobId {
+    let junk = b"not a snapshot envelope".to_vec();
+    let id = *blake3::hash(&junk).as_bytes();
+    fx.store
+        .put_if_absent(&snapshot_object_key(&id), junk.into())
+        .await
+        .unwrap();
+    id
+}
+
+fn policy(excluded: BlobId) -> MarkPolicy {
+    MarkPolicy {
+        quarantine: true,
+        excluded: [excluded].into(),
+        ..MarkPolicy::default()
+    }
+}
+
+async fn survey_under(fx: &Fx, policy: &MarkPolicy, pct: u8) -> Survey {
+    survey_with(
+        &fx.store,
+        fx.repo.read_keys(),
+        fx.repo.config(),
+        &plan_opts(pct),
+        policy,
+        &|_| {},
+    )
+    .await
+    .unwrap()
+}
+
+/// `Cycle::verify_compact` under a policy; `gc_support` stays as it is.
+async fn verify_compact_under(cycle: &mut Cycle<'_>, policy: &MarkPolicy) {
+    let fx = cycle.fx;
+    let verified = verify_with(
+        &fx.store,
+        fx.repo.read_keys(),
+        fx.repo.config(),
+        &cycle.published,
+        policy,
+        &|_, _| {},
+    )
+    .await
+    .unwrap();
+    cycle.candidates = verified.candidates.clone();
+    cycle.resurrected = verified.resurrected.clone();
+    let plan = compact_plan(&verified.shards, &cycle.candidates);
+    write_compacted(
+        &fx.store,
+        fx.repo.read_keys(),
+        &plan,
+        &verified.live,
+        &cycle.candidates,
+        &mut cycle.entropy,
+    )
+    .await
+    .unwrap();
+    cycle.rewrite = plan.rewrite.clone();
+}
+
+async fn finish_under(cycle: &mut Cycle<'_>, policy: &MarkPolicy) {
+    verify_compact_under(cycle, policy).await;
+    assert!(cycle.sweep_shards().await.failed.is_empty());
+    assert!(cycle.sweep_packs(usize::MAX).await.failed.is_empty());
+    assert!(cycle.finish().await.failed.is_empty());
+}
+
+#[tokio::test]
+async fn gc_interleave_excluded_snapshot_keeps_concurrent_backup() {
+    let (base, srcs) = base().await;
+    let fx = base.fork().await;
+    let policy = policy(plant_junk(&fx).await);
+    let mut cycle = Cycle::new(&fx);
+    cycle.survey = Some(survey_under(&fx, &policy, 50).await);
+    cycle.repack_publish().await;
+
+    let mut writer = fx.open_writer().await;
+    fx.commit(&mut writer, srcs[0].clone()).await;
+
+    finish_under(&mut cycle, &policy).await;
+    fx.assert_all_restore().await;
+    assert!(locks_left(&fx).await.is_empty());
+}
+
+#[tokio::test]
+async fn gc_interleave_excluded_snapshot_keeps_packs_of_skipped_shard() {
+    let fx = Fx::new().await;
+    fx.backup("a", &[("a", 1, 100 << 10)]).await;
+    let packs_before = fx.packs().await;
+    let shards_before = fx.listing("index/").await;
+    let b = fx.backup("b", &[("b", 2, 100 << 10)]).await;
+    let packs_b: BTreeMap<_, _> = fx
+        .packs()
+        .await
+        .into_iter()
+        .filter(|(k, _)| !packs_before.contains_key(k))
+        .collect();
+    let shards_after = fx.listing("index/").await;
+    let (shard_key, shard_len) = shards_after
+        .iter()
+        .find(|(k, _)| !shards_before.contains_key(*k))
+        .map(|(k, n)| (k.clone(), *n))
+        .expect("the backup wrote a shard");
+    let c = fx.backup("c", &[("c", 3, 100 << 10)]).await;
+    let packs_c: BTreeSet<_> = fx
+        .packs()
+        .await
+        .into_keys()
+        .filter(|k| !packs_before.contains_key(k) && !packs_b.contains_key(k))
+        .collect();
+    fx.forget(&c.snapshot_id).await;
+
+    let shard_path = fx.tmp.path().join("repo").join(&shard_key);
+    let resize = |len: u64| {
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&shard_path)
+            .unwrap()
+            .set_len(len)
+            .unwrap();
+    };
+    resize(MAX_SHARD_SIZE + 1);
+
+    let quarantining = MarkPolicy {
+        quarantine: true,
+        ..MarkPolicy::default()
+    };
+    let s = survey_under(&fx, &quarantining, 50).await;
+    assert_eq!(s.quarantined.len(), 1);
+    assert_eq!(s.quarantined[0].id, b.snapshot_id);
+    assert!(s.plan.delete.is_empty() && s.plan.repack.is_empty());
+
+    let excluded = policy(b.snapshot_id);
+    let s = survey_under(&fx, &excluded, 50).await;
+    assert!(s.quarantined.is_empty());
+    let unindexed: BTreeSet<_> = s.plan.unindexed.iter().map(|(k, _)| k.clone()).collect();
+    let planned: BTreeSet<_> = s
+        .plan
+        .delete
+        .iter()
+        .chain(&s.plan.repack)
+        .map(|p| pack_object_key(&p.pack_id))
+        .collect();
+    for pack in packs_b.keys() {
+        assert!(unindexed.contains(pack), "{pack}");
+        assert!(!planned.contains(pack), "{pack}");
+    }
+    assert!(packs_c.is_subset(&planned));
+
+    let mut cycle = Cycle::new(&fx);
+    cycle.survey = Some(s);
+    cycle.repack_publish().await;
+    finish_under(&mut cycle, &excluded).await;
+
+    let after = fx.packs().await;
+    for (pack, size) in &packs_b {
+        assert_eq!(after.get(pack), Some(size), "{pack}");
+    }
+    for pack in &packs_c {
+        assert!(!after.contains_key(pack), "{pack}");
+    }
+
+    resize(shard_len);
+    fx.assert_all_restore().await;
 }
