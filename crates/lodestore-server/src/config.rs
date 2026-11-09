@@ -765,6 +765,15 @@ fn validate_public_url(url: &str) -> anyhow::Result<()> {
         matches!(uri.path(), "" | "/") && uri.query().is_none() && !url.contains('#'),
         "public_url {url:?} must not contain a path, query or fragment"
     );
+    let host_ok = uri.authority().is_some_and(|a| {
+        a.as_str()
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '-' | '_' | '[' | ']'))
+    });
+    anyhow::ensure!(
+        host_ok && !url.contains('\''),
+        "public_url {url:?} must have a plain host name or address and no quotes"
+    );
     Ok(())
 }
 
@@ -834,6 +843,9 @@ mod tests {
             "http://host:8080",
             "https://lodestore.example.com",
             "https://h/",
+            "http://[::1]:8080",
+            "http://192.168.0.5:8080",
+            "http://lode_server:8080",
         ] {
             validate_public_url(ok).unwrap();
         }
@@ -843,6 +855,12 @@ mod tests {
             "https://h/sub",
             "https://h?x=1",
             "https://",
+            "https://h'x",
+            "https://h$(id)",
+            "https://h`id`",
+            "https://h;id",
+            "https://u:p@h",
+            "https://h:80'",
         ] {
             assert!(validate_public_url(bad).is_err(), "{bad}");
         }
