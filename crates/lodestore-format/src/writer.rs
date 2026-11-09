@@ -25,10 +25,13 @@ use crate::config;
 use crate::crypto::{BLOB_TYPE_DATA, BLOB_TYPE_TREE, BlobId, Entropy};
 use crate::error::{Error, Result};
 use crate::fs::scan::{self, ScanTotals};
+use prost::Message;
+
 use crate::fs::walk::{CACHEDIR_TAG, ExtentReader, WalkOptions, Walker, data_extents};
 use crate::fs::{conv, hostname, meta, now};
 use crate::index::{
-    INDEX_PREFIX, Index, SupersedesTrust, index_object_key, parse_hex32, seal_shard,
+    INDEX_PREFIX, Index, SHARD_TARGET_SIZE, SupersedesTrust, index_object_key, parse_hex32,
+    seal_shard, split_records,
 };
 use crate::keys::WriteKeys;
 use crate::locks;
@@ -253,6 +256,7 @@ pub struct Writer<S: BlobStore> {
     gc_locks_denied: bool,
     attested: HashSet<BlobId>,
     written: Vec<BlobId>,
+    shard_target: usize,
     /// Open packs of the conformance hooks, see [`Writer::put_blob_raw`].
     #[cfg(feature = "test-hooks")]
     raw: [Option<PackBuilder>; 2],
@@ -342,6 +346,7 @@ impl<S: BlobStore> Writer<S> {
             gc_locks_denied: gc_locks.denied,
             attested,
             written: Vec::new(),
+            shard_target: SHARD_TARGET_SIZE,
             #[cfg(feature = "test-hooks")]
             raw: [None, None],
         })
@@ -410,6 +415,12 @@ impl<S: BlobStore> Writer<S> {
     /// write-only credential, which has to trust the index (see ADR 0002).
     pub async fn drop_unbacked_packs(&mut self) -> Result<usize> {
         self.index.retain_listed_packs(&self.store).await
+    }
+
+    /// Sets the size at which a shard is closed, to make small tests split.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn set_shard_target(&mut self, bytes: usize) {
+        self.shard_target = bytes;
     }
 
     /// Replaces the randomness source, for deterministic tests.
@@ -1001,7 +1012,8 @@ impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
         }
         if full {
             self.flush(blob_type).await?;
-            if self.uploaded.len() >= self.flush_packs {
+            let uploaded_bytes: usize = self.uploaded.iter().map(Message::encoded_len).sum();
+            if self.uploaded.len() >= self.flush_packs || uploaded_bytes >= self.w.shard_target {
                 self.commit_shard().await?;
             }
         }
@@ -1034,27 +1046,29 @@ impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
             return Ok(());
         }
         let records = std::mem::take(&mut self.uploaded);
-        let (shard_id, bytes) = seal_shard(
-            &self.w.keys.k_idx,
-            &self.w.keys.repo_id,
-            records.clone(),
-            &mut self.w.entropy,
-        )?;
-        put_named(&self.w.store, &index_object_key(&shard_id), bytes).await?;
-        for record in &records {
-            for entry in parse_entries(&record.entries)? {
-                self.pending.remove(&(entry.blob_id, entry.blob_type));
+        for group in split_records(records, self.w.shard_target) {
+            let (shard_id, bytes) = seal_shard(
+                &self.w.keys.k_idx,
+                &self.w.keys.repo_id,
+                group.clone(),
+                &mut self.w.entropy,
+            )?;
+            put_named(&self.w.store, &index_object_key(&shard_id), bytes).await?;
+            for record in &group {
+                for entry in parse_entries(&record.entries)? {
+                    self.pending.remove(&(entry.blob_id, entry.blob_type));
+                }
             }
+            self.w.index.add_shard(
+                shard_id,
+                &pb::IndexShard {
+                    packs: group,
+                    supersedes: Vec::new(),
+                },
+            )?;
+            self.refs.insert(shard_id);
+            self.w.written.push(shard_id);
         }
-        self.w.index.add_shard(
-            shard_id,
-            &pb::IndexShard {
-                packs: records,
-                supersedes: Vec::new(),
-            },
-        )?;
-        self.refs.insert(shard_id);
-        self.w.written.push(shard_id);
         Ok(())
     }
 

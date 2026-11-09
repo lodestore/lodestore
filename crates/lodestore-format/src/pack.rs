@@ -24,7 +24,7 @@ const _: () = assert!(PACK_PREFIX_LEN == 6 + 1 + HPKE_ENC_LEN + SEALED_KEY_LEN);
 
 pub const ENTRY_LEN: usize = 45;
 const TRAILER_LEN: usize = 4 + 6;
-const HEADER_OVERHEAD: usize = crate::crypto::NONCE_LEN + crate::crypto::TAG_LEN;
+pub(crate) const HEADER_OVERHEAD: usize = crate::crypto::NONCE_LEN + crate::crypto::TAG_LEN;
 
 pub const PACK_FIXED_LEN: usize = PACK_PREFIX_LEN + HEADER_OVERHEAD + TRAILER_LEN;
 
