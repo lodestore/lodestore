@@ -455,14 +455,17 @@ async fn check_with_limits<S: BlobStore>(
             );
             continue;
         };
-        // shortcut: hardlink members and the depth of a subtree seen in an
-        // earlier snapshot are not checked again; a per-snapshot walk would
-        // cost a full tree walk per snapshot.
+        // shortcut: hardlink members, the depth of a subtree seen in an
+        // earlier snapshot and the entries above it are not checked again, and
+        // a directory stopped by the held limit is a finding for every snapshot
+        // that reaches it; a per-snapshot walk would cost a full tree walk per
+        // snapshot.
         let mut groups = HashMap::new();
         // A directory is its tree pieces, read as one run like a restore does,
-        // and its depth counted the way the restore's cursor counts it.
-        let mut stack: Vec<(Vec<BlobId>, usize)> = vec![(vec![root], 1)];
-        'dirs: while let Some((pieces, depth)) = stack.pop() {
+        // with its depth and the entries of the directories above it counted
+        // the way the restore's cursor counts them.
+        let mut stack: Vec<(Vec<BlobId>, usize, u64)> = vec![(vec![root], 1, 0)];
+        'dirs: while let Some((pieces, depth, above)) = stack.pop() {
             let dir = match pieces.as_slice() {
                 [one] => *one,
                 _ => *blake3::hash(&pieces.concat()).as_bytes(),
@@ -512,6 +515,12 @@ async fn check_with_limits<S: BlobStore>(
                     Err(e) => return Err(e),
                 }
             }
+            let held = above.saturating_add(nodes.len() as u64);
+            if let Err(e) = reader.walk_budget().check_held(held) {
+                let detail = format!("tree {name}: {e}");
+                c.bad_blob(&key, &dir, FindingKind::UnreadableTree, detail);
+                continue 'dirs;
+            }
             for node in &nodes {
                 let mut all_known = true;
                 for raw in &node.content {
@@ -560,7 +569,7 @@ async fn check_with_limits<S: BlobStore>(
                         .filter_map(|raw| blob_ref(raw))
                         .collect();
                     if !subtrees.is_empty() {
-                        stack.push((subtrees, depth + 1));
+                        stack.push((subtrees, depth + 1, held));
                     }
                 }
             }

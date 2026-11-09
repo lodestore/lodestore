@@ -518,6 +518,25 @@ async fn restore_hostile_held_entries_stop_by_limit() {
     assert_eq!(reader.list_dir(&snap, b"/").await.unwrap().len(), 6);
 }
 
+#[tokio::test]
+async fn check_hostile_held_entries_are_a_finding() {
+    let mut fx = Fx::new().await;
+    let inner = fx.tree(files("i", 6));
+    let mut top = vec![dir("d0", inner)];
+    top.extend(files("f", 5));
+    let snap = fx.snapshot(top).await;
+
+    let report = fx.check_limited(10, 10).await;
+    assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
+    let f = &report.findings[0];
+    assert_eq!(f.key, snapshot_object_key(&snap));
+    assert_eq!(f.kind, FindingKind::UnreadableTree);
+    assert!(f.detail.contains("entries held at once"), "{f:?}");
+
+    let report = fx.check_limited(10, 12).await;
+    assert!(report.findings.is_empty(), "{:?}", report.findings);
+}
+
 /// Every directory ends with the next one, so when the walk enters it the
 /// directory above has nothing left to hand out but is still held whole.
 #[tokio::test]
@@ -562,6 +581,31 @@ async fn restore_hostile_held_entries_count_consumed_directories() {
         .walk_subtree(&snap, b"/", &mut |_, _| Ok(()))
         .await
         .unwrap();
+}
+
+/// The same chain as above: every directory on the path counts whole.
+#[tokio::test]
+async fn check_hostile_held_entries_count_consumed_directories() {
+    let mut fx = Fx::new().await;
+    let mut inner = fx.tree(files("f", 5));
+    for _ in 0..2 {
+        let mut nodes = files("f", 4);
+        nodes.push(dir("z", inner));
+        inner = fx.tree(nodes);
+    }
+    let mut top = files("f", 4);
+    top.push(dir("z", inner));
+    let snap = fx.snapshot(top).await;
+
+    let report = fx.check_limited(10, 12).await;
+    assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
+    let f = &report.findings[0];
+    assert_eq!(f.key, snapshot_object_key(&snap));
+    assert_eq!(f.kind, FindingKind::UnreadableTree);
+    assert!(f.detail.contains("entries held at once"), "{f:?}");
+
+    let report = fx.check_limited(10, 20).await;
+    assert!(report.findings.is_empty(), "{:?}", report.findings);
 }
 
 #[tokio::test]
