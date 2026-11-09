@@ -55,11 +55,12 @@ fn problem(kind: PreflightKind, message: impl Into<String>) -> PreflightProblem 
     }
 }
 
-/// Agents that have not said they follow the cleanup protocol; one that has
-/// not connected since the server learned about capabilities counts as old.
+/// Agents that have not said they support `cap`; one that has not connected
+/// since the server learned about capabilities counts as old.
 pub(crate) async fn old_agents(
     state: &AppState,
     repository_id: &str,
+    cap: &str,
 ) -> anyhow::Result<Vec<HostRef>> {
     let rows = sqlx::query(
         "SELECT id, hostname, capabilities_json FROM agents \
@@ -74,7 +75,7 @@ pub(crate) async fn old_agents(
             .try_get::<Option<String>, _>("capabilities_json")?
             .and_then(|json| serde_json::from_str(&json).ok())
             .unwrap_or_default();
-        if !capabilities.iter().any(|c| c == CAP_GC) {
+        if !capabilities.iter().any(|c| c == cap) {
             old.push(HostRef {
                 id: row.try_get("id")?,
                 hostname: row.try_get("hostname")?,
@@ -88,7 +89,7 @@ pub(crate) async fn old_agents_problem(
     state: &AppState,
     repository_id: &str,
 ) -> anyhow::Result<Option<PreflightProblem>> {
-    let old = old_agents(state, repository_id).await?;
+    let old = old_agents(state, repository_id, CAP_GC).await?;
     Ok((!old.is_empty()).then(|| PreflightProblem {
         hosts: old,
         ..problem(

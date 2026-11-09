@@ -111,6 +111,11 @@ fn deadline_hello_announces_gc() {
     assert!(CAPABILITIES.contains(&"gc_v1"));
 }
 
+#[test]
+fn deadline_hello_announces_shard_limit() {
+    assert!(CAPABILITIES.contains(&"shard_limit_v1"));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn deadline_stdin_job_without_snapshot() {
     let tmp = tempfile::tempdir().unwrap();

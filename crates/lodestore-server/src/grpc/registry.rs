@@ -15,6 +15,7 @@ pub const CAP_LIMITS: &str = "limits_v1";
 pub const CAP_GC: &str = "gc_v1";
 pub const CAP_UPDATE: &str = "update_v1";
 pub const CAP_RESTORE_ROOTS: &str = "restore_roots_v1";
+pub const CAP_SHARD_LIMIT: &str = "shard_limit_v1";
 pub const ONLINE_WINDOW: Duration = Duration::from_secs(45);
 const CHANNEL_DEPTH: usize = 16;
 

@@ -4,6 +4,7 @@
 mod adv_support;
 mod gc_support;
 
+use std::collections::HashSet;
 use std::fs;
 use std::ops::Range;
 use std::sync::Mutex;
@@ -17,6 +18,7 @@ use lodestore_format::Error;
 use lodestore_format::attest::{MARKER_LEGACY_SHARDS, put_attestation};
 use lodestore_format::crypto::{BlobId, Entropy, HPKE_ENC_LEN, SEALED_KEY_LEN};
 use lodestore_format::gc::mark::load_shards;
+use lodestore_format::gc::sweep::confirm_unreferenced;
 use lodestore_format::index::{
     Index, MAX_SHARD_READ_SIZE, MAX_SHARD_SIZE, fetch_shard_bytes, index_object_key, rebuild_index,
     seal_shard,
@@ -342,4 +344,24 @@ async fn shard_limit_local_range_past_the_end_is_not_allocated() {
         .unwrap();
     let got = store.get_range("obj/ten", 0..u64::MAX / 2).await.unwrap();
     assert_eq!(got.len(), 10);
+}
+
+#[tokio::test]
+async fn shard_limit_confirm_unreferenced_reports_skipped() {
+    let fx = Fx::new().await;
+    fx.backup("a", &[("a", 1, 200 << 10)]).await;
+    let keys = fx.repo.read_keys();
+    let none = HashSet::new();
+    assert!(
+        confirm_unreferenced(&fx.store, keys, &none)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let (_, key) = put_big_shard(&fx).await;
+    let skipped = confirm_unreferenced(&fx.store, keys, &none).await.unwrap();
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(skipped[0].0, key);
+    assert!(skipped[0].1.contains("more than a shard can be"));
 }
