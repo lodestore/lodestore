@@ -9,7 +9,7 @@ use lodestore_format::attest::{
     MARKER_LEGACY_SHARDS, ensure_upgraded, put_attestation, read_attestations,
 };
 use lodestore_format::crypto::{BLOB_TYPE_DATA, BlobId, Entropy, HPKE_ENC_LEN, SEALED_KEY_LEN};
-use lodestore_format::gc::mark::load_shards;
+use lodestore_format::gc::mark::{Quarantined, load_shards};
 use lodestore_format::index::{
     MAX_SHARD_SIZE, hex32, index_object_key, open_shard, parse_hex32, seal_shard,
     seal_shard_superseding,
@@ -22,7 +22,9 @@ use lodestore_format::repo::Repository;
 use lodestore_format::snapshot::snapshot_object_key;
 use lodestore_format::store::{LocalFsStore, put_named};
 use lodestore_format::writer::{BackupOptions, Writer};
+use lodestore_server::db::now_ms;
 use lodestore_server::maintenance::attest::record_distrusted;
+use lodestore_server::maintenance::gc;
 use lodestore_server::maintenance::gc::GcState;
 use lodestore_server::maintenance::gc::cycle::{StepOutcome, step};
 use serde_json::{Value, json};
@@ -2571,6 +2573,54 @@ async fn gc_cycle_excluded_snapshot_verify_step() {
             backend.name()
         );
         assert!(packs_size(&ts, "main") < before);
+        assert_restores(&ts, "main", &b).await;
+        assert_restores(&ts, "main", &c).await;
+        ts.stop().await;
+    }
+}
+
+fn quarantined_as_walked(key: &str) -> Quarantined {
+    Quarantined {
+        key: key.to_string(),
+        id: parse_hex32(key.strip_prefix("snapshots/").unwrap()).unwrap(),
+        reason: "unreadable".to_string(),
+        bound: false,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_cycle_exclusion_during_walk_is_kept() {
+    for backend in backends() {
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let (b, c) = forgotten_a(&ts, "main").await;
+        enable(&ts, &api, &repo).await;
+        let key = plant_unopenable(&ts, "main");
+        failed_cycle(&ts, &api, &repo).await;
+        assert_eq!(
+            quarantine_rows(&ts, &repo).await,
+            vec![(key.clone(), 1, false)]
+        );
+
+        assert_eq!(exclude(&api, &repo, &key).await.status(), 200);
+        let walked = quarantined_as_walked(&key);
+        gc::db::replace_quarantine(ts.state(), &repo, &[walked], now_ms())
+            .await
+            .unwrap();
+        assert_eq!(
+            quarantine_rows(&ts, &repo).await,
+            vec![(key.clone(), 1, true)],
+            "[{}]",
+            backend.name()
+        );
+
+        let id = run_cycle(&api, &repo).await;
+        let later = after_pause(&ts, &id).await;
+        assert_eq!(
+            steps(&ts, &id, later).await,
+            StepOutcome::Finished(GcState::Done)
+        );
         assert_restores(&ts, "main", &b).await;
         assert_restores(&ts, "main", &c).await;
         ts.stop().await;

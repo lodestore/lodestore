@@ -735,9 +735,10 @@ pub(crate) async fn load_mark_policy(
 }
 
 /// Replaces the unconfirmed rows of the repository with the snapshots the
-/// walk just quarantined; confirmed rows stay. A snapshot that became bound
+/// walk just quarantined; confirmed rows stay, also when the walk that reports
+/// the snapshot started before the confirmation. A snapshot that became bound
 /// to a job since it was confirmed loses its confirmation.
-pub(crate) async fn replace_quarantine(
+pub async fn replace_quarantine(
     state: &AppState,
     repository_id: &str,
     items: &[Quarantined],
@@ -754,7 +755,11 @@ pub(crate) async fn replace_quarantine(
              confirmable, detected_at) VALUES ($1, $2, $3, $4, $5, $6) \
              ON CONFLICT (repository_id, snapshot_id) DO UPDATE SET \
              object_key = excluded.object_key, reason = excluded.reason, \
-             confirmable = excluded.confirmable, confirmed_at = NULL, confirmed_by = NULL",
+             confirmable = excluded.confirmable, \
+             confirmed_at = CASE WHEN excluded.confirmable = 0 THEN NULL \
+             ELSE gc_quarantine.confirmed_at END, \
+             confirmed_by = CASE WHEN excluded.confirmable = 0 THEN NULL \
+             ELSE gc_quarantine.confirmed_by END",
         )
         .bind(repository_id)
         .bind(hex32(&item.id))
