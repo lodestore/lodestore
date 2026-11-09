@@ -22,6 +22,7 @@ use lodestore_format::snapshot::snapshot_object_key;
 use lodestore_format::store::{LocalFsStore, put_named};
 use lodestore_format::writer::{BackupOptions, Writer};
 use lodestore_server::maintenance::attest::record_distrusted;
+use lodestore_server::maintenance::gc::GcState;
 use lodestore_server::maintenance::gc::cycle::{StepOutcome, step};
 use serde_json::{Value, json};
 use sqlx::Row;
@@ -2357,6 +2358,218 @@ async fn gc_cycle_splits_legacy_shard_while_deleting() {
                 backend.name()
             );
         }
+        assert_restores(&ts, "main", &b).await;
+        assert_restores(&ts, "main", &c).await;
+        ts.stop().await;
+    }
+}
+
+fn plant_unopenable(ts: &TestServer, name: &str) -> String {
+    let bytes = noise(99, 600);
+    let key = format!(
+        "snapshots/{}",
+        hex32(&lodestore_format::config::config_hash(&bytes))
+    );
+    std::fs::write(ts.local_repo_root(name).join(&key), bytes).unwrap();
+    key
+}
+
+async fn quarantine_rows(ts: &TestServer, repo: &str) -> Vec<(String, i64, bool)> {
+    sqlx::query(
+        "SELECT object_key, confirmable, confirmed_at FROM gc_quarantine \
+         WHERE repository_id = $1 ORDER BY object_key",
+    )
+    .bind(repo)
+    .fetch_all(&ts.state().db.pool)
+    .await
+    .unwrap()
+    .iter()
+    .map(|r| {
+        (
+            r.get("object_key"),
+            r.get("confirmable"),
+            r.get::<Option<i64>, _>("confirmed_at").is_some(),
+        )
+    })
+    .collect()
+}
+
+async fn exclude(api: &Api, repo: &str, key: &str) -> reqwest::Response {
+    let id = key.strip_prefix("snapshots/").unwrap();
+    api.post(
+        &format!("/api/v1/repositories/{repo}/gc/quarantine/{id}/exclude"),
+        &json!({}),
+    )
+    .await
+}
+
+async fn failed_cycle(ts: &TestServer, api: &Api, repo: &str) -> Cycle {
+    let id = run_cycle(api, repo).await;
+    wait_state(ts, &id, "failed").await;
+    let cycle = cycle(ts, &id).await;
+    assert!(!cycle.sweep_started);
+    cycle
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_cycle_bound_snapshot_stops_cleanup() {
+    for backend in backends() {
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let (b, _c) = forgotten_a(&ts, "main").await;
+        enable(&ts, &api, &repo).await;
+        seed_agent(&ts, &repo, "host-1", r#"["gc_v1"]"#).await;
+        sqlx::query(
+            "INSERT INTO snapshots (id, repository_id, host_id, hostname, time_ms, paths_json, \
+             tags_json, job_id, incomplete, errors_total, warnings_total, stats_json, \
+             discovered_at) VALUES ($1, $2, 'host-1', 'host-1', 1, '[]', '[]', 'job-1', 0, 0, 0, \
+             '{}', 1)",
+        )
+        .bind(&b.id)
+        .bind(&repo)
+        .execute(&ts.state().db.pool)
+        .await
+        .unwrap();
+        let key = format!("snapshots/{}", b.id);
+        std::fs::write(ts.local_repo_root("main").join(&key), noise(5, 400)).unwrap();
+        let before = packs_size(&ts, "main");
+
+        let failed = failed_cycle(&ts, &api, &repo).await;
+        let error = failed.error.unwrap();
+        assert!(error.contains("belongs to a backup job"), "{error}");
+        assert_eq!(packs_size(&ts, "main"), before);
+        assert_eq!(
+            quarantine_rows(&ts, &repo).await,
+            vec![(key, 0, false)],
+            "[{}]",
+            backend.name()
+        );
+        assert_eq!(
+            exclude(&api, &repo, &format!("snapshots/{}", b.id))
+                .await
+                .status(),
+            409
+        );
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_cycle_quarantine_returns_after_database_loss() {
+    for backend in backends() {
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let (b, c) = forgotten_a(&ts, "main").await;
+        enable(&ts, &api, &repo).await;
+        let key = plant_unopenable(&ts, "main");
+        let before = packs_size(&ts, "main");
+
+        let failed = failed_cycle(&ts, &api, &repo).await;
+        assert!(failed.error.unwrap().contains("quarantined"));
+        assert_eq!(exclude(&api, &repo, &key).await.status(), 200);
+        assert_eq!(
+            quarantine_rows(&ts, &repo).await,
+            vec![(key.clone(), 1, true)]
+        );
+
+        sqlx::query("DELETE FROM gc_quarantine")
+            .execute(&ts.state().db.pool)
+            .await
+            .unwrap();
+        failed_cycle(&ts, &api, &repo).await;
+        assert_eq!(
+            quarantine_rows(&ts, &repo).await,
+            vec![(key, 1, false)],
+            "[{}]",
+            backend.name()
+        );
+        assert_eq!(packs_size(&ts, "main"), before);
+        assert_restores(&ts, "main", &b).await;
+        assert_restores(&ts, "main", &c).await;
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_cycle_dry_run_reports_quarantine() {
+    for backend in backends() {
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        forgotten_a(&ts, "main").await;
+        let key = plant_unopenable(&ts, "main");
+        let oversized = format!("index/{}", hex32(&[7; 32]));
+        File::create(ts.local_repo_root("main").join(&oversized))
+            .unwrap()
+            .set_len(MAX_SHARD_SIZE + 1)
+            .unwrap();
+
+        let response = api
+            .post(
+                &format!("/api/v1/repositories/{repo}/gc/dry-run"),
+                &json!({}),
+            )
+            .await;
+        assert_eq!(response.status(), 202);
+        let id = response.json::<Value>().await.unwrap()["cycle_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        wait_state(&ts, &id, "done").await;
+
+        let full = report(&api, &repo, &id).await;
+        assert_eq!(
+            full["quarantined"][0]["key"],
+            key.as_str(),
+            "[{}]",
+            backend.name()
+        );
+        assert_eq!(full["skipped_shards"][0]["key"], oversized.as_str());
+        assert!(
+            full["skipped_shards"][0]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("more than a shard can be")
+        );
+        assert_eq!(quarantine_rows(&ts, &repo).await, vec![(key, 1, false)]);
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_cycle_excluded_snapshot_verify_step() {
+    for backend in backends() {
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let (b, c) = forgotten_a(&ts, "main").await;
+        enable(&ts, &api, &repo).await;
+
+        let id = run_cycle(&api, &repo).await;
+        let later = after_pause(&ts, &id).await;
+        let before = packs_size(&ts, "main");
+        let key = plant_unopenable(&ts, "main");
+        assert_eq!(
+            steps(&ts, &id, later).await,
+            StepOutcome::Finished(GcState::Failed)
+        );
+        let error = cycle(&ts, &id).await.error.unwrap();
+        assert!(error.contains("nothing is deleted"), "{error}");
+        assert_eq!(packs_size(&ts, "main"), before);
+
+        failed_cycle(&ts, &api, &repo).await;
+        assert_eq!(exclude(&api, &repo, &key).await.status(), 200);
+        let id = run_cycle(&api, &repo).await;
+        let later = after_pause(&ts, &id).await;
+        assert_eq!(
+            steps(&ts, &id, later).await,
+            StepOutcome::Finished(GcState::Done),
+            "[{}]",
+            backend.name()
+        );
+        assert!(packs_size(&ts, "main") < before);
         assert_restores(&ts, "main", &b).await;
         assert_restores(&ts, "main", &c).await;
         ts.stop().await;

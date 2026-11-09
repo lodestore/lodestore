@@ -926,3 +926,97 @@ async fn gc_api_repository_list_cleanup_summary() {
         ts.stop().await;
     }
 }
+
+const OPEN_ID: &str = "11111111111111111111111111111111111111111111111111111111111111aa";
+const BOUND_ID: &str = "22222222222222222222222222222222222222222222222222222222222222bb";
+
+async fn quarantine_row(ts: &TestServer, repo: &str, id: &str, confirmable: i64) {
+    sqlx::query(
+        "INSERT INTO gc_quarantine (repository_id, snapshot_id, object_key, reason, confirmable, \
+         detected_at) VALUES ($1, $2, $3, 'does not open', $4, 1)",
+    )
+    .bind(repo)
+    .bind(id)
+    .bind(format!("snapshots/{id}"))
+    .bind(confirmable)
+    .execute(&ts.state().db.pool)
+    .await
+    .unwrap();
+}
+
+fn exclude_path(repo: &str, id: &str) -> String {
+    format!("/api/v1/repositories/{repo}/gc/quarantine/{id}/exclude")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_api_exclude_requires_snapshots_delete() {
+    for backend in backends() {
+        let ts = server(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        quarantine_row(&ts, &repo, OPEN_ID, 1).await;
+        let path = exclude_path(&repo, OPEN_ID);
+        let url = format!("{}{path}", ts.rest_url());
+
+        for scope in ["jobs:run", "jobs:read"] {
+            let weak = bearer_client(&ts.issue_token(&[scope]).await);
+            let response = weak.post(&url).json(&json!({})).send().await.unwrap();
+            assert_eq!(response.status(), 403, "[{}] {scope}", backend.name());
+        }
+        let response = reqwest::Client::new()
+            .post(&url)
+            .header("cookie", api.cookie())
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 403, "[{}] without csrf", backend.name());
+        assert!(status(&api, &repo).await["quarantine"][0]["confirmed_at"].is_null());
+
+        let response = api.post(&path, &json!({})).await;
+        assert_eq!(response.status(), 200, "[{}]", backend.name());
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(body["quarantine"][0]["snapshot_id"], OPEN_ID);
+        assert!(body["quarantine"][0]["confirmed_at"].is_i64());
+        assert!(body["quarantine"][0]["confirmed_by"].is_string());
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_api_exclude_refuses_bound_and_unknown() {
+    for backend in backends() {
+        let ts = server(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        quarantine_row(&ts, &repo, OPEN_ID, 1).await;
+        quarantine_row(&ts, &repo, BOUND_ID, 0).await;
+
+        let bound = api.post(&exclude_path(&repo, BOUND_ID), &json!({})).await;
+        assert_eq!(bound.status(), 409, "[{}]", backend.name());
+        let unknown = "3".repeat(64);
+        let response = api.post(&exclude_path(&repo, &unknown), &json!({})).await;
+        assert_eq!(response.status(), 404);
+        let response = api.post(&exclude_path(&repo, "not-hex"), &json!({})).await;
+        assert_eq!(response.status(), 404);
+        let response = api
+            .post(&exclude_path("missing", OPEN_ID), &json!({}))
+            .await;
+        assert_eq!(response.status(), 404);
+
+        let first = api.post(&exclude_path(&repo, OPEN_ID), &json!({})).await;
+        assert_eq!(first.status(), 200);
+        let again = api.post(&exclude_path(&repo, OPEN_ID), &json!({})).await;
+        assert_eq!(again.status(), 409);
+        let listed = status(&api, &repo).await["quarantine"].clone();
+        let bound_row = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["snapshot_id"] == BOUND_ID)
+            .unwrap();
+        assert_eq!(bound_row["confirmable"], false);
+        assert!(bound_row["confirmed_at"].is_null());
+        ts.stop().await;
+    }
+}

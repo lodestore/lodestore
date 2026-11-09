@@ -12,14 +12,14 @@ use lodestore_format::attest::{consolidate_attestations, put_attestation, read_a
 use lodestore_format::check::is_data_error;
 use lodestore_format::crypto::{BlobId, Entropy};
 use lodestore_format::gc::compact::{compact_plan, write_compacted};
-use lodestore_format::gc::mark::ShardSet;
+use lodestore_format::gc::mark::{Quarantined, ShardSet};
 use lodestore_format::gc::plan::{MAX_CANDIDATES, PlanOptions};
 use lodestore_format::gc::repack::repack;
 use lodestore_format::gc::sweep::{
     SweepOutcome, confirm_unreferenced, purge_object, sweep_object, sweep_packs, sweep_shards,
 };
-use lodestore_format::gc::verify::verify;
-use lodestore_format::gc::{SurveyProgress, candidates, survey};
+use lodestore_format::gc::verify::verify_with;
+use lodestore_format::gc::{SurveyProgress, candidates, survey_with};
 use lodestore_format::index::{hex32, index_object_key, parse_hex32, rebuild_index};
 use lodestore_format::locks::{
     GcLock, LOCKS_PREFIX, WriterLock, close_writer_marker, gc_manifest_key, lock_id_hex,
@@ -400,6 +400,24 @@ async fn vouch_rebuilt(
     Ok(())
 }
 
+fn quarantine_error(quarantined: &[Quarantined]) -> Option<String> {
+    let first = quarantined.first()?;
+    Some(if let Some(bound) = quarantined.iter().find(|q| q.bound) {
+        format!(
+            "Snapshot {} belongs to a backup job and cannot be read: {}. Nothing was deleted. \
+             Run a full check, then repair the repository or delete the snapshot.",
+            bound.key, bound.reason
+        )
+    } else {
+        format!(
+            "{} snapshot(s) cannot be read and are quarantined (first: {}); nothing was deleted. \
+             Review them under Free up space on the repository page.",
+            quarantined.len(),
+            first.key
+        )
+    })
+}
+
 async fn mark_and_repack(
     state: &AppState,
     cycle: &CycleRow,
@@ -442,20 +460,27 @@ async fn mark_and_repack(
             set(done, total);
         }
     };
+    let policy = db::load_mark_policy(state, &cycle.repository_id, &source).await?;
     let surveyed = tracked(
         state,
         &cycle.id,
         &seen,
-        survey(
+        survey_with(
             &source.store,
             &source.keys,
             &source.config,
             &opts,
+            &policy,
             &progress,
         ),
     )
     .await?
     .context("surveying the repository")?;
+    db::replace_quarantine(state, &cycle.repository_id, &surveyed.quarantined, now_ms).await?;
+    if let Some(error) = quarantine_error(&surveyed.quarantined) {
+        event(state, &cycle.id, "warning", "quarantined", &error).await;
+        bail!(error);
+    }
 
     let started = cycle.started_at.unwrap_or(now_ms);
     let report = build_report(cycle, &surveyed, now_ms, now_ms - started, None);
@@ -710,15 +735,17 @@ async fn verifying(state: &AppState, cycle: &CycleRow) -> anyhow::Result<StepOut
         return Ok(StepOutcome::Postponed);
     }
 
+    let policy = db::load_mark_policy(state, &cycle.repository_id, &source).await?;
     let mut verified = tracked(
         state,
         &cycle.id,
         &seen,
-        verify(
+        verify_with(
             &source.store,
             &source.keys,
             &source.config,
             &marked,
+            &policy,
             &record(&seen),
         ),
     )

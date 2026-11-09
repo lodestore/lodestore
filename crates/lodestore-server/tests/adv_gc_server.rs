@@ -22,7 +22,7 @@ use lodestore_format::keys::KdfCost;
 use lodestore_format::pb;
 use lodestore_format::reader::{Reader, RestoreOptions};
 use lodestore_format::repo::{InitOptions, PendingInit, Repository};
-use lodestore_format::snapshot::snapshot_object_key;
+use lodestore_format::snapshot::{seal_snapshot, snapshot_object_key};
 use lodestore_format::store::{BlobStore, LocalFsStore};
 use lodestore_format::writer::{BackupOptions, Writer};
 use lodestore_server::maintenance::gc::GcState;
@@ -390,5 +390,204 @@ async fn adv_upgrade_signed_forged_shard_server_gc_keeps_every_snapshot() {
              shard was not signed by the upgrade: {e}"
         ),
     }
+    ts.stop().await;
+}
+
+async fn fresh_repo(ts: &TestServer) -> (String, LocalFsStore, PathBuf) {
+    let root = ts.local_repo_root("main");
+    let store = LocalFsStore::new(root.clone());
+    let mut entropy = Entropy::os();
+    let pending = PendingInit::generate(
+        &mut entropy,
+        InitOptions {
+            kdf: LOW_KDF,
+            ..InitOptions::default()
+        },
+    )
+    .unwrap();
+    let keys = pending.read_keys();
+    let master = keys.master().clone();
+    let format_repo_id = *keys.repo_id();
+    let hash = config_hash(pending.config_bytes());
+    pending
+        .commit(&store, PASSWORD, &mut entropy)
+        .await
+        .unwrap();
+    let id = create_repository(
+        ts.state(),
+        NewRepository {
+            name: "main".to_string(),
+            location: RepoLocation {
+                backend: "local".to_string(),
+                options: BTreeMap::from([("path".to_string(), root.display().to_string())]),
+            },
+            experimental: false,
+            format_repo_id,
+            config_hash: hash,
+            master,
+            server_slot_secret: None,
+            server_creds: None,
+            agent_creds: None,
+        },
+    )
+    .await
+    .unwrap();
+    (id, store, root)
+}
+
+async fn start_cycle(api: &Api, repo: &str) -> String {
+    let response = api
+        .post(&format!("/api/v1/repositories/{repo}/gc/run"), &json!({}))
+        .await;
+    assert_eq!(response.status(), 202, "{:?}", response.text().await);
+    response.json::<Value>().await.unwrap()["cycle_id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+async fn pack_listing(store: &LocalFsStore) -> Vec<String> {
+    let mut keys: Vec<String> = store
+        .list("packs/")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|e| e.key)
+        .collect();
+    keys.sort();
+    keys
+}
+
+/// A snapshot object the collector cannot open, named by its own hash so the
+/// name is not what gives it away.
+fn plant_unopenable(root: &Path) -> String {
+    let bytes = noise(99, 600);
+    let key = format!("snapshots/{}", hex32(&config_hash(&bytes)));
+    std::fs::write(root.join(&key), bytes).unwrap();
+    key
+}
+
+async fn quarantine_of(api: &Api, repo: &str) -> Vec<Value> {
+    let status: Value = api
+        .get(&format!("/api/v1/repositories/{repo}/gc"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    status["quarantine"].as_array().unwrap().clone()
+}
+
+/// A repository with one kept snapshot, one forgotten (its packs are
+/// garbage) and an aged pack folder.
+async fn kept_and_forgotten(ts: &TestServer, store: &LocalFsStore, root: &Path) -> Snapshot {
+    let kept = backup(ts, store, "host-a", "keep", &[("a", 1, 200 << 10)]).await;
+    let gone = backup(ts, store, "host-b", "gone", &[("b", 2, 200 << 10)]).await;
+    forget(root, &gone);
+    age_packs(root);
+    kept
+}
+
+async fn assert_stops_then_finishes(
+    ts: &TestServer,
+    api: &Api,
+    repo: &str,
+    store: &LocalFsStore,
+    kept: &Snapshot,
+    planted: &str,
+) {
+    let packs = pack_listing(store).await;
+    let first = start_cycle(api, repo).await;
+    assert!(
+        wait_until(WAIT, || async {
+            cycle_state(ts, &first).await.0 == "failed"
+        })
+        .await,
+        "the cycle did not fail: {:?}",
+        cycle_state(ts, &first).await
+    );
+    assert_eq!(pack_listing(store).await, packs, "a pack was deleted");
+    let quarantine = quarantine_of(api, repo).await;
+    assert_eq!(quarantine.len(), 1, "{quarantine:?}");
+    assert_eq!(quarantine[0]["key"], planted);
+
+    let hex = planted.strip_prefix("snapshots/").unwrap();
+    let response = api
+        .post(
+            &format!("/api/v1/repositories/{repo}/gc/quarantine/{hex}/exclude"),
+            &json!({}),
+        )
+        .await;
+    assert_eq!(response.status(), 200, "{:?}", response.text().await);
+    assert!(
+        store
+            .list("snapshots/")
+            .await
+            .unwrap()
+            .iter()
+            .any(|e| e.key == planted),
+        "the planted object must stay in the bucket"
+    );
+
+    let second = start_cycle(api, repo).await;
+    let later = after_pause(ts, &second).await;
+    assert_eq!(
+        steps(ts, &second, later).await,
+        StepOutcome::Finished(GcState::Done)
+    );
+    assert!(pack_listing(store).await.len() < packs.len());
+    restores(store, kept)
+        .await
+        .expect("the kept snapshot restores");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adv_gc_quarantines_unopenable_snapshot_until_excluded() {
+    let backend: Backend = backends().remove(0);
+    let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+    let api = ts.api().await;
+    let (repo, store, root) = fresh_repo(&ts).await;
+    let kept = kept_and_forgotten(&ts, &store, &root).await;
+    let planted = plant_unopenable(&root);
+    enable(&ts, &api, &repo).await;
+    assert_stops_then_finishes(&ts, &api, &repo, &store, &kept, &planted).await;
+    ts.stop().await;
+}
+
+/// A snapshot sealed under the repository's own keys whose root tree is in no
+/// index shard.
+async fn plant_missing_tree(store: &LocalFsStore, root: &Path) -> String {
+    let repo = Repository::open(store, PASSWORD).await.unwrap();
+    let snapshot = pb::Snapshot {
+        time: Some(pb::Timestamp {
+            seconds: 1_700_000_000,
+            nanos: 0,
+        }),
+        hostname: b"host-x".to_vec(),
+        paths: vec![b"/".to_vec()],
+        root_tree: noise(77, 32),
+        ..Default::default()
+    };
+    let (id, bytes) = seal_snapshot(
+        &snapshot,
+        repo.read_keys().hpke_public_key(),
+        repo.read_keys().repo_id(),
+        &mut Entropy::os(),
+    )
+    .unwrap();
+    let key = snapshot_object_key(&id);
+    std::fs::write(root.join(&key), bytes).unwrap();
+    key
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adv_gc_quarantines_snapshot_with_missing_tree() {
+    let backend: Backend = backends().remove(0);
+    let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+    let api = ts.api().await;
+    let (repo, store, root) = fresh_repo(&ts).await;
+    let kept = kept_and_forgotten(&ts, &store, &root).await;
+    let planted = plant_missing_tree(&store, &root).await;
+    enable(&ts, &api, &repo).await;
+    assert_stops_then_finishes(&ts, &api, &repo, &store, &kept, &planted).await;
     ts.stop().await;
 }

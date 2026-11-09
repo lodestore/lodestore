@@ -59,6 +59,7 @@ export const gcStatus = (over: Partial<GcStatus> = {}): GcStatus => ({
 	last_aborted_at: null,
 	events: [],
 	events_total: 0,
+	quarantine: [],
 	...over,
 });
 
