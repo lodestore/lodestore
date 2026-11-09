@@ -253,6 +253,13 @@ describe("AddHostPanel", () => {
 		expect(
 			screen.getByText(/\/install\/agent\/\$\(uname -m\)\.minisig/),
 		).toBeInTheDocument();
+		expect(
+			screen.getByText(/compare it with the one on the Binary page/),
+		).toBeInTheDocument();
+		expect(
+			screen.getByText(/checks the file you downloaded by hand/),
+		).toBeInTheDocument();
+		expect(screen.queryByText(/key id/i)).toBeNull();
 	});
 
 	it("HTTPS command shows no warning", async () => {

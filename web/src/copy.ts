@@ -434,9 +434,9 @@ export const copy = {
 				"Over plain HTTP anyone on the network can get root on this host.",
 			verifyTitle: "Check the agent signature by hand",
 			verifyIntro:
-				"On the host, download the agent and its signature, and verify them with the Lodestore project key (key id 8CA38864EEA52F78, also in the documentation).",
+				"On the host, download the agent and its signature, and verify them with the Lodestore project key. This page comes from the same server as the files, so before you trust the key in the command, compare it with the one on the Binary page of the documentation.",
 			verifyAfter:
-				"The last line of the output must read Trusted comment: lodestore-agent, then the version and the architecture of the host. Then run the install command above on the same host. With minisign installed, the installer checks the agent with the same key. Over plain HTTP the install script itself can be replaced on the way, so read it before you run it.",
+				"The last line of the output must read Trusted comment: lodestore-agent, then the version and the architecture of the host. This checks the file you downloaded by hand; the installer downloads the agent again and, with minisign installed, checks that copy with the same key. Over plain HTTP the install script itself can be replaced on the way, so read it before you run it.",
 			verifyObject: "verification commands",
 			copyVerify: "Copy verification commands",
 		},

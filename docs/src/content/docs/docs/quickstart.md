@@ -83,7 +83,7 @@ minisign -V -P RWR4L6XuZIijjGDS/pggnqvsOKeXTnAUspdDGzyF983eIpcnS+mKEREI -m lodes
 
 The last line must be `Trusted comment: lodestore-agent <version> <arch>`. Then run the install command above.
 
-This check does not protect the installer script: over plain HTTP the script can be replaced too, and with it the key it carries. Put the server behind HTTPS to close that gap. The key is also published on [Binary](/docs/install/binary/#check-the-files) and in the release tag, key id `8CA38864EEA52F78`; compare it before you trust the one the server shows.
+This check does not protect the installer script: over plain HTTP the script can be replaced too, and with it the key it carries. Put the server behind HTTPS to close that gap. The key is also published on [Binary](/docs/install/binary/#check-the-files) and in the release tag; compare the key in the command with that one before you trust it. The check covers the file you downloaded by hand; the installer downloads the agent again and checks that copy itself.
 
 The host appears under **Hosts** as online within seconds.
 
