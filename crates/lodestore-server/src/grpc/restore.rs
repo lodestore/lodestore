@@ -21,9 +21,9 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Status;
 
-use crate::catalog::{self, RepositoryUnavailable};
-use crate::grpc::internal;
+use crate::catalog;
 use crate::grpc::registry::Registry;
+use crate::grpc::{internal, internal_or_unavailable};
 use crate::jobs::restore::RestoreRecord;
 use crate::repos::checks::open_store;
 use crate::repos::db::server_access_checked;
@@ -83,12 +83,7 @@ async fn authorize(
 async fn source_store(state: &AppState, repository_id: &str) -> Result<Store, Status> {
     let access = server_access_checked(state, repository_id)
         .await
-        .map_err(
-            |error| match error.downcast_ref::<RepositoryUnavailable>() {
-                Some(_) => Status::failed_precondition("the source repository is unavailable"),
-                None => internal(error),
-            },
-        )?;
+        .map_err(internal_or_unavailable)?;
     open_store(&access.location, access.server_creds.as_ref()).map_err(internal)
 }
 
@@ -289,7 +284,7 @@ pub async fn restore_plan(
         parse_hex32(&record.snapshot_id).ok_or_else(|| internal("the stored snapshot id"))?;
     let source = catalog::open_repository(state, &record.source_repository_id)
         .await
-        .map_err(internal)?;
+        .map_err(internal_or_unavailable)?;
     let reader = Reader::open(source.store, source.keys, &source.config).map_err(read_error)?;
     let generation = state.registry.begin_plan(job_id);
     let (tx, rx) = mpsc::channel(STREAM_DEPTH);
