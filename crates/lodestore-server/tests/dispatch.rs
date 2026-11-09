@@ -208,18 +208,33 @@ async fn dispatch_unavailable_repository_fails_backup_job() {
             .execute(pool)
             .await
             .unwrap();
-        insert_job(pool, "job-1", &host.id, "manual", "queued", now_ms()).await;
+        let jobs = [
+            ("job-1", "manual"),
+            ("job-2", "schedule"),
+            ("job-3", "catchup"),
+        ];
+        for (id, origin) in jobs {
+            insert_job(pool, id, &host.id, "manual", "queued", now_ms()).await;
+            sqlx::query("UPDATE jobs SET origin = $1 WHERE id = $2")
+                .bind(origin)
+                .bind(id)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
 
         let mut agent = Fake::connect(&ts, &host, vec![]).await;
-        wait_state(pool, "job-1", "failed").await;
-        assert_eq!(
-            text(pool, "SELECT error_code FROM jobs WHERE id = $1", "job-1")
-                .await
-                .as_deref(),
-            Some("repository_unavailable"),
-            "[{}]",
-            backend.name()
-        );
+        for (id, origin) in jobs {
+            wait_state(pool, id, "failed").await;
+            assert_eq!(
+                text(pool, "SELECT error_code FROM jobs WHERE id = $1", id)
+                    .await
+                    .as_deref(),
+                Some("repository_unavailable"),
+                "[{}] {origin} job",
+                backend.name()
+            );
+        }
         let sent = agent.drain(Duration::from_millis(500)).await;
         assert!(
             sent.into_iter().all(|body| is_assign(body).is_none()),
