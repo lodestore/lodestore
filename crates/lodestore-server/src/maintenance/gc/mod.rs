@@ -325,6 +325,7 @@ async fn dry_run(state: &AppState, cycle_id: &str, plan_now_ms: i64) -> anyhow::
         }
     };
     let policy = db::load_mark_policy(state, &cycle.repository_id, &source).await?;
+    let survey_started = now_ms();
     let surveying = survey_with(
         &source.store,
         &source.keys,
@@ -352,6 +353,7 @@ async fn dry_run(state: &AppState, cycle_id: &str, plan_now_ms: i64) -> anyhow::
         &surveyed.quarantined,
         &failing,
         now_ms(),
+        survey_started,
     )
     .await?;
 

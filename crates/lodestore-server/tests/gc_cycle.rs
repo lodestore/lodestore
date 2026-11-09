@@ -2607,7 +2607,7 @@ async fn gc_cycle_exclusion_during_walk_is_kept() {
         assert_eq!(exclude(&api, &repo, &key).await.status(), 200);
         let walked = [quarantined_as_walked(&key)];
         let failing = gc::db::failing_ids(&walked, &[]);
-        gc::db::replace_quarantine(ts.state(), &repo, &walked, &failing, now_ms())
+        gc::db::replace_quarantine(ts.state(), &repo, &walked, &failing, now_ms(), now_ms())
             .await
             .unwrap();
         assert_eq!(
@@ -2625,6 +2625,50 @@ async fn gc_cycle_exclusion_during_walk_is_kept() {
         );
         assert_restores(&ts, "main", &b).await;
         assert_restores(&ts, "main", &c).await;
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_cycle_confirmation_made_during_walk_is_not_lifted() {
+    for backend in backends() {
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        forgotten_a(&ts, "main").await;
+        enable(&ts, &api, &repo).await;
+        let key = plant_unopenable(&ts, "main");
+        failed_cycle(&ts, &api, &repo).await;
+        assert_eq!(exclude(&api, &repo, &key).await.status(), 200);
+        let confirmed_before = now_ms();
+
+        let nothing = std::collections::HashSet::new();
+        gc::db::replace_quarantine(ts.state(), &repo, &[], &nothing, now_ms(), 0)
+            .await
+            .unwrap();
+        assert_eq!(
+            quarantine_rows(&ts, &repo).await,
+            vec![(key.clone(), 1, true)],
+            "[{}] a walk that started before the confirmation must not lift it",
+            backend.name()
+        );
+
+        gc::db::replace_quarantine(
+            ts.state(),
+            &repo,
+            &[],
+            &nothing,
+            now_ms(),
+            confirmed_before + 1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            quarantine_rows(&ts, &repo).await,
+            vec![],
+            "[{}] a walk that started after it lifts it for a snapshot that reads again",
+            backend.name()
+        );
         ts.stop().await;
     }
 }
