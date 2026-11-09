@@ -460,7 +460,7 @@ export const copy = {
 		title: "Repositories",
 		unavailableTitle: "The server does not open this repository",
 		unavailable: (reason: string) =>
-			`Its configuration in storage does not match what the server recorded when the repository was added: ${reason}. Cleanup, checks, restores and browsing are stopped until this is fixed.`,
+			`What the server found: ${reason}. Cleanup, checks, restores and browsing are stopped until this is fixed.`,
 		add: "Add repository",
 		emptyHeading: "No repositories yet",
 		emptyBody: "Create a repository to give your hosts somewhere to back up.",
