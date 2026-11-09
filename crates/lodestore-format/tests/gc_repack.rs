@@ -51,7 +51,7 @@ async fn gc_repack_full_cycle_restores() {
     cycle.survey(100).await;
     assert!(!cycle.survey.as_ref().unwrap().plan.repack.is_empty());
     cycle.repack_publish().await;
-    assert!(cycle.repack.shard.is_some());
+    assert!(!cycle.repack.shards.is_empty());
     let plan = cycle.verify_compact().await;
     assert!(!plan.is_empty());
     assert!(cycle.resurrected.is_empty());
@@ -664,7 +664,7 @@ async fn repack_keeps_pack_whose_frame_does_not_open() {
     assert_eq!(out.skipped.len(), 1);
     assert_eq!(out.skipped[0].0, ids[0]);
     assert!(!out.skipped[0].1.is_empty());
-    assert!(out.shard.is_some());
+    assert!(!out.shards.is_empty());
 }
 
 #[tokio::test]
@@ -705,7 +705,7 @@ async fn repack_skips_unopenable_prefix_and_size_mismatch() {
 
     let out = run_repack(&fx, &survey).await;
     assert!(out.replaced.is_empty());
-    assert!(out.shard.is_none());
+    assert!(out.shards.is_empty());
     let skipped: HashSet<BlobId> = out.skipped.iter().map(|(id, _)| *id).collect();
     assert_eq!(skipped, ids.into_iter().collect());
 }
@@ -715,7 +715,7 @@ async fn repack_attests_its_shard() {
     let fx = two_sparse_packs().await;
     let survey = fx.survey(100).await;
     let out = run_repack(&fx, &survey).await;
-    let shard = out.shard.expect("blobs were copied");
+    let shard = *out.shards.first().expect("blobs were copied");
     let attested = read_attestations(&fx.store, fx.repo.read_keys())
         .await
         .unwrap();
