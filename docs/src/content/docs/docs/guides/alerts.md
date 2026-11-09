@@ -71,6 +71,8 @@ A channel is a place alerts are sent to. Add them under Settings, Notifications,
 | Email | SMTP host, port, security (`starttls` or `tls`), optional user name and password, a `from` address and the recipients. Without recipients the message goes to the administrator's email (Settings, User). Plain SMTP without TLS is not supported. |
 | Webhook | A URL and an optional secret. See [the webhook payload](#the-webhook-payload). |
 
+A channel created in the web interface before 0.2 with every alert type checked also receives `snapshot_quarantined` and `repository_unavailable` after the update. A channel with a chosen list is left as it is; check the new types yourself if you want them.
+
 Use **Send test message** on a channel to check it end to end. The result of the last delivery is shown in the channel list. Secrets entered in the web interface are encrypted in the server database and are never shown again; leaving a secret field empty on edit keeps the saved one.
 
 ### Channels in server.yaml
