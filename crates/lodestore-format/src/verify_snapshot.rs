@@ -21,7 +21,7 @@ use crate::pack::{PACK_MAX_SIZE, PACK_PREFIX_LEN, pack_object_key, parse_entries
 use crate::pb;
 use crate::reader::open_chunk;
 use crate::snapshot::{MAX_SNAPSHOT_SIZE, open_snapshot, snapshot_object_key};
-use crate::store::{BlobError, BlobStore};
+use crate::store::{BlobError, BlobStore, read_bounded};
 use crate::tree::decode_tree;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -142,7 +142,7 @@ async fn read_snapshot<S: BlobStore>(
         .map(|e| e.size)
         .ok_or(BlobError::NotFound)?;
     within_size(&key, size, MAX_SNAPSHOT_SIZE, "snapshot")?;
-    let bytes = store.get(&key).await?;
+    let bytes = read_bounded(store, &key, Some(size), MAX_SNAPSHOT_SIZE, "snapshot").await?;
     open_snapshot(keys.hpke_private_key(), keys.repo_id(), id, &bytes)
 }
 

@@ -79,6 +79,9 @@ impl BlobStore for Hooked<'_> {
     }
 
     async fn get_range(&self, key: &str, range: Range<u64>) -> Result<Bytes, BlobError> {
+        if self.hide_get.as_deref() == Some(key) {
+            return Err(BlobError::NotFound);
+        }
         self.inner.get_range(key, range).await
     }
 

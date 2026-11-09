@@ -21,7 +21,7 @@ use crate::locks::{LOCKS_PREFIX, LockId, lock_id_hex, new_lock_id};
 use crate::pb;
 use crate::provenance::supersedes;
 use crate::snapshot::SNAPSHOT_PREFIX;
-use crate::store::{BlobDelete, BlobError, BlobPurge, BlobStore, put_named};
+use crate::store::{BlobDelete, BlobError, BlobPurge, BlobStore, put_named, read_bounded};
 
 pub const ATTEST_PREFIX: &str = "locks/attest-";
 /// Largest attestation read from a listing.
@@ -171,13 +171,25 @@ pub async fn read_attestations<S: BlobStore>(store: &S, keys: &ReadKeys) -> Resu
             out.rejected.push((entry.key, e.to_string()));
             continue;
         }
-        let bytes = match store.get(&entry.key).await {
+        let bytes = match read_bounded(
+            store,
+            &entry.key,
+            Some(entry.size),
+            MAX_ATTEST_SIZE,
+            "attestation",
+        )
+        .await
+        {
             Ok(bytes) => bytes,
-            Err(BlobError::NotFound) => {
+            Err(Error::Store(BlobError::NotFound)) => {
                 out.incomplete = true;
                 continue;
             }
-            Err(e) => return Err(e.into()),
+            Err(e @ Error::Corrupt { .. }) => {
+                out.rejected.push((entry.key, e.to_string()));
+                continue;
+            }
+            Err(e) => return Err(e),
         };
         match open_attestation(keys.k_srv(), keys.repo_id(), &entry.key, &bytes) {
             Ok(attestation) => {
@@ -245,14 +257,22 @@ pub async fn peek_attestations<S: BlobStore>(store: &S) -> Result<UnverifiedAtte
         if !entry.key.starts_with(ATTEST_PREFIX) || entry.size > MAX_ATTEST_SIZE {
             continue;
         }
-        let bytes = match store.get(&entry.key).await {
+        let bytes = match read_bounded(
+            store,
+            &entry.key,
+            Some(entry.size),
+            MAX_ATTEST_SIZE,
+            "attestation",
+        )
+        .await
+        {
             Ok(bytes) => bytes,
-            Err(BlobError::NotFound) => continue,
-            Err(BlobError::Denied { .. }) => {
+            Err(Error::Store(BlobError::NotFound) | Error::Corrupt { .. }) => continue,
+            Err(Error::Store(BlobError::Denied { .. })) => {
                 out.denied = true;
                 continue;
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(e),
         };
         if let Ok(attestation) = peek_attestation(&entry.key, &bytes) {
             out.shards.extend(shard_ids(&attestation));
