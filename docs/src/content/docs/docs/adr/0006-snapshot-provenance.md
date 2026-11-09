@@ -39,6 +39,10 @@ Both modes warn about manifests that claim a time more than ten minutes ahead of
 
 Consolidating attestations carries the provenance of snapshots that still exist in `snapshots/`, one record per snapshot, and drops the rest. It cuts the records into parts so that no object exceeds the attestation size limit, and it leaves out shards the server has revoked. The listing of `snapshots/` happens after the attestations are read; a record is written only after its snapshot object, so no record of an existing snapshot is lost.
 
+### Bound to a job
+
+Cleanup quarantines a snapshot it cannot read and lets an administrator exclude it from cleanup (see [Cleanup](/docs/guides/gc/#quarantined-snapshots)). A snapshot is **bound to a job** when the catalog ties it to a host and a job, or when a sealed provenance record signed by the server names it. A bound snapshot is never excluded: it was produced by a backup that the server saw finish, so one that no longer opens is damage to repair or a snapshot to delete, not one to stop protecting. A snapshot the catalog found in the bucket without a host and a job, one signed only with the repository password, and one nothing signed can be excluded. The catalog row is the server's own memory, so after a lost database a snapshot is bound only through its provenance record.
+
 ### Format
 
 `format_version` stays 1. `ProvenanceRecord` and `sealed_provenance` were frozen with ADR 0005 and `attest-vectors.json`; no byte layout and no test vector is added or changed.

@@ -3,13 +3,14 @@
 
 mod adv_support;
 mod gc_support;
+#[path = "adv_support/planted.rs"]
+mod planted;
 
-use adv_support::{
-    PlantedListing, attacker_keys, forge_offsets, open_all_shards, plant_shard, planted_shard_entry,
-};
+use adv_support::{attacker_keys, forge_offsets, open_all_shards, plant_shard};
 use gc_support::Fx;
 use lodestore_format::gc::survey;
 use lodestore_format::writer::BackupOptions;
+use planted::{PlantedListing, planted_shard_entry};
 
 #[tokio::test]
 async fn adv_planted_supersedes_does_not_stop_gc_survey() {

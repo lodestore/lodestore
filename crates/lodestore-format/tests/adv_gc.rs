@@ -3,11 +3,13 @@
 
 mod adv_support;
 mod gc_support;
+#[path = "adv_support/planted.rs"]
+mod planted;
 
 use std::collections::BTreeSet;
 
 use adv_support::{
-    PlantedListing, attacker_keys, forge_offsets, open_all_shards, plant_shard_where, put_junk_pack,
+    attacker_keys, forge_offsets, open_all_shards, plant_shard_where, put_junk_pack,
 };
 use gc_support::{Cycle, Fx, pack_ids};
 use lodestore_format::crypto::{BLOB_TYPE_DATA, BlobId, Entropy};
@@ -16,6 +18,7 @@ use lodestore_format::index::rebuild_index;
 use lodestore_format::pack::{ENTRY_LEN, PACK_PREFIX_LEN, pack_object_key};
 use lodestore_format::pb;
 use lodestore_format::store::ListEntry;
+use planted::PlantedListing;
 
 async fn full_cycle(fx: &Fx, repack_below_pct: u8) {
     let mut cycle = Cycle::new(fx);

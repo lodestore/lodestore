@@ -15,12 +15,14 @@ Where to find it:
 
 When it first opens a repository, and in any case before the first cycle, the server signs the index shards that already exist with a key that agents do not have, and writes the signature as `locks/attest-*` objects. Only signed shards are allowed to say that they replace others. See [Index metadata from a compromised agent](/docs/security/threat-model/#index-metadata-from-a-compromised-agent).
 
-1. **Check snapshots.** The server reads every snapshot and the whole index and works out which packs hold data no snapshot uses. A snapshot that cannot be read stops the cycle: the server cannot know what it references. Packs younger than the pause are never touched.
+1. **Check snapshots.** The server reads every snapshot and the whole index and works out which packs hold data no snapshot uses. A snapshot that cannot be read or that points to data which is missing is put in quarantine and stops the cycle before anything is deleted: the server cannot know what it references. See [Quarantined snapshots](#quarantined-snapshots). An index shard that is larger than a shard may be (see below) is left out and listed in the report. Packs younger than the pause are never touched.
 2. **Rewrite packs.** A pack with less live data than the repack threshold (default 50%) is rewritten: its live blobs are copied into new packs and the new index shard is written before anything is deleted. At most `Max repack per cycle` (default 10 GiB) is moved per cycle; the rest waits for the next one. Before a pack is rewritten or deleted, the server opens the copy of every live blob that would remain and checks that it is that blob. A pack whose data does not open, or that cannot be read, is left alone and the next cycle looks at it again, so false index records cannot make the server delete data that a snapshot needs.
 3. **Mark.** The server publishes the list of packs it plans to delete as an object `locks/gc-<id>`. From now on every backup, whether run by an agent or by `lode backup`, reads that list at the start and uploads again any blob that lives only in a marked pack.
 4. **Pause.** Nothing is deleted for the length of the pause, at least 24 hours. Backups that started before the mark must finish within this time.
 5. **Check again.** After the pause the server reads all snapshots again, including those created during the pause. A marked pack that a new snapshot needs is taken off the list. Deletion also waits while a restore or download of the repository is running, and while a backup that started before the mark has not finished (see [Unfinished backups](#unfinished-backups)).
 6. **Delete.** The server writes a new, smaller index without the marked packs, checks that every blob of every snapshot is still found, and only then deletes the old index shards, the marked packs and last the `locks/gc-<id>` object. When it compacts the index it also merges the `locks/attest-*` objects into one, without the shards the server has revoked and without the records of snapshots that no longer exist (see [Attestations and cleanup](#attestations-and-cleanup)). Up to the first deleted object a cycle can be aborted without any loss. After that it cannot, and a cycle that stops continues where it stopped on the next run.
+
+The first cycle after an update can have more to do. Index shards written by 0.1 have no size limit, and one above 64 MiB is rewritten by this cycle into shards under the limit, a step that runs even when there is nothing to delete. The cycle therefore goes through the pause in full before it removes the old shard. Readers do not load a shard above 64 MiB (a restore not above 1 GiB), and every writer of this version cuts shards at 32 MiB and 1024 pack records, so later cycles have nothing to split.
 
 The server also checks every new backup an agent makes, outside the cycle. See [Backups the server could not verify](#backups-the-server-could-not-verify).
 
@@ -36,7 +38,7 @@ Open the repository, turn on **Scheduled cleanup** and save. The server refuses 
 | Server key | The server's storage key cannot delete objects. See [Server key](#server-key). |
 | Agent key | The agent key cannot read `locks/`. See [Agent key](#agent-key). |
 | Another cleanup | A `locks/gc-*` object in the bucket was not made by this server. See [Lost server database](#lost-server-database). |
-| Unreadable snapshot | An object under `snapshots/` has the right name but cannot be opened, so the server cannot tell what it references. Find the object named in the message and, if it is not a snapshot you need, delete it in the bucket. A file under `snapshots/` whose name does not match its content is not a snapshot; it is ignored with a warning. |
+| Unreadable storage | The server cannot open the repository or read its `locks/` folder; the message names the cause. A snapshot that does not open is not a failed check: the cycle puts it in quarantine, see [Quarantined snapshots](#quarantined-snapshots). A file under `snapshots/` whose name does not match its content is not a snapshot; it is ignored with a warning. |
 
 The settings:
 
@@ -103,6 +105,29 @@ lode gc unlock main
 
 It shows which hosts cleanup is waiting for and asks for confirmation (`--yes` skips the question). If the backup is in fact still running, its snapshot can lose data and fail to restore, so unlock only backups you know were interrupted.
 
+## Quarantined snapshots
+
+A host with the writer keys can put an object under `snapshots/` that does not open, and a real snapshot can be damaged. Cleanup cannot tell what such a snapshot references, so it never deletes on a guess. A snapshot goes into quarantine when:
+
+- the object has the right name but does not open, or
+- it opens but names a tree or a data blob that is not in the repository.
+
+A file under `snapshots/` whose name does not match its content is not a snapshot and is ignored with a warning.
+
+What happens:
+
+- A cycle reads every snapshot, collects all that it cannot follow, and fails before it publishes a list of packs to delete. Nothing is deleted. A dry run lists the same snapshots and does not fail.
+- The alert `snapshot_quarantined` is raised, see [Alerts](/docs/guides/alerts/). The **Free up space** card lists the snapshots with the reason, and the cycle log has an event `quarantined`. The same list is in the full report (`quarantined`).
+- The quarantine is checked again at every cycle. A snapshot that opens again, for example after you restored the missing object in the bucket, leaves it by itself.
+
+To carry on without such a snapshot, open **Free up space** and choose **Exclude from cleanup…** for it. This needs the `snapshots:delete` scope; with the API it is `POST /api/v1/repositories/{id}/gc/quarantine/{snapshot_id}/exclude`. Then run cleanup again.
+
+Excluding is not safe for the data. An excluded snapshot no longer protects what it points to, and the next cycle may delete data that only this snapshot uses. If the snapshot is a real backup that you still need, repair it instead: restore the object or run a full check first. The snapshot object itself stays in the bucket; delete it separately if you do not need it.
+
+A snapshot that belongs to a backup job (the catalog ties it to a host and a job, or a record signed by the server names it, see [ADR 0006](/docs/adr/0006-snapshot-provenance/)) cannot be excluded: the card says so and offers no button. Run a full check, then repair the repository or delete the snapshot.
+
+The exclusion is kept in the server database only. After a lost database the snapshots come back into quarantine at the next cycle, and you confirm each again.
+
 ## Lost server database
 
 The server remembers which cycle it started. If its database is lost or replaced and a cycle was marked at that time, the bucket still holds the `locks/gc-<id>` object, and the new server sees a cleanup it did not start and refuses to run (**Another cleanup**). Delete the object `locks/gc-<id>` in the bucket by hand to continue, but only after you have made sure that no other Lodestore server cleans up this bucket: that server would be using the list.
@@ -143,4 +168,13 @@ When a cycle merges the objects it keeps one record per snapshot that still exis
 | Repack transfer | Data the server reads and writes for the repack. Plan the bandwidth for this. |
 | Held by Object Lock | Bytes Object Lock keeps, and when they can go. Shown only when not zero. |
 
-The full list of packs is in `lode gc --dry-run --json` and in the API (`GET /api/v1/repositories/{id}/gc/cycles/{cycle_id}/report`).
+The full list of packs is in `lode gc --dry-run --json` and in the API (`GET /api/v1/repositories/{id}/gc/cycles/{cycle_id}/report`). The full report also has two lists that explain why a cycle was careful:
+
+- `skipped_shards`: index shards that cleanup did not use, each with the reason. A shard is skipped when it is larger than the limit, does not open or holds a malformed record. The packs such a shard names are not deleted.
+- `quarantined`: snapshots that cleanup could not follow, see [Quarantined snapshots](#quarantined-snapshots).
+
+### A cycle that stops because of skipped shards
+
+A skipped shard may name packs that an agent still reuses, and an agent from 0.1 reads shards without a size limit. While the repository has an enrolled agent that does not announce `shard_limit_v1`, the cycle fails when it skipped a shard and has packs to delete. The message reads that some index shards could not be read by cleanup, that agents older than 0.2 may still reuse the packs they name, names the hosts, and says that no pack was deleted. Nothing was deleted. Update or revoke the named hosts (revoked agents do not count) and run cleanup again. Without such agents, a skipped shard does not stop a cycle. Update `lode` together with the server too: a `lode` from 0.1 started with `--writer-keys` is not visible to the server.
+
+One risk stays: an agent from 0.1 that was enrolled after a cycle (an old package, a downgrade, or a host re-enrolled after it was revoked) can deduplicate against a pack that the cycle has deleted. The server's check of its backup fails that job with `verification_failed`, and only an administrator can enroll an agent. After an update, do not enroll agents older than 0.2.
