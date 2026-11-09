@@ -9,6 +9,7 @@ use lodestore_format::attest::{
     MARKER_LEGACY_SHARDS, ensure_upgraded, put_attestation, read_attestations,
 };
 use lodestore_format::crypto::{BLOB_TYPE_DATA, BlobId, Entropy, HPKE_ENC_LEN, SEALED_KEY_LEN};
+use lodestore_format::gc::mark::load_shards;
 use lodestore_format::index::{
     MAX_SHARD_SIZE, hex32, index_object_key, open_shard, parse_hex32, seal_shard,
     seal_shard_superseding,
@@ -2570,6 +2571,141 @@ async fn gc_cycle_excluded_snapshot_verify_step() {
             backend.name()
         );
         assert!(packs_size(&ts, "main") < before);
+        assert_restores(&ts, "main", &b).await;
+        assert_restores(&ts, "main", &c).await;
+        ts.stop().await;
+    }
+}
+
+/// A shard past the size limit that repeats the records of the marked packs:
+/// cleanup skips it, a writer that predates the limit would read it.
+async fn plant_skipped_copy(ts: &TestServer, name: &str, marked: &[String]) {
+    let store = LocalFsStore::new(ts.local_repo_root(name));
+    let repo = Repository::open(&store, PASSWORD).await.unwrap();
+    let records: Vec<pb::PackRecord> = load_shards(&store, repo.read_keys())
+        .await
+        .unwrap()
+        .shards
+        .into_iter()
+        .flat_map(|(_, shard)| shard.packs)
+        .filter(|p| marked.contains(&hex32(&pack_id_of(p))))
+        .collect();
+    assert!(!records.is_empty());
+    let id = put_shard(ts, name, records, vec![]).await;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(ts.local_repo_root(name).join(index_object_key(&id)))
+        .unwrap()
+        .set_len(MAX_SHARD_SIZE + 1)
+        .unwrap();
+}
+
+fn assert_kept(ts: &TestServer, marked: &[String]) {
+    for hex in marked {
+        assert!(pack_path(ts, "main", hex).exists(), "{hex} was deleted");
+    }
+}
+
+async fn allow_shard_limit(ts: &TestServer) {
+    sqlx::query("UPDATE agents SET capabilities_json = '[\"gc_v1\",\"shard_limit_v1\"]' WHERE id = 'old-host'")
+        .execute(&ts.state().db.pool)
+        .await
+        .unwrap();
+}
+
+/// An agent that reads shards without the size limit keeps the packs a shard
+/// cleanup cannot read names; once it is updated the cycle goes through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_cycle_old_agents_keep_packs_named_by_skipped_shard() {
+    for backend in backends() {
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let (b, c) = forgotten_a(&ts, "main").await;
+        enable(&ts, &api, &repo).await;
+
+        let id = run_cycle(&api, &repo).await;
+        let later = after_pause(&ts, &id).await;
+        let marked = marked_packs(&api, &repo, &id).await;
+        assert!(!marked.is_empty());
+        plant_skipped_copy(&ts, "main", &marked).await;
+        seed_agent(&ts, &repo, "old-host", "[\"gc_v1\"]").await;
+
+        assert_eq!(
+            steps(&ts, &id, later).await,
+            StepOutcome::Finished(GcState::Failed),
+            "[{}]",
+            backend.name()
+        );
+        let failed = cycle(&ts, &id).await;
+        assert!(failed.error.unwrap().contains("old-host"));
+        assert!(!failed.error_after_delete);
+        assert_kept(&ts, &marked);
+        assert!(lock_files(&ts, "main").is_empty(), "the marker must go");
+
+        allow_shard_limit(&ts).await;
+        let second = run_cycle(&api, &repo).await;
+        let later = after_pause(&ts, &second).await;
+        let marked = marked_packs(&api, &repo, &second).await;
+        assert!(!marked.is_empty());
+        assert_eq!(
+            steps(&ts, &second, later).await,
+            StepOutcome::Finished(GcState::Done),
+            "{:?}",
+            cycle(&ts, &second).await.error
+        );
+        for hex in &marked {
+            assert!(
+                !pack_path(&ts, "main", hex).exists(),
+                "{hex} is still there"
+            );
+        }
+        assert_restores(&ts, "main", &b).await;
+        assert_restores(&ts, "main", &c).await;
+        ts.stop().await;
+    }
+}
+
+/// A shard planted after verification is caught by the check before the
+/// packs go, and the next run continues the sweep.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_cycle_sweep_refuses_shard_skipped_after_verify() {
+    for backend in backends() {
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let (b, c) = forgotten_a(&ts, "main").await;
+        enable(&ts, &api, &repo).await;
+        seed_agent(&ts, &repo, "old-host", "[\"gc_v1\"]").await;
+
+        let id = run_cycle(&api, &repo).await;
+        let later = after_pause(&ts, &id).await;
+        let marked = marked_packs(&api, &repo, &id).await;
+        assert!(!marked.is_empty());
+        for _ in 0..2 {
+            step(ts.state(), &id, later).await.unwrap();
+        }
+        assert_eq!(cycle(&ts, &id).await.state, "sweeping");
+        plant_skipped_copy(&ts, "main", &marked).await;
+
+        assert_eq!(
+            steps(&ts, &id, later).await,
+            StepOutcome::Finished(GcState::Failed),
+            "[{}]",
+            backend.name()
+        );
+        assert!(cycle(&ts, &id).await.error.unwrap().contains("old-host"));
+        assert_kept(&ts, &marked);
+
+        allow_shard_limit(&ts).await;
+        assert_eq!(run_cycle(&api, &repo).await, id);
+        wait_state(&ts, &id, "done").await;
+        for hex in &marked {
+            assert!(
+                !pack_path(&ts, "main", hex).exists(),
+                "{hex} is still there"
+            );
+        }
         assert_restores(&ts, "main", &b).await;
         assert_restores(&ts, "main", &c).await;
         ts.stop().await;

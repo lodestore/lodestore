@@ -37,6 +37,7 @@ use super::preflight::{old_agents, own_gc_ids};
 use super::{GcState, StoredProgress, backups_end, bucket_retention, build_report, held_until};
 use crate::catalog::{OpenRepository, open_repository};
 use crate::db::now_ms;
+use crate::grpc::registry::{CAP_GC, CAP_SHARD_LIMIT};
 use crate::jobs::ACTIVE_STATES;
 use crate::jobs::restore::RestoreRecord;
 use crate::maintenance::attest::verify::SWEEP;
@@ -331,7 +332,7 @@ pub async fn drive(state: AppState, cycle_id: String) {
 /// follow the cleanup protocol has joined the repository since it started:
 /// such an agent neither reads the marker nor keeps to a time limit.
 async fn refuse_old_agents(state: &AppState, repository_id: &str) -> anyhow::Result<()> {
-    let old = old_agents(state, repository_id).await?;
+    let old = old_agents(state, repository_id, CAP_GC).await?;
     if old.is_empty() {
         return Ok(());
     }
@@ -339,6 +340,33 @@ async fn refuse_old_agents(state: &AppState, repository_id: &str) -> anyhow::Res
     bail!(
         "Agents that don't support cleanup joined this repository ({}). Nothing was deleted. \
          Update or revoke them, then run cleanup again.",
+        hosts.join(", ")
+    )
+}
+
+/// Fails the cycle before any pack is deleted when a shard cleanup could not
+/// read may name a candidate and an agent that reads shards without the size
+/// limit is still in the repository: it reads such a shard whole and, once the
+/// marker is gone, deduplicates into the deleted pack.
+async fn refuse_old_shard_readers(
+    state: &AppState,
+    repository_id: &str,
+    candidates: &HashSet<BlobId>,
+    skipped: &[(String, String)],
+) -> anyhow::Result<()> {
+    if candidates.is_empty() || skipped.is_empty() {
+        return Ok(());
+    }
+    let old = old_agents(state, repository_id, CAP_SHARD_LIMIT).await?;
+    if old.is_empty() {
+        return Ok(());
+    }
+    let hosts: Vec<&str> = old.iter().map(|h| h.hostname.as_str()).collect();
+    bail!(
+        "{} index shard(s) could not be read by cleanup (see the skipped shards in the report), \
+         and agents that read shards without the size limit ({}) may still reuse the packs they \
+         name. No pack was deleted. Update or revoke those agents, then run cleanup again.",
+        skipped.len(),
         hosts.join(", ")
     )
 }
@@ -755,6 +783,13 @@ async fn verifying(state: &AppState, cycle: &CycleRow) -> anyhow::Result<StepOut
     if current.is_none_or(|c| c.state != GcState::Verifying) {
         return finished(state, &cycle.id).await;
     }
+    refuse_old_shard_readers(
+        state,
+        &cycle.repository_id,
+        &verified.candidates,
+        &verified.shards.skipped,
+    )
+    .await?;
 
     let revoked: HashSet<BlobId> = load_all_distrusted(state, &cycle.repository_id)
         .await
@@ -1012,9 +1047,10 @@ async fn sweeping(state: &AppState, cycle: &CycleRow, now_ms: i64) -> anyhow::Re
         swept.merge(out);
         state.readers.invalidate(&cycle.repository_id);
 
-        confirm_unreferenced(store, &source.keys, &doomed)
+        let unchecked = confirm_unreferenced(store, &source.keys, &doomed)
             .await
             .context("checking that no index names a pack that is going")?;
+        refuse_old_shard_readers(state, &cycle.repository_id, &doomed, &unchecked).await?;
         let packs = pack_sizes(store, &doomed).await?;
         let out = sweep_packs(store, &packs).await;
         check(&out)?;
