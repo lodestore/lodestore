@@ -101,7 +101,7 @@ pub struct ChannelInput {
     pub name: String,
     #[serde(default = "yes")]
     pub enabled: bool,
-    /// Left out means all five alert types.
+    /// Left out means every alert type.
     #[serde(default = "all_types")]
     pub alert_types: Vec<AlertType>,
     #[serde(default)]
