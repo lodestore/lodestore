@@ -215,6 +215,9 @@ pub(crate) enum Step {
 
 struct Level {
     nodes: std::vec::IntoIter<pb::Node>,
+    /// Entries the directory was read with; its buffer holds them all until
+    /// the level is left, whatever has been handed out.
+    len: u64,
     /// Length of the cursor path before this level was entered.
     path_len: usize,
 }
@@ -234,6 +237,7 @@ impl TreeCursor {
     pub(crate) fn new(nodes: Vec<pb::Node>, base: Vec<u8>) -> Self {
         TreeCursor {
             levels: vec![Level {
+                len: nodes.len() as u64,
                 nodes: nodes.into_iter(),
                 path_len: 0,
             }],
@@ -273,14 +277,16 @@ impl TreeCursor {
             return Err(Error::corrupt("tree", "directories are nested too deeply"));
         }
         let nodes = reader.load_tree(&dir.subtrees).await?;
+        let len = nodes.len() as u64;
         let held = self
             .levels
             .iter()
-            .fold(nodes.len() as u64, |sum, l| sum + l.nodes.len() as u64);
+            .fold(len, |sum, l| sum.saturating_add(l.len));
         reader.walk_budget().check_held(held)?;
         let path_len = self.path.len();
         self.path = self.path_of(&dir.name);
         self.levels.push(Level {
+            len,
             nodes: nodes.into_iter(),
             path_len,
         });
