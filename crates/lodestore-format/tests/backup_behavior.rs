@@ -352,7 +352,13 @@ async fn backup_refuses_tree_over_held_limit() {
         .await
         .unwrap_err();
     assert!(
-        matches!(err, Error::WalkLimit { what: "entries held at once", .. }),
+        matches!(
+            err,
+            Error::WalkLimit {
+                what: "entries held at once",
+                ..
+            }
+        ),
         "{err:?}"
     );
     r.set_dir_limits(u64::MAX, held);
