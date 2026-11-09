@@ -298,6 +298,79 @@ async fn backup_refuses_directory_over_entry_limit() {
     );
 }
 
+/// A restore holds every directory on the path it is in; a backup refuses a
+/// tree whose deepest path holds more than that.
+#[tokio::test]
+async fn backup_refuses_tree_over_held_limit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo_dir, target) = (tmp.path().join("repo"), tmp.path().join("out"));
+    fs::create_dir(&repo_dir).unwrap();
+    let src = tmp.path().canonicalize().unwrap().join("src");
+    let deepest = src.join("b").join("c");
+    fs::create_dir_all(&deepest).unwrap();
+    for (dir, n) in [(&src, 4), (&src.join("b"), 4), (&deepest, 5)] {
+        for i in 0..n {
+            fs::write(dir.join(format!("f{i}")), b"x").unwrap();
+        }
+    }
+    // The root and every directory above `src` list one entry each.
+    let held = src.components().count() as u64 - 1 + 15;
+    let store = init_repo(&repo_dir).await;
+
+    let mut w = writer(&store).await;
+    w.set_held_limit(held - 1);
+    let err = w
+        .backup(
+            std::slice::from_ref(&src),
+            BackupOptions::default(),
+            &|_| {},
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
+    assert!(
+        err.to_string()
+            .contains(&format!("more than the {} a restore holds", held - 1)),
+        "{err}"
+    );
+    assert!(objects(&store, "snapshots/").await.is_empty());
+
+    let mut w = writer(&store).await;
+    w.set_held_limit(held);
+    w.backup(
+        std::slice::from_ref(&src),
+        BackupOptions::default(),
+        &|_| {},
+    )
+    .await
+    .unwrap();
+    let mut r = reader(&store).await;
+    let id = r.list_snapshots().await.unwrap().entries.remove(0).id;
+    r.set_dir_limits(u64::MAX, held - 1);
+    let err = r
+        .restore(&id, &target, &RestoreOptions::default(), &|_| {})
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::WalkLimit {
+                what: "entries held at once",
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    r.set_dir_limits(u64::MAX, held);
+    r.restore(&id, &target, &RestoreOptions::default(), &|_| {})
+        .await
+        .unwrap();
+    assert_eq!(
+        fs::read(restored_path(&target, &deepest).join("f4")).unwrap(),
+        b"x"
+    );
+}
+
 #[tokio::test]
 async fn backup_large_dir_split() {
     const FILES: usize = 30_000;

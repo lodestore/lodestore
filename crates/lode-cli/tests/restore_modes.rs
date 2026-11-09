@@ -322,3 +322,49 @@ fn restore_dry_run_touches_nothing() {
     assert_eq!(n(&summary, "would_write"), 0);
     assert_eq!(state(&src), before);
 }
+
+/// A snapshot from before backups refused large directories restores only
+/// when asked to; the debug build lowers the limits for the test.
+#[test]
+fn restore_large_directory_needs_the_flag() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, src, target) = (
+        tmp.path().join("repo"),
+        tmp.path().join("src"),
+        tmp.path().join("out"),
+    );
+    fs::create_dir(&src).unwrap();
+    for i in 0..5 {
+        fs::write(src.join(format!("f{i}")), b"x").unwrap();
+    }
+    init_repo(&repo);
+    lode(&repo).arg("backup").arg(&src).assert().success();
+
+    let out = lode(&repo)
+        .env("LODE_TEST_DIR_LIMITS", "4,1000")
+        .args(["restore", "latest", "--target"])
+        .arg(&target)
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8(out).unwrap();
+    assert!(
+        stderr.contains("more than 4 entries in one directory"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("--allow-large-directories"), "{stderr}");
+    assert!(!restored_path(&target, &src).join("f0").exists());
+
+    lode(&repo)
+        .env("LODE_TEST_DIR_LIMITS", "4,1000")
+        .args(["restore", "latest", "--allow-large-directories", "--target"])
+        .arg(&target)
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read(restored_path(&target, &src).join("f4")).unwrap(),
+        b"x"
+    );
+}

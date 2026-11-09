@@ -1,7 +1,8 @@
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use indicatif::HumanBytes;
+use lodestore_format::Error;
 use lodestore_format::fs::filter::PathMatcher;
 use lodestore_format::fs::restore::Unapplied;
 use lodestore_format::reader::{
@@ -72,6 +73,16 @@ pub async fn run(
         Some(PathMatcher::new(&flags.include)?)
     };
     let mut reader = open_for_read(url, args).await?;
+    #[cfg(debug_assertions)]
+    if let Some((dir, held)) = std::env::var("LODE_TEST_DIR_LIMITS").ok().and_then(|v| {
+        let (d, h) = v.split_once(',')?;
+        Some((d.parse().ok()?, h.parse().ok()?))
+    }) {
+        reader.set_dir_limits(dir, held);
+    }
+    if flags.allow_large_directories {
+        reader.allow_large_directories();
+    }
     let (snapshot, path) = parse_snapshot_path(snapshot);
     let entry = super::resolve_spec(&reader, snapshot).await?;
     let throttle = Throttle::new();
@@ -116,7 +127,20 @@ pub async fn run(
     if let Some(bar) = &bar {
         bar.finish_and_clear();
     }
-    let report = report?;
+    let report = match report {
+        Err(
+            e @ Error::WalkLimit {
+                what: "entries in one directory" | "entries held at once",
+                ..
+            },
+        ) if !flags.allow_large_directories => {
+            return Err(e).context(
+                "the snapshot has a directory larger than a restore reads by default; \
+                 run again with --allow-large-directories to restore it",
+            );
+        }
+        report => report?,
+    };
 
     let code = if report.errors.is_empty() {
         0

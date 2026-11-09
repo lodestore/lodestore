@@ -278,9 +278,16 @@ impl<S: BlobStore> Reader<S> {
     }
 
     /// Replaces the limit on one directory and on the entries held at once.
-    #[cfg(any(test, feature = "test-hooks"))]
     pub fn set_dir_limits(&mut self, dir: u64, held: u64) {
         self.walk = self.walk.with_dir_limits(dir, held);
+    }
+
+    /// Lifts the limit on one directory and on the entries held at once, for
+    /// a snapshot written before a backup refused such a tree. Memory is then
+    /// bounded only by the snapshot and the whole-walk limits; a reader shared
+    /// by many users, as the server's, never calls this.
+    pub fn allow_large_directories(&mut self) {
+        self.set_dir_limits(u64::MAX, u64::MAX);
     }
 
     pub(crate) fn walk_budget(&self) -> &TreeBudget {
@@ -393,12 +400,15 @@ impl<S: BlobStore> Reader<S> {
         if self.cache.index.read().await.has_shard(&shard_id) {
             return Ok(true);
         }
-        let attested = self
+        let attested = match self
             .cache
             .trust_set
-            .get_or_init(|| self.trust_attested())
+            .get_or_try_init(|| self.trust_attested())
             .await
-            .contains(&shard_id);
+        {
+            Ok(set) => set.contains(&shard_id),
+            Err(this_call) => this_call.contains(&shard_id),
+        };
         let key = index_object_key(&shard_id);
         let fetched = if attested {
             fetch_attested_shard_bytes(&self.store, &shard_id, listed).await?
@@ -416,11 +426,14 @@ impl<S: BlobStore> Reader<S> {
     }
 
     /// Only shards the server attested may supersede others. When the
-    /// attestations cannot be read nothing is trusted: that only costs the
-    /// preference for a newer copy and the larger size a signed shard may have.
-    async fn trust_attested(&self) -> HashSet<BlobId> {
-        let attested = match read_attestations(&self.store, &self.keys).await {
-            Ok(set) => set.shards,
+    /// attestations cannot be read in full only what was read is trusted, for
+    /// this call alone (`Err`), and the next shard to load reads them again:
+    /// that costs the preference for a newer copy and the larger size a signed
+    /// shard may have until a read succeeds.
+    async fn trust_attested(&self) -> std::result::Result<HashSet<BlobId>, HashSet<BlobId>> {
+        let read = read_attestations(&self.store, &self.keys).await;
+        let attested = match &read {
+            Ok(set) => set.shards.clone(),
             Err(_) => HashSet::new(),
         };
         self.cache
@@ -428,7 +441,10 @@ impl<S: BlobStore> Reader<S> {
             .write()
             .await
             .set_supersedes_trust(SupersedesTrust::Only(attested.clone()));
-        attested
+        match read {
+            Ok(set) if !set.incomplete => Ok(attested),
+            _ => Err(attested),
+        }
     }
 
     /// Lists the shards in the store and loads those that open; one that does

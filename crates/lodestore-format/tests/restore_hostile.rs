@@ -469,6 +469,52 @@ async fn restore_hostile_held_entries_stop_by_limit() {
     assert_eq!(reader.list_dir(&snap, b"/").await.unwrap().len(), 6);
 }
 
+/// Every directory ends with the next one, so when the walk enters it the
+/// directory above has nothing left to hand out but is still held whole.
+#[tokio::test]
+async fn restore_hostile_held_entries_count_consumed_directories() {
+    let mut fx = Fx::new().await;
+    let mut inner = fx.tree(files("f", 5));
+    for _ in 0..2 {
+        let mut nodes = files("f", 4);
+        nodes.push(dir("z", inner));
+        inner = fx.tree(nodes);
+    }
+    let mut top = files("f", 4);
+    top.push(dir("z", inner));
+    let snap = fx.snapshot(top).await;
+    let before = fx.listing();
+
+    let mut reader = fx.reader().await;
+    reader.set_dir_limits(10, 12);
+    let held_limit = |err: &Error| {
+        matches!(
+            err,
+            Error::WalkLimit {
+                what: "entries held at once",
+                limit: 12
+            }
+        )
+    };
+    let err = reader
+        .restore(&snap, &fx.target, &RestoreOptions::default(), &|_| {})
+        .await
+        .unwrap_err();
+    assert!(held_limit(&err), "{err:?}");
+    assert_eq!(fx.listing(), before);
+    let err = reader
+        .walk_subtree(&snap, b"/", &mut |_, _| Ok(()))
+        .await
+        .unwrap_err();
+    assert!(held_limit(&err), "{err:?}");
+
+    reader.set_dir_limits(10, 20);
+    reader
+        .walk_subtree(&snap, b"/", &mut |_, _| Ok(()))
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn restore_hostile_hardlink_group_mismatch() {
     let mut fx = Fx::new().await;
