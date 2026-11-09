@@ -257,6 +257,23 @@ describe("Find file session states", { timeout: 30_000 }, () => {
 		).toBeVisible();
 	});
 
+	it("says when a snapshot tree was too large to walk", async () => {
+		findHandlers([
+			findSession({
+				state: "incomplete",
+				stop_reason: "walk_limit",
+				groups: [findGroup(0)],
+			}),
+		]);
+		open("/restore?tab=find&find=*.conf");
+
+		expect(
+			await screen.findByText(
+				"Stopped a snapshot whose directory tree is larger than one search may walk. Showing what was found in the other snapshots.",
+			),
+		).toBeVisible();
+	});
+
 	it("says when the search was stopped", async () => {
 		findHandlers([findSession({ state: "cancelled" })]);
 		open("/restore?tab=find&find=*.conf");

@@ -47,6 +47,8 @@ export const find = {
 			`Stopped at ${limit} matches. Showing what was found. Narrow the pattern or add filters.`,
 		timeout: (duration: string) =>
 			`Stopped after ${duration}. Showing what was found. Narrow the pattern or add filters.`,
+		walkLimit:
+			"Stopped a snapshot whose directory tree is larger than one search may walk. Showing what was found in the other snapshots.",
 		cancelled: "Search stopped. Showing what was found.",
 		failed: (reason: string) => `Couldn't finish the search: ${reason}`,
 		progress: (scanned: number, total: number) =>
