@@ -14,6 +14,7 @@ import {
 import type { GcState, GcStatus, PreflightProblem } from "@/api/gen/model";
 import { TextWithPaths } from "@/components/path-text";
 import { RelativeTime } from "@/components/relative-time";
+import { QuarantineAlert } from "@/components/repos/reclaim/quarantine";
 import {
 	CycleLog,
 	ReclaimReport,
@@ -520,6 +521,12 @@ function ReclaimBody({
 				/>
 			)}
 			{failure && <FailureAlert failure={failure} />}
+			{status.quarantine.some((item) => item.confirmed_at == null) && (
+				<QuarantineAlert
+					repositoryId={repositoryId}
+					items={status.quarantine}
+				/>
+			)}
 			<ReclaimStatus status={status} />
 			<Actions repositoryId={repositoryId} status={status} />
 			<Separator />

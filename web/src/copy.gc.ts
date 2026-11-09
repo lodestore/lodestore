@@ -82,6 +82,26 @@ export const gc = {
 		failed: "unlock the markers",
 		failedTitle: "Markers weren't unlocked",
 	},
+	quarantine: {
+		title: (n: number) =>
+			n === 1
+				? "Cleanup is stopped: 1 snapshot cannot be read"
+				: `Cleanup is stopped: ${n} snapshots cannot be read`,
+		description:
+			"Each one was found in storage but does not open or points to data that is missing. Nothing is deleted until you review them.",
+		more: (n: number) => `and ${n} more`,
+		list: "Snapshots",
+		bound:
+			"This snapshot belongs to a backup job. Run a full check, then repair the repository or delete the snapshot.",
+		exclude: "Exclude from cleanup…",
+		dialogTitle: "Exclude this snapshot from cleanup?",
+		dialogBody:
+			"The next cleanup will no longer protect the data this snapshot points to, and may delete what only this snapshot uses. The snapshot object stays in storage; delete it separately if you no longer need it.",
+		confirm: "Exclude snapshot",
+		cancel: "Cancel",
+		done: "The snapshot is excluded. Run cleanup again to continue.",
+		failed: "exclude the snapshot",
+	},
 	log: {
 		title: "Cycle log",
 		more: (n: number) => `and ${n} more`,
