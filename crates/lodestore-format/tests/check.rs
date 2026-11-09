@@ -14,6 +14,7 @@ use lodestore_format::check::sample::{
 };
 use lodestore_format::check::structure::{StructureReport, check_structure};
 use lodestore_format::check::{FindingKind, MAX_FINDINGS, NoteKind};
+use lodestore_format::config::MAX_CONFIG_SIZE;
 use lodestore_format::crypto::{BLOB_TYPE_DATA, BlobId, Entropy};
 use lodestore_format::index::parse_hex32;
 use lodestore_format::locks::{
@@ -896,4 +897,28 @@ async fn check_sample_oversized_file_counts_as_skipped() {
     let run = sample(&fx, &[id], 5, 100 << 10, &|| false).await;
     assert!(run.report.skipped >= 1, "{:?}", run.report);
     assert!(run.report.stopped_at_limit);
+}
+
+#[tokio::test]
+async fn check_structure_oversized_config_is_a_finding() {
+    let fx = Fx::new().await;
+    fx.backup("a", A).await;
+    fs::OpenOptions::new()
+        .write(true)
+        .open(repo_dir(&fx).join("config"))
+        .unwrap()
+        .set_len(MAX_CONFIG_SIZE + 1)
+        .unwrap();
+
+    let report = structure(&fx).await;
+
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|f| f.key == "config" && f.kind == FindingKind::UnreadableConfig),
+        "{:?}",
+        report.findings
+    );
+    assert_eq!(report.snapshots_checked, 1);
 }

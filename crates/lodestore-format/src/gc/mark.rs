@@ -182,6 +182,13 @@ enum Walked {
     WrongName,
 }
 
+fn not_as_listed(key: &str, size: u64) -> Error {
+    Error::Store(BlobError::Backend {
+        message: format!("{key}: the body read is not the {size} bytes the listing showed"),
+        temporary: true,
+    })
+}
+
 /// Reads the snapshot and marks everything it references. The trees newly
 /// added to `live` are listed in `added`, also when the walk fails midway.
 async fn walk_snapshot<S: BlobStore>(
@@ -197,8 +204,14 @@ async fn walk_snapshot<S: BlobStore>(
     let bytes = match read_bounded(store, key, Some(*size), MAX_SNAPSHOT_SIZE, "snapshot").await {
         Ok(bytes) => bytes,
         Err(Error::Store(BlobError::NotFound)) => return Ok(Walked::Gone),
+        Err(Error::Corrupt { .. }) => return Err(not_as_listed(key, *size)),
         Err(e) => return Err(e),
     };
+    // A body of another length than listed is a read that went wrong, not an
+    // object to ignore: the snapshot may be live.
+    if bytes.len() as u64 != *size {
+        return Err(not_as_listed(key, *size));
+    }
     if blake3::hash(&bytes).as_bytes() != id {
         return Ok(Walked::WrongName);
     }

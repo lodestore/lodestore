@@ -313,7 +313,7 @@ async fn adv_rebuild_skips_planted_oversized_pack() {
 }
 
 #[tokio::test]
-async fn adv_planted_oversized_writer_marker_does_not_stop_gc() {
+async fn adv_planted_oversized_writer_marker_is_not_read_and_holds_gc() {
     let fx = Fx::new().await;
     fx.backup("host-a", &[("a", 1, 200 << 10)]).await;
     let key = writer_marker_key(&new_lock_id(&mut Entropy::os()));

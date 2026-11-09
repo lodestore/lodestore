@@ -134,7 +134,7 @@ async fn fetch_pack<S: BlobStore>(
     {
         Ok(bytes) => bytes,
         Err(Error::Store(BlobError::NotFound)) => return Ok(Err("missing from the store".into())),
-        Err(Error::Corrupt { .. }) => return Ok(Err("larger than a pack can be".into())),
+        Err(e @ Error::Corrupt { .. }) => return Ok(Err(e.to_string())),
         Err(e) => return Err(e),
     };
     if bytes.len() as u64 != stat.size {

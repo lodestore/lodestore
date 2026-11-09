@@ -710,6 +710,52 @@ async fn repack_skips_unopenable_prefix_and_size_mismatch() {
     assert_eq!(skipped, ids.into_iter().collect());
 }
 
+/// Hands back a byte more of every pack than the range asked for.
+struct PackOverread<'a>(&'a LocalFsStore);
+
+impl BlobStore for PackOverread<'_> {
+    async fn put_if_absent(&self, key: &str, data: Bytes) -> Result<(), BlobError> {
+        self.0.put_if_absent(key, data).await
+    }
+
+    async fn get(&self, key: &str) -> Result<Bytes, BlobError> {
+        self.0.get(key).await
+    }
+
+    async fn get_range(&self, key: &str, range: Range<u64>) -> Result<Bytes, BlobError> {
+        let bytes = self.0.get_range(key, range).await?;
+        if !key.starts_with("packs/") {
+            return Ok(bytes);
+        }
+        let mut body = bytes.to_vec();
+        body.push(0);
+        Ok(body.into())
+    }
+
+    async fn list(&self, prefix: &str) -> Result<Vec<ListEntry>, BlobError> {
+        self.0.list(prefix).await
+    }
+}
+
+#[tokio::test]
+async fn repack_names_a_pack_longer_than_its_listing() {
+    let fx = two_sparse_packs().await;
+    let survey = fx.survey(100).await;
+    let id = survey.plan.repack[0].pack_id;
+
+    let out = repack(
+        &PackOverread(&fx.store),
+        fx.repo.read_keys(),
+        &survey,
+        &mut Entropy::os(),
+        &|_, _| {},
+    )
+    .await
+    .unwrap();
+    let (_, reason) = out.skipped.iter().find(|(p, _)| *p == id).unwrap();
+    assert!(reason.contains("longer than the listing"), "{reason}");
+}
+
 #[tokio::test]
 async fn repack_attests_its_shard() {
     let fx = two_sparse_packs().await;
