@@ -77,7 +77,10 @@ async fn repo_open_refuses_another_config_hash() {
             "[{}] {shown}",
             backend.name()
         );
-        assert!(!sync(&api, &id).await.status().is_success());
+        let response = sync(&api, &id).await;
+        assert_eq!(response.status(), 503, "[{}]", backend.name());
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(body["code"], "repository_unavailable");
         ts.stop().await;
     }
 }

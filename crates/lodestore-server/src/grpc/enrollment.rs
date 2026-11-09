@@ -12,7 +12,7 @@ use lodestore_proto::{ERROR_TOKEN_INVALID, ERROR_VERSION_UNSUPPORTED};
 use tonic::{Code, Request, Response, Status};
 
 use crate::db::now_ms;
-use crate::grpc::{internal, select_version, status_with};
+use crate::grpc::{internal, internal_or_unavailable, select_version, status_with};
 use crate::hosts::tokens;
 use crate::repos::db::writer_material;
 use crate::state::AppState;
@@ -89,7 +89,7 @@ impl Enrollment for EnrollmentService {
             .ok_or_else(invalid)?;
         let material = writer_material(state, &repository_id)
             .await
-            .map_err(internal)?;
+            .map_err(internal_or_unavailable)?;
 
         let reused = !req.previous_agent_id.is_empty()
             && sqlx::query("SELECT 1 FROM agents WHERE id = $1")

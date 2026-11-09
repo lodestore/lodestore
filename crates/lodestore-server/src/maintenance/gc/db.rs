@@ -749,7 +749,9 @@ pub(crate) async fn load_mark_policy(
 
 /// The snapshots this survey could not walk: the quarantined ones, and those
 /// the walk ignored under their own key, which is what an excluded snapshot
-/// that still does not open becomes.
+/// that still does not open becomes. A snapshot deleted while the walk ran
+/// still counts as failing, so its exclusion survives until the next walk,
+/// whose listing no longer has it.
 pub fn failing_ids(quarantined: &[Quarantined], ignored: &[(String, String)]) -> HashSet<BlobId> {
     quarantined
         .iter()
@@ -766,15 +768,18 @@ pub fn failing_ids(quarantined: &[Quarantined], ignored: &[(String, String)]) ->
 /// walk just quarantined. A confirmed row stays while its snapshot still fails
 /// (`failing`), also when the walk that reports it started before the
 /// confirmation, and while the snapshot is not bound to a job. A confirmed row
-/// of a snapshot that read fine or is gone from the bucket is dropped: the
-/// exclusion lasts as long as the snapshot is broken, and a snapshot that
-/// breaks again waits for a new confirmation.
+/// of a snapshot that read fine or is missing from the walk's listing is
+/// dropped when the confirmation predates the start of the walk
+/// (`survey_started_ms`): the exclusion lasts as long as the snapshot is
+/// broken, a snapshot that breaks again waits for a new confirmation, and a
+/// confirmation made while the walk ran is judged by the next walk.
 pub async fn replace_quarantine(
     state: &AppState,
     repository_id: &str,
     items: &[Quarantined],
     failing: &HashSet<BlobId>,
     now_ms: i64,
+    survey_started_ms: i64,
 ) -> anyhow::Result<()> {
     let mut tx = state.db.pool.begin().await?;
     sqlx::query("DELETE FROM gc_quarantine WHERE repository_id = $1 AND confirmed_at IS NULL")
@@ -804,9 +809,10 @@ pub async fn replace_quarantine(
     }
     let confirmed = sqlx::query(
         "SELECT snapshot_id FROM gc_quarantine WHERE repository_id = $1 \
-         AND confirmed_at IS NOT NULL",
+         AND confirmed_at IS NOT NULL AND confirmed_at < $2",
     )
     .bind(repository_id)
+    .bind(survey_started_ms)
     .fetch_all(&mut *tx)
     .await?;
     for row in confirmed {

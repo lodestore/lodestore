@@ -489,6 +489,7 @@ async fn mark_and_repack(
         }
     };
     let policy = db::load_mark_policy(state, &cycle.repository_id, &source).await?;
+    let survey_started = crate::db::now_ms();
     let surveyed = tracked(
         state,
         &cycle.id,
@@ -511,6 +512,7 @@ async fn mark_and_repack(
         &surveyed.quarantined,
         &failing,
         now_ms,
+        survey_started,
     )
     .await?;
     if let Some(error) = quarantine_error(&surveyed.quarantined) {

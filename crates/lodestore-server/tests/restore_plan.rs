@@ -1195,6 +1195,37 @@ async fn restore_plan_unavailable_source_refuses_pack_access() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restore_plan_unavailable_source_refuses_plan() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let host = enroll(&ts, &api, &repo, "host-a").await;
+        let (fx, _) = local_fixture(&ts, &repo).await;
+        let mut agent = Fake::connect(&ts, &host, &[CAP]).await;
+        let (job, _) = issued_plan(&ts, &host, &fx, vec![fx.item("b")], &mut agent).await;
+        sqlx::query("UPDATE repositories SET config_hash = $1 WHERE id = $2")
+            .bind(vec![9u8; 32])
+            .bind(&repo)
+            .execute(&ts.state().db.pool)
+            .await
+            .unwrap();
+
+        let status = AgentClient::new(channel(&ts, &host.paths).await)
+            .restore_plan(RestorePlanRequest { job_id: job })
+            .await
+            .expect_err("the planner must not open an unavailable source");
+        assert_eq!(
+            status.code(),
+            Code::FailedPrecondition,
+            "[{}]",
+            backend.name()
+        );
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn restore_plan_enqueue_validates() {
     for backend in backends() {
         let ts = TestServer::start(&backend).await;

@@ -215,7 +215,15 @@ async fn replace_key(
     let checks_json = serde_json::to_string(&checks).map_err(|e| ApiError::Internal(e.into()))?;
     db::replace_agent_creds(&state, &id, &key, state_name, &checks_json).await?;
 
-    let online = state.registry.online_in_repository(&id);
+    let unavailable = matches!(
+        crate::catalog::open_repository(&state, &id).await,
+        Err(error) if error.downcast_ref::<crate::catalog::RepositoryUnavailable>().is_some()
+    );
+    let online = if unavailable {
+        Vec::new()
+    } else {
+        state.registry.online_in_repository(&id)
+    };
     let notified = online
         .iter()
         .filter(|agent| {
