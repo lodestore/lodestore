@@ -4,6 +4,7 @@
 mod adv_support;
 mod gc_support;
 
+use std::fs;
 use std::ops::Range;
 use std::sync::Mutex;
 
@@ -22,6 +23,7 @@ use lodestore_format::index::{
 };
 use lodestore_format::pack::{ENTRY_LEN, PACK_MAX_SIZE, PACK_PREFIX_LEN};
 use lodestore_format::pb;
+use lodestore_format::reader::Reader;
 use lodestore_format::store::{BlobError, BlobStore, ListEntry, LocalFsStore};
 use lodestore_format::verify_snapshot::verify_shard;
 
@@ -53,6 +55,11 @@ impl BlobStore for RangeLog {
 /// A well-formed shard of one record whose entry table makes the sealed
 /// object larger than `MAX_SHARD_SIZE`.
 fn big_shard(fx: &Fx) -> (BlobId, Vec<u8>) {
+    big_shard_with(fx, Vec::new())
+}
+
+/// Like `big_shard`, with `real` records next to the filler one.
+fn big_shard_with(fx: &Fx, real: Vec<pb::PackRecord>) -> (BlobId, Vec<u8>) {
     let mut entropy = Entropy::os();
     let count = MAX_SHARD_SIZE as usize / ENTRY_LEN + 1000;
     let mut entries = vec![0u8; count * ENTRY_LEN];
@@ -72,7 +79,9 @@ fn big_shard(fx: &Fx) -> (BlobId, Vec<u8>) {
     };
     entropy.fill(&mut record.hpke_enc);
     let keys = fx.repo.read_keys();
-    let (id, bytes) = seal_shard(keys.k_idx(), keys.repo_id(), vec![record], &mut entropy).unwrap();
+    let mut records = real;
+    records.push(record);
+    let (id, bytes) = seal_shard(keys.k_idx(), keys.repo_id(), records, &mut entropy).unwrap();
     assert!(bytes.len() as u64 > MAX_SHARD_SIZE && bytes.len() as u64 <= MAX_SHARD_READ_SIZE);
     (id, bytes)
 }
@@ -235,6 +244,91 @@ async fn shard_limit_verify_rejects_pack_size_beyond_a_pack() {
         .unwrap_err();
     assert!(matches!(err, Error::Corrupt { .. }));
     assert!(err.to_string().contains("larger than a pack can be"));
+}
+
+/// Records the ranges asked of `index/` and refuses to serve one whole.
+struct IndexProbe {
+    inner: LocalFsStore,
+    ranges: Mutex<Vec<(String, Range<u64>)>>,
+}
+
+impl BlobStore for IndexProbe {
+    async fn put_if_absent(&self, key: &str, data: Bytes) -> Result<(), BlobError> {
+        self.inner.put_if_absent(key, data).await
+    }
+
+    async fn get(&self, key: &str) -> Result<Bytes, BlobError> {
+        assert!(!key.starts_with("index/"), "a shard was read whole");
+        self.inner.get(key).await
+    }
+
+    async fn get_range(&self, key: &str, range: Range<u64>) -> Result<Bytes, BlobError> {
+        if key.starts_with("index/") {
+            self.ranges
+                .lock()
+                .unwrap()
+                .push((key.to_owned(), range.clone()));
+        }
+        self.inner.get_range(key, range).await
+    }
+
+    async fn list(&self, prefix: &str) -> Result<Vec<ListEntry>, BlobError> {
+        self.inner.list(prefix).await
+    }
+}
+
+#[tokio::test]
+async fn shard_limit_reader_probe_is_bounded() {
+    let fx = Fx::new().await;
+    let outcome = fx.backup("a", &[("a", 1, 200 << 10)]).await;
+    let probe = IndexProbe {
+        inner: LocalFsStore::new(fx.tmp.path().join("repo")),
+        ranges: Mutex::new(Vec::new()),
+    };
+    let mut reader =
+        Reader::open(&probe, fx.repo.read_keys().duplicate(), fx.repo.config()).unwrap();
+
+    reader.list_dir(&outcome.snapshot_id, b"").await.unwrap();
+
+    let named = reader
+        .snapshot(&outcome.snapshot_id)
+        .await
+        .unwrap()
+        .index_refs
+        .len();
+    let ranges = probe.ranges.lock().unwrap();
+    assert!(named >= 1);
+    assert_eq!(ranges.len(), named);
+    assert!(
+        ranges
+            .iter()
+            .all(|(_, r)| *r == (0..MAX_SHARD_READ_SIZE + 1))
+    );
+}
+
+#[tokio::test]
+async fn shard_limit_restore_reads_a_legacy_shard() {
+    let fx = Fx::new().await;
+    fx.backup("a", &[("a", 1, 300 << 10), ("b", 2, 200 << 10)])
+        .await;
+    let keys = attacker_keys(&fx.repo);
+    let shards = open_all_shards(&fx.store, &keys).await;
+    let real: Vec<_> = shards
+        .iter()
+        .flat_map(|(_, s)| s.packs.iter().cloned())
+        .collect();
+    for (id, _) in &shards {
+        fs::remove_file(fx.tmp.path().join("repo").join(index_object_key(id))).unwrap();
+    }
+
+    let (id, bytes) = big_shard_with(&fx, real);
+    fx.store
+        .put_if_absent(&index_object_key(&id), Bytes::from(bytes))
+        .await
+        .unwrap();
+    attest(&fx, &[id]).await;
+
+    fx.assert_all_restore().await;
 }
 
 #[tokio::test]
