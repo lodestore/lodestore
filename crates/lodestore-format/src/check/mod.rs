@@ -26,6 +26,7 @@ pub enum FindingKind {
     PackMismatch,
     DamagedBlob,
     UnreadablePack,
+    UnreadableConfig,
     RestoreMismatch,
     RestoreFailed,
 }
@@ -41,6 +42,7 @@ impl FindingKind {
             FindingKind::PackMismatch => "pack_mismatch",
             FindingKind::DamagedBlob => "damaged_blob",
             FindingKind::UnreadablePack => "unreadable_pack",
+            FindingKind::UnreadableConfig => "unreadable_config",
             FindingKind::RestoreMismatch => "restore_mismatch",
             FindingKind::RestoreFailed => "restore_failed",
         }

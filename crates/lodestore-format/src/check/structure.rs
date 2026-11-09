@@ -256,6 +256,9 @@ pub async fn check_structure<S: BlobStore>(
             report.objects += 1;
         }
         Err(Error::Store(BlobError::NotFound)) => {}
+        Err(e @ Error::Corrupt { .. }) => {
+            findings.add(FindingKind::UnreadableConfig, "config", reason(&e));
+        }
         Err(e) => return Err(e),
     }
 
