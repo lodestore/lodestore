@@ -3,15 +3,15 @@
 
 mod adv_support;
 mod gc_support;
+#[path = "adv_support/planted.rs"]
+mod planted;
 
 use std::collections::HashSet;
 use std::fs;
 use std::ops::Range;
 use std::sync::Mutex;
 
-use adv_support::{
-    PlantedListing, attacker_keys, open_all_shards, plant_shard, planted_shard_entry,
-};
+use adv_support::{attacker_keys, open_all_shards, plant_shard};
 use bytes::Bytes;
 use gc_support::Fx;
 use lodestore_format::Error;
@@ -28,6 +28,7 @@ use lodestore_format::pb;
 use lodestore_format::reader::Reader;
 use lodestore_format::store::{BlobError, BlobStore, ListEntry, LocalFsStore};
 use lodestore_format::verify_snapshot::verify_shard;
+use planted::{PlantedListing, planted_shard_entry};
 
 /// Records the ranges asked of the store.
 struct RangeLog {
