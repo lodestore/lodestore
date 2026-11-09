@@ -119,12 +119,13 @@ What happens:
 - A cycle reads every snapshot, collects all that it cannot follow, and fails before it publishes a list of packs to delete. Nothing is deleted. A dry run lists the same snapshots and does not fail.
 - The alert `snapshot_quarantined` is raised, see [Alerts](/docs/guides/alerts/). The **Free up space** card lists the snapshots with the reason, and the cycle log has an event `quarantined`. The same list is in the full report (`quarantined`).
 - The quarantine is checked again at every cycle. A snapshot that opens again, for example after you restored the missing object in the bucket, leaves it by itself.
+- An exclusion you confirm while a cycle is reading the snapshots is kept. It lasts as long as the snapshot stays unreadable: a snapshot that reads again, or that is no longer in the bucket, loses its exclusion. If it breaks again later, it is back in quarantine and the cycle waits for you.
 
 To carry on without such a snapshot, open **Free up space** and choose **Exclude from cleanup…** for it. This needs the `snapshots:delete` scope; with the API it is `POST /api/v1/repositories/{id}/gc/quarantine/{snapshot_id}/exclude`. Then run cleanup again.
 
 Excluding is not safe for the data. An excluded snapshot no longer protects what it points to, and the next cycle may delete data that only this snapshot uses. If the snapshot is a real backup that you still need, repair it instead: restore the object or run a full check first. The snapshot object itself stays in the bucket; delete it separately if you do not need it.
 
-A snapshot that belongs to a backup job (the catalog ties it to a host and a job, or a record signed by the server names it, see [ADR 0006](/docs/adr/0006-snapshot-provenance/)) cannot be excluded: the card says so and offers no button. Run a full check, then repair the repository or delete the snapshot.
+A snapshot that belongs to a backup job (the catalog ties it to a host and a job, or a record signed by the server names it, see [ADR 0006](/docs/adr/0006-snapshot-provenance/)) cannot be excluded: the card says so and offers no button. Run a full check, then repair the repository or delete the snapshot. A snapshot that retention has already forgotten, but that is still in the bucket (for example under Object Lock), is not bound to a job and can be excluded.
 
 The exclusion is kept in the server database only. After a lost database the snapshots come back into quarantine at the next cycle, and you confirm each again.
 

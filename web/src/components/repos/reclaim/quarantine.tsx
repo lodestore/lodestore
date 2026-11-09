@@ -2,7 +2,11 @@ import { useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, CircleAlert, TriangleAlert } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
-import { getGetStatusQueryKey, useExclude } from "@/api/gen/endpoints";
+import {
+	getGetStatusQueryKey,
+	getListAlertsQueryKey,
+	useExclude,
+} from "@/api/gen/endpoints";
 import type { GcQuarantineDto } from "@/api/gen/model";
 import { PathText, TextWithPaths } from "@/components/path-text";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -46,9 +50,10 @@ export function ExcludeSnapshotDialog({
 				setOpen(false);
 				toast.success(text.done);
 				void refresh();
+				void client.invalidateQueries({ queryKey: getListAlertsQueryKey() });
 			},
 			onError: (error) => {
-				if (error.status === 404) void refresh();
+				if (error.status === 404 || error.status === 409) void refresh();
 			},
 		},
 	});
