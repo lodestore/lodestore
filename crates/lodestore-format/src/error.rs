@@ -8,6 +8,10 @@ pub enum Error {
     Crypto,
     #[error("wrong password or recovery key")]
     WrongSecret,
+    #[error(
+        "wrong password or recovery key, or the key slot it opens was not tried: {untried} more key slots ask for more key-derivation work than one opening may spend ({budget}); if the secret is right, remove the key slots that are not needed"
+    )]
+    KdfBudget { untried: usize, budget: u64 },
     #[error("corrupt {object}: {reason}")]
     Corrupt { object: String, reason: String },
     #[error(

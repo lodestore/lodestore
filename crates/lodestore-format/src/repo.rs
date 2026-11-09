@@ -6,11 +6,12 @@ use crate::crypto::Entropy;
 use crate::error::{Error, Result};
 use crate::fs::now;
 use crate::keys::{
-    KdfCost, MAX_ARGON2_TOTAL_WORK, MasterKey, ReadKeys, RecoveryKey, open_password_slot,
-    open_recovery_slot, seal_password_slot, seal_recovery_slot, slot_kdf_work, slot_object_name,
+    KdfCost, MAX_ARGON2_TOTAL_WORK, MAX_SLOT_SIZE, MasterKey, ReadKeys, RecoveryKey,
+    open_password_slot, open_recovery_slot, seal_password_slot, seal_recovery_slot, slot_kdf_work,
+    slot_object_name,
 };
 use crate::pb;
-use crate::store::{BlobDelete, BlobError, BlobStore, put_named};
+use crate::store::{BlobDelete, BlobError, BlobStore, put_named, read_bounded};
 
 const CONFIG_KEY: &str = "config";
 const KEYS_PREFIX: &str = "keys/";
@@ -100,7 +101,7 @@ impl PendingInit {
     }
 
     async fn ensure_no_config<S: BlobStore>(store: &S) -> Result<()> {
-        match store.get(CONFIG_KEY).await {
+        match store.get_range(CONFIG_KEY, 0..1).await {
             Ok(_) => Err(Error::AlreadyInitialized),
             Err(BlobError::NotFound) => Ok(()),
             Err(e) => Err(e.into()),
@@ -157,7 +158,10 @@ impl PendingInit {
     }
 
     async fn config_is_stored<S: BlobStore>(&self, store: &S) -> bool {
-        matches!(store.get(CONFIG_KEY).await, Ok(b) if b[..] == self.config_bytes[..])
+        matches!(
+            read_bounded(store, CONFIG_KEY, None, config::MAX_CONFIG_SIZE, "config").await,
+            Ok(b) if b[..] == self.config_bytes[..]
+        )
     }
 }
 
@@ -208,11 +212,12 @@ impl Repository {
         store: &S,
         unlock: impl Fn(&[u8], &crate::crypto::RepoId) -> Result<Option<MasterKey>>,
     ) -> Result<Self> {
-        let config_bytes = match store.get(CONFIG_KEY).await {
-            Ok(b) => b.to_vec(),
-            Err(BlobError::NotFound) => return Err(Error::NotInitialized),
-            Err(e) => return Err(e.into()),
-        };
+        let config_bytes =
+            match read_bounded(store, CONFIG_KEY, None, config::MAX_CONFIG_SIZE, "config").await {
+                Ok(b) => b.to_vec(),
+                Err(Error::Store(BlobError::NotFound)) => return Err(Error::NotInitialized),
+                Err(e) => return Err(e),
+            };
         let config = config::decode(&config_bytes)?;
         config::check_read_version(&config)?;
         config::check_suite(&config)?;
@@ -220,26 +225,50 @@ impl Repository {
 
         let mut skipped = Vec::new();
         let mut candidates = Vec::new();
+        let kind = match opened_with {
+            OpenedWith::Password => pb::SlotKind::Password,
+            OpenedWith::Recovery => pb::SlotKind::Recovery,
+        };
         for entry in store.list(KEYS_PREFIX).await? {
-            let bytes = store.get(&entry.key).await?;
+            let bytes = match read_bounded(
+                store,
+                &entry.key,
+                Some(entry.size),
+                MAX_SLOT_SIZE,
+                "key slot",
+            )
+            .await
+            {
+                Ok(b) => b,
+                Err(e @ Error::Corrupt { .. }) => {
+                    skipped.push((entry.key, e.to_string()));
+                    continue;
+                }
+                Err(Error::Store(BlobError::NotFound)) => continue,
+                Err(e) => return Err(e),
+            };
             if slot_object_name(&bytes) != entry.key {
                 let e = Error::corrupt(entry.key.clone(), "object name does not match its content");
                 skipped.push((entry.key, e.to_string()));
                 continue;
             }
-            candidates.push((slot_kdf_work(&bytes), entry.key, bytes));
+            if let Some(work) = slot_kdf_work(&bytes, kind) {
+                candidates.push((work, entry.key, bytes));
+            }
         }
         candidates.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
         let mut tried = false;
         let mut spent = 0u64;
-        let mut over_budget = false;
-        for (work, key, bytes) in candidates {
+        let total_candidates = candidates.len();
+        for (n, (work, key, bytes)) in candidates.into_iter().enumerate() {
             let Some(total) = spent
                 .checked_add(work)
                 .filter(|t| *t <= MAX_ARGON2_TOTAL_WORK)
             else {
-                over_budget = true;
-                break;
+                return Err(Error::KdfBudget {
+                    untried: total_candidates - n,
+                    budget: MAX_ARGON2_TOTAL_WORK,
+                });
             };
             spent = total;
             match unlock(&bytes, &repo_id) {
@@ -265,14 +294,6 @@ impl Repository {
                 Err(e @ Error::Corrupt { .. }) => skipped.push((key, e.to_string())),
                 Err(e) => return Err(e),
             }
-        }
-        if over_budget {
-            return Err(Error::corrupt(
-                "keys/",
-                format!(
-                    "the key slots ask for more key-derivation work than one opening may spend ({MAX_ARGON2_TOTAL_WORK}); remove the key slots that are not needed"
-                ),
-            ));
         }
         match skipped.into_iter().next() {
             Some((object, reason)) if !tried => Err(Error::Corrupt { object, reason }),
@@ -362,7 +383,7 @@ impl Repository {
         }
         let new_slot = self.add_password_slot(store, new_password, entropy).await?;
 
-        let stored = store.get(&new_slot).await?;
+        let stored = read_bounded(store, &new_slot, None, MAX_SLOT_SIZE, "key slot").await?;
         let reopened = open_password_slot(&stored, self.keys.repo_id(), new_password)?;
         let same_key = reopened
             .as_ref()
@@ -720,13 +741,99 @@ mod tests {
         let started = std::time::Instant::now();
         let err = Repository::open(&store, b"wrong").await.err().unwrap();
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
-        match err {
-            Error::Corrupt { object, reason } => {
-                assert_eq!(object, "keys/");
-                assert!(reason.contains("16777216"), "{reason}");
-            }
-            other => panic!("{other}"),
+        assert!(matches!(err, Error::KdfBudget { untried: 3, .. }), "{err}");
+    }
+
+    #[tokio::test]
+    async fn kdf_budget_wrong_password_names_the_untried_slots() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, real) = repo_with_one_slot(dir.path()).await;
+        plant_heavy_slots(dir.path(), &real, 1).await;
+        let err = Repository::open(&store, b"wrong").await.err().unwrap();
+        assert!(matches!(err, Error::KdfBudget { untried: 1, .. }), "{err}");
+        assert!(err.to_string().contains("wrong password"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn kdf_budget_ignores_slots_of_another_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, real) = repo_with_one_slot(dir.path()).await;
+        let keys_dir = dir.path().join("repo").join("keys");
+        let plant = |kind: pb::SlotKind, algorithm: u32, memory_kib: u32, n: u64| {
+            let slot = pb::KeySlot {
+                version: crate::keys::SLOT_VERSION,
+                kind: kind as i32,
+                kdf: Some(pb::KdfParams {
+                    algorithm,
+                    memory_kib,
+                    iterations: 3,
+                    parallelism: 1,
+                    salt: n.to_le_bytes().repeat(2),
+                }),
+                nonce: vec![0; 24],
+                ciphertext: vec![0; 48],
+                created: None,
+            };
+            let bytes = prost::Message::encode_to_vec(&slot);
+            let name = slot_object_name(&bytes);
+            std::fs::write(keys_dir.join(&name["keys/".len()..]), &bytes).unwrap();
+            name
+        };
+        for n in 0..90 {
+            plant(pb::SlotKind::Recovery, crate::keys::KDF_BLAKE3, 65535, n);
         }
+        let password_slot = plant(pb::SlotKind::Password, crate::keys::KDF_ARGON2ID, 65536, 0);
+        std::fs::remove_file(keys_dir.join(&real["keys/".len()..])).unwrap();
+
+        let calls = Mutex::new(Vec::new());
+        let result = Repository::open_with(OpenedWith::Password, &store, |slot, _| {
+            calls.lock().unwrap().push((
+                slot_object_name(slot),
+                slot_kdf_work(slot, pb::SlotKind::Password),
+            ));
+            Ok(None)
+        })
+        .await;
+        assert!(matches!(result, Err(Error::WrongSecret)));
+        assert_eq!(
+            calls.into_inner().unwrap(),
+            [(password_slot, Some(65536 * 3))]
+        );
+    }
+
+    #[tokio::test]
+    async fn open_skips_planted_oversized_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, real) = repo_with_one_slot(dir.path()).await;
+        let planted = "e".repeat(64);
+        let path = dir.path().join("repo").join("keys").join(&planted);
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(MAX_SLOT_SIZE + 1)
+            .unwrap();
+        let repo = Repository::open(&store, b"pw").await.unwrap();
+        assert_eq!(repo.opened_slot(), real);
+        let skipped = repo.skipped_slots();
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].0, format!("keys/{planted}"));
+        assert!(skipped[0].1.contains("key slot can be"), "{skipped:?}");
+    }
+
+    #[tokio::test]
+    async fn open_refuses_oversized_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = repo_with_one_slot(dir.path()).await;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(dir.path().join("repo").join("config"))
+            .unwrap()
+            .set_len(config::MAX_CONFIG_SIZE + 1)
+            .unwrap();
+        let err = Repository::open(&store, b"pw").await.err().unwrap();
+        assert!(
+            matches!(&err, Error::Corrupt { object, .. } if object == "config"),
+            "{err}"
+        );
     }
 
     #[tokio::test]
@@ -775,13 +882,16 @@ mod tests {
         }
         let calls = Mutex::new(Vec::new());
         let result = Repository::open_with(OpenedWith::Password, &store, |slot, _| {
-            calls.lock().unwrap().push(slot_kdf_work(slot));
+            calls
+                .lock()
+                .unwrap()
+                .push(slot_kdf_work(slot, pb::SlotKind::Password).unwrap());
             Ok(None)
         })
         .await;
-        assert!(matches!(result, Err(Error::Corrupt { .. })));
+        assert!(matches!(result, Err(Error::KdfBudget { untried: 1, .. })));
         let calls = calls.into_inner().unwrap();
-        assert_eq!(calls, [0, honest, MAX_ARGON2_TOTAL_WORK - honest]);
+        assert_eq!(calls, [honest, MAX_ARGON2_TOTAL_WORK - honest]);
     }
 
     #[tokio::test]
@@ -798,7 +908,7 @@ mod tests {
 
         let expensive = Mutex::new(0u32);
         let repo = Repository::open_with(OpenedWith::Password, &store, |slot, repo_id| {
-            if slot_kdf_work(slot) > 1 << 16 {
+            if slot_kdf_work(slot, pb::SlotKind::Password) > Some(1 << 16) {
                 *expensive.lock().unwrap() += 1;
                 return Ok(None);
             }
