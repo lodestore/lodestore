@@ -537,6 +537,68 @@ async fn check_hostile_held_entries_are_a_finding() {
     assert!(report.findings.is_empty(), "{:?}", report.findings);
 }
 
+/// Two snapshots share a directory of 5 entries: `shallow` holds it under a
+/// root of 1 entry, `deep` under a root of 8. With a held limit of 10 only
+/// `deep` passes it; the snapshots are made again until the check reads them
+/// in the wanted order.
+async fn shared_dir_pair(shallow_first: bool) -> (Fx, BlobId, BlobId) {
+    for _ in 0..64 {
+        let mut fx = Fx::new().await;
+        let shared = fx.tree(files("d", 5));
+        let shallow = fx.snapshot(vec![dir("d", shared)]).await;
+        let mut top = vec![dir("d", shared)];
+        top.extend(files("f", 7));
+        let deep = fx.snapshot(top).await;
+        if (snapshot_object_key(&shallow) < snapshot_object_key(&deep)) == shallow_first {
+            return (fx, shallow, deep);
+        }
+    }
+    panic!("no pair in the wanted order");
+}
+
+async fn assert_only_deep_is_found(shallow_first: bool) {
+    let (fx, shallow, deep) = shared_dir_pair(shallow_first).await;
+    let report = fx.check_limited(10, 10).await;
+    assert_eq!(report.snapshots_checked, 2);
+    assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
+    let f = &report.findings[0];
+    assert_eq!(f.key, snapshot_object_key(&deep));
+    assert_eq!(f.kind, FindingKind::UnreadableTree);
+    assert!(f.detail.contains("entries held at once"), "{f:?}");
+    assert!(f.detail.contains("--allow-large-directories"), "{f:?}");
+
+    let mut reader = fx.reader().await;
+    reader.set_dir_limits(10, 10);
+    reader
+        .walk_subtree(&shallow, b"/", &mut |_, _| Ok(()))
+        .await
+        .unwrap();
+    let err = reader
+        .walk_subtree(&deep, b"/", &mut |_, _| Ok(()))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::WalkLimit {
+                what: "entries held at once",
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
+async fn check_hostile_held_shared_dir_shallow_then_deep() {
+    assert_only_deep_is_found(true).await;
+}
+
+#[tokio::test]
+async fn check_hostile_held_shared_dir_deep_then_shallow() {
+    assert_only_deep_is_found(false).await;
+}
+
 /// Every directory ends with the next one, so when the walk enters it the
 /// directory above has nothing left to hand out but is still held whole.
 #[tokio::test]

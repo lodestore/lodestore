@@ -164,6 +164,42 @@ impl<S: BlobStore> Checker<'_, S> {
     }
 }
 
+/// A directory whose entries are checked and whose subdirectories are being
+/// walked.
+struct Frame {
+    dir: BlobId,
+    depth: usize,
+    /// Entries of this directory and of every directory above it.
+    held: u64,
+    len: u64,
+    subdirs: Vec<Vec<BlobId>>,
+    /// The most entries held from this directory down, over the subdirectories
+    /// walked so far.
+    below: u64,
+    exact: bool,
+}
+
+/// Counts what a finished subdirectory holds into the directory above it.
+fn add_below(frames: &mut [Frame], below: u64, exact: bool) {
+    if let Some(parent) = frames.last_mut() {
+        parent.below = parent.below.max(parent.len.saturating_add(below));
+        parent.exact &= exact;
+    }
+}
+
+fn record_below(map: &mut HashMap<BlobId, (u64, bool)>, dir: BlobId, below: u64, exact: bool) {
+    let known = map.entry(dir).or_insert((0, false));
+    if exact {
+        *known = (below, true);
+    } else {
+        known.0 = known.0.max(below);
+    }
+}
+
+fn too_large(name: &str, e: &Error) -> String {
+    format!("tree {name}: {e}; lode restore --allow-large-directories restores it")
+}
+
 fn tally(entries: &[ListEntry], bytes: &mut u64, objects: &mut u64) {
     for e in entries {
         *bytes += e.size;
@@ -407,6 +443,10 @@ async fn check_with_limits<S: BlobStore>(
     let mut reader = Reader::open_shared(store, keys.duplicate(), config, ReaderCache::new(0))?;
     reader.set_dir_limits(dir_limit, held_limit);
     let mut seen_dirs: HashSet<BlobId> = HashSet::new();
+    // The most entries a walk holds from a directory down, the directory
+    // counted; `false` marks a lower bound of a subtree that was only partly
+    // walked.
+    let mut held_below: HashMap<BlobId, (u64, bool)> = HashMap::new();
     let mut seen_chunks: HashSet<BlobId> = HashSet::new();
     let total = snapshots.len() as u64;
     for (done, (key, id, size)) in snapshots.into_iter().enumerate() {
@@ -455,26 +495,66 @@ async fn check_with_limits<S: BlobStore>(
             );
             continue;
         };
-        // shortcut: hardlink members, the depth of a subtree seen in an
-        // earlier snapshot and the entries above it are not checked again, and
-        // a directory stopped by the held limit is a finding for every snapshot
-        // that reaches it; a per-snapshot walk would cost a full tree walk per
-        // snapshot.
+        // shortcut: hardlink members and the depth of a subtree seen in an
+        // earlier snapshot are not checked again; a per-snapshot walk would
+        // cost a full tree walk per snapshot. A subtree that was only partly
+        // walked because it passed the held limit is walked again when a later
+        // snapshot reaches it with fewer entries above it.
         let mut groups = HashMap::new();
+        let mut held_found = false;
         // A directory is its tree pieces, read as one run like a restore does,
         // with its depth and the entries of the directories above it counted
-        // the way the restore's cursor counts them.
-        let mut stack: Vec<(Vec<BlobId>, usize, u64)> = vec![(vec![root], 1, 0)];
-        'dirs: while let Some((pieces, depth, above)) = stack.pop() {
+        // the way the restore's cursor counts them. Subdirectories are walked
+        // before their parent is done, so the most entries held below each
+        // directory is known when it is.
+        let mut frames: Vec<Frame> = Vec::new();
+        let mut next = Some((vec![root], 1));
+        'dirs: loop {
+            let (pieces, depth) = match next.take() {
+                Some(dir) => dir,
+                None => {
+                    let Some(top) = frames.last_mut() else {
+                        break;
+                    };
+                    if let Some(pieces) = top.subdirs.pop() {
+                        (pieces, top.depth + 1)
+                    } else {
+                        let Some(done) = frames.pop() else {
+                            break;
+                        };
+                        if !done.exact {
+                            seen_dirs.remove(&done.dir);
+                        }
+                        record_below(&mut held_below, done.dir, done.below, done.exact);
+                        add_below(&mut frames, done.below, done.exact);
+                        continue;
+                    }
+                }
+            };
+            let above = frames.last().map_or(0, |f| f.held);
             let dir = match pieces.as_slice() {
                 [one] => *one,
                 _ => *blake3::hash(&pieces.concat()).as_bytes(),
             };
+            let name = hex32(pieces.first().unwrap_or(&dir));
+            if let Some(&(below, exact)) = held_below.get(&dir) {
+                let over = reader.walk_budget().check_held(above.saturating_add(below));
+                if exact || over.is_err() || held_found {
+                    if let Err(e) = over
+                        && !std::mem::replace(&mut held_found, true)
+                    {
+                        c.findings
+                            .add(FindingKind::UnreadableTree, &key, too_large(&name, &e));
+                    }
+                    c.again(&key, &dir);
+                    add_below(&mut frames, below, exact);
+                    continue;
+                }
+            }
             if !seen_dirs.insert(dir) {
                 c.again(&key, &dir);
                 continue;
             }
-            let name = hex32(pieces.first().unwrap_or(&dir));
             let mut nodes = Vec::new();
             let mut previous: Option<Vec<u8>> = None;
             for tree in &pieces {
@@ -498,7 +578,7 @@ async fn check_with_limits<S: BlobStore>(
                     Ok(piece) => {
                         let n = nodes.len() as u64 + piece.len() as u64;
                         if let Err(e) = reader.walk_budget().check_dir(n) {
-                            let detail = format!("tree {name}: {e}");
+                            let detail = too_large(&name, &e);
                             c.bad_blob(&key, &dir, FindingKind::UnreadableTree, detail);
                             continue 'dirs;
                         }
@@ -515,12 +595,19 @@ async fn check_with_limits<S: BlobStore>(
                     Err(e) => return Err(e),
                 }
             }
-            let held = above.saturating_add(nodes.len() as u64);
+            let len = nodes.len() as u64;
+            let held = above.saturating_add(len);
             if let Err(e) = reader.walk_budget().check_held(held) {
-                let detail = format!("tree {name}: {e}");
-                c.bad_blob(&key, &dir, FindingKind::UnreadableTree, detail);
-                continue 'dirs;
+                if !std::mem::replace(&mut held_found, true) {
+                    c.findings
+                        .add(FindingKind::UnreadableTree, &key, too_large(&name, &e));
+                }
+                seen_dirs.remove(&dir);
+                record_below(&mut held_below, dir, len, false);
+                add_below(&mut frames, len, false);
+                continue;
             }
+            let mut subdirs = Vec::new();
             for node in &nodes {
                 let mut all_known = true;
                 for raw in &node.content {
@@ -569,10 +656,19 @@ async fn check_with_limits<S: BlobStore>(
                         .filter_map(|raw| blob_ref(raw))
                         .collect();
                     if !subtrees.is_empty() {
-                        stack.push((subtrees, depth + 1, held));
+                        subdirs.push(subtrees);
                     }
                 }
             }
+            frames.push(Frame {
+                dir,
+                depth,
+                held,
+                len,
+                subdirs,
+                below: len,
+                exact: true,
+            });
         }
     }
     progress(StructureStep::Snapshots, total, total);
