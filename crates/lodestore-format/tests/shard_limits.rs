@@ -10,12 +10,13 @@ use std::collections::HashSet;
 use std::fs;
 use std::ops::Range;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use adv_support::{attacker_keys, open_all_shards, plant_shard};
 use bytes::Bytes;
 use gc_support::Fx;
 use lodestore_format::Error;
-use lodestore_format::attest::{MARKER_LEGACY_SHARDS, put_attestation};
+use lodestore_format::attest::{ATTEST_PREFIX, MARKER_LEGACY_SHARDS, put_attestation};
 use lodestore_format::crypto::{BlobId, Entropy, HPKE_ENC_LEN, SEALED_KEY_LEN};
 use lodestore_format::gc::mark::load_shards;
 use lodestore_format::gc::sweep::confirm_unreferenced;
@@ -527,4 +528,74 @@ async fn shard_limit_overwritten_attested_shard_is_not_loaded() {
     let set = load_shards(&probe, fx.repo.read_keys()).await.unwrap();
     assert!(set.shards.iter().all(|(s, _)| *s != id));
     assert!(set.skipped.iter().any(|(k, _)| *k == key));
+}
+
+/// Fails the first read of an attestation, as a store that blips does.
+struct AttestBlip {
+    inner: LocalFsStore,
+    failed: AtomicBool,
+}
+
+impl AttestBlip {
+    fn blip(&self, key: &str) -> Result<(), BlobError> {
+        if key.starts_with(ATTEST_PREFIX) && !self.failed.swap(true, Ordering::SeqCst) {
+            return Err(BlobError::Denied {
+                message: "blip".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
+impl BlobStore for AttestBlip {
+    async fn put_if_absent(&self, key: &str, data: Bytes) -> Result<(), BlobError> {
+        self.inner.put_if_absent(key, data).await
+    }
+
+    async fn get(&self, key: &str) -> Result<Bytes, BlobError> {
+        self.blip(key)?;
+        self.inner.get(key).await
+    }
+
+    async fn get_range(&self, key: &str, range: Range<u64>) -> Result<Bytes, BlobError> {
+        self.blip(key)?;
+        self.inner.get_range(key, range).await
+    }
+
+    async fn list(&self, prefix: &str) -> Result<Vec<ListEntry>, BlobError> {
+        self.inner.list(prefix).await
+    }
+}
+
+/// A reader lives as long as the server; one failed read of the attestations
+/// must not leave the signed shards untrusted until a restart.
+#[tokio::test]
+async fn shard_limit_failed_attestation_read_is_retried() {
+    let fx = Fx::new().await;
+    let outcome = fx.backup("a", &[("a", 1, 300 << 10)]).await;
+    let keys = attacker_keys(&fx.repo);
+    let shards = open_all_shards(&fx.store, &keys).await;
+    let real: Vec<_> = shards
+        .iter()
+        .flat_map(|(_, s)| s.packs.iter().cloned())
+        .collect();
+    for (id, _) in &shards {
+        fs::remove_file(fx.tmp.path().join("repo").join(index_object_key(id))).unwrap();
+    }
+    let (id, bytes) = big_shard_with(&fx, real);
+    fx.store
+        .put_if_absent(&index_object_key(&id), Bytes::from(bytes))
+        .await
+        .unwrap();
+    attest(&fx, &[id]).await;
+    let store = AttestBlip {
+        inner: LocalFsStore::new(fx.tmp.path().join("repo")),
+        failed: AtomicBool::new(false),
+    };
+
+    let mut reader =
+        Reader::open(&store, fx.repo.read_keys().duplicate(), fx.repo.config()).unwrap();
+    reader.list_dir(&outcome.snapshot_id, b"").await.unwrap();
+    assert!(store.failed.load(Ordering::SeqCst));
+    reader.list_dir(&outcome.snapshot_id, b"").await.unwrap();
 }
