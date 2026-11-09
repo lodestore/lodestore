@@ -222,6 +222,34 @@ fn cli_exit_wrong_password_12() {
 }
 
 #[test]
+fn cli_exit_kdf_budget_12() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    init_repo(&repo);
+
+    let mut kdf = vec![0x08, 1, 0x10, 0x80, 0x80, 0x40, 0x18, 16, 0x20, 1, 0x2a, 16];
+    kdf.extend([7u8; 16]);
+    let mut slot = vec![0x08, 1, 0x10, 1, 0x1a, kdf.len() as u8];
+    slot.extend(&kdf);
+    slot.extend([0x22, 24]);
+    slot.extend([0u8; 24]);
+    slot.extend([0x2a, 48]);
+    slot.extend([0u8; 48]);
+    let name = lodestore_format::keys::slot_object_name(&slot);
+    fs::write(repo.join(name), &slot).unwrap();
+
+    let assert = lode(&repo)
+        .env("LODE_PASSWORD", "not the password")
+        .arg("snapshots")
+        .assert()
+        .code(12);
+    let err = stderr_of(&assert);
+    assert!(err.contains("key-derivation work"), "{err}");
+
+    lode(&repo).arg("snapshots").assert().success();
+}
+
+#[test]
 fn cli_json_error_on_stderr() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path().join("repo");

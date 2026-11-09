@@ -168,6 +168,40 @@ async fn repo_open_store_error_is_not_recorded() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn repo_open_oversized_config_is_recorded() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let id = ts.create_local_repository("main").await;
+        let path = ts.local_repo_root("main").join("config");
+        let original = std::fs::metadata(&path).unwrap().len();
+        let resize = |len: u64| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_len(len)
+                .unwrap();
+        };
+
+        resize(config::MAX_CONFIG_SIZE + 1);
+        let error = open_repository(ts.state(), &id).await.err().unwrap();
+        assert!(error.downcast_ref::<RepositoryUnavailable>().is_some());
+        let shown = reason(&api, &id).await;
+        assert!(
+            shown.as_str().unwrap().contains("config"),
+            "[{}] {shown}",
+            backend.name()
+        );
+
+        resize(original);
+        assert!(open_repository(ts.state(), &id).await.is_ok());
+        assert_eq!(reason(&api, &id).await, Value::Null, "[{}]", backend.name());
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn repo_open_v1_fixture_connects() {
     let fixtures =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../lodestore-format/tests/fixtures/v1");

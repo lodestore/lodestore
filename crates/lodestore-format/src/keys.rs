@@ -28,6 +28,9 @@ pub const MAX_ARGON2_MEMORY_KIB: u32 = 1 << 20;
 pub const MAX_ARGON2_ITERATIONS: u32 = 16;
 pub const MAX_ARGON2_PARALLELISM: u32 = 16;
 
+/// The largest key slot object a reader downloads.
+pub const MAX_SLOT_SIZE: u64 = 64 << 10;
+
 /// The most Argon2 work (memory in KiB times passes) one opening spends across
 /// all slots it tries.
 pub const MAX_ARGON2_TOTAL_WORK: u64 = 1 << 24;
@@ -315,13 +318,36 @@ impl fmt::Debug for WriteKeys {
     }
 }
 
-/// The Argon2 work a slot asks for (memory times passes), 0 when it has none
-/// or does not decode. Opening tries cheap slots first.
-pub fn slot_kdf_work(slot_bytes: &[u8]) -> u64 {
-    pb::KeySlot::decode(slot_bytes)
-        .ok()
-        .and_then(|slot| slot.kdf)
-        .map_or(0, |k| u64::from(k.memory_kib) * u64::from(k.iterations))
+/// What trying a slot costs an opening with a secret of `kind`: Argon2 work
+/// (memory times passes) for a password slot, 0 for a recovery slot, a slot
+/// that does not decode, or one whose parameters are out of range (refused
+/// before any hashing). `None`: this secret does not try the slot at all.
+pub fn slot_kdf_work(slot_bytes: &[u8], kind: pb::SlotKind) -> Option<u64> {
+    let Ok(slot) = pb::KeySlot::decode(slot_bytes) else {
+        return Some(0);
+    };
+    let algorithm = match kind {
+        pb::SlotKind::Password => KDF_ARGON2ID,
+        pb::SlotKind::Recovery => KDF_BLAKE3,
+        pb::SlotKind::Unspecified | pb::SlotKind::Server => return None,
+    };
+    let kdf = slot.kdf.as_ref();
+    if slot.version > SLOT_VERSION
+        || slot.kind != kind as i32
+        || kdf.map_or(0, |k| k.algorithm) != algorithm
+    {
+        return None;
+    }
+    let Some(k) = kdf.filter(|_| kind == pb::SlotKind::Password) else {
+        return Some(0);
+    };
+    if k.memory_kib > MAX_ARGON2_MEMORY_KIB
+        || k.iterations > MAX_ARGON2_ITERATIONS
+        || k.parallelism > MAX_ARGON2_PARALLELISM
+    {
+        return Some(0);
+    }
+    Some(u64::from(k.memory_kib) * u64::from(k.iterations))
 }
 
 pub fn slot_object_name(slot_bytes: &[u8]) -> String {
