@@ -50,6 +50,10 @@ fn read_error(error: lodestore_format::Error) -> Status {
             tracing::warn!(%error, "a restore plan met damaged or missing data");
             Status::data_loss("the snapshot data is damaged or missing")
         }
+        Error::WalkLimit { .. } => {
+            tracing::warn!(%error, "a restore plan hit the tree walk limit");
+            Status::resource_exhausted(error.to_string())
+        }
         error => internal(error),
     }
 }
@@ -393,6 +397,16 @@ pub async fn read_pack_range(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn walk_limit_fails_the_restore_plan() {
+        let status = read_error(lodestore_format::Error::WalkLimit {
+            what: "entries",
+            limit: 7,
+        });
+        assert_eq!(status.code(), tonic::Code::ResourceExhausted);
+        assert!(status.message().contains('7'));
+    }
 
     #[test]
     fn a_piece_is_cut_by_chunks_and_by_new_packs() {

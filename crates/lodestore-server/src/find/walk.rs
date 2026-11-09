@@ -403,8 +403,19 @@ async fn scan_snapshot(
         Err(error) => {
             tracing::warn!(snapshot = %snapshot.id, %error, "find: snapshot skipped");
             s.skipped += 1;
+            if let Some(stop) = stop_for(&error) {
+                s.stop_reason.get_or_insert(stop);
+            }
         }
     }
+}
+
+fn stop_for(error: &anyhow::Error) -> Option<FindStop> {
+    matches!(
+        error.downcast_ref::<FormatError>(),
+        Some(FormatError::WalkLimit { .. })
+    )
+    .then_some(FindStop::WalkLimit)
 }
 
 /// Adds one hit; false when it would be a new group past the limit, which is dropped.
@@ -496,6 +507,17 @@ mod tests {
         let over = collect(&mut entries, &mut budget, &cancel, b"/a/3", &file());
         assert!(matches!(over, Err(FormatError::InvalidInput(_))));
         assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn walk_limit_marks_the_search_stopped() {
+        let limit = anyhow::Error::from(FormatError::WalkLimit {
+            what: "entries",
+            limit: 7,
+        });
+        assert_eq!(stop_for(&limit), Some(FindStop::WalkLimit));
+        let corrupt = anyhow::Error::from(FormatError::corrupt("tree", "bad"));
+        assert_eq!(stop_for(&corrupt), None);
     }
 
     #[test]

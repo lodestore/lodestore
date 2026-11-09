@@ -63,6 +63,8 @@ pub enum FindStop {
     Limit,
     /// The search ran out of time.
     Timeout,
+    /// A snapshot's directory tree is larger than one walk may visit; it was skipped.
+    WalkLimit,
 }
 
 #[derive(Serialize, ToSchema)]
