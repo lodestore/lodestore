@@ -16,7 +16,9 @@ use lodestore_format::reader::{Overwrite, Reader, RestoreOptions, RestoreReport}
 use lodestore_format::repo::{InitOptions, PendingInit, Repository};
 use lodestore_format::snapshot::snapshot_object_key;
 use lodestore_format::store::LocalFsStore;
-use lodestore_format::tree::{MAX_WALK_NODES, MAX_WALK_TREE_BYTES, encode_tree};
+use lodestore_format::tree::{
+    MAX_DIR_ENTRIES, MAX_HELD_ENTRIES, MAX_WALK_NODES, MAX_WALK_TREE_BYTES, encode_tree,
+};
 use lodestore_format::writer::Writer;
 
 const LOW_KDF: KdfCost = KdfCost {
@@ -381,6 +383,90 @@ async fn walk_budget_is_per_operation() {
 fn walk_budget_defaults() {
     assert_eq!(MAX_WALK_NODES, 1 << 30);
     assert_eq!(MAX_WALK_TREE_BYTES, 512 << 30);
+    assert_eq!(MAX_DIR_ENTRIES, 1 << 23);
+    assert_eq!(MAX_HELD_ENTRIES, 1 << 24);
+}
+
+fn files(prefix: &str, n: usize) -> Vec<pb::Node> {
+    (0..n)
+        .map(|i| file(&format!("{prefix}{i}"), &[], 0))
+        .collect()
+}
+
+#[tokio::test]
+async fn restore_hostile_wide_directory_stops_by_dir_limit() {
+    let mut fx = Fx::new().await;
+    let pieces: Vec<Vec<u8>> = ["a", "b", "c"]
+        .iter()
+        .map(|p| {
+            let id = fx.tree(files(p, 5));
+            id.to_vec()
+        })
+        .collect();
+    let mut wide = dir("w", fx.tree(Vec::new()));
+    wide.subtrees = pieces;
+    let snap = fx.snapshot(vec![wide]).await;
+    let before = fx.listing();
+
+    let mut reader = fx.reader().await;
+    reader.set_dir_limits(10, u64::MAX);
+    let wide_limit = |err: &Error| {
+        matches!(
+            err,
+            Error::WalkLimit {
+                what: "entries in one directory",
+                limit: 10
+            }
+        )
+    };
+    let err = reader
+        .restore(&snap, &fx.target, &RestoreOptions::default(), &|_| {})
+        .await
+        .unwrap_err();
+    assert!(wide_limit(&err), "{err:?}");
+    assert_eq!(fx.listing(), before);
+    let err = reader.list_dir(&snap, b"/w").await.unwrap_err();
+    assert!(wide_limit(&err), "{err:?}");
+    let err = reader
+        .walk_subtree(&snap, b"/", &mut |_, _| Ok(()))
+        .await
+        .unwrap_err();
+    assert!(wide_limit(&err), "{err:?}");
+    assert_eq!(reader.list_dir(&snap, b"/").await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn restore_hostile_held_entries_stop_by_limit() {
+    let mut fx = Fx::new().await;
+    let inner = fx.tree(files("i", 6));
+    let mut top = vec![dir("d0", inner)];
+    top.extend(files("f", 5));
+    let snap = fx.snapshot(top).await;
+    let before = fx.listing();
+
+    let mut reader = fx.reader().await;
+    reader.set_dir_limits(10, 10);
+    let held_limit = |err: &Error| {
+        matches!(
+            err,
+            Error::WalkLimit {
+                what: "entries held at once",
+                limit: 10
+            }
+        )
+    };
+    let err = reader
+        .restore(&snap, &fx.target, &RestoreOptions::default(), &|_| {})
+        .await
+        .unwrap_err();
+    assert!(held_limit(&err), "{err:?}");
+    assert_eq!(fx.listing(), before);
+    let err = reader
+        .walk_subtree(&snap, b"/", &mut |_, _| Ok(()))
+        .await
+        .unwrap_err();
+    assert!(held_limit(&err), "{err:?}");
+    assert_eq!(reader.list_dir(&snap, b"/").await.unwrap().len(), 6);
 }
 
 #[tokio::test]

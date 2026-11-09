@@ -277,6 +277,16 @@ impl<S: BlobStore> Reader<S> {
         self.walk = TreeBudget::new(nodes, bytes);
     }
 
+    /// Replaces the limit on one directory and on the entries held at once.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn set_dir_limits(&mut self, dir: u64, held: u64) {
+        self.walk = self.walk.with_dir_limits(dir, held);
+    }
+
+    pub(crate) fn walk_budget(&self) -> &TreeBudget {
+        &self.walk
+    }
+
     pub async fn list_snapshots(&self) -> Result<SnapshotList> {
         list_snapshots(&self.store, &self.keys).await
     }
@@ -564,6 +574,8 @@ impl<S: BlobStore> Reader<S> {
             let bytes = self.tree_bytes(&id).await?;
             self.walk.charge_bytes(bytes.len() as u64)?;
             let piece = decode_tree(&bytes, previous.as_deref())?;
+            self.walk
+                .check_dir(nodes.len() as u64 + piece.len() as u64)?;
             self.walk.charge_nodes(piece.len() as u64)?;
             if let Some(last) = piece.last() {
                 previous = Some(last.name.clone());

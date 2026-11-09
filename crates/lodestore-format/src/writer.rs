@@ -39,7 +39,7 @@ use crate::pack::{MAX_TREE_ULEN, PACK_TARGET_SIZE, PackBuilder, pack_object_key,
 use crate::pb;
 use crate::snapshot::{ParentTree, seal_snapshot, snapshot_object_key};
 use crate::store::{BlobError, BlobStore, put_named, read_bounded};
-use crate::tree::{encode_tree, split_nodes, validate_name};
+use crate::tree::{MAX_DIR_ENTRIES, encode_tree, split_nodes, validate_name};
 
 /// Recorded issues beyond this many are only counted.
 const MAX_ISSUES: usize = 1000;
@@ -257,6 +257,7 @@ pub struct Writer<S: BlobStore> {
     attested: HashSet<BlobId>,
     written: Vec<BlobId>,
     shard_target: usize,
+    dir_limit: u64,
     /// Open packs of the conformance hooks, see [`Writer::put_blob_raw`].
     #[cfg(feature = "test-hooks")]
     raw: [Option<PackBuilder>; 2],
@@ -347,6 +348,7 @@ impl<S: BlobStore> Writer<S> {
             attested,
             written: Vec::new(),
             shard_target: SHARD_TARGET_SIZE,
+            dir_limit: MAX_DIR_ENTRIES,
             #[cfg(feature = "test-hooks")]
             raw: [None, None],
         })
@@ -423,6 +425,11 @@ impl<S: BlobStore> Writer<S> {
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn set_shard_target(&mut self, bytes: usize) {
         self.shard_target = bytes;
+    }
+
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn set_dir_limit(&mut self, entries: u64) {
+        self.dir_limit = entries;
     }
 
     /// Replaces the randomness source, for deterministic tests.
@@ -1083,6 +1090,14 @@ impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
     /// Writes the nodes of one directory as one or more tree blobs and
     /// returns their ids in order.
     async fn write_tree(&mut self, nodes: Vec<pb::Node>) -> Result<Vec<Vec<u8>>> {
+        if nodes.len() as u64 > self.w.dir_limit {
+            return Err(Error::InvalidInput(format!(
+                "a directory has {} entries, more than the {} a restore reads; \
+                 the backup stops here",
+                nodes.len(),
+                self.w.dir_limit
+            )));
+        }
         let mut ids = Vec::new();
         for piece in split_nodes(nodes) {
             let bytes = encode_tree(piece);

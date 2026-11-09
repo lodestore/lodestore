@@ -246,6 +246,59 @@ async fn backup_index_flushed_during_run() {
 }
 
 #[tokio::test]
+async fn backup_refuses_directory_over_entry_limit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo_dir, src, target) = (
+        tmp.path().join("repo"),
+        tmp.path().join("src"),
+        tmp.path().join("out"),
+    );
+    fs::create_dir(&repo_dir).unwrap();
+    let (ten, eleven) = (src.join("ten"), src.join("eleven"));
+    fs::create_dir_all(&ten).unwrap();
+    fs::create_dir_all(&eleven).unwrap();
+    for i in 0..11 {
+        fs::write(eleven.join(format!("f{i:02}")), b"x").unwrap();
+    }
+    for i in 0..10 {
+        fs::write(ten.join(format!("f{i:02}")), b"x").unwrap();
+    }
+    let store = init_repo(&repo_dir).await;
+
+    let mut w = writer(&store).await;
+    w.set_dir_limit(10);
+    let err = w
+        .backup(
+            std::slice::from_ref(&eleven),
+            BackupOptions::default(),
+            &|_| {},
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("more than the 10"), "{err}");
+    assert!(objects(&store, "snapshots/").await.is_empty());
+
+    let mut w = writer(&store).await;
+    w.set_dir_limit(10);
+    w.backup(
+        std::slice::from_ref(&ten),
+        BackupOptions::default(),
+        &|_| {},
+    )
+    .await
+    .unwrap();
+    let mut r = reader(&store).await;
+    let id = r.list_snapshots().await.unwrap().entries.remove(0).id;
+    r.restore(&id, &target, &RestoreOptions::default(), &|_| {})
+        .await
+        .unwrap();
+    assert_eq!(
+        fs::read(restored_path(&target, &ten).join("f09")).unwrap(),
+        b"x"
+    );
+}
+
+#[tokio::test]
 async fn backup_large_dir_split() {
     const FILES: usize = 30_000;
     let tmp = tempfile::tempdir().unwrap();
