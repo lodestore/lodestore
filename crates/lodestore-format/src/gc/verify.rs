@@ -3,7 +3,7 @@
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use super::mark::{LiveSet, MarkOutcome, ShardSet, load_shards, mark};
+use super::mark::{LiveSet, MarkOutcome, MarkPolicy, ShardSet, load_shards, mark_with};
 use crate::crypto::{BlobId, Key32};
 use crate::error::{Error, Result};
 use crate::index::{BlobLocation, hex32, listed_packs};
@@ -131,13 +131,46 @@ pub async fn verify<S: BlobStore>(
     candidates: &HashSet<BlobId>,
     progress: &(dyn Fn(u64, u64) + Sync),
 ) -> Result<Verified> {
+    verify_with(
+        store,
+        keys,
+        config,
+        candidates,
+        &MarkPolicy::default(),
+        progress,
+    )
+    .await
+}
+
+/// [`verify`] with the policy of the survey. A snapshot that is quarantined
+/// now stops the cycle: it was not when the survey ran, or the survey would
+/// not have planned anything.
+pub async fn verify_with<S: BlobStore>(
+    store: &S,
+    keys: &ReadKeys,
+    config: &pb::Config,
+    candidates: &HashSet<BlobId>,
+    policy: &MarkPolicy,
+    progress: &(dyn Fn(u64, u64) + Sync),
+) -> Result<Verified> {
     let shards = load_shards(store, keys).await?;
     let listed = listed_packs(store).await?;
     let mut full = shards.index(&HashSet::new())?;
     full.retain_packs(&listed);
     let mut outside = shards.index(candidates)?;
     outside.retain_packs(&listed);
-    let MarkOutcome { live, .. } = mark(store, keys, config, &full, progress).await?;
+    let MarkOutcome {
+        live, quarantined, ..
+    } = mark_with(store, keys, config, &full, policy, progress).await?;
+    if let Some(first) = quarantined.first() {
+        return Err(Error::corrupt(
+            first.key.clone(),
+            format!(
+                "cannot be read and is not excluded: {}; nothing is deleted",
+                first.reason
+            ),
+        ));
+    }
 
     let holders = candidate_holders(&shards, &live, candidates, &listed);
     let mut pack_keys = HashMap::new();
