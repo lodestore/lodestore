@@ -143,15 +143,10 @@ export function QuarantineAlert({
 									key={item.snapshot_id}
 									className="flex flex-col gap-1 text-sm"
 								>
-									<span>
-										<span className="font-mono">
-											<PathText value={item.key} />
-										</span>
-										<span className="text-muted-foreground">
-											{" "}
-											· {item.reason}
-										</span>
+									<span className="font-mono">
+										<PathText value={item.key} />
 									</span>
+									<span className="text-muted-foreground">{item.reason}</span>
 									{item.confirmable ? (
 										<ExcludeSnapshotDialog
 											repositoryId={repositoryId}

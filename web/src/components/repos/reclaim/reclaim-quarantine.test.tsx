@@ -49,9 +49,10 @@ describe("quarantine", () => {
 			await view.findByText("Cleanup is stopped: 2 snapshots cannot be read"),
 		).toBeInTheDocument();
 		const rows = view.getAllByRole("listitem");
-		expect(rows[0]).toHaveTextContent(
-			"snapshots/aa · the root tree is missing",
-		);
+		expect(rows[0]).toHaveTextContent("snapshots/aa");
+		expect(
+			within(rows[0]).getByText("the root tree is missing"),
+		).toBeInTheDocument();
 		expect(rows[1]).toHaveTextContent("snapshots/bb");
 		expect(
 			view.getAllByRole("button", { name: "Exclude from cleanup…" }),
