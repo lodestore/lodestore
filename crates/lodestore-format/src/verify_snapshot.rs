@@ -13,11 +13,11 @@ use crate::check::is_data_error;
 use crate::crypto::{BLOB_TYPE_DATA, BLOB_TYPE_TREE, BlobId, Key32};
 use crate::error::{Error, Result, within_size};
 use crate::index::{
-    INDEX_PREFIX, Index, SupersedesTrust, check_shard, hex32, index_object_key, open_shard,
-    parse_hex32,
+    INDEX_PREFIX, Index, MAX_SHARD_SIZE, SupersedesTrust, check_shard, fetch_shard_bytes, hex32,
+    index_object_key, open_shard, parse_hex32,
 };
 use crate::keys::ReadKeys;
-use crate::pack::{PACK_PREFIX_LEN, pack_object_key, parse_entries, parse_prefix};
+use crate::pack::{PACK_MAX_SIZE, PACK_PREFIX_LEN, pack_object_key, parse_entries, parse_prefix};
 use crate::pb;
 use crate::reader::open_chunk;
 use crate::snapshot::{MAX_SNAPSHOT_SIZE, open_snapshot, snapshot_object_key};
@@ -36,10 +36,9 @@ async fn fetch_shard<S: BlobStore>(
     keys: &ReadKeys,
     shard_id: &BlobId,
 ) -> Result<Option<pb::IndexShard>> {
-    match store.get(&index_object_key(shard_id)).await {
-        Ok(bytes) => open_shard(keys.k_idx(), keys.repo_id(), shard_id, &bytes).map(Some),
-        Err(BlobError::NotFound) => Ok(None),
-        Err(e) => Err(e.into()),
+    match fetch_shard_bytes(store, &index_object_key(shard_id), None, MAX_SHARD_SIZE).await? {
+        Some(bytes) => open_shard(keys.k_idx(), keys.repo_id(), shard_id, &bytes).map(Some),
+        None => Ok(None),
     }
 }
 
@@ -70,7 +69,16 @@ async fn verify_opened<S: BlobStore>(
                 Error::corrupt(index_object_key(shard_id), "pack id must be 32 bytes")
             })?;
         let name = pack_object_key(&pack_id);
-        let bytes = match store.get(&name).await {
+        if pack.pack_size > PACK_MAX_SIZE as u64 {
+            return Err(Error::corrupt(
+                name,
+                "the shard record names a pack larger than a pack can be",
+            ));
+        }
+        let bytes = match store
+            .get_range(&name, 0..pack.pack_size.saturating_add(1))
+            .await
+        {
             Ok(bytes) => bytes,
             Err(BlobError::NotFound) => return Err(Error::corrupt(name, "pack is missing")),
             Err(e) => return Err(e.into()),
