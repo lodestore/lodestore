@@ -345,7 +345,15 @@ async fn dry_run(state: &AppState, cycle_id: &str, plan_now_ms: i64) -> anyhow::
         }
     };
     let surveyed = surveyed.context("surveying the repository")?;
-    db::replace_quarantine(state, &cycle.repository_id, &surveyed.quarantined, now_ms()).await?;
+    let failing = db::failing_ids(&surveyed.quarantined, &surveyed.ignored);
+    db::replace_quarantine(
+        state,
+        &cycle.repository_id,
+        &surveyed.quarantined,
+        &failing,
+        now_ms(),
+    )
+    .await?;
 
     let finished = now_ms();
     let retention = bucket_retention(state, &cycle.repository_id).await;

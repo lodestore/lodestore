@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -720,6 +721,17 @@ pub(crate) async fn load_mark_policy(
         let id: String = row.try_get("id")?;
         policy.bound.extend(parse_hex32(&id));
     }
+    // A snapshot that retention already ordered deleted is not bound to a job,
+    // even while its object stays in the bucket under Object Lock.
+    let rows = sqlx::query("SELECT id FROM snapshot_tombstones WHERE repository_id = $1")
+        .bind(repository_id)
+        .fetch_all(&state.db.pool)
+        .await?;
+    let forgotten: HashSet<BlobId> = rows
+        .iter()
+        .filter_map(|row| row.try_get::<String, _>("id").ok())
+        .filter_map(|id| parse_hex32(&id))
+        .collect();
     let attested = read_attestations(&source.store, &source.keys).await?;
     let provenance = ProvenanceSet::from_attested(&attested, &source.keys);
     if !provenance.is_empty() {
@@ -731,17 +743,37 @@ pub(crate) async fn load_mark_policy(
                 .filter(|id| provenance.signer(id) == Some(Signer::Server)),
         );
     }
+    policy.bound.retain(|id| !forgotten.contains(id));
     Ok(policy)
 }
 
+/// The snapshots this survey could not walk: the quarantined ones, and those
+/// the walk ignored under their own key, which is what an excluded snapshot
+/// that still does not open becomes.
+pub fn failing_ids(quarantined: &[Quarantined], ignored: &[(String, String)]) -> HashSet<BlobId> {
+    quarantined
+        .iter()
+        .map(|q| q.id)
+        .chain(
+            ignored
+                .iter()
+                .filter_map(|(key, _)| key.strip_prefix("snapshots/").and_then(parse_hex32)),
+        )
+        .collect()
+}
+
 /// Replaces the unconfirmed rows of the repository with the snapshots the
-/// walk just quarantined; confirmed rows stay, also when the walk that reports
-/// the snapshot started before the confirmation. A snapshot that became bound
-/// to a job since it was confirmed loses its confirmation.
+/// walk just quarantined. A confirmed row stays while its snapshot still fails
+/// (`failing`), also when the walk that reports it started before the
+/// confirmation, and while the snapshot is not bound to a job. A confirmed row
+/// of a snapshot that read fine or is gone from the bucket is dropped: the
+/// exclusion lasts as long as the snapshot is broken, and a snapshot that
+/// breaks again waits for a new confirmation.
 pub async fn replace_quarantine(
     state: &AppState,
     repository_id: &str,
     items: &[Quarantined],
+    failing: &HashSet<BlobId>,
     now_ms: i64,
 ) -> anyhow::Result<()> {
     let mut tx = state.db.pool.begin().await?;
@@ -769,6 +801,29 @@ pub async fn replace_quarantine(
         .bind(now_ms)
         .execute(&mut *tx)
         .await?;
+    }
+    let confirmed = sqlx::query(
+        "SELECT snapshot_id FROM gc_quarantine WHERE repository_id = $1 \
+         AND confirmed_at IS NOT NULL",
+    )
+    .bind(repository_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    for row in confirmed {
+        let id: String = row.try_get("snapshot_id")?;
+        if parse_hex32(&id).is_some_and(|blob| failing.contains(&blob)) {
+            continue;
+        }
+        sqlx::query("DELETE FROM gc_quarantine WHERE repository_id = $1 AND snapshot_id = $2")
+            .bind(repository_id)
+            .bind(&id)
+            .execute(&mut *tx)
+            .await?;
+        tracing::info!(
+            repository = repository_id,
+            snapshot = %id,
+            "exclusion from cleanup lifted: the snapshot reads again or is gone"
+        );
     }
     tx.commit().await?;
     Ok(())

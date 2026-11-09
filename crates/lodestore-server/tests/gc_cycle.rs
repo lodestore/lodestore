@@ -6,7 +6,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use common::{Api, TestServer, WAIT, backends, bearer_client, wait_until};
 use lodestore_format::attest::{
-    MARKER_LEGACY_SHARDS, ensure_upgraded, put_attestation, read_attestations,
+    MARKER_LEGACY_SHARDS, ensure_upgraded, put_attestation, read_attestations, seal_provenance,
 };
 use lodestore_format::crypto::{BLOB_TYPE_DATA, BlobId, Entropy, HPKE_ENC_LEN, SEALED_KEY_LEN};
 use lodestore_format::gc::mark::{Quarantined, load_shards};
@@ -22,6 +22,7 @@ use lodestore_format::repo::Repository;
 use lodestore_format::snapshot::snapshot_object_key;
 use lodestore_format::store::{LocalFsStore, put_named};
 use lodestore_format::writer::{BackupOptions, Writer};
+use lodestore_server::catalog::open_repository;
 use lodestore_server::db::now_ms;
 use lodestore_server::maintenance::attest::record_distrusted;
 use lodestore_server::maintenance::gc;
@@ -2604,8 +2605,9 @@ async fn gc_cycle_exclusion_during_walk_is_kept() {
         );
 
         assert_eq!(exclude(&api, &repo, &key).await.status(), 200);
-        let walked = quarantined_as_walked(&key);
-        gc::db::replace_quarantine(ts.state(), &repo, &[walked], now_ms())
+        let walked = [quarantined_as_walked(&key)];
+        let failing = gc::db::failing_ids(&walked, &[]);
+        gc::db::replace_quarantine(ts.state(), &repo, &walked, &failing, now_ms())
             .await
             .unwrap();
         assert_eq!(
@@ -2623,6 +2625,169 @@ async fn gc_cycle_exclusion_during_walk_is_kept() {
         );
         assert_restores(&ts, "main", &b).await;
         assert_restores(&ts, "main", &c).await;
+        ts.stop().await;
+    }
+}
+
+async fn dry_run(ts: &TestServer, api: &Api, repo: &str) {
+    let response = api
+        .post(
+            &format!("/api/v1/repositories/{repo}/gc/dry-run"),
+            &json!({}),
+        )
+        .await;
+    assert_eq!(response.status(), 202);
+    let id = response.json::<Value>().await.unwrap()["cycle_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    wait_state(ts, &id, "done").await;
+}
+
+fn rows_of(rows: &[(String, i64, bool)], confirmed: bool) -> usize {
+    rows.iter().filter(|(_, _, c)| *c == confirmed).count()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_cycle_exclusion_lifted_when_snapshot_reads_again() {
+    for backend in backends() {
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        forgotten_a(&ts, "main").await;
+        enable(&ts, &api, &repo).await;
+        let packs = ts.local_repo_root("main").join("packs");
+        let away = ts.local_repo_root("main").join("packs.off");
+
+        std::fs::rename(&packs, &away).unwrap();
+        dry_run(&ts, &api, &repo).await;
+        let rows = quarantine_rows(&ts, &repo).await;
+        assert_eq!(rows.len(), 2, "[{}] {rows:?}", backend.name());
+        for (key, _, _) in &rows {
+            assert_eq!(exclude(&api, &repo, key).await.status(), 200);
+        }
+
+        dry_run(&ts, &api, &repo).await;
+        let rows = quarantine_rows(&ts, &repo).await;
+        assert_eq!(rows_of(&rows, true), 2, "[{}] {rows:?}", backend.name());
+
+        std::fs::rename(&away, &packs).unwrap();
+        dry_run(&ts, &api, &repo).await;
+        assert_eq!(
+            quarantine_rows(&ts, &repo).await,
+            vec![],
+            "[{}]",
+            backend.name()
+        );
+
+        std::fs::rename(&packs, &away).unwrap();
+        failed_cycle(&ts, &api, &repo).await;
+        let rows = quarantine_rows(&ts, &repo).await;
+        assert_eq!(rows_of(&rows, false), 2, "[{}] {rows:?}", backend.name());
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_cycle_exclusion_lifted_when_snapshot_is_gone() {
+    for backend in backends() {
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        forgotten_a(&ts, "main").await;
+        let key = plant_unopenable(&ts, "main");
+
+        dry_run(&ts, &api, &repo).await;
+        assert_eq!(exclude(&api, &repo, &key).await.status(), 200);
+        dry_run(&ts, &api, &repo).await;
+        assert_eq!(
+            quarantine_rows(&ts, &repo).await,
+            vec![(key.clone(), 1, true)]
+        );
+
+        std::fs::remove_file(ts.local_repo_root("main").join(&key)).unwrap();
+        dry_run(&ts, &api, &repo).await;
+        assert_eq!(
+            quarantine_rows(&ts, &repo).await,
+            vec![],
+            "[{}]",
+            backend.name()
+        );
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_cycle_forgotten_snapshot_can_be_excluded() {
+    for backend in backends() {
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let (b, _c) = forgotten_a(&ts, "main").await;
+        enable(&ts, &api, &repo).await;
+
+        let source = open_repository(ts.state(), &repo).await.unwrap();
+        let record = pb::ProvenanceRecord {
+            snapshot_id: parse_hex32(&b.id).unwrap().to_vec(),
+            host_id: "host-1".to_string(),
+            hostname: "host-1".to_string(),
+            job_id: "job-1".to_string(),
+            verified_at: Some(pb::Timestamp {
+                seconds: 1,
+                nanos: 0,
+            }),
+        };
+        let mut entropy = Entropy::os();
+        let sealed = seal_provenance(&source.keys, &record, &mut entropy).unwrap();
+        put_attestation(
+            &source.store,
+            &source.keys,
+            &[],
+            &[],
+            vec![sealed],
+            &mut entropy,
+        )
+        .await
+        .unwrap();
+        let key = format!("snapshots/{}", b.id);
+        let packs = ts.local_repo_root("main").join("packs");
+        std::fs::rename(&packs, ts.local_repo_root("main").join("packs.off")).unwrap();
+
+        dry_run(&ts, &api, &repo).await;
+        assert!(
+            quarantine_rows(&ts, &repo)
+                .await
+                .contains(&(key.clone(), 0, false)),
+            "[{}]",
+            backend.name()
+        );
+        sqlx::query(
+            "INSERT INTO snapshot_tombstones (id, repository_id, forgotten_at, reason) \
+             VALUES ($1, $2, 1, 'object lock')",
+        )
+        .bind(&b.id)
+        .bind(&repo)
+        .execute(&ts.state().db.pool)
+        .await
+        .unwrap();
+
+        dry_run(&ts, &api, &repo).await;
+        assert!(
+            quarantine_rows(&ts, &repo)
+                .await
+                .contains(&(key.clone(), 1, false)),
+            "[{}]",
+            backend.name()
+        );
+        assert_eq!(exclude(&api, &repo, &key).await.status(), 200);
+        assert!(
+            quarantine_rows(&ts, &repo)
+                .await
+                .contains(&(key.clone(), 1, true)),
+            "[{}]",
+            backend.name()
+        );
+
         ts.stop().await;
     }
 }

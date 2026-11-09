@@ -504,7 +504,15 @@ async fn mark_and_repack(
     )
     .await?
     .context("surveying the repository")?;
-    db::replace_quarantine(state, &cycle.repository_id, &surveyed.quarantined, now_ms).await?;
+    let failing = db::failing_ids(&surveyed.quarantined, &surveyed.ignored);
+    db::replace_quarantine(
+        state,
+        &cycle.repository_id,
+        &surveyed.quarantined,
+        &failing,
+        now_ms,
+    )
+    .await?;
     if let Some(error) = quarantine_error(&surveyed.quarantined) {
         event(state, &cycle.id, "warning", "quarantined", &error).await;
         bail!(error);
