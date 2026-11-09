@@ -151,6 +151,7 @@ function RepositoryPage() {
 						checks={repository.checks}
 						agentKeyState={repository.agent_key_state}
 						checkedAt={repository.checked_at}
+						unavailableReason={repository.unavailable_reason}
 					/>
 
 					<CatalogCard repositoryId={repository.id} />

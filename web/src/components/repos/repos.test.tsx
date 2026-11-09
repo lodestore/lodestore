@@ -319,6 +319,46 @@ describe("repository page", () => {
 		expect(screen.getByText("3 days ago")).toBeInTheDocument();
 	});
 
+	it("shows why the server does not open the repository", async () => {
+		useSignedIn({ repositories: [s3Repository] });
+		server.use(
+			http.get("/api/v1/repositories/repo-1", () =>
+				HttpResponse.json({
+					...detail,
+					unavailable_reason:
+						"corrupt config: differs from the configuration recorded when the repository was added",
+				}),
+			),
+			http.get("/api/v1/agent-policy", () =>
+				HttpResponse.json({ iam_json: "{}", minio_commands: "mc" }),
+			),
+		);
+		renderApp("/settings/repositories/repo-1");
+
+		expect(
+			await screen.findByText("The server does not open this repository"),
+		).toBeInTheDocument();
+		expect(
+			screen.getByText(/differs from the configuration recorded/),
+		).toBeInTheDocument();
+	});
+
+	it("shows no unavailable notice for a repository the server opens", async () => {
+		useSignedIn({ repositories: [s3Repository] });
+		mockDetail();
+		server.use(
+			http.get("/api/v1/agent-policy", () =>
+				HttpResponse.json({ iam_json: "{}", minio_commands: "mc" }),
+			),
+		);
+		renderApp("/settings/repositories/repo-1");
+
+		await screen.findByText("Write objects");
+		expect(
+			screen.queryByText("The server does not open this repository"),
+		).toBeNull();
+	});
+
 	it("rechecks the storage and refreshes the check time", async () => {
 		useSignedIn({ repositories: [s3Repository] });
 		const mock = mockDetail();
