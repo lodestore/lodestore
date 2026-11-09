@@ -32,7 +32,7 @@ Rules the schema follows, stated at the top of the `.proto` file:
 - Changing the meaning of an existing field, or anything else an old build would misread, is not compatible and must be announced in `config`:
   - raise `min_reader_version`: builds that do not support that version refuse to open the repository at all;
   - raise `min_writer_version`: old builds may read but refuse to write;
-  - add a string to `incompat_features`: builds that do not know the feature refuse to write.
+  - add a string to `incompat_features`: builds that do not know the feature refuse to read or write. The feature changes what an object means, so a build that read the repository anyway would misread it.
   A build checks these on open, before it touches any other object.
 - `prost` is pinned to the minor version in `Cargo.toml`, and a golden test that re-encodes fixed messages and compares the bytes must guard against an encoder change before the format is declared stable. Existing objects are never rewritten, so a change of encoder affects only new objects, but a silent difference in field order would still make two builds produce different names for the same logical object and weaken deduplication of tree blobs.
 
