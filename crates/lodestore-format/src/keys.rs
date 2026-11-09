@@ -31,6 +31,9 @@ pub const MAX_ARGON2_PARALLELISM: u32 = 16;
 /// The largest key slot object a reader downloads.
 pub const MAX_SLOT_SIZE: u64 = 64 << 10;
 
+/// The most key slots one opening reads, in listing order.
+pub const MAX_KEY_SLOTS: usize = 1024;
+
 /// The most Argon2 work (memory in KiB times passes) one opening spends across
 /// all slots it tries.
 pub const MAX_ARGON2_TOTAL_WORK: u64 = 1 << 24;

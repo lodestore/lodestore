@@ -9,7 +9,8 @@ pub enum Error {
     #[error("wrong password or recovery key")]
     WrongSecret,
     #[error(
-        "wrong password or recovery key, or the key slot it opens was not tried: {untried} more key slots ask for more key-derivation work than one opening may spend ({budget}); if the secret is right, remove the key slots that are not needed"
+        "wrong password or recovery key, or the key slot it opens was not tried: {untried} more key slots are beyond what one opening may try ({slots} slots, {budget} of key-derivation work); if the secret is right, remove the key slots that are not needed",
+        slots = crate::keys::MAX_KEY_SLOTS
     )]
     KdfBudget { untried: usize, budget: u64 },
     #[error("corrupt {object}: {reason}")]
