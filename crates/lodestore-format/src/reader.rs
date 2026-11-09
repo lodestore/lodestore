@@ -20,8 +20,8 @@ use crate::error::{Error, Result};
 use crate::fs::filter::PathMatcher;
 use crate::fs::restore::{RestoreSettings, Restorer, check_extents};
 use crate::index::{
-    BlobLocation, INDEX_PREFIX, Index, MAX_SHARD_READ_SIZE, SupersedesTrust, fetch_shard_bytes,
-    hex32, index_object_key, open_shard, parse_hex32,
+    BlobLocation, INDEX_PREFIX, Index, MAX_SHARD_SIZE, SupersedesTrust, fetch_attested_shard_bytes,
+    fetch_shard_bytes, hex32, index_object_key, open_shard, parse_hex32,
 };
 use crate::keys::ReadKeys;
 use crate::pack::{PACK_PREFIX_LEN, decompress, open_prefix, pack_object_key};
@@ -192,7 +192,7 @@ pub struct ReaderCache {
     repo_id: OnceLock<RepoId>,
     index: tokio::sync::RwLock<Index>,
     load: tokio::sync::Mutex<()>,
-    trust_set: tokio::sync::OnceCell<()>,
+    trust_set: tokio::sync::OnceCell<HashSet<BlobId>>,
     listed_at: Mutex<Option<Instant>>,
     pack_keys: Mutex<HashMap<BlobId, Key32>>,
     trees: Mutex<TreeBytes>,
@@ -275,6 +275,16 @@ impl<S: BlobStore> Reader<S> {
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn set_walk_limits(&mut self, nodes: u64, bytes: u64) {
         self.walk = TreeBudget::new(nodes, bytes);
+    }
+
+    /// Replaces the limit on one directory and on the entries held at once.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn set_dir_limits(&mut self, dir: u64, held: u64) {
+        self.walk = self.walk.with_dir_limits(dir, held);
+    }
+
+    pub(crate) fn walk_budget(&self) -> &TreeBudget {
+        &self.walk
     }
 
     pub async fn list_snapshots(&self) -> Result<SnapshotList> {
@@ -383,12 +393,19 @@ impl<S: BlobStore> Reader<S> {
         if self.cache.index.read().await.has_shard(&shard_id) {
             return Ok(true);
         }
-        self.cache
+        let attested = self
+            .cache
             .trust_set
             .get_or_init(|| self.trust_attested())
-            .await;
+            .await
+            .contains(&shard_id);
         let key = index_object_key(&shard_id);
-        match fetch_shard_bytes(&self.store, &key, listed, MAX_SHARD_READ_SIZE).await? {
+        let fetched = if attested {
+            fetch_attested_shard_bytes(&self.store, &shard_id, listed).await?
+        } else {
+            fetch_shard_bytes(&self.store, &key, listed, MAX_SHARD_SIZE).await?
+        };
+        match fetched {
             Some(bytes) => {
                 let shard = open_shard(self.keys.k_idx(), self.keys.repo_id(), &shard_id, &bytes)?;
                 self.cache.index.write().await.add_shard(shard_id, &shard)?;
@@ -400,8 +417,8 @@ impl<S: BlobStore> Reader<S> {
 
     /// Only shards the server attested may supersede others. When the
     /// attestations cannot be read nothing is trusted: that only costs the
-    /// preference for a newer copy.
-    async fn trust_attested(&self) {
+    /// preference for a newer copy and the larger size a signed shard may have.
+    async fn trust_attested(&self) -> HashSet<BlobId> {
         let attested = match read_attestations(&self.store, &self.keys).await {
             Ok(set) => set.shards,
             Err(_) => HashSet::new(),
@@ -410,7 +427,8 @@ impl<S: BlobStore> Reader<S> {
             .index
             .write()
             .await
-            .set_supersedes_trust(SupersedesTrust::Only(attested));
+            .set_supersedes_trust(SupersedesTrust::Only(attested.clone()));
+        attested
     }
 
     /// Lists the shards in the store and loads those that open; one that does
@@ -556,6 +574,8 @@ impl<S: BlobStore> Reader<S> {
             let bytes = self.tree_bytes(&id).await?;
             self.walk.charge_bytes(bytes.len() as u64)?;
             let piece = decode_tree(&bytes, previous.as_deref())?;
+            self.walk
+                .check_dir(nodes.len() as u64 + piece.len() as u64)?;
             self.walk.charge_nodes(piece.len() as u64)?;
             if let Some(last) = piece.last() {
                 previous = Some(last.name.clone());

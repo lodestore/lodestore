@@ -25,9 +25,18 @@ pub const MAX_WALK_NODES: u64 = 1 << 30;
 /// like [`MAX_WALK_NODES`].
 pub const MAX_WALK_TREE_BYTES: u64 = 512 << 30;
 
+/// The most entries one directory may have.
+pub const MAX_DIR_ENTRIES: u64 = 1 << 23;
+
+/// The most entries one operation holds decoded at once, over all the
+/// directories it has open.
+pub const MAX_HELD_ENTRIES: u64 = 1 << 24;
+
 /// What is left of the node and byte allowance of one operation on a snapshot.
 #[derive(Debug, Clone, Copy)]
 pub struct TreeBudget {
+    dir: u64,
+    held: u64,
     nodes: u64,
     bytes: u64,
     nodes_left: u64,
@@ -43,11 +52,42 @@ impl Default for TreeBudget {
 impl TreeBudget {
     pub fn new(nodes: u64, bytes: u64) -> Self {
         TreeBudget {
+            dir: MAX_DIR_ENTRIES,
+            held: MAX_HELD_ENTRIES,
             nodes,
             bytes,
             nodes_left: nodes,
             bytes_left: bytes,
         }
+    }
+
+    /// Replaces the per-directory and held-at-once limits.
+    pub fn with_dir_limits(mut self, dir: u64, held: u64) -> Self {
+        self.dir = dir;
+        self.held = held;
+        self
+    }
+
+    /// Refuses a directory that would have `n` entries.
+    pub fn check_dir(&self, n: u64) -> Result<()> {
+        if n > self.dir {
+            return Err(Error::WalkLimit {
+                what: "entries in one directory",
+                limit: self.dir,
+            });
+        }
+        Ok(())
+    }
+
+    /// Refuses an operation that would hold `n` entries at once.
+    pub fn check_held(&self, n: u64) -> Result<()> {
+        if n > self.held {
+            return Err(Error::WalkLimit {
+                what: "entries held at once",
+                limit: self.held,
+            });
+        }
+        Ok(())
     }
 
     /// Starts a new operation with the full allowance.
@@ -233,6 +273,11 @@ impl TreeCursor {
             return Err(Error::corrupt("tree", "directories are nested too deeply"));
         }
         let nodes = reader.load_tree(&dir.subtrees).await?;
+        let held = self
+            .levels
+            .iter()
+            .fold(nodes.len() as u64, |sum, l| sum + l.nodes.len() as u64);
+        reader.walk_budget().check_held(held)?;
         let path_len = self.path.len();
         self.path = self.path_of(&dir.name);
         self.levels.push(Level {
