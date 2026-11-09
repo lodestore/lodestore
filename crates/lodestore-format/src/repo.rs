@@ -1,9 +1,7 @@
 use bytes::Bytes;
 use subtle::ConstantTimeEq;
 
-use crate::config::{
-    self, AEAD_ID_CHACHA20POLY1305, BLOB_AEAD_XCHACHA20POLY1305, KDF_ID_HKDF_SHA256, KEM_ID_XWING,
-};
+use crate::config;
 use crate::crypto::Entropy;
 use crate::error::{Error, Result};
 use crate::fs::now;
@@ -217,7 +215,7 @@ impl Repository {
         };
         let config = config::decode(&config_bytes)?;
         config::check_read_version(&config)?;
-        check_suite(&config)?;
+        config::check_suite(&config)?;
         let repo_id = config::repo_id_of(&config)?;
 
         let mut skipped = Vec::new();
@@ -374,27 +372,6 @@ async fn put_slot<S: BlobStore>(store: &S, slot: Vec<u8>) -> Result<String> {
     let name = slot_object_name(&slot);
     put_named(store, &name, slot).await?;
     Ok(name)
-}
-
-fn check_suite(config: &pb::Config) -> Result<()> {
-    let hpke = config
-        .hpke
-        .as_ref()
-        .ok_or_else(|| Error::corrupt("config", "hpke suite is missing"))?;
-    if hpke.kem_id != KEM_ID_XWING
-        || hpke.kdf_id != KDF_ID_HKDF_SHA256
-        || hpke.aead_id != AEAD_ID_CHACHA20POLY1305
-        || config.blob_aead_id != BLOB_AEAD_XCHACHA20POLY1305
-    {
-        return Err(Error::corrupt(
-            "config",
-            format!(
-                "unsupported cipher suite (kem {:#06x}, kdf {:#06x}, aead {:#06x}, blob aead {})",
-                hpke.kem_id, hpke.kdf_id, hpke.aead_id, config.blob_aead_id
-            ),
-        ));
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -657,6 +634,31 @@ mod tests {
             Repository::open(&store, b"other").await,
             Err(Error::WrongSecret)
         ));
+    }
+
+    #[tokio::test]
+    async fn incompat_features_refused_on_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = repo_with_one_slot(dir.path()).await;
+        let opened = Repository::open(&store, b"pw").await.unwrap();
+        let mut config = opened.config().clone();
+        config.incompat_features = vec!["future".into()];
+        std::fs::write(
+            dir.path().join("repo").join("config"),
+            config::encode(&config),
+        )
+        .unwrap();
+
+        let err = Repository::open(&store, b"pw").await.err().unwrap();
+        assert!(err.to_string().contains("cannot read or write"), "{err}");
+        let err = crate::reader::Reader::open(
+            LocalFsStore::new(dir.path().join("repo")),
+            opened.read_keys().duplicate(),
+            &config,
+        )
+        .err()
+        .unwrap();
+        assert!(err.to_string().contains("cannot read or write"), "{err}");
     }
 
     #[tokio::test]
