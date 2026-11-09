@@ -4,8 +4,16 @@ use anyhow::Context;
 use sqlx::Row;
 use sqlx::any::AnyRow;
 
-use super::api::{GcEventDto, GcFullReport, GcReport};
+use lodestore_format::attest::read_attestations;
+use lodestore_format::crypto::BlobId;
+use lodestore_format::gc::mark::{MarkPolicy, Quarantined};
+use lodestore_format::index::{hex32, parse_hex32};
+use lodestore_format::provenance::{ProvenanceSet, Signer};
+use lodestore_format::store::BlobStore;
+
+use super::api::{GcEventDto, GcFullReport, GcQuarantineDto, GcReport};
 use super::{EffectiveSettings, GcOrigin, GcSettings, GcState, StoredProgress};
+use crate::catalog::OpenRepository;
 use crate::db::now_ms;
 use crate::error::ApiError;
 use crate::grpc::dispatch::messages::clip;
@@ -677,4 +685,160 @@ pub async fn latest_events(
     .collect::<Result<Vec<_>, sqlx::Error>>()?;
     events.reverse();
     Ok((events, clamp(total)))
+}
+
+/// The policy for the walk of the snapshots, as the database and the bucket
+/// state it now: read again by every step, so an exclusion made while a cycle
+/// runs counts at its next step.
+pub(crate) async fn load_mark_policy(
+    state: &AppState,
+    repository_id: &str,
+    source: &OpenRepository,
+) -> anyhow::Result<MarkPolicy> {
+    let mut policy = MarkPolicy {
+        quarantine: true,
+        ..MarkPolicy::default()
+    };
+    let rows = sqlx::query(
+        "SELECT snapshot_id FROM gc_quarantine WHERE repository_id = $1 AND confirmed_at IS NOT NULL",
+    )
+    .bind(repository_id)
+    .fetch_all(&state.db.pool)
+    .await?;
+    for row in rows {
+        let id: String = row.try_get("snapshot_id")?;
+        policy.excluded.extend(parse_hex32(&id));
+    }
+    let rows = sqlx::query(
+        "SELECT id FROM snapshots WHERE repository_id = $1 \
+         AND host_id IS NOT NULL AND job_id IS NOT NULL",
+    )
+    .bind(repository_id)
+    .fetch_all(&state.db.pool)
+    .await?;
+    for row in rows {
+        let id: String = row.try_get("id")?;
+        policy.bound.extend(parse_hex32(&id));
+    }
+    let attested = read_attestations(&source.store, &source.keys).await?;
+    let provenance = ProvenanceSet::from_attested(&attested, &source.keys);
+    if !provenance.is_empty() {
+        let listed = source.store.list("snapshots/").await?;
+        policy.bound.extend(
+            listed
+                .iter()
+                .filter_map(|e| e.key.strip_prefix("snapshots/").and_then(parse_hex32))
+                .filter(|id| provenance.signer(id) == Some(Signer::Server)),
+        );
+    }
+    Ok(policy)
+}
+
+/// Replaces the unconfirmed rows of the repository with the snapshots the
+/// walk just quarantined; confirmed rows stay. A snapshot that became bound
+/// to a job since it was confirmed loses its confirmation.
+pub(crate) async fn replace_quarantine(
+    state: &AppState,
+    repository_id: &str,
+    items: &[Quarantined],
+    now_ms: i64,
+) -> anyhow::Result<()> {
+    let mut tx = state.db.pool.begin().await?;
+    sqlx::query("DELETE FROM gc_quarantine WHERE repository_id = $1 AND confirmed_at IS NULL")
+        .bind(repository_id)
+        .execute(&mut *tx)
+        .await?;
+    for item in items {
+        sqlx::query(
+            "INSERT INTO gc_quarantine (repository_id, snapshot_id, object_key, reason, \
+             confirmable, detected_at) VALUES ($1, $2, $3, $4, $5, $6) \
+             ON CONFLICT (repository_id, snapshot_id) DO UPDATE SET \
+             object_key = excluded.object_key, reason = excluded.reason, \
+             confirmable = excluded.confirmable, confirmed_at = NULL, confirmed_by = NULL",
+        )
+        .bind(repository_id)
+        .bind(hex32(&item.id))
+        .bind(&item.key)
+        .bind(&item.reason)
+        .bind(i64::from(!item.bound))
+        .bind(now_ms)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+pub(crate) async fn list_quarantine(
+    state: &AppState,
+    repository_id: &str,
+) -> anyhow::Result<Vec<GcQuarantineDto>> {
+    let rows = sqlx::query(
+        "SELECT snapshot_id, object_key, reason, confirmable, detected_at, confirmed_at, \
+         confirmed_by FROM gc_quarantine WHERE repository_id = $1 \
+         ORDER BY detected_at, snapshot_id",
+    )
+    .bind(repository_id)
+    .fetch_all(&state.db.pool)
+    .await?;
+    rows.iter()
+        .map(|row| {
+            Ok(GcQuarantineDto {
+                snapshot_id: row.try_get("snapshot_id")?,
+                key: row.try_get("object_key")?,
+                reason: row.try_get("reason")?,
+                confirmable: row.try_get::<i64, _>("confirmable")? != 0,
+                detected_at: row.try_get("detected_at")?,
+                confirmed_at: row.try_get("confirmed_at")?,
+                confirmed_by: row.try_get("confirmed_by")?,
+            })
+        })
+        .collect::<Result<Vec<_>, sqlx::Error>>()
+        .map_err(Into::into)
+}
+
+pub(crate) enum Excluded {
+    Done,
+    Missing,
+    Bound,
+    Already,
+}
+
+/// Confirms a quarantined snapshot as excluded from cleanup. Only the
+/// database changes; the snapshot object is left alone.
+pub(crate) async fn exclude_from_gc(
+    state: &AppState,
+    repository_id: &str,
+    snapshot_id: &BlobId,
+    actor: &str,
+    now_ms: i64,
+) -> anyhow::Result<Excluded> {
+    let id = hex32(snapshot_id);
+    let changed = sqlx::query(
+        "UPDATE gc_quarantine SET confirmed_at = $1, confirmed_by = $2 \
+         WHERE repository_id = $3 AND snapshot_id = $4 AND confirmed_at IS NULL \
+         AND confirmable = 1",
+    )
+    .bind(now_ms)
+    .bind(actor)
+    .bind(repository_id)
+    .bind(&id)
+    .execute(&state.db.pool)
+    .await?
+    .rows_affected();
+    if changed == 1 {
+        return Ok(Excluded::Done);
+    }
+    let row = sqlx::query(
+        "SELECT confirmable FROM gc_quarantine WHERE repository_id = $1 AND snapshot_id = $2",
+    )
+    .bind(repository_id)
+    .bind(&id)
+    .fetch_optional(&state.db.pool)
+    .await?;
+    Ok(match row {
+        None => Excluded::Missing,
+        Some(row) if row.try_get::<i64, _>("confirmable")? == 0 => Excluded::Bound,
+        Some(_) => Excluded::Already,
+    })
 }
