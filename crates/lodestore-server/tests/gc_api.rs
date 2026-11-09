@@ -984,6 +984,77 @@ async fn gc_api_exclude_requires_snapshots_delete() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_api_exclude_refuses_revoked_expired_and_other_repository() {
+    for backend in backends() {
+        let ts = server(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let other = ts.create_local_repository("other").await;
+        quarantine_row(&ts, &repo, OPEN_ID, 1).await;
+        let path = exclude_path(&repo, OPEN_ID);
+        let url = format!("{}{path}", ts.rest_url());
+
+        let mut issued = Vec::new();
+        for name in ["revoked", "expired", "valid"] {
+            let created = api
+                .post(
+                    "/api/v1/tokens",
+                    &json!({ "name": name, "scopes": ["snapshots:delete"], "expires_in_days": null }),
+                )
+                .await;
+            assert_eq!(created.status(), 201);
+            let body: Value = created.json().await.unwrap();
+            issued.push((
+                body["item"]["id"].as_str().unwrap().to_string(),
+                body["token"].as_str().unwrap().to_string(),
+            ));
+        }
+        let revoke = api
+            .post(
+                &format!("/api/v1/tokens/{}/revoke", issued[0].0),
+                &json!({}),
+            )
+            .await;
+        assert_eq!(revoke.status(), 204);
+        sqlx::query("UPDATE api_tokens SET expires_at = $1 WHERE id = $2")
+            .bind(1_i64)
+            .bind(&issued[1].0)
+            .execute(&ts.state().db.pool)
+            .await
+            .unwrap();
+
+        for (what, (_, token)) in ["revoked", "expired"].iter().zip(&issued) {
+            let response = bearer_client(token)
+                .post(&url)
+                .json(&json!({}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 401, "[{}] {what}", backend.name());
+        }
+        assert!(status(&api, &repo).await["quarantine"][0]["confirmed_at"].is_null());
+
+        let across = api.post(&exclude_path(&other, OPEN_ID), &json!({})).await;
+        assert_eq!(
+            across.status(),
+            404,
+            "[{}] other repository",
+            backend.name()
+        );
+        assert!(status(&api, &repo).await["quarantine"][0]["confirmed_at"].is_null());
+
+        let valid = bearer_client(&issued[2].1)
+            .post(&url)
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(valid.status(), 200, "[{}]", backend.name());
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn gc_api_exclude_refuses_bound_and_unknown() {
     for backend in backends() {
         let ts = server(&backend).await;

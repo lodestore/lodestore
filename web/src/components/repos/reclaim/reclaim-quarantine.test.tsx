@@ -2,6 +2,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { describe, expect, it } from "vitest";
+import { getListAlertsQueryKey } from "@/api/gen/endpoints";
 import type { GcQuarantineDto } from "@/api/gen/model";
 import { apiError } from "@/test/app";
 import { card, gcStatus, openRepository } from "@/test/gc";
@@ -146,5 +147,58 @@ describe("quarantine", () => {
 			),
 		).toBeInTheDocument();
 		expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+	});
+
+	it("refreshes the status after a 409", async () => {
+		const current = openRepository(gcStatus({ quarantine: [entry("aa")] }));
+		let fetched = 0;
+		server.use(
+			http.get("/api/v1/repositories/repo-1/gc", () => {
+				fetched += 1;
+				return HttpResponse.json(current.status);
+			}),
+			http.post(EXCLUDE("aa"), () =>
+				apiError(409, "conflict", "A backup job points at this snapshot."),
+			),
+		);
+		const view = await card();
+		await userEvent.click(
+			await view.findByRole("button", { name: "Exclude from cleanup…" }),
+		);
+		const dialog = await screen.findByRole("alertdialog");
+		await waitFor(() => expect(fetched).toBeGreaterThan(0));
+		const before = fetched;
+		await userEvent.click(
+			within(dialog).getByRole("button", { name: "Exclude snapshot" }),
+		);
+		expect(
+			await within(dialog).findByText(/A backup job points at this snapshot/),
+		).toBeInTheDocument();
+		await waitFor(() => expect(fetched).toBeGreaterThan(before));
+		expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+	});
+
+	it("refreshes the alerts after excluding", async () => {
+		const current = openRepository(gcStatus({ quarantine: [entry("aa")] }));
+		server.use(http.post(EXCLUDE("aa"), () => HttpResponse.json(gcStatus())));
+		current.queryClient.setQueryData(getListAlertsQueryKey(), {
+			alerts: [],
+			total: 0,
+		});
+		const view = await card();
+		await userEvent.click(
+			await view.findByRole("button", { name: "Exclude from cleanup…" }),
+		);
+		await userEvent.click(
+			within(await screen.findByRole("alertdialog")).getByRole("button", {
+				name: "Exclude snapshot",
+			}),
+		);
+		await waitFor(() =>
+			expect(
+				current.queryClient.getQueryState(getListAlertsQueryKey())
+					?.isInvalidated,
+			).toBe(true),
+		);
 	});
 });
