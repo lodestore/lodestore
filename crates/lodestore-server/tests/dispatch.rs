@@ -195,6 +195,42 @@ async fn dispatch_assigns_and_finishes_job() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dispatch_unavailable_repository_fails_backup_job() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let host = enroll(&ts, &api, &repo, "host-a").await;
+        let pool = &ts.state().db.pool;
+        sqlx::query("UPDATE repositories SET open_error = 'differs from the configuration recorded' WHERE id = $1")
+            .bind(&repo)
+            .execute(pool)
+            .await
+            .unwrap();
+        insert_job(pool, "job-1", &host.id, "manual", "queued", now_ms()).await;
+
+        let mut agent = Fake::connect(&ts, &host, vec![]).await;
+        wait_state(pool, "job-1", "failed").await;
+        assert_eq!(
+            text(pool, "SELECT error_code FROM jobs WHERE id = $1", "job-1")
+                .await
+                .as_deref(),
+            Some("repository_unavailable"),
+            "[{}]",
+            backend.name()
+        );
+        let sent = agent.drain(Duration::from_millis(500)).await;
+        assert!(
+            sent.into_iter().all(|body| is_assign(body).is_none()),
+            "[{}] the agent got a job for an unavailable repository",
+            backend.name()
+        );
+        drop(agent);
+        ts.stop().await;
+    }
+}
+
 async fn signed(ts: &TestServer, repo: &str, snapshot: &str) -> bool {
     let keys = lodestore_server::catalog::open_repository(ts.state(), repo)
         .await

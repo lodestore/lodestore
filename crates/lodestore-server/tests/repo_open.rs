@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use common::{Api, TestServer, backends, wait_until};
 use lodestore_format::config;
-use lodestore_server::catalog::open_repository;
+use lodestore_server::catalog::{RepositoryUnavailable, open_repository};
+use lodestore_server::repos::db::writer_material;
 use serde_json::{Value, json};
 use sqlx::Row;
 
@@ -224,6 +225,119 @@ async fn repo_open_v1_fixture_connects() {
         let mut want = expected_ids.clone();
         want.sort();
         assert_eq!(ids, want, "[{}]", backend.name());
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn repo_open_browse_answers_unavailable() {
+    let fixtures =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../lodestore-format/tests/fixtures/v1");
+    let password = std::fs::read_to_string(fixtures.join("PASSWORD")).unwrap();
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let root = ts.local_repo_root("v1");
+        copy_dir(&fixtures.join("repo"), &root);
+        let connected = api
+            .post(
+                "/api/v1/repositories/connect",
+                &json!({
+                    "draft": {
+                        "name": "v1",
+                        "location": {
+                            "backend": "local",
+                            "options": { "path": root.display().to_string() },
+                        },
+                    },
+                    "password": password.trim(),
+                    "recovery_key": null,
+                }),
+            )
+            .await;
+        assert_eq!(connected.status(), 201, "[{}]", backend.name());
+        let id = connected.json::<Value>().await.unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(sync(&api, &id).await.status(), 200);
+        let snapshot: String = sqlx::query("SELECT id FROM snapshots WHERE repository_id = $1")
+            .bind(&id)
+            .fetch_one(&ts.state().db.pool)
+            .await
+            .unwrap()
+            .try_get("id")
+            .unwrap();
+
+        set_hash(&ts, &id, &[9; 32]).await;
+        let entries = api
+            .get(&format!("/api/v1/snapshots/{snapshot}/entries"))
+            .await;
+        let download = api
+            .post(
+                "/api/v1/downloads",
+                &json!({ "snapshot_id": snapshot, "items": ["L2E"], "format": "zip" }),
+            )
+            .await;
+        for response in [entries, download] {
+            assert_eq!(response.status(), 503, "[{}]", backend.name());
+            let body: Value = response.json().await.unwrap();
+            assert_eq!(body["code"], "repository_unavailable");
+            assert!(
+                body["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("differs from the configuration recorded"),
+                "[{}] {body}",
+                backend.name()
+            );
+        }
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn repo_open_refuses_writer_material() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let id = ts.create_local_repository("main").await;
+        let good = recorded_hash(&ts, &id).await;
+
+        set_hash(&ts, &id, &[9; 32]).await;
+        assert!(open_repository(ts.state(), &id).await.is_err());
+        let refused = writer_material(ts.state(), &id).await.err().unwrap();
+        assert!(
+            refused.downcast_ref::<RepositoryUnavailable>().is_some(),
+            "[{}] {refused:#}",
+            backend.name()
+        );
+
+        set_hash(&ts, &id, &good).await;
+        assert!(open_repository(ts.state(), &id).await.is_ok());
+        assert!(writer_material(ts.state(), &id).await.is_ok());
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn repo_open_recheck_clears_after_fix() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let id = ts.create_local_repository("main").await;
+        let good = recorded_hash(&ts, &id).await;
+
+        set_hash(&ts, &id, &[9; 32]).await;
+        assert!(open_repository(ts.state(), &id).await.is_err());
+        assert!(reason(&api, &id).await.is_string());
+
+        set_hash(&ts, &id, &good).await;
+        assert!(reason(&api, &id).await.is_string());
+        let checked = api
+            .post(&format!("/api/v1/repositories/{id}/check"), &json!({}))
+            .await;
+        assert_eq!(checked.status(), 200, "[{}]", backend.name());
+        assert_eq!(reason(&api, &id).await, Value::Null, "[{}]", backend.name());
         ts.stop().await;
     }
 }
