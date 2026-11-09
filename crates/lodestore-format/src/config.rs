@@ -88,6 +88,12 @@ pub fn check_read_version(config: &pb::Config) -> Result<()> {
     if config.min_reader_version > MAX_SUPPORTED_VERSION {
         return Err(unsupported("reader version", config.min_reader_version));
     }
+    if !config.incompat_features.is_empty() {
+        return Err(Error::InvalidInput(format!(
+            "repository uses features this build cannot read or write: {}",
+            config.incompat_features.join(", ")
+        )));
+    }
     Ok(())
 }
 
@@ -96,13 +102,50 @@ pub fn check_write_version(config: &pb::Config) -> Result<()> {
     if config.min_writer_version > MAX_SUPPORTED_VERSION {
         return Err(unsupported("writer version", config.min_writer_version));
     }
-    if !config.incompat_features.is_empty() {
-        return Err(Error::InvalidInput(format!(
-            "repository uses features this build cannot write: {}",
-            config.incompat_features.join(", ")
-        )));
+    Ok(())
+}
+
+pub fn check_suite(config: &pb::Config) -> Result<()> {
+    let hpke = config
+        .hpke
+        .as_ref()
+        .ok_or_else(|| Error::corrupt("config", "hpke suite is missing"))?;
+    if hpke.kem_id != KEM_ID_XWING
+        || hpke.kdf_id != KDF_ID_HKDF_SHA256
+        || hpke.aead_id != AEAD_ID_CHACHA20POLY1305
+        || config.blob_aead_id != BLOB_AEAD_XCHACHA20POLY1305
+    {
+        return Err(Error::corrupt(
+            "config",
+            format!(
+                "unsupported cipher suite (kem {:#06x}, kdf {:#06x}, aead {:#06x}, blob aead {})",
+                hpke.kem_id, hpke.kdf_id, hpke.aead_id, config.blob_aead_id
+            ),
+        ));
     }
     Ok(())
+}
+
+/// The check a server runs before it uses a repository: the bytes in the
+/// bucket must be the configuration it recorded when the repository was added.
+pub fn check_recorded(
+    config_bytes: &[u8],
+    expected_hash: &[u8; 32],
+    expected_repo_id: &RepoId,
+) -> Result<pb::Config> {
+    if config_hash(config_bytes) != *expected_hash {
+        return Err(Error::corrupt(
+            "config",
+            "differs from the configuration recorded when the repository was added",
+        ));
+    }
+    let config = decode(config_bytes)?;
+    check_read_version(&config)?;
+    check_suite(&config)?;
+    if repo_id_of(&config)? != *expected_repo_id {
+        return Err(Error::corrupt("config", "belongs to another repository"));
+    }
+    Ok(config)
 }
 
 #[cfg(test)]
@@ -158,8 +201,59 @@ mod tests {
 
         let mut c = base();
         c.incompat_features = vec!["future".into()];
-        assert!(check_read_version(&c).is_ok());
-        assert!(check_write_version(&c).is_err());
+        for err in [
+            check_read_version(&c).unwrap_err(),
+            check_write_version(&c).unwrap_err(),
+        ] {
+            assert!(matches!(err, Error::InvalidInput(_)));
+            assert!(err.to_string().contains("cannot read or write"));
+            assert!(err.to_string().contains("future"));
+        }
+    }
+
+    fn recorded() -> (Vec<u8>, [u8; 32]) {
+        let bytes = encode(&base());
+        let hash = config_hash(&bytes);
+        (bytes, hash)
+    }
+
+    #[test]
+    fn check_recorded_accepts_the_recorded_config() {
+        let (bytes, hash) = recorded();
+        let config = check_recorded(&bytes, &hash, &[1; 16]).unwrap();
+        assert_eq!(config, base());
+    }
+
+    #[test]
+    fn check_recorded_refuses_another_hash() {
+        let (bytes, mut hash) = recorded();
+        hash[0] ^= 1;
+        let err = check_recorded(&bytes, &hash, &[1; 16]).unwrap_err();
+        assert!(matches!(err, Error::Corrupt { .. }));
+        assert!(err.to_string().contains("recorded"));
+    }
+
+    #[test]
+    fn check_recorded_refuses_another_repo_id() {
+        let (bytes, hash) = recorded();
+        let err = check_recorded(&bytes, &hash, &[2; 16]).unwrap_err();
+        assert!(matches!(err, Error::Corrupt { .. }));
+        assert!(err.to_string().contains("another repository"));
+    }
+
+    #[test]
+    fn check_recorded_refuses_an_unknown_suite() {
+        let mut c = base();
+        c.blob_aead_id = 99;
+        let bytes = encode(&c);
+        let err = check_recorded(&bytes, &config_hash(&bytes), &[1; 16]).unwrap_err();
+        assert!(err.to_string().contains("unsupported cipher suite"));
+
+        let mut c = base();
+        c.incompat_features = vec!["future".into()];
+        let bytes = encode(&c);
+        let err = check_recorded(&bytes, &config_hash(&bytes), &[1; 16]).unwrap_err();
+        assert!(err.to_string().contains("cannot read or write"));
     }
 
     #[test]
