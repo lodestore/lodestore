@@ -28,6 +28,10 @@ pub const MAX_ARGON2_MEMORY_KIB: u32 = 1 << 20;
 pub const MAX_ARGON2_ITERATIONS: u32 = 16;
 pub const MAX_ARGON2_PARALLELISM: u32 = 16;
 
+/// The most Argon2 work (memory in KiB times passes) one opening spends across
+/// all slots it tries.
+pub const MAX_ARGON2_TOTAL_WORK: u64 = 1 << 24;
+
 const SALT_LEN: usize = 16;
 
 const WRITER_KEYS_HEADER: &str = "LODE-WRITER-KEYS v1";
