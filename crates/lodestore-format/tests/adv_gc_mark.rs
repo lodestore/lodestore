@@ -4,8 +4,12 @@
 mod adv_support;
 mod gc_support;
 
-use adv_support::{attacker_keys, forge_offsets, open_all_shards, plant_shard};
+use adv_support::{
+    PlantedListing, attacker_keys, forge_offsets, open_all_shards, plant_shard, planted_shard_entry,
+};
 use gc_support::Fx;
+use lodestore_format::gc::survey;
+use lodestore_format::writer::BackupOptions;
 
 #[tokio::test]
 async fn adv_planted_supersedes_does_not_stop_gc_survey() {
@@ -31,4 +35,55 @@ async fn adv_planted_supersedes_does_not_stop_gc_survey() {
         assert!(after.live.contains(id, *blob_type));
     }
     assert_eq!(after.snapshots, before.snapshots);
+}
+
+#[tokio::test]
+async fn adv_gc_skips_planted_oversized_shard() {
+    let fx = Fx::new().await;
+    fx.backup("host-a", &[("a", 1, 200 << 10)]).await;
+    fx.backup("host-b", &[("b", 2, 200 << 10)]).await;
+    let before = fx.survey(0).await;
+
+    let entry = planted_shard_entry(5 << 30);
+    let key = entry.key.clone();
+    let planted = PlantedListing::new(&fx.store, vec![entry]);
+    let after = survey(
+        &planted,
+        fx.repo.read_keys(),
+        fx.repo.config(),
+        &gc_support::plan_opts(0),
+        &|_| {},
+    )
+    .await
+    .unwrap();
+
+    assert!(after.shards.skipped.iter().any(|(k, _)| *k == key));
+    assert_eq!(planted.reads_of(&key), 0);
+    assert_eq!(after.snapshots, before.snapshots);
+    assert_eq!(after.live.len(), before.live.len());
+}
+
+#[tokio::test]
+async fn adv_writer_skips_planted_oversized_shard() {
+    let fx = Fx::new().await;
+    fx.backup("host-a", &[("a", 1, 200 << 10)]).await;
+
+    let entry = planted_shard_entry(5 << 30);
+    let key = entry.key.clone();
+    let planted = PlantedListing::new(&fx.store, vec![entry]);
+    let keys = fx.repo.read_keys().write_keys(fx.repo.config_hash());
+    let mut writer = lodestore_format::writer::Writer::new(&planted, keys, fx.repo.config())
+        .await
+        .unwrap();
+    let src = fx.make_src("host-b", &[("b", 2, 200 << 10)]);
+    writer
+        .backup(
+            std::slice::from_ref(&src),
+            BackupOptions::default(),
+            &|_| {},
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(planted.reads_of(&key), 0);
 }

@@ -10,11 +10,13 @@ use anyhow::Context;
 use lodestore_format::attest::{put_attestation, read_attestations, seal_provenance};
 use lodestore_format::check::is_data_error;
 use lodestore_format::crypto::{BlobId, Entropy};
-use lodestore_format::index::{hex32, index_object_key, open_shard, parse_hex32};
+use lodestore_format::index::{
+    MAX_SHARD_SIZE, fetch_shard_bytes, hex32, index_object_key, open_shard, parse_hex32,
+};
 use lodestore_format::keys::ReadKeys;
 use lodestore_format::pb;
 use lodestore_format::snapshot::{open_snapshot, snapshot_object_key};
-use lodestore_format::store::BlobStore;
+use lodestore_format::store::{BlobError, BlobStore};
 use lodestore_format::verify_snapshot::{
     check_snapshot_resolves, snapshot_index_refs, verify_shard,
 };
@@ -378,7 +380,9 @@ async fn supersedes_nothing<S: BlobStore>(
     keys: &ReadKeys,
     id: &BlobId,
 ) -> lodestore_format::Result<bool> {
-    let bytes = store.get(&index_object_key(id)).await?;
+    let bytes = fetch_shard_bytes(store, &index_object_key(id), None, MAX_SHARD_SIZE)
+        .await?
+        .ok_or(BlobError::NotFound)?;
     Ok(open_shard(keys.k_idx(), keys.repo_id(), id, &bytes)?
         .supersedes
         .is_empty())

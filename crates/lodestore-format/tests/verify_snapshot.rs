@@ -48,6 +48,11 @@ impl BlobStore for Refusing<'_> {
     }
 
     async fn get_range(&self, key: &str, range: Range<u64>) -> Result<Bytes, BlobError> {
+        if key == self.key {
+            return Err(BlobError::Denied {
+                message: "no".into(),
+            });
+        }
         self.inner.get_range(key, range).await
     }
 
