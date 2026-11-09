@@ -40,6 +40,8 @@ pub enum ApiError {
     TooManyRuns { message: String, retry_after_s: u64 },
     #[error("{0}")]
     Backend(String),
+    #[error("{0}")]
+    Unavailable(String),
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
 }
@@ -69,6 +71,7 @@ impl ApiError {
             ApiError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
             ApiError::TooManyRuns { .. } => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
             ApiError::Backend(_) => (StatusCode::BAD_GATEWAY, "backend"),
+            ApiError::Unavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, "repository_unavailable"),
             ApiError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         }
     }

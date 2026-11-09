@@ -110,7 +110,9 @@ fn file_name(hostname: &str, snapshot_id: &str, format: ArchiveFormat) -> String
         (status = 201, description = "A single-use link to the archive", body = DownloadCreated),
         (status = 404, description = "Unknown snapshot, gone from storage, or a selected path is missing", body = ErrorBody),
         (status = 422, description = "The selection is not valid", body = ErrorBody),
+        (status = 400, description = "The directory tree is larger than one walk may visit (tree_too_large)", body = ErrorBody),
         (status = 502, description = "The repository storage is unavailable", body = ErrorBody),
+        (status = 503, description = "The repository does not match what this server recorded (repository_unavailable)", body = ErrorBody),
     )
 )]
 async fn create_download(
@@ -330,6 +332,7 @@ async fn finish(state: &AppState, id: &str, sent: u64, error_code: Option<&str>)
         (status = 404, description = "The link was already used or expired, or the snapshot is gone", body = ErrorBody),
         (status = 409, description = "Cleanup is deleting packs in the repository; the link stays valid", body = ErrorBody),
         (status = 502, description = "The repository storage is unavailable", body = ErrorBody),
+        (status = 503, description = "The repository does not match what this server recorded (repository_unavailable)", body = ErrorBody),
     )
 )]
 async fn download_archive(

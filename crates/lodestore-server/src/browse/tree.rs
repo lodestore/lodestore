@@ -24,7 +24,7 @@ use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 use crate::auth::tokens::{Scoped, SnapshotsRead};
-use crate::catalog::open_repository;
+use crate::catalog::{RepositoryUnavailable, open_repository};
 use crate::error::{ApiError, ErrorBody};
 use crate::state::AppState;
 
@@ -85,6 +85,9 @@ pub async fn snapshot_repository(
 
 pub fn read_error(error: impl Into<anyhow::Error>) -> ApiError {
     let error = error.into();
+    if error.downcast_ref::<RepositoryUnavailable>().is_some() {
+        return ApiError::Unavailable(error.to_string());
+    }
     match error.downcast_ref::<FormatError>() {
         Some(FormatError::Store(BlobError::NotFound)) => {
             ApiError::NotFound("the snapshot is no longer in storage".into())
@@ -215,7 +218,9 @@ pub fn entry_item(node: &pb::Node) -> EntryItem {
         (status = 200, description = "One page of the directory: folders first, then names without regard to case", body = EntryPage),
         (status = 404, description = "Unknown snapshot, gone from storage, or no such directory", body = ErrorBody),
         (status = 422, description = "The path is not valid", body = ErrorBody),
+        (status = 400, description = "The directory tree is larger than one walk may visit (tree_too_large)", body = ErrorBody),
         (status = 502, description = "The repository storage is unavailable", body = ErrorBody),
+        (status = 503, description = "The repository does not match what this server recorded (repository_unavailable)", body = ErrorBody),
     )
 )]
 async fn list_snapshot_entries(
@@ -375,7 +380,9 @@ async fn search_walk(
         (status = 200, description = "Newline-delimited JSON, at most 500 matches", content_type = "application/x-ndjson", body = SearchLine),
         (status = 404, description = "Unknown snapshot, gone from storage, or no such directory", body = ErrorBody),
         (status = 422, description = "The path or the text is not valid", body = ErrorBody),
+        (status = 400, description = "The directory tree is larger than one walk may visit (tree_too_large)", body = ErrorBody),
         (status = 502, description = "The repository storage is unavailable", body = ErrorBody),
+        (status = 503, description = "The repository does not match what this server recorded (repository_unavailable)", body = ErrorBody),
     )
 )]
 async fn search_snapshot(
@@ -491,7 +498,9 @@ pub async fn require_items_exist(
         (status = 200, description = "Files, folders and bytes the selection would restore", body = SelectionSummary),
         (status = 404, description = "Unknown snapshot, gone from storage, or a selected path is missing", body = ErrorBody),
         (status = 422, description = "Empty selection or a path that is not valid", body = ErrorBody),
+        (status = 400, description = "The directory tree is larger than one walk may visit (tree_too_large)", body = ErrorBody),
         (status = 502, description = "The repository storage is unavailable", body = ErrorBody),
+        (status = 503, description = "The repository does not match what this server recorded (repository_unavailable)", body = ErrorBody),
     )
 )]
 async fn summarize_selection(
