@@ -13,6 +13,8 @@ pub fn alertname(kind: AlertType) -> &'static str {
         AlertType::CheckFailed => "LodestoreCheckFailed",
         AlertType::CertificateExpiring => "LodestoreCertificateExpiring",
         AlertType::AgentUpdateFailed => "LodestoreAgentUpdateFailed",
+        AlertType::SnapshotQuarantined => "LodestoreSnapshotQuarantined",
+        AlertType::RepositoryUnavailable => "LodestoreRepositoryUnavailable",
     }
 }
 
@@ -26,6 +28,18 @@ pub fn title(c: &Candidate, now_ms: i64) -> String {
         AlertType::CheckFailed => format!(
             "{} check failed on {}",
             level_label(c.check_level.as_deref()),
+            c.repository_name.as_deref().unwrap_or("unknown repository"),
+        ),
+        AlertType::SnapshotQuarantined => {
+            let n = i64::try_from(c.facts.findings.unwrap_or(0)).unwrap_or(i64::MAX);
+            format!(
+                "{n} {} in {} cannot be read; cleanup is stopped",
+                plural(n, "snapshot"),
+                c.repository_name.as_deref().unwrap_or("unknown repository"),
+            )
+        }
+        AlertType::RepositoryUnavailable => format!(
+            "Repository {} is unavailable",
             c.repository_name.as_deref().unwrap_or("unknown repository"),
         ),
         AlertType::CertificateExpiring => {
@@ -87,6 +101,22 @@ pub fn detail(c: &Candidate) -> String {
                 plural(n, "problem")
             )
         }
+        AlertType::SnapshotQuarantined => format!(
+            "Review them under Free up space on the repository page: exclude a snapshot the cleanup should skip, or repair or delete it. First: {}.",
+            c.facts
+                .error
+                .as_deref()
+                .unwrap_or("unknown")
+                .trim_end_matches('.'),
+        ),
+        AlertType::RepositoryUnavailable => format!(
+            "The server does not open it: {}. Cleanup, checks, restores and browsing are stopped for this repository.",
+            c.facts
+                .error
+                .as_deref()
+                .unwrap_or("unknown")
+                .trim_end_matches('.'),
+        ),
         AlertType::CertificateExpiring => match (c.cert, c.facts.external) {
             (Some(CertKind::Grpc), Some(true)) => {
                 "The certificate comes from grpc.tls_cert_file. Replace it before it expires."
@@ -184,6 +214,14 @@ mod tests {
             alertname(AlertType::AgentUpdateFailed),
             "LodestoreAgentUpdateFailed"
         );
+        assert_eq!(
+            alertname(AlertType::SnapshotQuarantined),
+            "LodestoreSnapshotQuarantined"
+        );
+        assert_eq!(
+            alertname(AlertType::RepositoryUnavailable),
+            "LodestoreRepositoryUnavailable"
+        );
     }
 
     #[test]
@@ -230,6 +268,31 @@ mod tests {
                 "3 problems found. Open the report in Integrity checks.".into()
             )
         );
+    }
+
+    #[test]
+    fn repository_alert_texts() {
+        let quarantined = AlertFacts {
+            findings: Some(2),
+            error: Some("snapshots/ab: decryption failed".into()),
+            ..AlertFacts::default()
+        };
+        let (title, detail) = text(AlertType::SnapshotQuarantined, quarantined);
+        assert_eq!(
+            title,
+            "2 snapshots in main cannot be read; cleanup is stopped"
+        );
+        assert!(
+            detail.ends_with("First: snapshots/ab: decryption failed."),
+            "{detail}"
+        );
+        let unavailable = AlertFacts {
+            error: Some("config hash mismatch".into()),
+            ..AlertFacts::default()
+        };
+        let (title, detail) = text(AlertType::RepositoryUnavailable, unavailable);
+        assert_eq!(title, "Repository main is unavailable");
+        assert!(detail.contains("config hash mismatch."), "{detail}");
     }
 
     #[test]
