@@ -319,6 +319,27 @@ describe("overview states", () => {
 		).toBeNull();
 	});
 
+	it("shows repository alerts above the empty fleet", async () => {
+		useAlerts([
+			alertFixture("u1", {
+				type: "repository_unavailable",
+				host: null,
+				policy: null,
+				repository: { id: "repo-2", name: "offsite" },
+				detail: "The server does not open it: config hash mismatch.",
+				facts: { error: "config hash mismatch" },
+			}),
+		]);
+		renderApp("/overview");
+		expect(
+			await screen.findByRole("link", { name: "offsite" }),
+		).toHaveAttribute("href", "/settings/repositories/repo-2#checks");
+		expect(rows(STRIP).map(titleOf)).toContain(
+			"Repository offsite is unavailable",
+		);
+		expect(screen.getByText(copy.overview.empty.heading)).toBeInTheDocument();
+	});
+
 	it("shows the loading summary", async () => {
 		server.use(
 			http.get("/api/v1/fleet", async () => {

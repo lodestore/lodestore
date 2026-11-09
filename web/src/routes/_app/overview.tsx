@@ -94,25 +94,28 @@ function OverviewPage() {
 			)}
 			{data &&
 				(data.totals.hosts === 0 ? (
-					<Empty className="py-24">
-						<EmptyHeader>
-							<Illustration
-								name="hosts-empty"
-								width={320}
-								height={216}
-								className="h-auto w-80 max-w-full"
-							/>
-							<EmptyTitle>{text.empty.heading}</EmptyTitle>
-							<EmptyDescription>{text.empty.body}</EmptyDescription>
-						</EmptyHeader>
-						<EmptyContent>
-							<Button asChild>
-								<Link to="/hosts" search={{ add: true }}>
-									{text.empty.action}
-								</Link>
-							</Button>
-						</EmptyContent>
-					</Empty>
+					<>
+						<OtherAlerts alerts={hostless} />
+						<Empty className="py-24">
+							<EmptyHeader>
+								<Illustration
+									name="hosts-empty"
+									width={320}
+									height={216}
+									className="h-auto w-80 max-w-full"
+								/>
+								<EmptyTitle>{text.empty.heading}</EmptyTitle>
+								<EmptyDescription>{text.empty.body}</EmptyDescription>
+							</EmptyHeader>
+							<EmptyContent>
+								<Button asChild>
+									<Link to="/hosts" search={{ add: true }}>
+										{text.empty.action}
+									</Link>
+								</Button>
+							</EmptyContent>
+						</Empty>
+					</>
 				) : (
 					<>
 						<FleetSummary
