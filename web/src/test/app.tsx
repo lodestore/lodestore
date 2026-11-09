@@ -23,6 +23,7 @@ export const serverInfo = {
 	public_url: "http://localhost:8080",
 	grpc_public_address: "backup.example.com:8443",
 	agent_arches: ["x86_64"],
+	project_key: "RWR4L6XuZIijjGDS/pggnqvsOKeXTnAUspdDGzyF983eIpcnS+mKEREI",
 	demo_mode: false,
 };
 

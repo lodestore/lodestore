@@ -12633,6 +12633,7 @@
           "public_url",
           "grpc_public_address",
           "agent_arches",
+          "project_key",
           "demo_mode"
         ],
         "properties": {
@@ -12646,6 +12647,9 @@
             "type": "boolean"
           },
           "grpc_public_address": {
+            "type": "string"
+          },
+          "project_key": {
             "type": "string"
           },
           "public_url": {
