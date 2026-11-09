@@ -197,7 +197,9 @@ fn record_below(map: &mut HashMap<BlobId, (u64, bool)>, dir: BlobId, below: u64,
 }
 
 fn too_large(name: &str, e: &Error) -> String {
-    format!("tree {name}: {e}; lode restore --allow-large-directories restores it")
+    format!(
+        "tree {name}: {e}; nothing below it was checked; lode restore --allow-large-directories lifts this limit"
+    )
 }
 
 fn tally(entries: &[ListEntry], bytes: &mut u64, objects: &mut u64) {
