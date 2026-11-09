@@ -124,7 +124,7 @@ async fn agent_binary(State(state): State<AppState>, UrlPath(name): UrlPath<Stri
             };
         }
         Artifact::Signature => {
-            if !path.is_file() {
+            if !tokio::fs::metadata(&path).await.is_ok_and(|m| m.is_file()) {
                 return not_found(arch);
             }
             let signature_path = state.config.agent_dir.join(format!("{file}.minisig"));
