@@ -32,7 +32,13 @@ const STABLE_STREAM: Duration = Duration::from_secs(60);
 const RENEW_RETRY: Duration = Duration::from_secs(60);
 const MAX_SKEW_SECS: i64 = 300;
 const JOBS_DRAIN: Duration = Duration::from_secs(30);
-pub const CAPABILITIES: [&str; 4] = ["restore_v1", "limits_v1", "gc_v1", "restore_roots_v1"];
+pub const CAPABILITIES: [&str; 5] = [
+    "restore_v1",
+    "limits_v1",
+    "gc_v1",
+    "restore_roots_v1",
+    "shard_limit_v1",
+];
 const CAP_UPDATE: &str = "update_v1";
 
 pub struct RunArgs {
