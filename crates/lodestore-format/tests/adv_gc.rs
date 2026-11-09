@@ -15,6 +15,7 @@ use gc_support::{Cycle, Fx, pack_ids};
 use lodestore_format::crypto::{BLOB_TYPE_DATA, BlobId, Entropy};
 use lodestore_format::gc::survey;
 use lodestore_format::index::rebuild_index;
+use lodestore_format::locks::{new_lock_id, read_writer_locks, writer_marker_key};
 use lodestore_format::pack::{ENTRY_LEN, PACK_PREFIX_LEN, pack_object_key};
 use lodestore_format::pb;
 use lodestore_format::store::ListEntry;
@@ -308,5 +309,29 @@ async fn adv_rebuild_skips_planted_oversized_pack() {
             .iter()
             .all(|p| pack_object_key(&p.pack_id) != key)
     );
+    assert_eq!(planted.reads_of(&key), 0);
+}
+
+#[tokio::test]
+async fn adv_planted_oversized_writer_marker_does_not_stop_gc() {
+    let fx = Fx::new().await;
+    fx.backup("host-a", &[("a", 1, 200 << 10)]).await;
+    let key = writer_marker_key(&new_lock_id(&mut Entropy::os()));
+    let planted = PlantedListing::new(
+        &fx.store,
+        vec![ListEntry {
+            key: key.clone(),
+            size: 5 << 30,
+            modified_ms: None,
+        }],
+    );
+    let keys = attacker_keys(&fx.repo);
+
+    let locks = read_writer_locks(&planted, &keys.k_idx, &keys.repo_id)
+        .await
+        .unwrap();
+
+    let lock = locks.iter().find(|l| l.key == key).expect("listed lock");
+    assert!(lock.marker.is_none());
     assert_eq!(planted.reads_of(&key), 0);
 }

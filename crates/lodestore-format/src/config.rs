@@ -4,6 +4,8 @@ use crate::crypto::RepoId;
 use crate::error::{Error, Result};
 use crate::pb;
 
+/// Largest `config` object a reader downloads.
+pub const MAX_CONFIG_SIZE: u64 = 1 << 20;
 pub const FORMAT_VERSION: u32 = 1;
 pub const MAX_SUPPORTED_VERSION: u32 = 1;
 

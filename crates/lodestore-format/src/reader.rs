@@ -29,9 +29,10 @@ use crate::pb;
 use crate::provenance::{LatestPick, ProvenanceSet, pick_latest};
 use crate::selection::Selection;
 use crate::snapshot::{
-    SnapshotEntry, SnapshotList, TreeSource, list_snapshots, open_snapshot, snapshot_object_key,
+    MAX_SNAPSHOT_SIZE, SnapshotEntry, SnapshotList, TreeSource, list_snapshots, open_snapshot,
+    snapshot_object_key,
 };
-use crate::store::{BlobError, BlobStore};
+use crate::store::{BlobError, BlobStore, read_bounded};
 use crate::tree::{
     Action, SelectedWalk, Step, TreeBudget, TreeCursor, decode_tree, selection_totals,
     validate_subtree,
@@ -337,11 +338,16 @@ impl<S: BlobStore> Reader<S> {
         &self.store
     }
 
-    // shortcut: shards and snapshots named directly are fetched without a size
-    // check; add a size probe to BlobStore if an unlisted path ever reads
-    // untrusted keys.
+    /// The snapshot `id`, read at most [`MAX_SNAPSHOT_SIZE`] bytes.
     pub async fn snapshot(&self, id: &BlobId) -> Result<pb::Snapshot> {
-        let bytes = self.store.get(&snapshot_object_key(id)).await?;
+        let bytes = read_bounded(
+            &self.store,
+            &snapshot_object_key(id),
+            None,
+            MAX_SNAPSHOT_SIZE,
+            "snapshot",
+        )
+        .await?;
         open_snapshot(
             self.keys.hpke_private_key(),
             self.keys.repo_id(),

@@ -14,7 +14,7 @@ use crate::keys::ReadKeys;
 use crate::pb;
 use crate::reader::{Reader, ReaderCache};
 use crate::snapshot::{MAX_SNAPSHOT_SIZE, SNAPSHOT_PREFIX, open_snapshot, snapshot_object_key};
-use crate::store::{BlobError, BlobStore};
+use crate::store::{BlobError, BlobStore, read_bounded};
 use crate::tree::decode_tree;
 
 /// Every index shard that opens and whose records are well formed, as
@@ -194,10 +194,10 @@ async fn walk_snapshot<S: BlobStore>(
     added: &mut Vec<BlobId>,
 ) -> Result<Walked> {
     within_size(key, *size, MAX_SNAPSHOT_SIZE, "snapshot")?;
-    let bytes = match store.get(key).await {
+    let bytes = match read_bounded(store, key, Some(*size), MAX_SNAPSHOT_SIZE, "snapshot").await {
         Ok(bytes) => bytes,
-        Err(BlobError::NotFound) => return Ok(Walked::Gone),
-        Err(e) => return Err(e.into()),
+        Err(Error::Store(BlobError::NotFound)) => return Ok(Walked::Gone),
+        Err(e) => return Err(e),
     };
     if blake3::hash(&bytes).as_bytes() != id {
         return Ok(Walked::WrongName);
