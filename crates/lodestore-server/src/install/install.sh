@@ -1,5 +1,5 @@
 #!/bin/sh
-set -eu
+set -euf
 
 SERVER_URL='@@SERVER_URL@@'
 VERSION='@@VERSION@@'
@@ -248,13 +248,30 @@ restore_identity() {
   rmdir "$backup"
 }
 
+snapshot_trust_keys() {
+  [ -n "$trust_keys" ] || return 0
+  snapshot=
+  n=0
+  old_ifs=$IFS
+  IFS=$nl
+  for file in $trust_keys; do
+    n=$((n + 1))
+    mkdir -p "$tmp/trusted-keys/$n"
+    copy=$tmp/trusted-keys/$n/$(basename -- "$file")
+    cp -- "$file" "$copy" || die "could not read the --trust-key file $file"
+    snapshot=$snapshot$copy$nl
+  done
+  IFS=$old_ifs
+  trust_keys=$snapshot
+}
+
 install_trust_keys() {
   [ -n "$trust_keys" ] || return 0
   install -d -m 0755 -o root -g root "$CONF_DIR/trusted-keys"
   old_ifs=$IFS
   IFS=$nl
   for file in $trust_keys; do
-    install -m 0644 -o root -g root "$file" "$CONF_DIR/trusted-keys/$(basename "$file")"
+    install -m 0644 -o root -g root -- "$file" "$CONF_DIR/trusted-keys/$(basename -- "$file")"
   done
   IFS=$old_ifs
 }
@@ -336,6 +353,7 @@ main() {
   tmp=$(mktemp -d)
   trap cleanup EXIT
   trap 'exit 1' INT TERM HUP
+  snapshot_trust_keys
   download_agent
 
   install -d -m 0700 "$CONF_DIR" "$STATE_DIR"

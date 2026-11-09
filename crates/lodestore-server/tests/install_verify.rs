@@ -51,6 +51,7 @@ struct Run {
     github: bool,
     no_minisign: bool,
     trust_keys: Vec<PathBuf>,
+    remove_keys_after_snapshot: bool,
     releases_url: Option<String>,
 }
 
@@ -86,10 +87,24 @@ async fn download(ts: &TestServer, run: Run) -> Outcome {
          insecure=1\n\
          nl='\n'\n\
          trust_keys='{keys}'\n\
+         snapshot_trust_keys\n\
+         {remove_keys}\n\
          {no_minisign}\n\
          download_agent\n\
          cp \"$tmp/agent\" \"$OUT\"\n",
         github = u8::from(run.github),
+        remove_keys = if run.remove_keys_after_snapshot {
+            format!(
+                "rm -f {}",
+                run.trust_keys
+                    .iter()
+                    .map(|k| format!("'{}'", k.display()))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
+        } else {
+            String::new()
+        },
         no_minisign = if run.no_minisign {
             "have_minisign() { return 1; }"
         } else {
@@ -310,6 +325,58 @@ async fn install_verify_server_second_trust_key_installs() {
     .await;
     assert_eq!(outcome.code, 0, "{}", outcome.stderr);
     assert_eq!(outcome.installed.as_deref(), Some(bytes.as_slice()));
+    ts.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs minisign, curl and sha256sum"]
+async fn install_verify_trust_key_is_read_once() {
+    let ts = TestServer::start(&Backend::Sqlite).await;
+    let signer = TestSigner::generate();
+    let bytes = agent_bytes();
+    put_agent(
+        &ts,
+        &bytes,
+        Some(&signer.sign(&bytes, "lodestore-agent 0.2.0 x86_64")),
+    );
+    let key = write_key(ts.dir.path(), "own", &signer);
+    let outcome = download(
+        &ts,
+        Run {
+            trust_keys: vec![key],
+            remove_keys_after_snapshot: true,
+            ..Run::default()
+        },
+    )
+    .await;
+    assert_eq!(outcome.code, 0, "{}", outcome.stderr);
+    assert_eq!(outcome.installed.as_deref(), Some(bytes.as_slice()));
+    ts.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs minisign, curl and sha256sum"]
+async fn install_verify_trust_key_name_is_not_a_glob() {
+    let ts = TestServer::start(&Backend::Sqlite).await;
+    let trusted = TestSigner::generate();
+    let neighbour = TestSigner::generate();
+    let bytes = agent_bytes();
+    put_agent(
+        &ts,
+        &bytes,
+        Some(&neighbour.sign(&bytes, "lodestore-agent 0.2.0 x86_64")),
+    );
+    let literal = write_key(ts.dir.path(), "k*", &trusted);
+    write_key(ts.dir.path(), "kB", &neighbour);
+    let outcome = download(
+        &ts,
+        Run {
+            trust_keys: vec![literal],
+            ..Run::default()
+        },
+    )
+    .await;
+    assert_refused(&outcome, "does not verify");
     ts.stop().await;
 }
 
