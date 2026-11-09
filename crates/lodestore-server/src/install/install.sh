@@ -42,8 +42,8 @@ Usage: curl --proto '=https' --tlsv1.2 -fsSL <server>/install.sh | sh -s -- --jo
                    minisign to check the release signature
   --trust-key <file>
                    trust this public key, both for checking the agent in this install and
-                   for updates, for your own builds; the file name must end in .pub,
-                   repeat the option for more keys
+                   for updates, for your own builds; the file name must end in .pub and be
+                   different for each key, repeat the option for more keys
   --allow-in-place-restore
                    enable restores in place for this host: writes restore.allow_in_place: true
                    to /etc/lodestore/agent.yaml
@@ -300,6 +300,7 @@ main() {
   insecure=0
   allow_in_place=0
   trust_keys=
+  trust_names=
   nl='
 '
   while [ $# -gt 0 ]; do
@@ -321,6 +322,9 @@ main() {
           *.pub) [ -f "$2" ] && [ -r "$2" ] || die "--trust-key needs a readable .pub file: $2" ;;
           *) die "--trust-key needs a readable .pub file: $2" ;;
         esac
+        base=$(basename -- "$2")
+        case $nl$trust_names in *"$nl$base$nl"*) die "two --trust-key files are named $base; rename one" ;; esac
+        trust_names=$trust_names$base$nl
         trust_keys=$trust_keys$2$nl
         shift 2
         ;;

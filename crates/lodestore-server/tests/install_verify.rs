@@ -381,6 +381,54 @@ async fn install_verify_trust_key_name_is_not_a_glob() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn install_verify_trust_keys_with_the_same_file_name_refused() {
+    let ts = TestServer::start(&Backend::Sqlite).await;
+    let body = reqwest::get(format!("{}/install.sh", ts.rest_url()))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let mut keys = Vec::new();
+    for dir in ["a", "b"] {
+        std::fs::create_dir_all(ts.dir.path().join(dir)).unwrap();
+        keys.push(write_key(
+            &ts.dir.path().join(dir),
+            "own",
+            &TestSigner::generate(),
+        ));
+    }
+    let mut command = Command::new("sh");
+    command
+        .args(["-s", "--", "--trust-key"])
+        .arg(&keys[0])
+        .arg("--trust-key")
+        .arg(&keys[1])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let result = tokio::task::spawn_blocking(move || {
+        let mut child = command.spawn().unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(body.as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    })
+    .await
+    .unwrap();
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert_ne!(result.status.code(), Some(0), "{stderr}");
+    assert!(
+        stderr.contains("two --trust-key files are named own.pub"),
+        "{stderr}"
+    );
+    ts.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs minisign, curl and sha256sum"]
 async fn install_verify_server_without_minisign_notes() {
     let ts = TestServer::start(&Backend::Sqlite).await;
