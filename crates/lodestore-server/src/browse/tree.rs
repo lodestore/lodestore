@@ -90,6 +90,9 @@ pub fn read_error(error: impl Into<anyhow::Error>) -> ApiError {
             ApiError::NotFound("the snapshot is no longer in storage".into())
         }
         Some(FormatError::InvalidInput(message)) => ApiError::NotFound(message.clone()),
+        Some(FormatError::WalkLimit { .. }) => {
+            ApiError::BadRequest("tree_too_large", error.to_string())
+        }
         Some(_) => ApiError::Backend(format!("the repository storage failed: {error}")),
         None if error.downcast_ref::<BlobError>().is_some() => {
             ApiError::Backend(format!("the repository storage failed: {error}"))
@@ -517,4 +520,21 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(list_snapshot_entries))
         .routes(routes!(search_snapshot))
         .routes(routes!(summarize_selection))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn walk_limit_is_a_clear_bad_request() {
+        let error = read_error(FormatError::WalkLimit {
+            what: "entries",
+            limit: 7,
+        });
+        assert!(
+            matches!(&error, ApiError::BadRequest("tree_too_large", message) if message.contains('7')),
+            "unexpected mapping"
+        );
+    }
 }

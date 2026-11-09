@@ -28,6 +28,8 @@ pub enum Error {
     Interrupted,
     #[error("the backup ran longer than its time limit of {limit_secs}s; no snapshot was written")]
     DeadlineExceeded { limit_secs: u64 },
+    #[error("the snapshot's directory tree has more than {limit} {what}; the walk was stopped")]
+    WalkLimit { what: &'static str, limit: u64 },
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }

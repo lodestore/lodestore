@@ -46,9 +46,14 @@ function describeState(session: FindSession) {
 		case "cancelled":
 			return copy.find.status.cancelled;
 		case "incomplete":
-			return session.stop_reason === "timeout"
-				? copy.find.status.timeout(duration)
-				: copy.find.status.limit(session.limit);
+			switch (session.stop_reason) {
+				case "timeout":
+					return copy.find.status.timeout(duration);
+				case "walk_limit":
+					return copy.find.status.walkLimit;
+				default:
+					return copy.find.status.limit(session.limit);
+			}
 		case "failed":
 			return copy.find.status.failed(session.error ?? "");
 	}

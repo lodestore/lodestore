@@ -8500,7 +8500,8 @@
         "type": "string",
         "enum": [
           "limit",
-          "timeout"
+          "timeout",
+          "walk_limit"
         ]
       },
       "FindVersion": {
