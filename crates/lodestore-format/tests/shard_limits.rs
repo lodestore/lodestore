@@ -28,7 +28,7 @@ use lodestore_format::pb;
 use lodestore_format::reader::Reader;
 use lodestore_format::store::{BlobError, BlobStore, ListEntry, LocalFsStore};
 use lodestore_format::verify_snapshot::verify_shard;
-use planted::{PlantedListing, planted_shard_entry};
+use planted::{PlantedListing, RangedOnly, planted_shard_entry};
 
 /// Records the ranges asked of the store.
 struct RangeLog {
@@ -306,7 +306,7 @@ async fn shard_limit_reader_probe_is_bounded() {
     assert!(
         ranges
             .iter()
-            .all(|(_, r)| *r == (0..MAX_SHARD_READ_SIZE + 1))
+            .all(|(_, r)| *r == (0..MAX_SHARD_SIZE + 1))
     );
 }
 
@@ -365,4 +365,63 @@ async fn shard_limit_confirm_unreferenced_reports_skipped() {
     assert_eq!(skipped.len(), 1);
     assert_eq!(skipped[0].0, key);
     assert!(skipped[0].1.contains("more than a shard can be"));
+}
+
+#[tokio::test]
+async fn shard_limit_reader_skips_unattested_shard_over_limit() {
+    let fx = Fx::new().await;
+    fx.backup("a", &[("a", 1, 300 << 10), ("b", 2, 200 << 10)])
+        .await;
+    let outcome = fx.backup("c", &[("c", 3, 100 << 10)]).await;
+    let keys = attacker_keys(&fx.repo);
+    let shards = open_all_shards(&fx.store, &keys).await;
+    let real: Vec<_> = shards
+        .iter()
+        .flat_map(|(_, s)| s.packs.iter().cloned())
+        .collect();
+    let honest: Vec<BlobId> = shards.iter().map(|(id, _)| *id).collect();
+    attest(&fx, &honest).await;
+    for id in &honest {
+        fs::remove_file(fx.tmp.path().join("repo").join(index_object_key(id))).unwrap();
+    }
+    let (id, bytes) = big_shard_with(&fx, real);
+    let key = index_object_key(&id);
+    fx.store
+        .put_if_absent(&key, Bytes::from(bytes))
+        .await
+        .unwrap();
+
+    let probe = IndexProbe {
+        inner: LocalFsStore::new(fx.tmp.path().join("repo")),
+        ranges: Mutex::new(Vec::new()),
+    };
+    let mut reader =
+        Reader::open(&probe, fx.repo.read_keys().duplicate(), fx.repo.config()).unwrap();
+    let err = reader.list_dir(&outcome.snapshot_id, b"").await.unwrap_err();
+
+    assert!(matches!(err, Error::Corrupt { .. }), "{err}");
+    assert!(err.to_string().contains("not in the index"), "{err}");
+    assert!(
+        probe
+            .ranges
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(k, r)| *k != key || r.end <= MAX_SHARD_SIZE + 1)
+    );
+}
+
+#[tokio::test]
+async fn shard_limit_swapped_shard_is_read_by_range() {
+    let fx = Fx::new().await;
+    let (_, key) = put_big_shard(&fx).await;
+    let ranged = RangedOnly::new(&fx.store, &["index/"]);
+
+    let got = fetch_shard_bytes(&ranged, &key, Some(1024), MAX_SHARD_SIZE)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(got.len(), 1024);
+    assert_eq!(ranged.ranges_of(&key), vec![0..1024]);
 }

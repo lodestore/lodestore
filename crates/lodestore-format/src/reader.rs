@@ -20,7 +20,7 @@ use crate::error::{Error, Result};
 use crate::fs::filter::PathMatcher;
 use crate::fs::restore::{RestoreSettings, Restorer, check_extents};
 use crate::index::{
-    BlobLocation, INDEX_PREFIX, Index, MAX_SHARD_READ_SIZE, SupersedesTrust, fetch_shard_bytes,
+    BlobLocation, INDEX_PREFIX, Index, MAX_SHARD_READ_SIZE, MAX_SHARD_SIZE, SupersedesTrust, fetch_shard_bytes,
     hex32, index_object_key, open_shard, parse_hex32,
 };
 use crate::keys::ReadKeys;
@@ -192,7 +192,7 @@ pub struct ReaderCache {
     repo_id: OnceLock<RepoId>,
     index: tokio::sync::RwLock<Index>,
     load: tokio::sync::Mutex<()>,
-    trust_set: tokio::sync::OnceCell<()>,
+    trust_set: tokio::sync::OnceCell<HashSet<BlobId>>,
     listed_at: Mutex<Option<Instant>>,
     pack_keys: Mutex<HashMap<BlobId, Key32>>,
     trees: Mutex<TreeBytes>,
@@ -383,12 +383,19 @@ impl<S: BlobStore> Reader<S> {
         if self.cache.index.read().await.has_shard(&shard_id) {
             return Ok(true);
         }
-        self.cache
+        let attested = self
+            .cache
             .trust_set
             .get_or_init(|| self.trust_attested())
-            .await;
+            .await
+            .contains(&shard_id);
         let key = index_object_key(&shard_id);
-        match fetch_shard_bytes(&self.store, &key, listed, MAX_SHARD_READ_SIZE).await? {
+        let max = if attested {
+            MAX_SHARD_READ_SIZE
+        } else {
+            MAX_SHARD_SIZE
+        };
+        match fetch_shard_bytes(&self.store, &key, listed, max).await? {
             Some(bytes) => {
                 let shard = open_shard(self.keys.k_idx(), self.keys.repo_id(), &shard_id, &bytes)?;
                 self.cache.index.write().await.add_shard(shard_id, &shard)?;
@@ -400,8 +407,8 @@ impl<S: BlobStore> Reader<S> {
 
     /// Only shards the server attested may supersede others. When the
     /// attestations cannot be read nothing is trusted: that only costs the
-    /// preference for a newer copy.
-    async fn trust_attested(&self) {
+    /// preference for a newer copy and the larger size a signed shard may have.
+    async fn trust_attested(&self) -> HashSet<BlobId> {
         let attested = match read_attestations(&self.store, &self.keys).await {
             Ok(set) => set.shards,
             Err(_) => HashSet::new(),
@@ -410,7 +417,8 @@ impl<S: BlobStore> Reader<S> {
             .index
             .write()
             .await
-            .set_supersedes_trust(SupersedesTrust::Only(attested));
+            .set_supersedes_trust(SupersedesTrust::Only(attested.clone()));
+        attested
     }
 
     /// Lists the shards in the store and loads those that open; one that does

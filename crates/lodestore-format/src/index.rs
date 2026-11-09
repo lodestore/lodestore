@@ -11,7 +11,7 @@ use crate::check::is_data_error;
 use crate::crypto::{
     BlobId, Entropy, HPKE_ENC_LEN, RepoId, SEALED_KEY_LEN, open_index_shard, seal_index_shard,
 };
-use crate::error::{Error, Result, within_size};
+use crate::error::{Error, Result};
 use crate::keys::ReadKeys;
 use crate::locks::read_gc_locks;
 use crate::pack::{
@@ -19,7 +19,7 @@ use crate::pack::{
     parse_entries, read_pack_header,
 };
 use crate::pb;
-use crate::store::{BlobError, BlobStore, put_named};
+use crate::store::{BlobError, BlobStore, put_named, read_bounded};
 
 pub(crate) const INDEX_PREFIX: &str = "index/";
 pub(crate) const PACKS_PREFIX: &str = "packs/";
@@ -60,29 +60,20 @@ pub struct BlobLocation {
 }
 
 /// Reads an index shard of at most `max` bytes, `None` when it is gone. A
-/// shard is one AEAD frame, so it is held whole; the size is checked before
-/// the download from the listing (`listed`), or without one by asking for one
-/// byte more than `max`.
+/// shard is one AEAD frame, so it is held whole. With the size the listing
+/// showed (`listed`) it reads exactly that many bytes, so a shard swapped for
+/// a larger one after the listing is never downloaded beyond it; without one
+/// it asks for one byte more than `max`.
 pub async fn fetch_shard_bytes<S: BlobStore>(
     store: &S,
     key: &str,
     listed: Option<u64>,
     max: u64,
 ) -> Result<Option<Bytes>> {
-    let got = match listed {
-        Some(size) => {
-            within_size(key, size, max, "shard")?;
-            store.get(key).await
-        }
-        None => store.get_range(key, 0..max.saturating_add(1)).await,
-    };
-    match got {
-        Ok(bytes) => {
-            within_size(key, bytes.len() as u64, max, "shard")?;
-            Ok(Some(bytes))
-        }
-        Err(BlobError::NotFound) => Ok(None),
-        Err(e) => Err(e.into()),
+    match read_bounded(store, key, listed, max, "shard").await {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(Error::Store(BlobError::NotFound)) => Ok(None),
+        Err(e) => Err(e),
     }
 }
 
