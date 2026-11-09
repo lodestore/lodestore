@@ -534,3 +534,48 @@ async fn install_verify_github_missing_signature_refused() {
     let run = github_with(&format!("lodestore release {VERSION}"), false, false).await;
     assert_refused(&run.outcome, "SHA256SUMS.minisig");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs minisign, curl and sha256sum"]
+async fn install_verify_served_project_key_is_the_one_in_project_pub() {
+    require_tools();
+    let ts = TestServer::start(&Backend::Sqlite).await;
+    let script = reqwest::get(format!("{}/install.sh", ts.rest_url()))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let served = script
+        .lines()
+        .find_map(|l| l.strip_prefix("PROJECT_KEY='")?.strip_suffix('\''))
+        .expect("the script has no PROJECT_KEY line");
+    let pub_file = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../lodestore-agent/keys/project.pub"),
+    )
+    .unwrap();
+    assert_eq!(Some(served), pub_file.lines().nth(1));
+
+    let data = ts.dir.path().join("key-check.bin");
+    std::fs::write(&data, agent_bytes()).unwrap();
+    let sig = ts.dir.path().join("key-check.bin.minisig");
+    std::fs::write(
+        &sig,
+        TestSigner::generate().sign(&agent_bytes(), "lodestore-agent 0.2.0 x86_64"),
+    )
+    .unwrap();
+    let status = Command::new("minisign")
+        .args(["-V", "-Q", "-P", served, "-m"])
+        .arg(&data)
+        .arg("-x")
+        .arg(&sig)
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "a foreign signature must be a key mismatch, not an invalid key"
+    );
+    ts.stop().await;
+}
