@@ -6,7 +6,10 @@ use std::fs;
 use std::os::unix::fs::{MetadataExt, symlink};
 use std::path::{Path, PathBuf};
 
-use lodestore_format::check::structure::check_structure;
+use lodestore_format::check::FindingKind;
+use lodestore_format::check::structure::{
+    StructureReport, check_structure, check_structure_with_dir_limits,
+};
 use lodestore_format::crypto::{BLOB_TYPE_DATA, BLOB_TYPE_TREE, BlobId, Entropy};
 use lodestore_format::error::Error;
 use lodestore_format::keys::KdfCost;
@@ -131,6 +134,22 @@ impl Fx {
             "no finding for {key}: {:?}",
             report.findings
         );
+    }
+
+    /// The structure check with smaller directory limits.
+    async fn check_limited(&self, dir: u64, held: u64) -> StructureReport {
+        let store = LocalFsStore::new(self.repo_dir.clone());
+        let repo = Repository::open(&store, b"pw").await.unwrap();
+        check_structure_with_dir_limits(
+            &store,
+            repo.read_keys(),
+            repo.config(),
+            &|_, _, _| {},
+            dir,
+            held,
+        )
+        .await
+        .unwrap()
     }
 
     /// The restore is refused as corrupt and the target is exactly as before.
@@ -433,6 +452,36 @@ async fn restore_hostile_wide_directory_stops_by_dir_limit() {
         .unwrap_err();
     assert!(wide_limit(&err), "{err:?}");
     assert_eq!(reader.list_dir(&snap, b"/").await.unwrap().len(), 1);
+}
+
+/// The check reports the snapshot, stops reading the directory at the piece
+/// that passes the limit and goes on with the next snapshot.
+#[tokio::test]
+async fn check_hostile_wide_directory_is_a_finding() {
+    let mut fx = Fx::new().await;
+    let pieces: Vec<Vec<u8>> = ["a", "b", "c", "d"]
+        .iter()
+        .map(|p| {
+            let id = fx.tree(files(p, 5));
+            id.to_vec()
+        })
+        .collect();
+    let mut wide = dir("w", fx.tree(Vec::new()));
+    wide.subtrees = pieces;
+    let snap = fx.snapshot(vec![wide]).await;
+    fx.snapshot(files("g", 2)).await;
+
+    let report = fx.check_limited(10, u64::MAX).await;
+    assert_eq!(report.snapshots_checked, 2);
+    assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
+    let f = &report.findings[0];
+    assert_eq!(f.key, snapshot_object_key(&snap));
+    assert_eq!(f.kind, FindingKind::UnreadableTree);
+    assert!(f.detail.contains("entries in one directory"), "{f:?}");
+    assert_eq!(report.trees_checked, 5);
+
+    let report = fx.check_limited(20, u64::MAX).await;
+    assert!(report.findings.is_empty(), "{:?}", report.findings);
 }
 
 #[tokio::test]

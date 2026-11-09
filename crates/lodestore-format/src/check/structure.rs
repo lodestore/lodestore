@@ -23,7 +23,7 @@ use crate::pb;
 use crate::reader::{Reader, ReaderCache};
 use crate::snapshot::{MAX_SNAPSHOT_SIZE, SNAPSHOT_PREFIX, open_snapshot, snapshot_object_key};
 use crate::store::{BlobError, BlobStore, ListEntry, read_bounded};
-use crate::tree::{MAX_DEPTH, check_node, decode_tree};
+use crate::tree::{MAX_DEPTH, MAX_DIR_ENTRIES, MAX_HELD_ENTRIES, check_node, decode_tree};
 
 const KEYS_PREFIX: &str = "keys/";
 
@@ -179,6 +179,38 @@ pub async fn check_structure<S: BlobStore>(
     keys: &ReadKeys,
     config: &pb::Config,
     progress: &(dyn Fn(StructureStep, u64, u64) + Sync),
+) -> Result<StructureReport> {
+    check_with_limits(
+        store,
+        keys,
+        config,
+        progress,
+        MAX_DIR_ENTRIES,
+        MAX_HELD_ENTRIES,
+    )
+    .await
+}
+
+/// [`check_structure`] with smaller directory limits, for tests.
+#[cfg(any(test, feature = "test-hooks"))]
+pub async fn check_structure_with_dir_limits<S: BlobStore>(
+    store: &S,
+    keys: &ReadKeys,
+    config: &pb::Config,
+    progress: &(dyn Fn(StructureStep, u64, u64) + Sync),
+    dir: u64,
+    held: u64,
+) -> Result<StructureReport> {
+    check_with_limits(store, keys, config, progress, dir, held).await
+}
+
+async fn check_with_limits<S: BlobStore>(
+    store: &S,
+    keys: &ReadKeys,
+    config: &pb::Config,
+    progress: &(dyn Fn(StructureStep, u64, u64) + Sync),
+    dir_limit: u64,
+    held_limit: u64,
 ) -> Result<StructureReport> {
     let mut report = StructureReport::default();
     let mut findings = Findings::default();
@@ -373,6 +405,7 @@ pub async fn check_structure<S: BlobStore>(
     }
 
     let mut reader = Reader::open_shared(store, keys.duplicate(), config, ReaderCache::new(0))?;
+    reader.set_dir_limits(dir_limit, held_limit);
     let mut seen_dirs: HashSet<BlobId> = HashSet::new();
     let mut seen_chunks: HashSet<BlobId> = HashSet::new();
     let total = snapshots.len() as u64;
@@ -460,6 +493,12 @@ pub async fn check_structure<S: BlobStore>(
                 report.trees_checked += 1;
                 match piece {
                     Ok(piece) => {
+                        let n = nodes.len() as u64 + piece.len() as u64;
+                        if let Err(e) = reader.walk_budget().check_dir(n) {
+                            let detail = format!("tree {name}: {e}");
+                            c.bad_blob(&key, &dir, FindingKind::UnreadableTree, detail);
+                            continue 'dirs;
+                        }
                         if let Some(last) = piece.last() {
                             previous = Some(last.name.clone());
                         }
