@@ -175,7 +175,7 @@ fn deploy_files_rules_structure() {
     );
 
     let rules = rules_of(&document);
-    assert_eq!(rules.len(), 6);
+    assert_eq!(rules.len(), 8);
     for (kind, severity) in [
         (AlertType::BackupFailed, "critical"),
         (AlertType::NoRecentBackup, "warning"),
@@ -183,6 +183,8 @@ fn deploy_files_rules_structure() {
         (AlertType::CheckFailed, "critical"),
         (AlertType::CertificateExpiring, "warning"),
         (AlertType::AgentUpdateFailed, "critical"),
+        (AlertType::SnapshotQuarantined, "critical"),
+        (AlertType::RepositoryUnavailable, "critical"),
     ] {
         let name = alertname(kind);
         let rule = rules

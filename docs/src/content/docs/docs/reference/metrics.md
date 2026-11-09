@@ -61,8 +61,10 @@ scrape_configs:
 | `LodestoreAgentUpdateFailed` | critical | `lodestore_host_agent_update_failed == 1` |
 | `LodestoreCheckFailed` | critical | `lodestore_check_last_status == 0` |
 | `LodestoreCertificateExpiring` | warning | an agent or server certificate with fewer than 14 days left |
+| `LodestoreSnapshotQuarantined` | critical | `lodestore_alerts_active{type="snapshot_quarantined"} > 0` |
+| `LodestoreRepositoryUnavailable` | critical | `lodestore_alerts_active{type="repository_unavailable"} > 0` |
 
-They have the same names and titles as the alerts of Lodestore itself, see [Alerts and notifications](/docs/guides/alerts/). The rules and the built-in notifications work on the same facts, so use one or the other for a given person; with both on, a failure is reported twice. The 15 minutes and the 14 days are written into the rules, edit the file to change them. The dead-man limit is not: `lodestore_backup_overdue` already uses the per-policy limit the server works out, including `spec.alerts.maxAge`.
+The last two carry no repository label; the repository is named in the alert in Lodestore. They have the same names and titles as the alerts of Lodestore itself, see [Alerts and notifications](/docs/guides/alerts/). The rules and the built-in notifications work on the same facts, so use one or the other for a given person; with both on, a failure is reported twice. The 15 minutes and the 14 days are written into the rules, edit the file to change them. The dead-man limit is not: `lodestore_backup_overdue` already uses the per-policy limit the server works out, including `spec.alerts.maxAge`.
 
 The dashboard and the rules use only the metrics below. A test in the repository scrapes a running server and checks that every metric they name exists.
 
@@ -128,4 +130,4 @@ To alert on the age yourself: `time() - lodestore_backup_last_success_timestamp_
 
 | Metric | Labels | Meaning |
 |--------|--------|---------|
-| `lodestore_alerts_active` | `type`, `silenced` | Alerts firing now, by type (`backup_failed`, `no_recent_backup`, `agent_offline`, `check_failed`, `certificate_expiring`) and whether their host is silenced (`true` or `false`). All combinations are always present. |
+| `lodestore_alerts_active` | `type`, `silenced` | Alerts firing now, by type (`backup_failed`, `no_recent_backup`, `agent_offline`, `check_failed`, `certificate_expiring`, `agent_update_failed`, `snapshot_quarantined`, `repository_unavailable`) and whether their host is silenced (`true` or `false`). All combinations are always present. |

@@ -780,13 +780,15 @@ async fn check_series(x: &mut Exposition, state: &AppState) -> anyhow::Result<()
     Ok(())
 }
 
-const ALERT_TYPES: [AlertType; 6] = [
+const ALERT_TYPES: [AlertType; 8] = [
     AlertType::BackupFailed,
     AlertType::NoRecentBackup,
     AlertType::AgentOffline,
     AlertType::CheckFailed,
     AlertType::CertificateExpiring,
     AlertType::AgentUpdateFailed,
+    AlertType::SnapshotQuarantined,
+    AlertType::RepositoryUnavailable,
 ];
 
 async fn alert_series(x: &mut Exposition, state: &AppState, now_ms: i64) -> anyhow::Result<()> {

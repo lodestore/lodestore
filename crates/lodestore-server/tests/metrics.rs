@@ -687,6 +687,20 @@ async fn metrics_agent_version_and_update_failed() {
             ),
             0.0
         );
+        assert_eq!(
+            value(
+                &text,
+                r#"lodestore_alerts_active{type="snapshot_quarantined",silenced="false"}"#
+            ),
+            0.0
+        );
+        assert_eq!(
+            value(
+                &text,
+                r#"lodestore_alerts_active{type="repository_unavailable",silenced="false"}"#
+            ),
+            0.0
+        );
         stand.stop().await;
     }
 }
