@@ -194,13 +194,15 @@ async fn store_create_only_s3() {
         &store.get_range("packs/ab/object", 3..9).await.unwrap()[..],
         b"st"
     );
-    assert!(
-        store
-            .get_range("packs/ab/object", 9..12)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    for past in [5..10, 9..12] {
+        assert!(
+            store
+                .get_range("packs/ab/object", past)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
     assert!(matches!(
         store.get("packs/ab/missing").await,
         Err(BlobError::NotFound)

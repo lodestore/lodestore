@@ -20,8 +20,8 @@ use lodestore_format::crypto::{BlobId, Entropy, HPKE_ENC_LEN, SEALED_KEY_LEN};
 use lodestore_format::gc::mark::load_shards;
 use lodestore_format::gc::sweep::confirm_unreferenced;
 use lodestore_format::index::{
-    Index, MAX_SHARD_SIZE, fetch_attested_shard_bytes, fetch_shard_bytes, index_object_key,
-    rebuild_index, seal_shard,
+    Index, MAX_ATTESTED_SHARD_SIZE, MAX_SHARD_SIZE, fetch_attested_shard_bytes, fetch_shard_bytes,
+    index_object_key, rebuild_index, seal_shard,
 };
 use lodestore_format::pack::{ENTRY_LEN, PACK_MAX_SIZE, PACK_PREFIX_LEN};
 use lodestore_format::pb;
@@ -454,8 +454,9 @@ impl BlobStore for Inflated {
     }
 }
 
-#[tokio::test]
-async fn shard_limit_attested_shard_has_no_read_cap() {
+/// A repository whose only shard is a signed legacy one above
+/// `MAX_SHARD_SIZE`, listed at `listed` bytes.
+async fn signed_legacy_shard_listed_at(listed: u64) -> (Fx, BlobId, BlobId, Inflated) {
     let fx = Fx::new().await;
     let outcome = fx.backup("a", &[("a", 1, 300 << 10)]).await;
     let keys = attacker_keys(&fx.repo);
@@ -476,18 +477,109 @@ async fn shard_limit_attested_shard_has_no_read_cap() {
     attest(&fx, &[id]).await;
     let store = Inflated {
         inner: LocalFsStore::new(fx.tmp.path().join("repo")),
-        key: key.clone(),
-        size: 2 << 30,
+        key,
+        size: listed,
     };
+    (fx, outcome.snapshot_id, id, store)
+}
+
+#[tokio::test]
+async fn shard_limit_attested_shard_is_read_up_to_the_signed_cap() {
+    let (fx, snapshot, id, store) = signed_legacy_shard_listed_at(MAX_ATTESTED_SHARD_SIZE).await;
 
     let set = load_shards(&store, fx.repo.read_keys()).await.unwrap();
     assert!(set.shards.iter().any(|(s, _)| *s == id));
     assert!(set.oversized.contains(&id));
-    assert!(set.skipped.iter().all(|(k, _)| *k != key));
+    assert!(set.skipped.iter().all(|(k, _)| *k != store.key));
 
     let mut reader =
         Reader::open(&store, fx.repo.read_keys().duplicate(), fx.repo.config()).unwrap();
-    reader.list_dir(&outcome.snapshot_id, b"").await.unwrap();
+    reader.list_dir(&snapshot, b"").await.unwrap();
+}
+
+#[tokio::test]
+async fn shard_limit_attested_shard_over_the_signed_cap_is_skipped() {
+    let (fx, snapshot, id, store) =
+        signed_legacy_shard_listed_at(MAX_ATTESTED_SHARD_SIZE + 1).await;
+
+    let set = load_shards(&store, fx.repo.read_keys()).await.unwrap();
+    assert!(set.shards.iter().all(|(s, _)| *s != id));
+    assert!(set.skipped.iter().any(|(k, _)| *k == store.key));
+
+    let mut reader =
+        Reader::open(&store, fx.repo.read_keys().duplicate(), fx.repo.config()).unwrap();
+    let err = reader.list_dir(&snapshot, b"").await.unwrap_err();
+    assert!(err.to_string().contains("not in the index"), "{err}");
+}
+
+/// One object of `size` zero bytes, served by range only, counting the
+/// bytes it hands out.
+struct Zeros {
+    key: String,
+    size: u64,
+    served: Mutex<u64>,
+}
+
+impl BlobStore for Zeros {
+    async fn put_if_absent(&self, _: &str, _: Bytes) -> Result<(), BlobError> {
+        Err(BlobError::backend("read only"))
+    }
+
+    async fn get(&self, _: &str) -> Result<Bytes, BlobError> {
+        Err(BlobError::backend("a whole object was read"))
+    }
+
+    async fn get_range(&self, key: &str, range: Range<u64>) -> Result<Bytes, BlobError> {
+        if key != self.key {
+            return Err(BlobError::NotFound);
+        }
+        let n = range.end.min(self.size).saturating_sub(range.start);
+        *self.served.lock().unwrap() += n;
+        Ok(Bytes::from(vec![0; n as usize]))
+    }
+
+    async fn list(&self, _: &str) -> Result<Vec<ListEntry>, BlobError> {
+        Ok(Vec::new())
+    }
+}
+
+fn zeros(id: &BlobId, size: u64) -> Zeros {
+    Zeros {
+        key: index_object_key(id),
+        size,
+        served: Mutex::new(0),
+    }
+}
+
+#[tokio::test]
+async fn shard_limit_attested_shard_without_listing_stops_at_the_signed_cap() {
+    let id: BlobId = Entropy::os().bytes();
+    let store = zeros(&id, MAX_ATTESTED_SHARD_SIZE + MAX_SHARD_SIZE);
+
+    let err = fetch_attested_shard_bytes(&store, &id, None)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, Error::Corrupt { .. }), "{err}");
+    assert!(err.to_string().contains("signed shard"), "{err}");
+    let probe = MAX_SHARD_SIZE + 1;
+    assert!(*store.served.lock().unwrap() <= probe + MAX_ATTESTED_SHARD_SIZE + 1);
+}
+
+#[tokio::test]
+async fn shard_limit_attested_shard_of_whole_pieces_reads_to_its_end() {
+    let size = 2 * MAX_SHARD_SIZE;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&vec![0; size as usize]);
+    let id: BlobId = *hasher.finalize().as_bytes();
+    let store = zeros(&id, size);
+
+    let got = fetch_attested_shard_bytes(&store, &id, None)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(got.len() as u64, size);
 }
 
 #[tokio::test]

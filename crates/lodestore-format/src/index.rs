@@ -34,6 +34,9 @@ pub(crate) const MAX_RECORD_ENTRIES_LEN: usize =
     (PACK_MAX_SIZE / (ENTRY_LEN + MIN_FRAME_LEN)) * ENTRY_LEN;
 /// Largest index shard a writer, the collector or the server check reads.
 pub const MAX_SHARD_SIZE: u64 = 64 << 20;
+/// Largest index shard the server attested that is still read: shards written
+/// before `MAX_SHARD_SIZE` may be larger, and compaction splits them.
+pub const MAX_ATTESTED_SHARD_SIZE: u64 = 1 << 30;
 
 pub fn hex32(id: &[u8; 32]) -> String {
     blake3::Hash::from_bytes(*id).to_hex().to_string()
@@ -81,12 +84,17 @@ pub async fn fetch_shard_bytes<S: BlobStore>(
 /// shard over `MAX_SHARD_SIZE` is first hashed in pieces of that size, which
 /// holds one piece in memory. Only when the hash is the name is it read whole,
 /// by range of exactly the length found; `open_shard` checks the hash again.
+/// A shard over `MAX_ATTESTED_SHARD_SIZE` is refused, without a listing once
+/// that many bytes have been hashed.
 pub async fn fetch_attested_shard_bytes<S: BlobStore>(
     store: &S,
     shard_id: &BlobId,
     listed: Option<u64>,
 ) -> Result<Option<Bytes>> {
     let key = index_object_key(shard_id);
+    if let Some(size) = listed {
+        crate::error::within_size(&key, size, MAX_ATTESTED_SHARD_SIZE, "signed shard")?;
+    }
     if listed.is_none_or(|size| size <= MAX_SHARD_SIZE) {
         match fetch_shard_bytes(store, &key, listed, MAX_SHARD_SIZE).await {
             Err(Error::Corrupt { .. }) if listed.is_none() => {}
@@ -96,12 +104,8 @@ pub async fn fetch_attested_shard_bytes<S: BlobStore>(
     let mut hasher = blake3::Hasher::new();
     let mut total = 0u64;
     loop {
-        let end = match listed {
-            Some(size) => total.saturating_add(MAX_SHARD_SIZE).min(size),
-            None => total
-                .checked_add(MAX_SHARD_SIZE)
-                .ok_or_else(|| Error::corrupt(&key, "longer than a shard can be read"))?,
-        };
+        let limit = listed.unwrap_or(MAX_ATTESTED_SHARD_SIZE + 1);
+        let end = total.saturating_add(MAX_SHARD_SIZE).min(limit);
         if end <= total {
             break;
         }
@@ -121,6 +125,7 @@ pub async fn fetch_attested_shard_bytes<S: BlobStore>(
             break;
         }
     }
+    crate::error::within_size(&key, total, MAX_ATTESTED_SHARD_SIZE, "signed shard")?;
     if hasher.finalize().as_bytes() != shard_id {
         return Err(Error::corrupt(
             &key,
