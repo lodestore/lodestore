@@ -39,7 +39,7 @@ use crate::pack::{MAX_TREE_ULEN, PACK_TARGET_SIZE, PackBuilder, pack_object_key,
 use crate::pb;
 use crate::snapshot::{ParentTree, seal_snapshot, snapshot_object_key};
 use crate::store::{BlobError, BlobStore, put_named, read_bounded};
-use crate::tree::{MAX_DIR_ENTRIES, encode_tree, split_nodes, validate_name};
+use crate::tree::{MAX_DIR_ENTRIES, MAX_HELD_ENTRIES, encode_tree, split_nodes, validate_name};
 
 /// Recorded issues beyond this many are only counted.
 const MAX_ISSUES: usize = 1000;
@@ -258,6 +258,7 @@ pub struct Writer<S: BlobStore> {
     written: Vec<BlobId>,
     shard_target: usize,
     dir_limit: u64,
+    held_limit: u64,
     /// Open packs of the conformance hooks, see [`Writer::put_blob_raw`].
     #[cfg(feature = "test-hooks")]
     raw: [Option<PackBuilder>; 2],
@@ -349,6 +350,7 @@ impl<S: BlobStore> Writer<S> {
             written: Vec::new(),
             shard_target: SHARD_TARGET_SIZE,
             dir_limit: MAX_DIR_ENTRIES,
+            held_limit: MAX_HELD_ENTRIES,
             #[cfg(feature = "test-hooks")]
             raw: [None, None],
         })
@@ -430,6 +432,11 @@ impl<S: BlobStore> Writer<S> {
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn set_dir_limit(&mut self, entries: u64) {
         self.dir_limit = entries;
+    }
+
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn set_held_limit(&mut self, entries: u64) {
+        self.held_limit = entries;
     }
 
     /// Replaces the randomness source, for deterministic tests.
@@ -893,6 +900,9 @@ struct Session<'a, 'p, S: BlobStore> {
     scan: Option<Arc<ScanTotals>>,
     /// Bytes read so far of the file being backed up.
     cur_read: u64,
+    /// Entries a restore holds on the deepest path below the nodes about to
+    /// be written, then through the directory [`Session::write_tree`] wrote.
+    held: u64,
 }
 
 impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
@@ -925,6 +935,7 @@ impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
             tree_sink: None,
             scan: None,
             cur_read: 0,
+            held: 0,
         }
     }
 
@@ -1098,6 +1109,15 @@ impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
                 self.w.dir_limit
             )));
         }
+        let held = (nodes.len() as u64).saturating_add(std::mem::take(&mut self.held));
+        if held > self.w.held_limit {
+            return Err(Error::InvalidInput(format!(
+                "a directory and the ones it is in hold {held} entries, more than the {} \
+                 a restore holds at once; the backup stops here",
+                self.w.held_limit
+            )));
+        }
+        self.held = held;
         let mut ids = Vec::new();
         for piece in split_nodes(nodes) {
             let bytes = encode_tree(piece);
@@ -1137,6 +1157,7 @@ impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
     ) -> Fut<'b, Vec<pb::Node>> {
         Box::pin(async move {
             let mut nodes = Vec::new();
+            let mut below = 0;
             for (name, child) in &trie.children {
                 let full = join(path, name);
                 let st = Walker::stat(dirfd, name)
@@ -1149,6 +1170,7 @@ impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
                     if let Some(node) = self.backup_entry(dirfd, name, &st, &full).await? {
                         nodes.push(node);
                     }
+                    below = below.max(std::mem::take(&mut self.held));
                     continue;
                 }
                 if Walker::node_type(&st) != Some(pb::NodeType::Dir) {
@@ -1163,7 +1185,9 @@ impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
                 let mut node = Walker::node_of(name, &st, pb::NodeType::Dir, true);
                 node.subtrees = self.write_tree(children).await?;
                 nodes.push(node);
+                below = below.max(std::mem::take(&mut self.held));
             }
+            self.held = below;
             Ok(nodes)
         })
     }
@@ -1185,6 +1209,7 @@ impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
                 entries.retain(|e| e.name == CACHEDIR_TAG);
             }
             let mut nodes = Vec::new();
+            let mut below = 0;
             for entry in entries {
                 let full = join(path, &entry.name);
                 let st = match entry.stat {
@@ -1200,7 +1225,9 @@ impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
                 if let Some(node) = self.backup_entry(dirfd, &entry.name, &st, &full).await? {
                     nodes.push(node);
                 }
+                below = below.max(std::mem::take(&mut self.held));
             }
+            self.held = below;
             Ok(nodes)
         })
     }
