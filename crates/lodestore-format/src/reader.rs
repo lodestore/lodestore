@@ -20,8 +20,8 @@ use crate::error::{Error, Result};
 use crate::fs::filter::PathMatcher;
 use crate::fs::restore::{RestoreSettings, Restorer, check_extents};
 use crate::index::{
-    BlobLocation, INDEX_PREFIX, Index, SupersedesTrust, hex32, index_object_key, open_shard,
-    parse_hex32,
+    BlobLocation, INDEX_PREFIX, Index, MAX_SHARD_READ_SIZE, SupersedesTrust, fetch_shard_bytes,
+    hex32, index_object_key, open_shard, parse_hex32,
 };
 use crate::keys::ReadKeys;
 use crate::pack::{PACK_PREFIX_LEN, decompress, open_prefix, pack_object_key};
@@ -356,7 +356,7 @@ impl<S: BlobStore> Reader<S> {
     /// store happens outside the index lock; only one shard is fetched at a
     /// time, and a shard another reader fetched meanwhile is not fetched again.
     /// `false` when the store does not have it.
-    async fn load_shard(&self, shard_id: BlobId) -> Result<bool> {
+    async fn load_shard(&self, shard_id: BlobId, listed: Option<u64>) -> Result<bool> {
         if self.cache.index.read().await.has_shard(&shard_id) {
             return Ok(true);
         }
@@ -368,14 +368,14 @@ impl<S: BlobStore> Reader<S> {
             .trust_set
             .get_or_init(|| self.trust_attested())
             .await;
-        match self.store.get(&index_object_key(&shard_id)).await {
-            Ok(bytes) => {
+        let key = index_object_key(&shard_id);
+        match fetch_shard_bytes(&self.store, &key, listed, MAX_SHARD_READ_SIZE).await? {
+            Some(bytes) => {
                 let shard = open_shard(self.keys.k_idx(), self.keys.repo_id(), &shard_id, &bytes)?;
                 self.cache.index.write().await.add_shard(shard_id, &shard)?;
                 Ok(true)
             }
-            Err(BlobError::NotFound) => Ok(false),
-            Err(e) => Err(e.into()),
+            None => Ok(false),
         }
     }
 
@@ -401,7 +401,7 @@ impl<S: BlobStore> Reader<S> {
             let Some(shard_id) = entry.key.strip_prefix(INDEX_PREFIX).and_then(parse_hex32) else {
                 continue;
             };
-            match self.load_shard(shard_id).await {
+            match self.load_shard(shard_id, Some(entry.size)).await {
                 Ok(_) | Err(Error::Corrupt { .. }) => {}
                 Err(e) => return Err(e),
             }
@@ -553,7 +553,7 @@ impl<S: BlobStore> Reader<S> {
                 .as_slice()
                 .try_into()
                 .map_err(|_| Error::corrupt("snapshot", "index reference must be 32 bytes"))?;
-            self.load_shard(shard_id).await?;
+            self.load_shard(shard_id, None).await?;
         }
         let root = self
             .load_tree(std::slice::from_ref(&snapshot.root_tree))
