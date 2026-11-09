@@ -12,7 +12,12 @@ set -euo pipefail
 self=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 
 check_range() {
-  local base=$1 head=$2 sha author bad=() total=0
+  local base=$1 head=$2 sha author shas bad=() total=0
+  local rev
+  for rev in "$base" "$head"; do
+    git rev-parse --verify --quiet "$rev^{commit}" >/dev/null || { echo "unknown revision: $rev" >&2; return 2; }
+  done
+  shas=$(git rev-list --no-merges "$base..$head")
   while read -r sha; do
     [ -n "$sha" ] || continue
     total=$((total + 1))
@@ -20,7 +25,7 @@ check_range() {
     if ! git log -1 --format='%(trailers:key=Signed-off-by,valueonly)' "$sha" | grep -Fxq -- "$author"; then
       bad+=("$(git log -1 --format='%h %s' "$sha")")
     fi
-  done < <(git rev-list --no-merges "$base..$head")
+  done <<<"$shas"
   if [ "${#bad[@]}" -gt 0 ]; then
     echo "commits without a Signed-off-by that matches their author:" >&2
     printf '  %s\n' "${bad[@]}" >&2
@@ -84,6 +89,8 @@ self_test() {
 
   expect 0 "empty range" "$self" HEAD HEAD
   expect 2 "no arguments" "$self"
+  expect 2 "unknown base" "$self" deadbeef HEAD
+  expect 2 "unknown head" "$self" HEAD deadbeef
 
   echo "self-test ok"
 }
