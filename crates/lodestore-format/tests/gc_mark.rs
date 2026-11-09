@@ -9,9 +9,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use lodestore_format::Error;
 use lodestore_format::attest::put_attestation;
 use lodestore_format::crypto::{BLOB_TYPE_DATA, BLOB_TYPE_TREE, BlobId, Entropy};
-use lodestore_format::gc::mark::{LiveSet, ShardSet, load_shards};
+use lodestore_format::gc::mark::{LiveSet, MarkPolicy, ShardSet, load_shards};
 use lodestore_format::gc::plan::{PackStat, PlanOptions, plan};
-use lodestore_format::gc::{Survey, survey};
+use lodestore_format::gc::{Survey, survey, survey_with};
 use lodestore_format::index::hex32;
 use lodestore_format::keys::KdfCost;
 use lodestore_format::pack::{PACK_PREFIX_LEN, pack_object_key, parse_entries};
@@ -104,6 +104,18 @@ impl Fx {
             self.repo.read_keys(),
             self.repo.config(),
             opts,
+            &|_| {},
+        )
+        .await
+    }
+
+    async fn survey_with(&self, policy: &MarkPolicy) -> Result<Survey, Error> {
+        survey_with(
+            &self.store,
+            self.repo.read_keys(),
+            self.repo.config(),
+            &opts(),
+            policy,
             &|_| {},
         )
         .await
@@ -226,6 +238,85 @@ async fn gc_mark_fail_closed_unopenable_snapshot() {
     let err = fx.survey(&opts()).await.err().unwrap();
     assert_eq!(corrupt_object(err), key);
     assert_eq!(fx.bucket(), before);
+}
+
+fn quarantining() -> MarkPolicy {
+    MarkPolicy {
+        quarantine: true,
+        ..MarkPolicy::default()
+    }
+}
+
+/// Junk under a valid snapshot name: it hashes to its name but does not open.
+async fn plant_junk(fx: &Fx) -> (BlobId, String) {
+    let junk = b"not a snapshot envelope".to_vec();
+    let id = *blake3::hash(&junk).as_bytes();
+    let key = snapshot_object_key(&id);
+    fx.put(&key, &junk).await;
+    (id, key)
+}
+
+#[tokio::test]
+async fn gc_mark_quarantine_unopenable_snapshot() {
+    let fx = Fx::new().await;
+    let good = fx.backup(1).await;
+    fx.backup(2).await;
+    fx.store
+        .delete(&snapshot_object_key(&good.snapshot_id))
+        .await
+        .unwrap();
+    let kept = fx.backup(3).await;
+    let (_, key) = plant_junk(&fx).await;
+
+    assert!(fx.survey(&opts()).await.is_err());
+    let s = fx.survey_with(&quarantining()).await.unwrap();
+    assert_eq!(s.quarantined.len(), 1);
+    assert_eq!(s.quarantined[0].key, key);
+    assert!(!s.quarantined[0].bound);
+    assert!(s.plan.delete.is_empty() && s.plan.repack.is_empty());
+    assert!(s.snapshots.contains(&kept.snapshot_id));
+    assert_eq!(s.snapshots.len(), 2);
+}
+
+#[tokio::test]
+async fn gc_mark_quarantine_excluded_snapshot_is_skipped() {
+    let fx = Fx::new().await;
+    let gone = fx.backup(1).await;
+    fx.backup(2).await;
+    fx.store
+        .delete(&snapshot_object_key(&gone.snapshot_id))
+        .await
+        .unwrap();
+    let (id, key) = plant_junk(&fx).await;
+    let policy = MarkPolicy {
+        excluded: [id].into(),
+        ..quarantining()
+    };
+
+    let s = fx.survey_with(&policy).await.unwrap();
+    assert!(s.quarantined.is_empty());
+    assert_eq!(s.ignored.len(), 1);
+    assert_eq!(s.ignored[0].0, key);
+    assert!(s.ignored[0].1.contains("excluded by an administrator"));
+    assert!(!s.plan.delete.is_empty());
+}
+
+#[tokio::test]
+async fn gc_mark_quarantine_bound_snapshot() {
+    let fx = Fx::new().await;
+    fx.backup(1).await;
+    let (id, key) = plant_junk(&fx).await;
+    let policy = MarkPolicy {
+        bound: [id].into(),
+        excluded: [id].into(),
+        ..quarantining()
+    };
+
+    let s = fx.survey_with(&policy).await.unwrap();
+    assert_eq!(s.quarantined.len(), 1);
+    assert_eq!(s.quarantined[0].key, key);
+    assert!(s.quarantined[0].bound);
+    assert!(s.ignored.is_empty());
 }
 
 #[tokio::test]

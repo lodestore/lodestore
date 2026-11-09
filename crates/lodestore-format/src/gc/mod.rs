@@ -20,7 +20,7 @@ pub mod repack;
 pub mod sweep;
 pub mod verify;
 
-use mark::{LiveSet, MarkOutcome, ShardSet, load_shards, mark};
+use mark::{LiveSet, MarkOutcome, MarkPolicy, Quarantined, ShardSet, load_shards, mark_with};
 use plan::{GcPlan, PlanOptions, plan};
 use repack::RepackOutcome;
 
@@ -49,6 +49,7 @@ pub struct Survey {
     pub live: LiveSet,
     pub snapshots: Vec<BlobId>,
     pub ignored: Vec<(String, String)>,
+    pub quarantined: Vec<Quarantined>,
     pub plan: GcPlan,
 }
 
@@ -61,24 +62,43 @@ pub async fn survey<S: BlobStore>(
     opts: &PlanOptions,
     progress: &(dyn Fn(SurveyProgress) + Sync),
 ) -> Result<Survey> {
+    survey_with(store, keys, config, opts, &MarkPolicy::default(), progress).await
+}
+
+/// [`survey`] with a policy for snapshots the walk cannot follow. While any
+/// snapshot is quarantined the plan is empty: nothing is deleted or repacked.
+pub async fn survey_with<S: BlobStore>(
+    store: &S,
+    keys: &ReadKeys,
+    config: &pb::Config,
+    opts: &PlanOptions,
+    policy: &MarkPolicy,
+    progress: &(dyn Fn(SurveyProgress) + Sync),
+) -> Result<Survey> {
     let shards = load_shards(store, keys).await?;
     let index = shards.index(&HashSet::new())?;
     let MarkOutcome {
         live,
         snapshots,
         ignored,
-    } = mark(store, keys, config, &index, &|done, total| {
+        quarantined,
+    } = mark_with(store, keys, config, &index, policy, &|done, total| {
         progress(SurveyProgress::Snapshots { done, total });
     })
     .await?;
-    let listing = store.list(PACKS_PREFIX).await?;
-    let plan = plan(&shards, &index, &live, &listing, opts)?;
+    let plan = if quarantined.is_empty() {
+        let listing = store.list(PACKS_PREFIX).await?;
+        plan(&shards, &index, &live, &listing, opts)?
+    } else {
+        GcPlan::default()
+    };
     Ok(Survey {
         shards,
         index,
         live,
         snapshots,
         ignored,
+        quarantined,
         plan,
     })
 }
