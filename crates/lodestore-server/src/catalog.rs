@@ -27,7 +27,7 @@ use crate::db::now_ms;
 use crate::error::{ApiError, ErrorBody};
 use crate::grpc::dispatch::messages::clip;
 use crate::repos::checks::open_store;
-use crate::repos::db::{get_repository, list_repositories, server_access};
+use crate::repos::db::{get_repository, list_repositories, server_access, set_open_error};
 use crate::state::AppState;
 
 pub mod actions;
@@ -81,12 +81,60 @@ pub async fn open_repository(
         .try_into()
         .map_err(|_| anyhow::anyhow!("master secret must be 32 bytes"))?;
     let store = open_store(&access.location, access.server_creds.as_ref())?;
-    let config = lodestore_format::config::decode(&store.get(CONFIG_OBJECT).await?)?;
+    let config_bytes = store.get(CONFIG_OBJECT).await?;
+    let config = match lodestore_format::config::check_recorded(
+        &config_bytes,
+        &access.config_hash,
+        &access.format_repo_id,
+    ) {
+        Ok(config) => {
+            if access.open_error.is_some()
+                && let Err(error) = set_open_error(state, repository_id, None).await
+            {
+                tracing::warn!(repository = repository_id, %error, "clearing the open error");
+            }
+            config
+        }
+        Err(error) => {
+            let reason = error.to_string();
+            if access.open_error.as_deref() != Some(reason.as_str())
+                && let Err(error) = set_open_error(state, repository_id, Some(&reason)).await
+            {
+                tracing::warn!(repository = repository_id, %error, "recording the open error");
+            }
+            return Err(anyhow::Error::new(error).context(
+                "the repository does not match what this server recorded; it is unavailable",
+            ));
+        }
+    };
     Ok(OpenRepository {
         store,
         keys: ReadKeys::derive(MasterKey::from_bytes(master), access.format_repo_id),
         config,
     })
+}
+
+/// Opens every repository once so a mismatching one is marked unavailable
+/// without anyone asking for it.
+pub async fn probe_repositories(state: AppState) {
+    let ids = match sqlx::query("SELECT id FROM repositories")
+        .fetch_all(&state.db.pool)
+        .await
+    {
+        Ok(rows) => rows
+            .iter()
+            .filter_map(|r| r.try_get::<String, _>("id").ok())
+            .collect::<Vec<_>>(),
+        Err(error) => {
+            tracing::warn!(%error, "listing repositories to probe");
+            return;
+        }
+    };
+    for id in ids {
+        if let Err(error) = open_repository(&state, &id).await {
+            tracing::warn!(repository = %id, error = %format!("{error:#}"), "repository is not available");
+        }
+    }
 }
 
 async fn read_snapshot(source: &OpenRepository, id: &[u8; 32]) -> FormatResult<pb::Snapshot> {
