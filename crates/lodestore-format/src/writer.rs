@@ -38,7 +38,7 @@ use crate::locks;
 use crate::pack::{MAX_TREE_ULEN, PACK_TARGET_SIZE, PackBuilder, pack_object_key, parse_entries};
 use crate::pb;
 use crate::snapshot::{ParentTree, seal_snapshot, snapshot_object_key};
-use crate::store::{BlobError, BlobStore, put_named};
+use crate::store::{BlobError, BlobStore, put_named, read_bounded};
 use crate::tree::{encode_tree, split_nodes, validate_name};
 
 /// Recorded issues beyond this many are only counted.
@@ -355,11 +355,12 @@ impl<S: BlobStore> Writer<S> {
     /// Opens the repository `store` holds with writer keys: reads `config`,
     /// checks that the keys were exported for exactly it, then [`Writer::new`].
     pub async fn connect(store: S, keys: WriteKeys) -> Result<Self> {
-        let config_bytes = match store.get("config").await {
-            Ok(bytes) => bytes,
-            Err(BlobError::NotFound) => return Err(Error::NotInitialized),
-            Err(e) => return Err(e.into()),
-        };
+        let config_bytes =
+            match read_bounded(&store, "config", None, config::MAX_CONFIG_SIZE, "config").await {
+                Ok(bytes) => bytes,
+                Err(Error::Store(BlobError::NotFound)) => return Err(Error::NotInitialized),
+                Err(e) => return Err(e),
+            };
         keys.verify_config(&config_bytes)?;
         let config = config::decode(&config_bytes)?;
         Self::new(store, keys, &config).await
@@ -377,11 +378,12 @@ impl<S: BlobStore> Writer<S> {
         own_shards: &HashSet<BlobId>,
         distrusted: &HashSet<BlobId>,
     ) -> Result<Self> {
-        let config_bytes = match store.get("config").await {
-            Ok(bytes) => bytes,
-            Err(BlobError::NotFound) => return Err(Error::NotInitialized),
-            Err(e) => return Err(e.into()),
-        };
+        let config_bytes =
+            match read_bounded(&store, "config", None, config::MAX_CONFIG_SIZE, "config").await {
+                Ok(bytes) => bytes,
+                Err(Error::Store(BlobError::NotFound)) => return Err(Error::NotInitialized),
+                Err(e) => return Err(e),
+            };
         keys.verify_config(&config_bytes)?;
         let config = config::decode(&config_bytes)?;
         Self::open(store, keys, &config, Dedup::Hinted(own_shards), distrusted).await

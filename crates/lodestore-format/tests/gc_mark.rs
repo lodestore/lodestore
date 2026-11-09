@@ -381,21 +381,21 @@ async fn gc_mark_quarantine_rollback_shared_subtree() {
     assert!(!s.live.contains(&root, BLOB_TYPE_TREE));
 }
 
-struct FailingSnapshotGet<'a>(&'a LocalFsStore);
+struct FailingSnapshotRead<'a>(&'a LocalFsStore);
 
-impl BlobStore for FailingSnapshotGet<'_> {
+impl BlobStore for FailingSnapshotRead<'_> {
     async fn put_if_absent(&self, key: &str, data: Bytes) -> Result<(), BlobError> {
         self.0.put_if_absent(key, data).await
     }
 
     async fn get(&self, key: &str) -> Result<Bytes, BlobError> {
-        if key.starts_with("snapshots/") {
-            return Err(BlobError::backend("injected"));
-        }
         self.0.get(key).await
     }
 
     async fn get_range(&self, key: &str, range: Range<u64>) -> Result<Bytes, BlobError> {
+        if key.starts_with("snapshots/") {
+            return Err(BlobError::backend("injected"));
+        }
         self.0.get_range(key, range).await
     }
 
@@ -408,7 +408,7 @@ impl BlobStore for FailingSnapshotGet<'_> {
 async fn gc_mark_quarantine_store_error_stops_mark() {
     let fx = Fx::new().await;
     fx.backup(1).await;
-    let failing = FailingSnapshotGet(&fx.store);
+    let failing = FailingSnapshotRead(&fx.store);
     let err = survey_with(
         &failing,
         fx.repo.read_keys(),

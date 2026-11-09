@@ -16,7 +16,7 @@ use crate::index::{hex32, parse_hex32};
 use crate::keys::ReadKeys;
 use crate::pb;
 use crate::reader::Reader;
-use crate::store::BlobStore;
+use crate::store::{BlobStore, read_bounded};
 
 pub(crate) const SNAPSHOT_PREFIX: &str = "snapshots/";
 pub const ENVELOPE_VERSION: u32 = 1;
@@ -125,7 +125,22 @@ pub async fn list_snapshots<S: BlobStore>(store: &S, keys: &ReadKeys) -> Result<
             out.skipped.push((entry.key, e.to_string()));
             continue;
         }
-        let bytes = store.get(&entry.key).await?;
+        let bytes = match read_bounded(
+            store,
+            &entry.key,
+            Some(entry.size),
+            MAX_SNAPSHOT_SIZE,
+            "snapshot",
+        )
+        .await
+        {
+            Ok(bytes) => bytes,
+            Err(e @ Error::Corrupt { .. }) => {
+                out.skipped.push((entry.key, e.to_string()));
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
         match open_snapshot(keys.hpke_private_key(), keys.repo_id(), &id, &bytes) {
             Ok(snapshot) => out.entries.push(SnapshotEntry {
                 id,
