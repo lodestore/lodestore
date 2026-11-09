@@ -137,6 +137,8 @@ pub enum AlertType {
     CheckFailed,
     CertificateExpiring,
     AgentUpdateFailed,
+    SnapshotQuarantined,
+    RepositoryUnavailable,
 }
 
 impl AlertType {
@@ -148,6 +150,8 @@ impl AlertType {
             AlertType::CheckFailed => "check_failed",
             AlertType::CertificateExpiring => "certificate_expiring",
             AlertType::AgentUpdateFailed => "agent_update_failed",
+            AlertType::SnapshotQuarantined => "snapshot_quarantined",
+            AlertType::RepositoryUnavailable => "repository_unavailable",
         }
     }
 
@@ -159,6 +163,8 @@ impl AlertType {
             "check_failed" => AlertType::CheckFailed,
             "certificate_expiring" => AlertType::CertificateExpiring,
             "agent_update_failed" => AlertType::AgentUpdateFailed,
+            "snapshot_quarantined" => AlertType::SnapshotQuarantined,
+            "repository_unavailable" => AlertType::RepositoryUnavailable,
             _ => return None,
         })
     }

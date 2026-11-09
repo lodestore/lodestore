@@ -681,6 +681,40 @@ describe("active alerts", () => {
 		).toHaveAttribute("href", "/hosts/host-1");
 	});
 
+	it("links quarantine and unavailable alerts to the repository page", async () => {
+		await renderAlerts([
+			alertFixture("q1", {
+				type: "snapshot_quarantined",
+				host: null,
+				policy: null,
+				repository: { id: "repo-1", name: "main" },
+				detail: "Review them under Free up space.",
+				facts: { findings: 2, error: "snapshots/ab: decryption failed" },
+			}),
+			alertFixture("u1", {
+				type: "repository_unavailable",
+				host: null,
+				policy: null,
+				repository: { id: "repo-2", name: "offsite" },
+				detail: "The server does not open it: config hash mismatch.",
+				facts: { error: "config hash mismatch" },
+			}),
+		]);
+		const titles = rows(STRIP).map(titleOf);
+		expect(titles).toContain(
+			"2 snapshots in main cannot be read; cleanup is stopped",
+		);
+		expect(titles).toContain("Repository offsite is unavailable");
+		expect(screen.getByRole("link", { name: "main" })).toHaveAttribute(
+			"href",
+			"/settings/repositories/repo-1#free-up-space",
+		);
+		expect(screen.getByRole("link", { name: "offsite" })).toHaveAttribute(
+			"href",
+			"/settings/repositories/repo-2#checks",
+		);
+	});
+
 	it("silences and resumes a host", async () => {
 		const user = userEvent.setup();
 		let body: unknown;

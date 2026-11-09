@@ -720,6 +720,85 @@ async fn alerts_check_failed_raises_and_resolves() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn alerts_snapshot_quarantined_fires_and_resolves() {
+    for backend in backends() {
+        let env = Env::start(&backend).await;
+        let now = now_ms();
+        sqlx::query(
+            "INSERT INTO gc_quarantine (repository_id, snapshot_id, object_key, reason, \
+             confirmable, detected_at) VALUES ($1, 's1', 'snapshots/ab', 'decryption failed', 1, $2)",
+        )
+        .bind(&env.repo)
+        .bind(now)
+        .execute(env.pool())
+        .await
+        .unwrap();
+
+        assert_eq!(env.tick(now).await.fired, 1, "[{}]", backend.name());
+        let alerts = env.alerts("active").await;
+        assert_eq!(alerts.len(), 1);
+        let alert = &alerts[0];
+        assert_eq!(alert["type"], "snapshot_quarantined");
+        assert_eq!(alert["severity"], "critical");
+        assert_eq!(alert["repository"]["id"], env.repo.as_str());
+        assert_eq!(alert["facts"]["findings"], 1);
+        assert_eq!(alert["facts"]["error"], "snapshots/ab: decryption failed");
+        let id = alert["id"].as_str().unwrap().to_string();
+        let key: String = sqlx::query("SELECT key FROM alerts WHERE id = $1")
+            .bind(&id)
+            .fetch_one(env.pool())
+            .await
+            .unwrap()
+            .get("key");
+        assert_eq!(key, format!("snapshot_quarantined:{}", env.repo));
+        assert_eq!(env.tick(now + MINUTE).await, Default::default());
+
+        sqlx::query("UPDATE gc_quarantine SET confirmed_at = $1, confirmed_by = 'admin'")
+            .bind(now + HOUR)
+            .execute(env.pool())
+            .await
+            .unwrap();
+        assert_eq!(env.tick(now + HOUR + MINUTE).await.resolved, 1);
+        assert!(env.alerts("active").await.is_empty());
+        assert_eq!(env.events(&id).await, ["firing", "resolved"]);
+        env.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn alerts_repository_unavailable_fires_and_resolves() {
+    for backend in backends() {
+        let env = Env::start(&backend).await;
+        let now = now_ms();
+        sqlx::query("UPDATE repositories SET open_error = 'config hash mismatch' WHERE id = $1")
+            .bind(&env.repo)
+            .execute(env.pool())
+            .await
+            .unwrap();
+
+        assert_eq!(env.tick(now).await.fired, 1, "[{}]", backend.name());
+        let alerts = env.alerts("active").await;
+        assert_eq!(alerts.len(), 1);
+        let alert = &alerts[0];
+        assert_eq!(alert["type"], "repository_unavailable");
+        assert_eq!(alert["severity"], "critical");
+        assert_eq!(alert["title"], "Repository main is unavailable");
+        assert_eq!(alert["facts"]["error"], "config hash mismatch");
+        let id = alert["id"].as_str().unwrap().to_string();
+
+        sqlx::query("UPDATE repositories SET open_error = NULL WHERE id = $1")
+            .bind(&env.repo)
+            .execute(env.pool())
+            .await
+            .unwrap();
+        assert_eq!(env.tick(now + MINUTE).await.resolved, 1);
+        assert!(env.alerts("active").await.is_empty());
+        assert_eq!(env.events(&id).await, ["firing", "resolved"]);
+        env.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn alerts_check_cancel_keeps_alert() {
     for backend in backends() {
         let env = Env::start(&backend).await;

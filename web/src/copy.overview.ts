@@ -150,6 +150,10 @@ export const overview = {
 			agentUpdateFailed: (host: string) => `Agent update failed on ${host}`,
 			checkFailed: (level: string, repository: string) =>
 				`${level} check failed on ${repository}`,
+			snapshotQuarantined: (count: number, repository: string) =>
+				`${plural(count, "snapshot")} in ${repository} cannot be read; cleanup is stopped`,
+			repositoryUnavailable: (repository: string) =>
+				`Repository ${repository} is unavailable`,
 			expiresIn: (name: string, days: number) =>
 				`${name} expires in ${plural(days, "day")}`,
 			expired: (name: string) => `${name} has expired`,
