@@ -58,6 +58,41 @@ impl<S: BlobStore> BlobStore for Swapped<S> {
     }
 }
 
+/// A store whose listing still shows objects that are gone. Like the S3
+/// store, it answers an empty range without asking the bucket.
+struct Stale<S> {
+    inner: S,
+    gone: Vec<ListEntry>,
+}
+
+impl<S: BlobStore> BlobStore for Stale<S> {
+    async fn put_if_absent(&self, key: &str, data: bytes::Bytes) -> Result<(), BlobError> {
+        self.inner.put_if_absent(key, data).await
+    }
+
+    async fn get(&self, key: &str) -> Result<bytes::Bytes, BlobError> {
+        self.inner.get(key).await
+    }
+
+    async fn get_range(&self, key: &str, range: Range<u64>) -> Result<bytes::Bytes, BlobError> {
+        if range.is_empty() {
+            return Ok(bytes::Bytes::new());
+        }
+        self.inner.get_range(key, range).await
+    }
+
+    async fn list(&self, prefix: &str) -> Result<Vec<ListEntry>, BlobError> {
+        let mut out = self.inner.list(prefix).await?;
+        out.extend(
+            self.gone
+                .iter()
+                .filter(|e| e.key.starts_with(prefix))
+                .cloned(),
+        );
+        Ok(out)
+    }
+}
+
 async fn survey_on<S: BlobStore>(store: &S, fx: &Fx) -> Survey {
     survey(
         store,
@@ -337,4 +372,22 @@ async fn bounded_reads_packs_and_check_are_ranged() {
             .iter()
             .any(|f| f.kind == FindingKind::UnreadablePack)
     );
+}
+
+#[tokio::test]
+async fn bounded_reads_empty_listing_of_a_vanished_object_is_not_found() {
+    let fx = Fx::new().await;
+    let stale = Stale {
+        inner: &fx.store,
+        gone: vec![ListEntry {
+            key: "locks/attest-gone".into(),
+            size: 0,
+            modified_ms: None,
+        }],
+    };
+    let set = read_attestations(&stale, fx.repo.read_keys())
+        .await
+        .unwrap();
+    assert!(set.incomplete);
+    assert!(set.rejected.is_empty(), "{:?}", set.rejected);
 }
