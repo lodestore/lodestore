@@ -15,7 +15,7 @@ Where to find them:
 
 | Level | What it does | Cost |
 |-------|--------------|------|
-| `structure` | Lists the bucket, reads the index and follows every snapshot and tree to its blobs. Reports snapshots that cannot be opened or that have a directory larger than a restore reads by default, blobs that no pack holds and packs the index names that the bucket lacks or whose size differs from the one the index records. Also counts the real size of the repository, which the overview and the metrics show as storage used. | Reads metadata only. Fast, cheap. |
+| `structure` | Lists the bucket, reads the index and follows every snapshot and tree to its blobs. Reports snapshots that cannot be opened or that pass a restore's default limits on the entries of one directory or the entries held at once, blobs that no pack holds and packs the index names that the bucket lacks or whose size differs from the one the index records. Also counts the real size of the repository, which the overview and the metrics show as storage used. A snapshot over the directory limits, written before backups refused such trees, restores with `lode restore --allow-large-directories`. | Reads metadata only. Fast, cheap. |
 | `packs` | Downloads packs, decrypts every blob in them and compares its hash with its id. Also compares each pack with what the index says about it (size and the place of every blob). Finds silent damage of a stored object. | Downloads data. Limited per run, see below. |
 | `restore` | Restores a random sample of files from random snapshots into a scratch folder on the server, compares each file with its recorded hash and deletes the folder. The only level that proves the whole chain, key to file, works. | Writes to the server's disk. Limited per run. |
 
