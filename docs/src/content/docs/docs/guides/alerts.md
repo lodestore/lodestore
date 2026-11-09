@@ -18,7 +18,7 @@ Lodestore watches the fleet and raises an alert when something needs a person. A
 
 `snapshot_quarantined` means cleanup is stopped for that repository until you deal with the snapshot: open the repository page and use the **Free up space** card to review the quarantined snapshots. See [Freeing up space](/docs/guides/gc/).
 
-`repository_unavailable` means the server does not open the repository until its configuration in the bucket matches what the server recorded. Open the repository page and read the **Storage checks** card to see which setting differs. This alert covers a configuration mismatch only; a bucket that cannot be reached because of a network error does not raise it, and shows as failing jobs and failing storage checks instead.
+`repository_unavailable` means the server does not open the repository until its configuration in the bucket matches what the server recorded. Open the repository page and read the **Storage checks** card to see which setting differs. After you fix the configuration, **Check storage again** on the repository page opens the repository again and clears the alert; the server checks it again by itself at its next open as well. This alert covers a configuration mismatch only; a bucket that cannot be reached because of a network error does not raise it, and shows as failing jobs and failing storage checks instead.
 
 An alert is one object per cause, not per evaluation: it fires once, may remind, and resolves once. Resolved alerts stay in the history.
 
