@@ -16,7 +16,7 @@ const hosts = [
 	<div class="wrap">
 		<div>
 			<h1 class="rise">
-				Back up every <span class="rot"
+				Back up every <span class="rot" data-sizer={words.reduce((a, b) => (b.length > a.length ? b : a))}
 					><span class="rot-in" id="rot" data-words={JSON.stringify(words.slice(1))}><span>{words[0]}</span></span></span
 				><br />Restore without the server.
 			</h1>

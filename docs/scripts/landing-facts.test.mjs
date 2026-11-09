@@ -123,6 +123,9 @@ test('the hero heading is one sentence for crawlers', () => {
 	const words = JSON.parse(decode(raw));
 	assert.ok(Array.isArray(words) && words.length > 0);
 	for (const w of words) assert.ok(typeof w === 'string' && w.length > 0 && w.endsWith('.'), `bad rotator word: ${w}`);
+	const shown = h1.match(/<span>([^<]*)<\/span><\/span><\/span>/)?.[1];
+	const longest = [shown, ...words].reduce((a, b) => (b.length > a.length ? b : a));
+	assert.equal(decode(h1.match(/data-sizer="([^"]*)"/)?.[1] ?? ''), longest, 'the rotator does not reserve the width of its longest word');
 });
 
 test('trust line makes no air-gapped claim', () => {
