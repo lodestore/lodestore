@@ -423,6 +423,60 @@ async fn gc_mark_quarantine_store_error_stops_mark() {
     assert!(matches!(err, Error::Store(_)), "{err:?}");
 }
 
+/// Serves snapshot bodies one byte shorter, or longer, than they are.
+struct MisSizedSnapshotRead<'a>(&'a LocalFsStore, bool);
+
+impl BlobStore for MisSizedSnapshotRead<'_> {
+    async fn put_if_absent(&self, key: &str, data: Bytes) -> Result<(), BlobError> {
+        self.0.put_if_absent(key, data).await
+    }
+
+    async fn get(&self, key: &str) -> Result<Bytes, BlobError> {
+        self.0.get(key).await
+    }
+
+    async fn get_range(&self, key: &str, range: Range<u64>) -> Result<Bytes, BlobError> {
+        let bytes = self.0.get_range(key, range).await?;
+        if !key.starts_with("snapshots/") {
+            return Ok(bytes);
+        }
+        let mut body = bytes.to_vec();
+        if self.1 {
+            body.push(0);
+        } else {
+            body.pop();
+        }
+        Ok(body.into())
+    }
+
+    async fn list(&self, prefix: &str) -> Result<Vec<ListEntry>, BlobError> {
+        self.0.list(prefix).await
+    }
+}
+
+#[tokio::test]
+async fn gc_mark_snapshot_body_not_of_listed_size_stops_mark() {
+    let fx = Fx::new().await;
+    fx.backup(1).await;
+    for longer in [false, true] {
+        let store = MisSizedSnapshotRead(&fx.store, longer);
+        for policy in [MarkPolicy::default(), quarantining()] {
+            let err = survey_with(
+                &store,
+                fx.repo.read_keys(),
+                fx.repo.config(),
+                &opts(),
+                &policy,
+                &|_| {},
+            )
+            .await
+            .err()
+            .unwrap();
+            assert!(matches!(err, Error::Store(_)), "{err:?}");
+        }
+    }
+}
+
 #[tokio::test]
 async fn gc_verify_with_refuses_quarantined() {
     let fx = Fx::new().await;
