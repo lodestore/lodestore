@@ -22,7 +22,7 @@ use lodestore_format::keys::KdfCost;
 use lodestore_format::pb;
 use lodestore_format::reader::{Reader, RestoreOptions};
 use lodestore_format::repo::{InitOptions, PendingInit, Repository};
-use lodestore_format::snapshot::snapshot_object_key;
+use lodestore_format::snapshot::{seal_snapshot, snapshot_object_key};
 use lodestore_format::store::{BlobStore, LocalFsStore};
 use lodestore_format::writer::{BackupOptions, Writer};
 use lodestore_server::maintenance::gc::GcState;
@@ -548,6 +548,45 @@ async fn adv_gc_quarantines_unopenable_snapshot_until_excluded() {
     let (repo, store, root) = fresh_repo(&ts).await;
     let kept = kept_and_forgotten(&ts, &store, &root).await;
     let planted = plant_unopenable(&root);
+    enable(&ts, &api, &repo).await;
+    assert_stops_then_finishes(&ts, &api, &repo, &store, &kept, &planted).await;
+    ts.stop().await;
+}
+
+/// A snapshot sealed under the repository's own keys whose root tree is in no
+/// index shard.
+async fn plant_missing_tree(store: &LocalFsStore, root: &Path) -> String {
+    let repo = Repository::open(store, PASSWORD).await.unwrap();
+    let snapshot = pb::Snapshot {
+        time: Some(pb::Timestamp {
+            seconds: 1_700_000_000,
+            nanos: 0,
+        }),
+        hostname: b"host-x".to_vec(),
+        paths: vec![b"/".to_vec()],
+        root_tree: noise(77, 32),
+        ..Default::default()
+    };
+    let (id, bytes) = seal_snapshot(
+        &snapshot,
+        repo.read_keys().hpke_public_key(),
+        repo.read_keys().repo_id(),
+        &mut Entropy::os(),
+    )
+    .unwrap();
+    let key = snapshot_object_key(&id);
+    std::fs::write(root.join(&key), bytes).unwrap();
+    key
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adv_gc_quarantines_snapshot_with_missing_tree() {
+    let backend: Backend = backends().remove(0);
+    let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+    let api = ts.api().await;
+    let (repo, store, root) = fresh_repo(&ts).await;
+    let kept = kept_and_forgotten(&ts, &store, &root).await;
+    let planted = plant_missing_tree(&store, &root).await;
     enable(&ts, &api, &repo).await;
     assert_stops_then_finishes(&ts, &api, &repo, &store, &kept, &planted).await;
     ts.stop().await;
