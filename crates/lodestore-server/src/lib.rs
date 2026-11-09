@@ -1,4 +1,5 @@
 //! Lodestore server: control plane and catalog.
+#![forbid(unsafe_code)]
 
 pub mod agent_update;
 pub mod alerts;

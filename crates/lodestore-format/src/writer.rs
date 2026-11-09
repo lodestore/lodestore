@@ -413,6 +413,7 @@ impl<S: BlobStore> Writer<S> {
     }
 
     /// Replaces the randomness source, for deterministic tests.
+    #[cfg(any(test, feature = "test-hooks"))]
     pub fn with_entropy(mut self, entropy: Entropy) -> Self {
         self.entropy = entropy;
         self

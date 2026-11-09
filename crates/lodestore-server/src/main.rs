@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use lodestore_server::config::{Config, ConfigArgs};

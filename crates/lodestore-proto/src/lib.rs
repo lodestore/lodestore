@@ -1,4 +1,5 @@
 //! Lodestore agent control protocol.
+#![forbid(unsafe_code)]
 
 #[allow(clippy::all, clippy::pedantic)]
 pub mod agent {
