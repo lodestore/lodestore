@@ -252,6 +252,7 @@ pub struct RepoFull {
     pub agent_key_state: String,
     pub checks_json: Option<String>,
     pub checked_at: Option<i64>,
+    pub open_error: Option<String>,
 }
 
 fn full_row(r: &sqlx::any::AnyRow) -> anyhow::Result<RepoFull> {
@@ -264,13 +265,14 @@ fn full_row(r: &sqlx::any::AnyRow) -> anyhow::Result<RepoFull> {
         agent_key_state: r.try_get("agent_key_state")?,
         checks_json: r.try_get("checks_json")?,
         checked_at: r.try_get("checked_at")?,
+        open_error: r.try_get("open_error")?,
     })
 }
 
 pub async fn list_repositories(state: &AppState) -> anyhow::Result<Vec<RepoFull>> {
     sqlx::query(
         "SELECT id, name, backend, location_json, experimental, agent_key_state, checks_json, \
-         checked_at FROM repositories ORDER BY created_at, id",
+         checked_at, open_error FROM repositories ORDER BY created_at, id",
     )
     .fetch_all(&state.db.pool)
     .await?
@@ -282,7 +284,7 @@ pub async fn list_repositories(state: &AppState) -> anyhow::Result<Vec<RepoFull>
 pub async fn find_repository(state: &AppState, id: &str) -> anyhow::Result<Option<RepoFull>> {
     sqlx::query(
         "SELECT id, name, backend, location_json, experimental, agent_key_state, checks_json, \
-         checked_at FROM repositories WHERE id = $1",
+         checked_at, open_error FROM repositories WHERE id = $1",
     )
     .bind(id)
     .fetch_optional(&state.db.pool)
@@ -342,12 +344,26 @@ pub struct ServerAccess {
     pub format_repo_id: [u8; 16],
     pub master: Zeroizing<Vec<u8>>,
     pub server_slot_secret: Option<Zeroizing<Vec<u8>>>,
+    pub open_error: Option<String>,
+}
+
+pub(crate) async fn set_open_error(
+    state: &AppState,
+    id: &str,
+    error: Option<&str>,
+) -> anyhow::Result<()> {
+    sqlx::query("UPDATE repositories SET open_error = $1 WHERE id = $2")
+        .bind(error)
+        .bind(id)
+        .execute(&state.db.pool)
+        .await?;
+    Ok(())
 }
 
 pub async fn server_access(state: &AppState, id: &str) -> anyhow::Result<ServerAccess> {
     let row = sqlx::query(
         "SELECT backend, location_json, config_hash, format_repo_id, master_secret_id, \
-         server_slot_secret_id, server_creds_secret_id, agent_creds_secret_id \
+         server_slot_secret_id, server_creds_secret_id, agent_creds_secret_id, open_error \
          FROM repositories WHERE id = $1",
     )
     .bind(id)
@@ -390,6 +406,7 @@ pub async fn server_access(state: &AppState, id: &str) -> anyhow::Result<ServerA
             .get_secret(&row.try_get::<String, _>("master_secret_id")?)
             .await?,
         server_slot_secret,
+        open_error: row.try_get("open_error")?,
     })
 }
 

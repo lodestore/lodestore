@@ -119,6 +119,7 @@ pub async fn serve(config: Config, listeners: Listeners) -> anyhow::Result<Serve
     maintenance::check::interrupt_running(&state).await?;
     maintenance::attest::resume_interrupted(&state).await?;
     catalog::resume_unsynced(&state).await;
+    tokio::spawn(catalog::probe_repositories(state.clone()));
 
     let rest_addr = listeners.rest.local_addr()?;
     let grpc_addr = listeners.grpc.local_addr()?;

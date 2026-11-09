@@ -11550,6 +11550,13 @@
           "name": {
             "type": "string"
           },
+          "unavailable_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the server refuses to open the repository, set when its config\ndoes not match what was recorded."
+          },
           "unlocked": {
             "type": [
               "boolean",
