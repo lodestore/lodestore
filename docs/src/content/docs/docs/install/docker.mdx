@@ -11,7 +11,7 @@ The [Quickstart](/docs/quickstart/) starts the server with one `docker run` and 
 
 ## The image
 
-`ghcr.io/lodestore/lodestore` holds the server, the web interface and the agent binaries that `install.sh` hands to new hosts. It is built for `linux/amd64` and `linux/arm64`. A release `0.1.0` is published as `:0.1.0`; stable releases also move `:0.1` and `:latest`. Pin the full version.
+`ghcr.io/lodestore/lodestore` holds the server, the web interface and the agent binaries that `install.sh` hands to new hosts. The agents in the official image come with their signatures. An image you build from source has none: on a host with `minisign` the installer will not install its agents until you sign them with your own key and pass it with `--trust-key`, see [Signing your own builds](/docs/guides/agent-updates/#signing-your-own-builds). It is built for `linux/amd64` and `linux/arm64`. A release `0.1.0` is published as `:0.1.0`; stable releases also move `:0.1` and `:latest`. Pin the full version.
 
 The image runs as user `65532` with no shell, keeps its state in `/var/lib/lodestore` and listens on two ports:
 

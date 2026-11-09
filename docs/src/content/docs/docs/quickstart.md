@@ -62,14 +62,28 @@ The wizard opens after you sign in. It has four steps:
 
 ## Add a host
 
-Open **Hosts** and choose **Add host**. The page shows a command with a one-time join token. Run it as root on the host you want to back up. The installer downloads the agent from your server, checks its checksum, installs a systemd service and registers the host.
+Open **Hosts** and choose **Add host**. The page shows a command with a one-time join token. Run it as root on the host you want to back up. The installer downloads the agent from your server, checks its checksum and, when `minisign` is installed on the host, its signature, then installs a systemd service and registers the host.
 
 <!-- ci:install-agent -->
 ```sh
 curl -fsSL "http://$LODESTORE_HOST:8080/install.sh" | sudo sh -s -- --insecure --join "$JOIN_TOKEN"
 ```
 
-The `--insecure` flag is there because this quickstart serves the installer over plain HTTP, so the agent binary and its checksum can be tampered with on the way. With HTTPS in front of the server, the command has no such flag.
+The `--insecure` flag is there because this quickstart serves the installer over plain HTTP. Over plain HTTP anyone on the network can get root on this host: the installer, the agent binary and its checksum can all be replaced on the way, and the installer runs as root. With HTTPS in front of the server, the command has no such flag.
+
+### Check the agent by hand
+
+This step is optional. If `minisign` is installed on the host, the installer does the same check itself. Download the agent and its signature, then verify them with the project key:
+
+```sh
+curl -fsSL -o lodestore-agent "http://$LODESTORE_HOST:8080/install/agent/$(uname -m)"
+curl -fsSL -o lodestore-agent.minisig "http://$LODESTORE_HOST:8080/install/agent/$(uname -m).minisig"
+minisign -V -P RWR4L6XuZIijjGDS/pggnqvsOKeXTnAUspdDGzyF983eIpcnS+mKEREI -m lodestore-agent
+```
+
+The last line must be `Trusted comment: lodestore-agent <version> <arch>`. Then run the install command above.
+
+This check does not protect the installer script: over plain HTTP the script can be replaced too, and with it the key it carries. Put the server behind HTTPS to close that gap. The key is also published on [Binary](/docs/install/binary/#check-the-files) and in the release tag, key id `8CA38864EEA52F78`; compare it before you trust the one the server shows.
 
 The host appears under **Hosts** as online within seconds.
 
