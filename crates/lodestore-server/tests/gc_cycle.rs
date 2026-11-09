@@ -10,10 +10,11 @@ use lodestore_format::attest::{
 };
 use lodestore_format::crypto::{BLOB_TYPE_DATA, BlobId, Entropy, HPKE_ENC_LEN, SEALED_KEY_LEN};
 use lodestore_format::index::{
-    hex32, index_object_key, open_shard, parse_hex32, seal_shard_superseding,
+    MAX_SHARD_SIZE, hex32, index_object_key, open_shard, parse_hex32, seal_shard,
+    seal_shard_superseding,
 };
 use lodestore_format::locks::{new_lock_id, publish_gc_manifest};
-use lodestore_format::pack::PACK_PREFIX_LEN;
+use lodestore_format::pack::{ENTRY_LEN, PACK_MAX_SIZE, PACK_PREFIX_LEN};
 use lodestore_format::pb;
 use lodestore_format::reader::{Reader, RestoreOptions};
 use lodestore_format::repo::Repository;
@@ -2182,6 +2183,182 @@ async fn gc_cycle_signs_rebuilt_index() {
             "[{}] the second cycle wrote index shards again",
             backend.name()
         );
+        ts.stop().await;
+    }
+}
+
+/// A shard as version 0.1 could write it: attested, above `MAX_SHARD_SIZE`,
+/// holding the records of `from` next to filler records of packs that don't
+/// exist. The files of `from` are removed when `take` is set.
+async fn plant_legacy_shard(
+    ts: &TestServer,
+    repo: &str,
+    name: &str,
+    from: &[BlobId],
+    take: bool,
+) -> (BlobId, Vec<String>) {
+    lodestore_server::maintenance::attest::ensure_upgraded(ts.state(), repo)
+        .await
+        .unwrap();
+    let store = LocalFsStore::new(ts.local_repo_root(name));
+    let repository = Repository::open(&store, PASSWORD).await.unwrap();
+    let keys = repository.read_keys();
+    let mut packs = Vec::new();
+    for id in from {
+        let path = ts.local_repo_root(name).join(index_object_key(id));
+        let shard = open_shard(
+            keys.k_idx(),
+            keys.repo_id(),
+            id,
+            &std::fs::read(&path).unwrap(),
+        )
+        .unwrap();
+        packs.extend(shard.packs);
+        if take {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+    let real: Vec<String> = packs.iter().map(|p| hex32(&pack_id_of(p))).collect();
+    let mut entropy = Entropy::os();
+    for _ in 0..66 {
+        let mut entries = vec![0u8; ENTRY_LEN * 23_000];
+        entropy.fill(&mut entries);
+        for e in entries.as_chunks_mut::<ENTRY_LEN>().0 {
+            e[32] = BLOB_TYPE_DATA;
+            e[33..37].copy_from_slice(&(PACK_PREFIX_LEN as u32).to_le_bytes());
+            e[37..41].copy_from_slice(&64u32.to_le_bytes());
+            e[41..45].copy_from_slice(&16u32.to_le_bytes());
+        }
+        packs.push(pb::PackRecord {
+            pack_id: entropy.bytes::<32>().to_vec(),
+            hpke_enc: vec![0; HPKE_ENC_LEN],
+            sealed_pack_key: vec![0; SEALED_KEY_LEN],
+            pack_size: PACK_MAX_SIZE as u64,
+            entries,
+        });
+    }
+    let (id, bytes) = seal_shard(keys.k_idx(), keys.repo_id(), packs, &mut entropy).unwrap();
+    assert!(bytes.len() as u64 > MAX_SHARD_SIZE);
+    put_named(&store, &index_object_key(&id), bytes)
+        .await
+        .unwrap();
+    attest_shards(ts, name, &[id]).await;
+    (id, real)
+}
+
+fn pack_id_of(record: &pb::PackRecord) -> BlobId {
+    record.pack_id.as_slice().try_into().unwrap()
+}
+
+fn largest_shard(ts: &TestServer, name: &str) -> u64 {
+    files_under(&ts.local_repo_root(name).join("index"))
+        .iter()
+        .map(|p| std::fs::metadata(p).unwrap().len())
+        .max()
+        .unwrap_or(0)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_cycle_splits_legacy_oversized_shard() {
+    for backend in backends() {
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let a = backup_files(&ts, "main", "a", 11).await;
+        enable(&ts, &api, &repo).await;
+        let from: Vec<BlobId> = index_ids(&ts, "main").into_iter().collect();
+        let (legacy, real) = plant_legacy_shard(&ts, &repo, "main", &from, false).await;
+        assert!(largest_shard(&ts, "main") > MAX_SHARD_SIZE);
+
+        let id = run_cycle(&api, &repo).await;
+        let later = after_pause(&ts, &id).await;
+        assert_eq!(
+            steps(&ts, &id, later).await,
+            StepOutcome::Finished(lodestore_server::maintenance::gc::GcState::Done),
+            "[{}] {:?}",
+            backend.name(),
+            cycle(&ts, &id).await.error
+        );
+        assert!(
+            largest_shard(&ts, "main") <= MAX_SHARD_SIZE,
+            "[{}]",
+            backend.name()
+        );
+        assert!(
+            !ts.local_repo_root("main")
+                .join(index_object_key(&legacy))
+                .exists(),
+            "[{}] the old shard is still there",
+            backend.name()
+        );
+        for hex in &real {
+            assert!(
+                pack_path(&ts, "main", hex).exists(),
+                "[{}] {hex}",
+                backend.name()
+            );
+        }
+        assert_restores(&ts, "main", &a).await;
+
+        let second = run_cycle(&api, &repo).await;
+        wait_state(&ts, &second, "done").await;
+        assert_eq!(report(&api, &repo, &second).await["bytes_freed"], 0);
+        assert_restores(&ts, "main", &a).await;
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_cycle_splits_legacy_shard_while_deleting() {
+    for backend in backends() {
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let a = backup_files(&ts, "main", "a", 11).await;
+        let first = index_ids(&ts, "main");
+        let b = backup_files(&ts, "main", "b", 12).await;
+        let c = backup_files(&ts, "main", "c", 13).await;
+        let live: Vec<BlobId> = index_ids(&ts, "main").difference(&first).copied().collect();
+        forget_snapshot(&ts, "main", &a.id);
+        age_packs(&ts, "main");
+        enable(&ts, &api, &repo).await;
+        let (legacy, real) = plant_legacy_shard(&ts, &repo, "main", &live, true).await;
+        assert!(!real.is_empty());
+        let before = packs_size(&ts, "main");
+
+        let id = run_cycle(&api, &repo).await;
+        let later = after_pause(&ts, &id).await;
+        assert_eq!(
+            steps(&ts, &id, later).await,
+            StepOutcome::Finished(lodestore_server::maintenance::gc::GcState::Done),
+            "[{}] {:?}",
+            backend.name(),
+            cycle(&ts, &id).await.error
+        );
+        assert!(
+            packs_size(&ts, "main") < before,
+            "[{}] nothing was deleted",
+            backend.name()
+        );
+        assert!(
+            largest_shard(&ts, "main") <= MAX_SHARD_SIZE,
+            "[{}]",
+            backend.name()
+        );
+        assert!(
+            !ts.local_repo_root("main")
+                .join(index_object_key(&legacy))
+                .exists()
+        );
+        for hex in &real {
+            assert!(
+                pack_path(&ts, "main", hex).exists(),
+                "[{}] {hex}",
+                backend.name()
+            );
+        }
+        assert_restores(&ts, "main", &b).await;
+        assert_restores(&ts, "main", &c).await;
         ts.stop().await;
     }
 }

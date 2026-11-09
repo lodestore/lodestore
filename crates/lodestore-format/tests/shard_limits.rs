@@ -52,7 +52,7 @@ impl BlobStore for RangeLog {
     }
 }
 
-/// A well-formed shard of one record whose entry table makes the sealed
+/// A well-formed shard of honest records whose entry tables make the sealed
 /// object larger than `MAX_SHARD_SIZE`.
 fn big_shard(fx: &Fx) -> (BlobId, Vec<u8>) {
     big_shard_with(fx, Vec::new())
@@ -70,17 +70,18 @@ fn big_shard_with(fx: &Fx, real: Vec<pb::PackRecord>) -> (BlobId, Vec<u8>) {
         e[37..41].copy_from_slice(&64u32.to_le_bytes());
         e[41..45].copy_from_slice(&16u32.to_le_bytes());
     }
-    let mut record = pb::PackRecord {
-        pack_id: entropy.bytes::<32>().to_vec(),
-        hpke_enc: vec![0; HPKE_ENC_LEN],
-        sealed_pack_key: vec![0; SEALED_KEY_LEN],
-        pack_size: PACK_MAX_SIZE as u64,
-        entries,
-    };
-    entropy.fill(&mut record.hpke_enc);
+    let records: Vec<pb::PackRecord> = entries
+        .chunks(ENTRY_LEN * 20_000)
+        .map(|chunk| pb::PackRecord {
+            pack_id: entropy.bytes::<32>().to_vec(),
+            hpke_enc: vec![0; HPKE_ENC_LEN],
+            sealed_pack_key: vec![0; SEALED_KEY_LEN],
+            pack_size: PACK_MAX_SIZE as u64,
+            entries: chunk.to_vec(),
+        })
+        .collect();
     let keys = fx.repo.read_keys();
-    let mut records = real;
-    records.push(record);
+    let records: Vec<pb::PackRecord> = real.into_iter().chain(records).collect();
     let (id, bytes) = seal_shard(keys.k_idx(), keys.repo_id(), records, &mut entropy).unwrap();
     assert!(bytes.len() as u64 > MAX_SHARD_SIZE && bytes.len() as u64 <= MAX_SHARD_READ_SIZE);
     (id, bytes)

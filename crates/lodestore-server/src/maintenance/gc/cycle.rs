@@ -460,7 +460,8 @@ async fn mark_and_repack(
     let started = cycle.started_at.unwrap_or(now_ms);
     let report = build_report(cycle, &surveyed, now_ms, now_ms - started, None);
     let plan = &surveyed.plan;
-    if plan.delete.is_empty() && plan.repack.is_empty() {
+    let oversized = surveyed.shards.oversized.len();
+    if plan.delete.is_empty() && plan.repack.is_empty() && oversized == 0 {
         let older_than = now_ms.saturating_sub(cycle.settings.pause_ms);
         let swept = sweep_deleted(&source.store, older_than).await?;
         let mut report = report;
@@ -479,6 +480,12 @@ async fn mark_and_repack(
         return finished(state, &cycle.id).await;
     }
 
+    if oversized > 0 {
+        let message = format!(
+            "{oversized} index shard(s) written before the size limit are split by this cleanup."
+        );
+        event(state, &cycle.id, "info", "splitting_shards", &message).await;
+    }
     refuse_foreign_marker(state, cycle, &source).await?;
     db::transition(state, &cycle.id, GcState::Marking, GcState::Repacking).await?;
     let mut entropy = Entropy::os();
@@ -510,10 +517,10 @@ async fn mark_and_repack(
         );
         event(state, &cycle.id, "warning", "repack_skipped", &message).await;
     }
-    if let Some(shard) = repacked.shard {
-        record_verified(state, &cycle.repository_id, &[shard])
+    if !repacked.shards.is_empty() {
+        record_verified(state, &cycle.repository_id, &repacked.shards)
             .await
-            .context("recording the repacked shard as verified")?;
+            .context("recording the repacked shards as verified")?;
     }
 
     let marked = candidates(plan, &repacked);
