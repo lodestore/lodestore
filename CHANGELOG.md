@@ -26,6 +26,7 @@ All notable changes to Lodestore are recorded here. The format follows [Keep a C
 ### Changed
 
 - **Breaking:** `install.sh --from-github` requires `minisign` on the host and stops before downloading anything without it. On a host with `minisign`, an agent without a matching signature, such as one from an image built from source, is not installed unless it is signed with a key given by `--trust-key`.
+- The server refuses to start when `public_url` has a user name, a quote or any character other than letters, digits and `. : - _ [ ]` in its host, because the value is written into the install script.
 - The server is relicensed from AGPL-3.0 to Apache-2.0; every crate in the repository is now Apache-2.0.
 - **Breaking for CI:** the API token scope `restore` is split into `restore:download` (archive downloads), `restore:host` (restore into a new folder) and `restore:in-place` (restore in place). Tokens issued before the update keep only `restore:download`. A CI job that started restore jobs gets `403`, with the name of the scope it needs, until you issue a new token with `restore:host` or `restore:in-place`.
 - A token needs `restore:in-place` to restore file owners, setuid/setgid bits and file capabilities (`restore_owners`). `lode server restore` restores owners by default, so with a token that holds only `restore:host` run it with `--no-owners`. Sessions are not affected.

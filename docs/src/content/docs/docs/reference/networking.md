@@ -17,7 +17,7 @@ public_url: https://lodestore.example.com
 trusted_proxies: [10.0.0.0/8]
 ```
 
-- `public_url` is a bare origin: `http://` or `https://`, a host and an optional port, no path. A trailing slash is removed.
+- `public_url` is a bare origin: `http://` or `https://`, a host and an optional port, no path. The host is a name or an address (letters, digits, `.`, `-`, `_`, or an IPv6 address in brackets); user names, quotes and other characters are refused at startup, because the value goes into the install script. A trailing slash is removed.
 - When a request arrives over plain HTTP, the UI shows a warning banner.
 - The session cookie gets the `Secure` flag when `public_url` starts with `https://`.
 - Any ordinary reverse proxy works: nginx `proxy_pass`, Caddy, Traefik, a Kubernetes Ingress. Browser requests that change data are accepted when their `Origin` is the `public_url` origin or the host the request was addressed to, so the proxy does not have to pass the original `Host`.
