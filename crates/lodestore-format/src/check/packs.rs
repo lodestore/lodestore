@@ -11,7 +11,7 @@ use crate::index::hex32;
 use crate::keys::ReadKeys;
 use crate::pack::{PACK_MAX_SIZE, pack_object_key, parse_entries, read_pack_header};
 use crate::reader::open_chunk;
-use crate::store::{BlobError, BlobStore};
+use crate::store::{BlobError, BlobStore, read_bounded};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackOutcome {
@@ -181,19 +181,24 @@ async fn check_pack<S: BlobStore>(
         findings.add(FindingKind::UnreadablePack, key, reason(&e));
         return Ok(outcome);
     }
-    let bytes = match store.get(&key).await {
-        Ok(bytes) => bytes,
-        Err(BlobError::NotFound) => {
-            outcome.missing = true;
-            findings.add(
-                FindingKind::MissingPack,
-                key,
-                format!("not in the bucket ({listed_size} bytes were listed)"),
-            );
-            return Ok(outcome);
-        }
-        Err(e) => return Err(e.into()),
-    };
+    let bytes =
+        match read_bounded(store, &key, Some(listed_size), PACK_MAX_SIZE as u64, "pack").await {
+            Ok(bytes) => bytes,
+            Err(Error::Store(BlobError::NotFound)) => {
+                outcome.missing = true;
+                findings.add(
+                    FindingKind::MissingPack,
+                    key,
+                    format!("not in the bucket ({listed_size} bytes were listed)"),
+                );
+                return Ok(outcome);
+            }
+            Err(e @ Error::Corrupt { .. }) => {
+                findings.add(FindingKind::UnreadablePack, key, reason(&e));
+                return Ok(outcome);
+            }
+            Err(e) => return Err(e),
+        };
     outcome.bytes = bytes.len() as u64;
     if blake3::hash(&bytes).as_bytes() != pack_id {
         findings.add(

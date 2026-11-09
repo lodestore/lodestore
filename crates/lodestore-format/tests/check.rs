@@ -488,6 +488,11 @@ impl BlobStore for Refusing {
     }
 
     async fn get_range(&self, key: &str, range: std::ops::Range<u64>) -> Result<Bytes, BlobError> {
+        if key == self.key {
+            return Err(BlobError::Denied {
+                message: "no".into(),
+            });
+        }
         self.inner.get_range(key, range).await
     }
 

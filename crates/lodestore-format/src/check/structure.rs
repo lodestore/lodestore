@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::check::{Finding, FindingKind, Findings, Note, NoteKind, Notes, is_data_error};
+use crate::config::MAX_CONFIG_SIZE;
 use crate::crypto::{BLOB_TYPE_DATA, BLOB_TYPE_TREE, BlobId};
 use crate::error::{Error, Result, within_size};
 use crate::gc::mark::load_shards;
@@ -21,7 +22,7 @@ use crate::pack::pack_object_key;
 use crate::pb;
 use crate::reader::{Reader, ReaderCache};
 use crate::snapshot::{MAX_SNAPSHOT_SIZE, SNAPSHOT_PREFIX, open_snapshot, snapshot_object_key};
-use crate::store::{BlobError, BlobStore, ListEntry};
+use crate::store::{BlobError, BlobStore, ListEntry, read_bounded};
 use crate::tree::{MAX_DEPTH, check_node, decode_tree};
 
 const KEYS_PREFIX: &str = "keys/";
@@ -249,13 +250,13 @@ pub async fn check_structure<S: BlobStore>(
         Err(BlobError::Denied { .. }) => {}
         Err(e) => return Err(e.into()),
     }
-    match store.get("config").await {
+    match read_bounded(store, "config", None, MAX_CONFIG_SIZE, "config").await {
         Ok(bytes) => {
             report.physical_bytes += bytes.len() as u64;
             report.objects += 1;
         }
-        Err(BlobError::NotFound) => {}
-        Err(e) => return Err(e.into()),
+        Err(Error::Store(BlobError::NotFound)) => {}
+        Err(e) => return Err(e),
     }
 
     let pending = match read_gc_locks(store, keys.k_idx(), keys.repo_id()).await {
@@ -380,9 +381,10 @@ pub async fn check_structure<S: BlobStore>(
                 .add(FindingKind::UnreadableSnapshot, key, reason(&e));
             continue;
         }
-        let bytes = match store.get(&key).await {
+        let bytes = match read_bounded(store, &key, Some(size), MAX_SNAPSHOT_SIZE, "snapshot").await
+        {
             Ok(bytes) => bytes,
-            Err(BlobError::NotFound) => {
+            Err(Error::Store(BlobError::NotFound)) => {
                 c.notes.add(
                     NoteKind::IgnoredObject,
                     key,
@@ -390,7 +392,13 @@ pub async fn check_structure<S: BlobStore>(
                 );
                 continue;
             }
-            Err(e) => return Err(e.into()),
+            Err(e @ Error::Corrupt { .. }) => {
+                report.snapshots_checked += 1;
+                c.findings
+                    .add(FindingKind::UnreadableSnapshot, key, reason(&e));
+                continue;
+            }
+            Err(e) => return Err(e),
         };
         report.snapshots_checked += 1;
         let snapshot = match open_snapshot(keys.hpke_private_key(), keys.repo_id(), &id, &bytes) {
