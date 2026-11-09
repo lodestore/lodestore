@@ -18,7 +18,7 @@ use crate::pack::{
 };
 use crate::pb;
 use crate::reader::open_chunk;
-use crate::store::{BlobError, BlobStore, put_named};
+use crate::store::{BlobError, BlobStore, put_named, read_bounded};
 
 #[derive(Debug, Clone, Default)]
 pub struct RepackOutcome {
@@ -129,10 +129,13 @@ async fn fetch_pack<S: BlobStore>(
     if stat.size > PACK_MAX_SIZE as u64 {
         return Ok(Err("larger than a pack can be".into()));
     }
-    let bytes = match store.get(&pack_object_key(&stat.pack_id)).await {
+    let key = pack_object_key(&stat.pack_id);
+    let bytes = match read_bounded(store, &key, Some(stat.size), PACK_MAX_SIZE as u64, "pack").await
+    {
         Ok(bytes) => bytes,
-        Err(BlobError::NotFound) => return Ok(Err("missing from the store".into())),
-        Err(e) => return Err(e.into()),
+        Err(Error::Store(BlobError::NotFound)) => return Ok(Err("missing from the store".into())),
+        Err(Error::Corrupt { .. }) => return Ok(Err("larger than a pack can be".into())),
+        Err(e) => return Err(e),
     };
     if bytes.len() as u64 != stat.size {
         return Ok(Err("size differs from the listing".into()));

@@ -699,9 +699,9 @@ async fn repack_skips_unopenable_prefix_and_size_mismatch() {
     let mut garbled = fs::read(path(&ids[0])).unwrap();
     garbled[..PACK_PREFIX_LEN].fill(0xAB);
     fs::write(path(&ids[0]), garbled).unwrap();
-    let mut longer = fs::read(path(&ids[1])).unwrap();
-    longer.push(0);
-    fs::write(path(&ids[1]), longer).unwrap();
+    let mut shorter = fs::read(path(&ids[1])).unwrap();
+    shorter.pop();
+    fs::write(path(&ids[1]), shorter).unwrap();
 
     let out = run_repack(&fx, &survey).await;
     assert!(out.replaced.is_empty());
