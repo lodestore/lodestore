@@ -292,6 +292,16 @@ Lists print a table with the same columns and status words as the web interface.
 
 `lode backup`, `lode snapshots`, `lode ls`, `lode dump` and `lode restore` work straight against a repository, with its password or recovery key and no server. See [Restoring without the server](/docs/recipes/restore-without-server/). This section covers what changed with snapshot signatures; [Snapshot provenance and `latest`](/docs/security/threat-model/#snapshot-provenance-and-latest) explains what they protect and where they stop.
 
+### Restoring a very large directory
+
+`lode restore` holds a directory in memory whole and stops at a directory of more than 2^23 entries, or at more than 2^24 entries held at once across the directories it has open, each directory counted at its full length. `lode backup` refuses such a tree and writes no snapshot, so a snapshot made by this version never needs more. A snapshot written before backups refused them can. The error names the limit and the flag:
+
+| Option | Meaning |
+|--------|---------|
+| `--allow-large-directories` | Restore a snapshot with a directory above 2^23 entries, or with more than 2^24 entries held at once. Each such directory is held in memory whole. The limits of the whole walk (2^30 entries, 512 GiB of directory data) stay |
+
+The server never lifts these limits; the flag acts only in the `lode restore` process it is given to.
+
 ### Which snapshot is `latest`
 
 `latest` (also `latest:/path`) in `lode restore`, `lode ls` and `lode dump` is not the newest by the time in the manifest, which the host that wrote it sets. It is the newest snapshot that carries a signature, ordered by the time the storage reports for the snapshot object. Equal times are broken by the larger snapshot id.
