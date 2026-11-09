@@ -16,11 +16,7 @@ const spin = '<svg class="icon spin" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1
 
 function rotateWord(rot: HTMLElement) {
 	const rotating = onScreen(rot);
-	let words: string[] = [];
-	try {
-		const parsed: unknown = JSON.parse(rot.dataset.words ?? '[]');
-		if (Array.isArray(parsed)) words = parsed.filter((w): w is string => typeof w === 'string');
-	} catch {}
+	const words: string[] = JSON.parse(rot.dataset.words ?? '[]');
 	if (!words.length) return;
 	const first = rot.firstElementChild?.textContent ?? '';
 	for (const w of [...words, first]) {
