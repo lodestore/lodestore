@@ -4020,6 +4020,16 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "The repository does not match what this server recorded (repository_unavailable)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         },
         "security": [

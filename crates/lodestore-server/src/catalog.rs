@@ -410,6 +410,8 @@ impl CatalogStatus {
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum RebuildError {
     #[error("{0}")]
+    Unavailable(String),
+    #[error("{0}")]
     Storage(String),
     #[error("{0}")]
     Other(String),
@@ -417,6 +419,9 @@ pub enum RebuildError {
 
 impl RebuildError {
     fn of(error: &anyhow::Error) -> Self {
+        if error.downcast_ref::<RepositoryUnavailable>().is_some() {
+            return RebuildError::Unavailable(error.to_string());
+        }
         let storage = error.downcast_ref::<FormatError>().is_some()
             || error.downcast_ref::<BlobError>().is_some();
         if storage {
@@ -1077,13 +1082,12 @@ pub struct PageQuery {
 }
 
 fn sync_error(error: anyhow::Error) -> ApiError {
-    if matches!(
-        error.downcast_ref::<RebuildError>(),
-        Some(RebuildError::Storage(_))
-    ) {
-        ApiError::Backend(format!("the repository storage failed: {error}"))
-    } else {
-        ApiError::Internal(error)
+    match error.downcast_ref::<RebuildError>() {
+        Some(RebuildError::Unavailable(message)) => ApiError::Unavailable(message.clone()),
+        Some(RebuildError::Storage(_)) => {
+            ApiError::Backend(format!("the repository storage failed: {error}"))
+        }
+        _ => ApiError::Internal(error),
     }
 }
 
@@ -1098,6 +1102,7 @@ fn sync_error(error: anyhow::Error) -> ApiError {
         (status = 200, description = "Snapshots found in the bucket", body = CatalogSyncResult),
         (status = 404, description = "Unknown repository", body = ErrorBody),
         (status = 502, description = "The repository storage is unavailable", body = ErrorBody),
+        (status = 503, description = "The repository does not match what this server recorded (repository_unavailable)", body = ErrorBody),
     )
 )]
 async fn sync_catalog(
