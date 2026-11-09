@@ -131,6 +131,8 @@ jobs:
       - if: steps.mode.outputs.mode == 'candidate'
         run: scripts/quickstart-ci.sh lodestore:candidate-amd64
       - if: steps.mode.outputs.mode == 'published'
+        run: scripts/install-minisign.sh
+      - if: steps.mode.outputs.mode == 'published'
         env:
           PUBLISHED_VERSION: ${{ inputs.published-version }}
         run: scripts/quickstart-ci.sh "ghcr.io/lodestore/lodestore:$PUBLISHED_VERSION" --published "$PUBLISHED_VERSION"

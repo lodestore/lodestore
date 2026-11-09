@@ -9,6 +9,7 @@ use axum::Router;
 use axum::routing::get;
 use common::{Api, Backend, TestServer, wait_until};
 use lodestore_testkit::connect_proxy::ConnectProxy;
+use lodestore_testkit::minisign::TestSigner;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -30,6 +31,30 @@ fn require_root_systemd() {
         root && systemd && curl,
         "e2e_install_systemd requires root and systemd and curl; run scripts/test-linux.sh --root"
     );
+    assert!(
+        Command::new("minisign").arg("-v").output().is_ok(),
+        "e2e_install_ requires minisign; run scripts/install-minisign.sh"
+    );
+}
+
+fn stage_agent(ts: &TestServer, signer: &TestSigner) -> String {
+    let file = format!("lodestore-agent-linux-{}", std::env::consts::ARCH);
+    let target = ts.config.agent_dir.join(&file);
+    std::fs::create_dir_all(&ts.config.agent_dir).unwrap();
+    std::fs::copy(agent_binary(), &target).unwrap();
+    let comment = format!(
+        "lodestore-agent {} {}",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::ARCH
+    );
+    std::fs::write(
+        ts.config.agent_dir.join(format!("{file}.minisig")),
+        signer.sign(&std::fs::read(&target).unwrap(), &comment),
+    )
+    .unwrap();
+    let key = ts.dir.path().join("e2e.pub");
+    std::fs::write(&key, signer.public_key_text()).unwrap();
+    format!("--trust-key {}", key.display())
 }
 
 fn agent_binary() -> PathBuf {
@@ -100,8 +125,9 @@ fn sha256_of(path: &str) -> String {
     data_encoding::HEXLOWER.encode(&Sha256::digest(std::fs::read(path).unwrap()))
 }
 
-async fn serve_releases(binary: Vec<u8>, sums: String) -> String {
+async fn serve_releases(binary: Vec<u8>, sums: String, signer: &TestSigner) -> String {
     let version = env!("CARGO_PKG_VERSION");
+    let signature = signer.sign(sums.as_bytes(), &format!("lodestore release {version}"));
     let name = format!("lodestore-agent-linux-{}", std::env::consts::ARCH);
     let app = Router::new()
         .route(
@@ -111,6 +137,10 @@ async fn serve_releases(binary: Vec<u8>, sums: String) -> String {
         .route(
             &format!("/v{version}/SHA256SUMS"),
             get(move || async move { sums }),
+        )
+        .route(
+            &format!("/v{version}/SHA256SUMS.minisig"),
+            get(move || async move { signature }),
         );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -134,14 +164,8 @@ impl Drop for Cleanup {
 async fn e2e_install_systemd() {
     require_root_systemd();
     let ts = TestServer::start(&Backend::Sqlite).await;
-    std::fs::create_dir_all(&ts.config.agent_dir).unwrap();
-    std::fs::copy(
-        agent_binary(),
-        ts.config
-            .agent_dir
-            .join(format!("lodestore-agent-linux-{}", std::env::consts::ARCH)),
-    )
-    .unwrap();
+    let signer = TestSigner::generate();
+    let trust = stage_agent(&ts, &signer);
     let url = ts.rest_url();
     let script = ts.dir.path().join("install.sh");
     std::fs::write(
@@ -160,7 +184,12 @@ async fn e2e_install_systemd() {
     let repo = ts.create_local_repository("main").await;
 
     let token = api.join_token(&repo, json!([])).await;
-    let (code, output) = run(install_command(&url, "", &format!("--join {token}"))).await;
+    let (code, output) = run(install_command(
+        &url,
+        "",
+        &format!("--join {token} {trust}"),
+    ))
+    .await;
     assert_eq!(code, 0, "{output}");
     let agent_id = local_agent_id();
     assert!(
@@ -183,7 +212,12 @@ async fn e2e_install_systemd() {
     assert!(!unit.contains("RestrictSUIDSGID"), "{unit}");
     assert!(Path::new(BIN).is_file());
 
-    let again = run(install_command(&url, "", &format!("--join {token}"))).await;
+    let again = run(install_command(
+        &url,
+        "",
+        &format!("--join {token} {trust}"),
+    ))
+    .await;
     assert_eq!(again.0, 0, "{}", again.1);
     assert!(
         again
@@ -200,7 +234,7 @@ async fn e2e_install_systemd() {
     let (code, output) = run(install_command(
         &url,
         proxy,
-        &format!("--join {second_token} --force"),
+        &format!("--join {second_token} --force {trust}"),
     ))
     .await;
     assert_eq!(code, 0, "{output}");
@@ -220,7 +254,7 @@ async fn e2e_install_systemd() {
     let (code, output) = run(install_command(
         &url,
         &format!("HTTPS_PROXY={}", connect_proxy.url()),
-        &format!("--join {proxied_token} --force"),
+        &format!("--join {proxied_token} --force {trust}"),
     ))
     .await;
     assert_eq!(code, 0, "{output}");
@@ -267,12 +301,12 @@ async fn e2e_install_systemd() {
     release.push(0);
     let release_sum = data_encoding::HEXLOWER.encode(&Sha256::digest(&release));
     let name = format!("lodestore-agent-linux-{}", std::env::consts::ARCH);
-    let good = serve_releases(release.clone(), format!("{release_sum}  {name}\n")).await;
+    let good = serve_releases(release.clone(), format!("{release_sum}  {name}\n"), &signer).await;
     let third_token = api.join_token(&repo, json!([])).await;
     let (code, output) = run(install_command(
         &url,
         &format!("LODESTORE_RELEASES_URL={good}"),
-        &format!("--from-github --join {third_token} --force"),
+        &format!("--from-github --join {third_token} --force {trust}"),
     ))
     .await;
     assert_eq!(code, 0, "{output}");
@@ -284,11 +318,11 @@ async fn e2e_install_systemd() {
     assert_eq!(active.trim(), "active");
 
     let before = sha256_of(BIN);
-    let bad = serve_releases(release, format!("{}  {name}\n", "a".repeat(64))).await;
+    let bad = serve_releases(release, format!("{}  {name}\n", "a".repeat(64)), &signer).await;
     let (code, output) = run(install_command(
         &url,
         &format!("LODESTORE_RELEASES_URL={bad}"),
-        "--from-github --join unused --force",
+        &format!("--from-github --join unused --force {trust}"),
     ))
     .await;
     assert_ne!(code, 0, "{output}");
@@ -296,7 +330,12 @@ async fn e2e_install_systemd() {
     assert_eq!(sha256_of(BIN), before);
     assert_eq!(local_agent_id(), third_id);
 
-    let (code, output) = run(install_command(&url, "", "--join not-a-token --force")).await;
+    let (code, output) = run(install_command(
+        &url,
+        "",
+        &format!("--join not-a-token --force {trust}"),
+    ))
+    .await;
     assert_ne!(code, 0, "{output}");
     assert!(
         output.contains("previous registration is restored"),
@@ -334,14 +373,8 @@ async fn e2e_install_trust_key() {
 
     require_root_systemd();
     let ts = TestServer::start(&Backend::Sqlite).await;
-    std::fs::create_dir_all(&ts.config.agent_dir).unwrap();
-    std::fs::copy(
-        agent_binary(),
-        ts.config
-            .agent_dir
-            .join(format!("lodestore-agent-linux-{}", std::env::consts::ARCH)),
-    )
-    .unwrap();
+    let signer = TestSigner::generate();
+    let trust = stage_agent(&ts, &signer);
     let url = ts.rest_url();
     let script = ts.dir.path().join("install.sh");
     std::fs::write(
@@ -357,7 +390,7 @@ async fn e2e_install_trust_key() {
     let _cleanup = Cleanup(script);
 
     let key = ts.dir.path().join("own.pub");
-    std::fs::write(&key, "untrusted comment: own key\nRWQ0\n").unwrap();
+    std::fs::write(&key, signer.public_key_text()).unwrap();
     std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
 
     let api = ts.api().await;
@@ -408,7 +441,7 @@ async fn e2e_install_trust_key() {
         std::fs::write(format!("{update_dir}/{file}"), "{}").unwrap();
     }
     std::fs::write(format!("{BIN}.prev"), b"previous").unwrap();
-    let (code, output) = run(install_command(&url, "", "")).await;
+    let (code, output) = run(install_command(&url, "", &trust)).await;
     assert_eq!(code, 0, "{output}");
     assert!(!timer_active());
     assert!(!Path::new(&format!("{update_dir}/pending.json")).exists());
