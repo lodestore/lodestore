@@ -278,9 +278,16 @@ impl<S: BlobStore> Reader<S> {
     }
 
     /// Replaces the limit on one directory and on the entries held at once.
-    #[cfg(any(test, feature = "test-hooks"))]
     pub fn set_dir_limits(&mut self, dir: u64, held: u64) {
         self.walk = self.walk.with_dir_limits(dir, held);
+    }
+
+    /// Lifts the limit on one directory and on the entries held at once, for
+    /// a snapshot written before a backup refused such a tree. Memory is then
+    /// bounded only by the snapshot and the whole-walk limits; a reader shared
+    /// by many users, as the server's, never calls this.
+    pub fn allow_large_directories(&mut self) {
+        self.set_dir_limits(u64::MAX, u64::MAX);
     }
 
     pub(crate) fn walk_budget(&self) -> &TreeBudget {
