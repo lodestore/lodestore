@@ -14,20 +14,20 @@ restic is a command-line backup program. Lodestore is a server with an agent on 
 
 ## At a glance
 
-| | restic | Lodestore 0.1 |
+| | restic | Lodestore 0.2 |
 |---|--------|---------------|
 | Shape | A command-line program that runs when you start it | A server and an agent on each host |
 | Scheduling | Not built in; cron, systemd timers or Task Scheduler start it | Cron schedules in an IANA time zone, jitter and catch-up of missed runs, set on the server |
 | Protection from a compromised host | Append-only mode is provided by the backend, for example rest-server; `forget` and `prune` need full access | Agent key without delete rights on S3-compatible storage; deletion is server-only; the server checks every new backup an agent makes, so index metadata forged by a compromised host cannot delete the backups of other hosts or pass off an unrestorable backup as a success; the latest snapshot is picked from signed records of which host and job made each snapshot, not from the time a host writes into it; the agent writes restored files only into folders its own configuration allows, even when the server asks for more |
 | Integrity checks | `restic check` verifies the repository structure, and stored data when flags are given | Three scheduled levels: structure, packs and a test restore |
 | Platforms | Linux, macOS, FreeBSD, OpenBSD, Windows | Linux, x86_64 and arm64 |
-| License | BSD-2-Clause | Apache-2.0 (agent, format, CLI), AGPL-3.0 (server) |
+| License | BSD-2-Clause | Apache-2.0 |
 
 ### Storage
 
-| Storage | restic | Lodestore 0.1 |
+| Storage | restic | Lodestore 0.2 |
 |---------|--------|---------------|
 | AWS S3 and S3-compatible storage | Yes | Yes |
 | Local or network folder | Yes | Yes, the agent can delete in it |
 | SFTP, Azure Blob Storage, Google Cloud Storage | Yes | Planned |
-| REST Server, OpenStack Swift, Backblaze B2, Alibaba Cloud OSS, other services through rclone | Yes | Not in 0.1 |
+| REST Server, OpenStack Swift, Backblaze B2, Alibaba Cloud OSS, other services through rclone | Yes | Not in 0.2 |

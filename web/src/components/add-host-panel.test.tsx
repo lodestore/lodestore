@@ -29,6 +29,7 @@ function mockServer(
 		agentArches?: string[];
 		tokenStatus?: unknown;
 		tokenLifetimeMs?: number;
+		command?: string;
 	} = {},
 ) {
 	server.use(
@@ -47,7 +48,9 @@ function mockServer(
 				{
 					id: "token-1",
 					token: SECRET,
-					command: `curl -fsSL http://localhost:8080/install.sh | sh -s -- --join ${SECRET}`,
+					command:
+						options.command ??
+						`curl -fsSL http://localhost:8080/install.sh | sh -s -- --join ${SECRET}`,
 					expires_at: serverTime + (options.tokenLifetimeMs ?? 3_600_000),
 					server_time: serverTime,
 				},
@@ -221,6 +224,62 @@ describe("AddHostPanel", () => {
 		await waitFor(() => expect(issuedTokens).toBe(2));
 		await new Promise((resolve) => setTimeout(resolve, 200));
 		expect(issuedTokens).toBe(2);
+	});
+
+	it("HTTP command shows the root warning and the manual signature check", async () => {
+		mockServer({
+			command: `curl -fsSL http://localhost:8080/install.sh | sh -s -- --insecure --join ${SECRET}`,
+		});
+		renderPanel();
+		await generate();
+
+		expect(
+			await screen.findByText(
+				"Over plain HTTP anyone on the network can get root on this host.",
+			),
+		).toBeInTheDocument();
+		await userEvent.setup().click(
+			await screen.findByRole("button", {
+				name: "Check the agent signature by hand",
+			}),
+		);
+		expect(
+			await screen.findByText(
+				new RegExp(
+					`minisign -V -P ${serverInfo.project_key.replace(/[+/]/g, "\\$&")} -m lodestore-agent`,
+				),
+			),
+		).toBeInTheDocument();
+		expect(
+			screen.getByText(/\/install\/agent\/\$\(uname -m\)\.minisig/),
+		).toBeInTheDocument();
+		expect(
+			screen.getByText(/compare it with the one on the Binary page/),
+		).toBeInTheDocument();
+		expect(
+			screen.getByText(/checks the file you downloaded by hand/),
+		).toBeInTheDocument();
+		expect(screen.queryByText(/key id/i)).toBeNull();
+	});
+
+	it("HTTPS command shows no warning", async () => {
+		mockServer({
+			command: `curl --proto '=https' --tlsv1.2 -fsSL https://lode.example/install.sh | sh -s -- --join ${SECRET}`,
+		});
+		renderPanel();
+		await generate();
+		await screen.findByText(/--join lode1\./);
+
+		expect(
+			screen.queryByText(
+				"Over plain HTTP anyone on the network can get root on this host.",
+			),
+		).toBeNull();
+		expect(
+			screen.queryByRole("button", {
+				name: "Check the agent signature by hand",
+			}),
+		).toBeNull();
 	});
 
 	it("asks for a repository first when there are none", async () => {

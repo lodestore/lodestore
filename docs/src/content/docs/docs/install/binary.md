@@ -134,6 +134,15 @@ sudo install -m 0644 lodestore-agent-linux-$ARCH.minisig /usr/share/lodestore/ag
 
 Without them the server answers that the agent for that architecture is not available. In that case run the install command with `--from-github`, which fetches the agent and its `SHA256SUMS` from the release instead. The Docker image already holds both architectures.
 
+On a host where `minisign` is installed, the installer does not accept an agent without a signature that matches the project key or a key given with `--trust-key`, so put both files in the directory. `--from-github` needs `minisign` on the host: it verifies `SHA256SUMS.minisig` with the project key, then the agent against `SHA256SUMS`. Without `minisign` it stops before downloading anything. Where to get it:
+
+| System | How |
+| --- | --- |
+| Debian 12 or newer, Ubuntu 24.04 or newer | `apt install minisign` |
+| Fedora | `dnf install minisign` |
+| RHEL, AlmaLinux, Rocky | `dnf install minisign` from EPEL |
+| Ubuntu 22.04 | No package. Download a binary from [github.com/jedisct1/minisign/releases](https://github.com/jedisct1/minisign/releases) |
+
 ## Restoring on the host
 
 An agent writes restored files only where its own `/etc/lodestore/agent.yaml` allows it. The server cannot change this file, and the agent checks the rule itself for every restore, whoever started it: a token, the web interface, or a server that someone else controls.

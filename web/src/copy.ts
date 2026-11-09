@@ -429,6 +429,17 @@ export const copy = {
 		noRepoBody:
 			"Hosts back up into a repository. Add one to generate a join token.",
 		noRepoButton: "Add repository",
+		insecure: {
+			warning:
+				"Over plain HTTP anyone on the network can get root on this host.",
+			verifyTitle: "Check the agent signature by hand",
+			verifyIntro:
+				"On the host, download the agent and its signature, and verify them with the Lodestore project key. This page comes from the same server as the files, so before you trust the key in the command, compare it with the one on the Binary page of the documentation.",
+			verifyAfter:
+				"The last line of the output must read Trusted comment: lodestore-agent, then the version and the architecture of the host. This checks the file you downloaded by hand; the installer downloads the agent again and, with minisign installed, checks that copy with the same key. Over plain HTTP the install script itself can be replaced on the way, so read it before you run it.",
+			verifyObject: "verification commands",
+			copyVerify: "Copy verification commands",
+		},
 		noAgentBinaries: {
 			before: "This server has no agent binaries. Add ",
 			after:

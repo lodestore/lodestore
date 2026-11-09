@@ -17,7 +17,7 @@ public_url: https://lodestore.example.com
 trusted_proxies: [10.0.0.0/8]
 ```
 
-- `public_url` is a bare origin: `http://` or `https://`, a host and an optional port, no path. A trailing slash is removed.
+- `public_url` is a bare origin: `http://` or `https://`, a host and an optional port, no path. The host is a name or an address (letters, digits, `.`, `-`, `_`, or an IPv6 address in brackets); user names, quotes and other characters are refused at startup, because the value goes into the install script. A trailing slash is removed.
 - When a request arrives over plain HTTP, the UI shows a warning banner.
 - The session cookie gets the `Secure` flag when `public_url` starts with `https://`.
 - Any ordinary reverse proxy works: nginx `proxy_pass`, Caddy, Traefik, a Kubernetes Ingress. Browser requests that change data are accepted when their `Origin` is the `public_url` origin or the host the request was addressed to, so the proxy does not have to pass the original `Host`.
@@ -68,9 +68,13 @@ Each agent certificate lives 90 days and is renewed after two thirds of that tim
 
 ## Installing agents
 
-The install command shown in the UI downloads the installer and, through it, the agent binary and its checksum from the server. Over plain HTTP a person on the network path can replace the script, the binary and the checksum together, so the installer refuses `http://` downloads unless you pass `--insecure`. Use an `https://` `public_url` for anything beyond a trusted lab network. When `public_url` is `http://`, the generated command already contains `--insecure`, and the UI warns about the unsafe connection.
+The install command shown in the UI downloads the installer and, through it, the agent binary and its checksum from the server. Over plain HTTP anyone on the network can get root on the host: a person on the path can replace the script, the binary and the checksum together, so the installer refuses `http://` downloads unless you pass `--insecure`. Use an `https://` `public_url` for anything beyond a trusted lab network. When `public_url` is `http://`, the generated command already contains `--insecure`, and the UI warns about the unsafe connection.
 
-The installer downloads with `curl --proto '=https' --tlsv1.2` and does not follow redirects to plain HTTP. `--from-github` fetches the agent and its `SHA256SUMS` from the GitHub release instead, which is HTTPS as well.
+The installer downloads with `curl --proto '=https' --tlsv1.2` and does not follow redirects to plain HTTP.
+
+When `minisign` is installed on the host, the installer also checks the agent's signature against the project key built into the script, and against any key you pass with `--trust-key`. Over plain HTTP that key arrives in the same script, so an attacker who can replace the script can replace the key too; the signature check protects you only when the script itself arrives over HTTPS. Without `minisign` the installer checks only the checksum from the server and prints a `note:` saying so.
+
+`--from-github` fetches the agent, `SHA256SUMS` and `SHA256SUMS.minisig` from the GitHub release instead, which is HTTPS as well. It requires `minisign` and stops before any download when it is missing. To check an agent by hand before installing, see [Check the agent by hand](/docs/quickstart/#check-the-agent-by-hand).
 
 `install.sh --force` keeps the previous registration until the new one succeeds; if enrollment fails or the installer is interrupted, the old identity is restored and the agent is restarted.
 

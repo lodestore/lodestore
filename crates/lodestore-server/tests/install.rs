@@ -28,6 +28,13 @@ async fn install_script_served_with_server_url() {
         let body = response.text().await.unwrap();
         assert!(body.contains(&format!("SERVER_URL='{}'", ts.config.public_url)));
         assert!(body.contains(&format!("VERSION='{}'", env!("CARGO_PKG_VERSION"))));
+        let project_pub = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../lodestore-agent/keys/project.pub"
+        ))
+        .unwrap();
+        let key = project_pub.lines().nth(1).unwrap();
+        assert!(body.contains(&format!("PROJECT_KEY='{key}'")));
         assert!(!body.contains("@@"));
 
         let mut sh = Command::new("sh")
@@ -208,10 +215,57 @@ async fn install_agent_binary_and_checksum() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn install_agent_signature_served() {
+    let ts = TestServer::start(&Backend::Sqlite).await;
+    std::fs::create_dir_all(&ts.config.agent_dir).unwrap();
+    std::fs::write(
+        ts.config.agent_dir.join("lodestore-agent-linux-x86_64"),
+        agent_bytes(),
+    )
+    .unwrap();
+    let signature =
+        "untrusted comment: sig\nRWQ=\ntrusted comment: lodestore-agent 0.2.0 x86_64\nAAAA\n";
+    std::fs::write(
+        ts.config
+            .agent_dir
+            .join("lodestore-agent-linux-x86_64.minisig"),
+        signature,
+    )
+    .unwrap();
+    let response = reqwest::get(format!("{}/install/agent/x86_64.minisig", ts.rest_url()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        response.headers()["content-type"],
+        "text/plain; charset=utf-8"
+    );
+    assert_eq!(response.text().await.unwrap(), signature);
+    ts.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn install_agent_signature_missing_404() {
+    let ts = TestServer::start(&Backend::Sqlite).await;
+    std::fs::create_dir_all(&ts.config.agent_dir).unwrap();
+    std::fs::write(
+        ts.config.agent_dir.join("lodestore-agent-linux-x86_64"),
+        agent_bytes(),
+    )
+    .unwrap();
+    let response = reqwest::get(format!("{}/install/agent/x86_64.minisig", ts.rest_url()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 404);
+    assert!(!response.text().await.unwrap().contains("use --from-github"));
+    ts.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn install_missing_binary_404() {
     for backend in backends() {
         let ts = TestServer::start(&backend).await;
-        for suffix in ["", ".sha256"] {
+        for suffix in ["", ".sha256", ".minisig"] {
             let response = reqwest::get(format!("{}/install/agent/aarch64{suffix}", ts.rest_url()))
                 .await
                 .unwrap();
@@ -226,7 +280,7 @@ async fn install_missing_binary_404() {
 async fn install_unknown_arch_404() {
     for backend in backends() {
         let ts = TestServer::start(&backend).await;
-        for path in ["mips", "mips.sha256", "..%2Fetc"] {
+        for path in ["mips", "mips.sha256", "mips.minisig", "..%2Fetc"] {
             let response = reqwest::get(format!("{}/install/agent/{path}", ts.rest_url()))
                 .await
                 .unwrap();

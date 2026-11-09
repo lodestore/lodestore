@@ -92,7 +92,13 @@ if [ "$signed" = 1 ]; then
     [ -f "$bin.minisig" ] || fail "no signature next to the $arch agent"
     minisign -V -p "$root/crates/lodestore-agent/keys/project.pub" -m "$bin" >/dev/null ||
       fail "signature of the $arch agent does not verify"
+    curl -fsS "$base/install/agent/$arch.minisig" -o "$workdir/served-$arch.minisig"
+    cmp -s "$workdir/served-$arch.minisig" "$bin.minisig" ||
+      fail "the served signature of the $arch agent differs from the image"
   done
+  project_key=$(sed -n 2p "$root/crates/lodestore-agent/keys/project.pub")
+  grep -qF "PROJECT_KEY='$project_key'" "$workdir/install.sh" ||
+    fail "install.sh does not carry the project key"
 fi
 
 echo "smoke ok"

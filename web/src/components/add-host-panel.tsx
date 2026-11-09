@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { CircleCheck, Server, TriangleAlert } from "lucide-react";
+import { ChevronDown, CircleCheck, Server, TriangleAlert } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import {
 	getListHostsQueryKey,
@@ -13,6 +13,11 @@ import { LabelsEditor } from "@/components/labels-editor";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+	Collapsible,
+	CollapsibleContent,
+	CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import {
 	Empty,
 	EmptyContent,
@@ -44,6 +49,21 @@ function formatRemaining(ms: number) {
 	const total = Math.max(0, Math.floor(ms / 1000));
 	const minutes = Math.floor(total / 60);
 	return `${String(minutes).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+}
+
+function verifyCommands({
+	public_url,
+	project_key,
+}: {
+	public_url: string;
+	project_key: string;
+}) {
+	const base = `${public_url.replace(/\/+$/, "")}/install/agent/$(uname -m)`;
+	return [
+		`curl -fsSL -o lodestore-agent ${base}`,
+		`curl -fsSL -o lodestore-agent.minisig ${base}.minisig`,
+		`minisign -V -P ${project_key} -m lodestore-agent`,
+	].join("\n");
 }
 
 export function AddHostPanel({
@@ -280,6 +300,49 @@ export function AddHostPanel({
 						toastText={copy.addHost.commandCopied}
 						disabled={expired}
 					/>
+					{issued.response.command.includes("--insecure") && (
+						<>
+							<Alert role="alert" className="text-warning">
+								<TriangleAlert aria-hidden />
+								<AlertDescription>
+									{copy.addHost.insecure.warning}
+								</AlertDescription>
+							</Alert>
+							{info.data && (
+								<Collapsible className="flex flex-col gap-2">
+									<CollapsibleTrigger asChild>
+										<Button
+											type="button"
+											variant="outline"
+											size="sm"
+											className="group/verify h-auto max-w-full self-start py-1"
+										>
+											<ChevronDown
+												aria-hidden
+												className="shrink-0 transition-transform group-data-[state=closed]/verify:-rotate-90"
+											/>
+											<span className="font-semibold">
+												{copy.addHost.insecure.verifyTitle}
+											</span>
+										</Button>
+									</CollapsibleTrigger>
+									<CollapsibleContent className="flex flex-col gap-2">
+										<p className="text-sm">
+											{copy.addHost.insecure.verifyIntro}
+										</p>
+										<CodeBlock
+											text={verifyCommands(info.data)}
+											object={copy.addHost.insecure.verifyObject}
+											copyLabel={copy.addHost.insecure.copyVerify}
+										/>
+										<p className="text-sm">
+											{copy.addHost.insecure.verifyAfter}
+										</p>
+									</CollapsibleContent>
+								</Collapsible>
+							)}
+						</>
+					)}
 					<Alert>
 						<AlertDescription>{copy.addHost.shownOnce}</AlertDescription>
 					</Alert>

@@ -107,8 +107,22 @@ jobs:
         with:
           tool: cargo-deny@0.20.2
       - run: cargo deny check licenses bans sources
-      - run: scripts/check-license-boundary.sh
-      - run: scripts/check-license-boundary.sh --self-test
+
+  dco:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - run: scripts/check-dco.sh --self-test
+      - name: Check the sign-off of every commit in the pull request
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: scripts/check-dco.sh "$BASE_SHA" "$HEAD_SHA"
 
   release-scripts:
     runs-on: ubuntu-latest

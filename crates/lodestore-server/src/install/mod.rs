@@ -14,6 +14,7 @@ use axum::routing::get;
 use sha2::{Digest, Sha256};
 use tokio_util::io::ReaderStream;
 
+use crate::agent_update::manifest::read_signature;
 use crate::config::Config;
 use crate::state::AppState;
 
@@ -23,6 +24,21 @@ pub(crate) const ARCHES: [(&str, &str); 2] = [
 ];
 
 const SCRIPT: &str = include_str!("install.sh");
+const PROJECT_PUB: &str = include_str!("../../../lodestore-agent/keys/project.pub");
+
+pub(crate) fn project_key() -> &'static str {
+    PROJECT_PUB
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with("untrusted comment:"))
+        .unwrap_or_default()
+}
+
+enum Artifact {
+    Binary,
+    Checksum,
+    Signature,
+}
 
 type Fingerprint = (SystemTime, u64);
 
@@ -57,7 +73,8 @@ async fn install_script(State(state): State<AppState>) -> Response {
             "@@SERVER_URL@@",
             state.config.public_url.trim_end_matches('/'),
         )
-        .replace("@@VERSION@@", env!("CARGO_PKG_VERSION"));
+        .replace("@@VERSION@@", env!("CARGO_PKG_VERSION"))
+        .replace("@@PROJECT_KEY@@", project_key());
     (
         [
             (
@@ -79,20 +96,48 @@ fn not_found(arch: &str) -> Response {
         .into_response()
 }
 
+fn signature_not_found(arch: &str) -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        format!("signature for the {arch} agent is not available on this server"),
+    )
+        .into_response()
+}
+
 async fn agent_binary(State(state): State<AppState>, UrlPath(name): UrlPath<String>) -> Response {
-    let (arch, checksum_only) = match name.strip_suffix(".sha256") {
-        Some(arch) => (arch, true),
-        None => (name.as_str(), false),
+    let (arch, kind) = if let Some(arch) = name.strip_suffix(".sha256") {
+        (arch, Artifact::Checksum)
+    } else if let Some(arch) = name.strip_suffix(".minisig") {
+        (arch, Artifact::Signature)
+    } else {
+        (name.as_str(), Artifact::Binary)
     };
     let Some((arch, file)) = ARCHES.iter().find(|(a, _)| *a == arch) else {
         return StatusCode::NOT_FOUND.into_response();
     };
     let path = state.config.agent_dir.join(file);
-    if checksum_only {
-        return match checksum(path).await {
-            Some(hex) => ([(CONTENT_TYPE, "text/plain; charset=utf-8")], hex).into_response(),
-            None => not_found(arch),
-        };
+    match kind {
+        Artifact::Checksum => {
+            return match checksum(path).await {
+                Some(hex) => ([(CONTENT_TYPE, "text/plain; charset=utf-8")], hex).into_response(),
+                None => not_found(arch),
+            };
+        }
+        Artifact::Signature => {
+            if !tokio::fs::metadata(&path).await.is_ok_and(|m| m.is_file()) {
+                return not_found(arch);
+            }
+            let signature_path = state.config.agent_dir.join(format!("{file}.minisig"));
+            let text = tokio::task::spawn_blocking(move || read_signature(signature_path))
+                .await
+                .ok()
+                .flatten();
+            return match text {
+                Some(text) => ([(CONTENT_TYPE, "text/plain; charset=utf-8")], text).into_response(),
+                None => signature_not_found(arch),
+            };
+        }
+        Artifact::Binary => {}
     }
     let Ok(file) = tokio::fs::File::open(&path).await else {
         return not_found(arch);

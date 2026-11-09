@@ -57,7 +57,9 @@ The site icons in `docs/public/` are redrawn from the mark with `pnpm --dir docs
 4. Run the commands above for the parts you touched. CI runs the same checks on every pull request.
 5. Open a pull request against `main`. Describe the problem, what you changed and how you checked it.
 
-By submitting a change you agree that it is licensed under the license of the crates it touches (see below).
+Every commit is signed off under the [Developer Certificate of Origin](https://developercertificate.org/): a `Signed-off-by: Your Name <you@example.com>` line, added by `git commit -s`. The name and email must match the author of the commit. CI checks every commit of a pull request. For commits you already made, run `git rebase --signoff main`.
+
+By submitting a change you agree that it is licensed under the [License](#license) below.
 
 ## Changes to the repository format
 
@@ -67,14 +69,9 @@ The repository format is frozen by committed data, because a silent change to ch
 - A change that alters any output must update the golden vectors in `crates/lodestore-format/tests/vectors.rs` deliberately, and explain in the pull request why the change is needed.
 - Files under `crates/lodestore-format/tests/fixtures/v1` may only be added to, never modified, deleted or renamed; CI enforces this with `scripts/check-fixtures-append-only.sh`. A format change that old repositories cannot survive ships as `format_version` 2 with its own fixtures next to the old ones.
 
-## Licenses and crate boundaries
+## License
 
-| Component | License |
-|---|---|
-| `lodestore-agent`, `lodestore-format`, `lodestore-proto`, `lode-cli`, `lodestore-policy`, `lodestore-testkit` | Apache-2.0 |
-| `lodestore-server` | AGPL-3.0-only |
-
-Apache-2.0 crates must never depend on `lodestore-server` or any other AGPL crate, not even as a dev-dependency. `scripts/check-license-boundary.sh` fails the build if one does.
+The whole repository is licensed under Apache-2.0 (`LICENSE`), and a contribution is accepted under the same license.
 
 ## Security-sensitive code
 

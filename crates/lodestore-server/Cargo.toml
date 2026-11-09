@@ -3,7 +3,7 @@ name = "lodestore-server"
 description = "Lodestore control plane and catalog"
 edition.workspace = true
 rust-version.workspace = true
-license = "AGPL-3.0-only"
+license.workspace = true
 version.workspace = true
 publish = false
 

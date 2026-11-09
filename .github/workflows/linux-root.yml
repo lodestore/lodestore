@@ -34,6 +34,8 @@ jobs:
       - run: sudo apt-get install -y acl
       - run: scripts/test-linux.sh --root fidelity_root_ --no-fail-fast
       - run: scripts/test-linux.sh --root backup_root_ --no-fail-fast
+      - run: scripts/install-minisign.sh
       - run: BINS=lodestore-agent PKG=lodestore-server scripts/test-linux.sh --root e2e_install_ --no-fail-fast
+      - run: cargo nextest run -p lodestore-server --run-ignored only -E 'binary(install_verify)'
       - run: BINS=lodestore-agent PKG=lodestore-agent scripts/test-linux.sh --root update_systemd_ --no-fail-fast
       - run: cargo nextest run -p lodestore-format --run-ignored only --no-fail-fast -E 'test(/^s3_/)'

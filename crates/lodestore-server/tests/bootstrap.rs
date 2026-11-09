@@ -193,6 +193,16 @@ async fn bootstrap_unlock_key_sources() {
         assert_eq!(body["public_url"], ts.rest_url());
         assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(body["agent_arches"], json!([]));
+        let project_pub = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../lodestore-agent/keys/project.pub"
+        ))
+        .unwrap();
+        assert_eq!(
+            body["project_key"],
+            project_pub.lines().nth(1).unwrap(),
+            "[{name}]"
+        );
         assert!(
             !ts.config.data_dir.join("unlock.key").exists(),
             "[{name}] no key may be generated when one is supplied"

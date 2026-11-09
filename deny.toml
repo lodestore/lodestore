@@ -10,9 +10,6 @@ allow = [
     "CDLA-Permissive-2.0",
     "0BSD",
 ]
-exceptions = [
-    { crate = "lodestore-server", allow = ["AGPL-3.0-only"] },
-]
 
 [bans]
 multiple-versions = "allow"

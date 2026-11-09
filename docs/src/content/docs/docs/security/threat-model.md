@@ -84,7 +84,14 @@ On every other host the attacker still starts the scripts of `hooks.d` through a
 
 **The installer.**
 
-`install.sh` checks the binary only against a SHA-256 served by the same server, so the check shows the download is intact, not who built it. On a server you do not trust, verify the binary with `minisign -V` first.
+`install.sh` carries the project's minisign public key. What it checks depends on how it is run:
+
+- With `--from-github` it requires `minisign`, verifies `SHA256SUMS.minisig` with the project key (or a key from `--trust-key`), requires the trusted comment to name the release version, and then checks the agent against the checksum in `SHA256SUMS`.
+- Through the server, when `minisign` is installed, it verifies the agent's signature. The trusted comment must name the product and the architecture. The version is not compared, so a compromised server or an attacker on the path can hand out an older signed agent of the same architecture. This rollback risk is left open on this path.
+- Through the server, without `minisign`, it checks only the SHA-256 served by the same server and prints a `note:`. That shows the download is intact, not who built it.
+- Over plain HTTP the script itself can be replaced, together with the key inside it. `--insecure` means anyone on the network can get root on the host.
+
+The installer trusts the server it was downloaded from. The script, the key inside it and the key shown in Add host all come from that server, so a compromised server can substitute its own key and an agent signed with it. `--from-github` does not change this, because the script that carries the key still comes from the server. This residual risk is accepted. Whoever does not trust the server compares the key and its id `8CA38864EEA52F78` with the ones published on [Binary](/docs/install/binary/#check-the-files) and in `project.pub` of the release tag, and verifies the agent with `minisign -V` using that key before installing it.
 
 **Rollback guard.**
 
@@ -340,7 +347,7 @@ Saving, running or deleting a policy stays closed. Any other route under `/api/v
 - `/metrics` is not mounted.
 - Archive downloads are limited to two at a time, and each stops after two minutes. A slow download would otherwise hold a thread and keep garbage collection waiting.
 
-**What stays open.** `/install.sh` and `/install/agent/{name}` serve the public installer and the agent binaries, and the archive download serves whatever the demo repository holds. All three are fine only because the data is synthetic.
+**What stays open.** `/install.sh` and `/install/agent/{name}` serve the public installer and the agent binaries and their signatures, and the archive download serves whatever the demo repository holds. All three are fine only because the data is synthetic.
 
 **Switching the mode.** Sessions of one mode must not outlive the other. When the server starts with a different `demo_mode` than the one stored, it deletes every session before it listens. Fill the demo with data and maintain it only with the flag off, and close the reverse proxy for that time.
 

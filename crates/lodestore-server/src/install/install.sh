@@ -1,8 +1,9 @@
 #!/bin/sh
-set -eu
+set -euf
 
 SERVER_URL='@@SERVER_URL@@'
 VERSION='@@VERSION@@'
+PROJECT_KEY='@@PROJECT_KEY@@'
 RELEASES_URL=${LODESTORE_RELEASES_URL:-https://github.com/lodestore/lodestore/releases/download}
 BIN=/usr/local/bin/lodestore-agent
 UNIT=/etc/systemd/system/lodestore-agent.service
@@ -33,20 +34,26 @@ usage() {
 Usage: curl --proto '=https' --tlsv1.2 -fsSL <server>/install.sh | sh -s -- --join <token> [options]
 
   --join <token>   register this host with a one-time join token
-  --insecure       allow downloading the agent over plain HTTP (a network attacker
-                   can then replace the agent binary and its checksum)
+  --insecure       allow downloading over plain HTTP;
+                   anyone on the network can then get root on this host
   --force          forget the local identity and register this host again; the previous
                    agent id is kept when the server does not know it
-  --from-github    download the agent from GitHub releases instead of the server
+  --from-github    download the agent from GitHub releases instead of the server; needs
+                   minisign to check the release signature
   --trust-key <file>
-                   install a public key the agent trusts for updates, for your own
-                   builds; the file name must end in .pub, repeat the option for more keys
+                   trust this public key, both for checking the agent in this install and
+                   for updates, for your own builds; the file name must end in .pub and be
+                   different for each key, repeat the option for more keys
   --allow-in-place-restore
                    enable restores in place for this host: writes restore.allow_in_place: true
                    to /etc/lodestore/agent.yaml
   --uninstall      stop and remove the agent service and binary
   --purge          with --uninstall, also remove /etc/lodestore and /var/lib/lodestore
   --help           show this help
+
+When minisign is installed, the installer checks the signature of the agent against the
+Lodestore project key (key id 8CA38864EEA52F78) and any --trust-key, and refuses to
+install an agent without a valid signature.
 
 HTTPS_PROXY, HTTP_PROXY and NO_PROXY set in the environment of the installer
 (for example "| HTTPS_PROXY=http://proxy:3128 sh -s -- --join <token>") are
@@ -88,14 +95,50 @@ require_https() {
   esac
 }
 
+have_minisign() {
+  command -v minisign >/dev/null 2>&1
+}
+
+signed_comment() {
+  if comment=$(minisign -V -Q -P "$PROJECT_KEY" -m "$1" -x "$2" 2>/dev/null); then
+    return 0
+  fi
+  old_ifs=$IFS
+  IFS=$nl
+  for key_file in $trust_keys; do
+    if comment=$(minisign -V -Q -p "$key_file" -m "$1" -x "$2" 2>/dev/null); then
+      IFS=$old_ifs
+      return 0
+    fi
+  done
+  IFS=$old_ifs
+  return 1
+}
+
+agent_comment_ok() {
+  printf '%s\n' "$comment" | awk -v a="$arch" 'NR == 1 && NF == 3 && $1 == "lodestore-agent" && $3 == a { ok = 1 } END { exit (ok ? 0 : 1) }'
+}
+
+fetch_signature() {
+  if [ "$insecure" = 1 ]; then
+    curl -fsSL -o "$2" "$1" || die "$3; nothing was installed"
+  else
+    curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL -o "$2" "$1" || die "$3; nothing was installed"
+  fi
+}
+
 download_agent() {
   name=lodestore-agent-linux-$arch
   if [ "$github" = 1 ]; then
+    have_minisign || die "--from-github checks the release signature and needs minisign; install it (apt install minisign, or dnf install minisign from EPEL) or take it from https://github.com/jedisct1/minisign/releases, then run the installer again; nothing was installed"
     base=$RELEASES_URL/v$VERSION
     fetch "$base/$name" "$tmp/agent"
     fetch "$base/SHA256SUMS" "$tmp/sums"
+    fetch_signature "$base/SHA256SUMS.minisig" "$tmp/sums.minisig" "the release v$VERSION has no SHA256SUMS.minisig"
+    signed_comment "$tmp/sums" "$tmp/sums.minisig" || die "SHA256SUMS of v$VERSION does not verify with the project key or any --trust-key; nothing was installed"
+    [ "$comment" = "lodestore release $VERSION" ] || die "SHA256SUMS is signed for \"$comment\", not lodestore release $VERSION; nothing was installed"
     expected=$(awk -v f="$name" '$2 == f || $2 == "*" f { print $1; exit }' "$tmp/sums")
-    [ -n "$expected" ] || die "SHA256SUMS has no entry for $name"
+    [ -n "$expected" ] || die "SHA256SUMS has no entry for $name; nothing was installed"
   else
     fetch "$SERVER_URL/install/agent/$arch" "$tmp/agent"
     fetch "$SERVER_URL/install/agent/$arch.sha256" "$tmp/sum"
@@ -104,6 +147,14 @@ download_agent() {
   fi
   actual=$(sha256sum "$tmp/agent" | cut -d ' ' -f 1)
   [ "$actual" = "$expected" ] || die "checksum mismatch for $name: expected $expected, got $actual; nothing was installed"
+  [ "$github" = 0 ] || return 0
+  if have_minisign; then
+    fetch_signature "$SERVER_URL/install/agent/$arch.minisig" "$tmp/agent.minisig" "the server has no signature for $name; minisign is installed, so the installer needs one"
+    signed_comment "$tmp/agent" "$tmp/agent.minisig" || die "the signature of $name does not verify with the project key or any --trust-key; nothing was installed"
+    agent_comment_ok || die "the signature of $name is for \"$comment\", not lodestore-agent for $arch; nothing was installed"
+  else
+    echo "note: minisign is not installed, so the agent was checked only against the checksum from the server" >&2
+  fi
 }
 
 write_env_file() {
@@ -197,13 +248,30 @@ restore_identity() {
   rmdir "$backup"
 }
 
+snapshot_trust_keys() {
+  [ -n "$trust_keys" ] || return 0
+  snapshot=
+  n=0
+  old_ifs=$IFS
+  IFS=$nl
+  for file in $trust_keys; do
+    n=$((n + 1))
+    mkdir -p "$tmp/trusted-keys/$n"
+    copy=$tmp/trusted-keys/$n/$(basename -- "$file")
+    cp -- "$file" "$copy" || die "could not read the --trust-key file $file"
+    snapshot=$snapshot$copy$nl
+  done
+  IFS=$old_ifs
+  trust_keys=$snapshot
+}
+
 install_trust_keys() {
   [ -n "$trust_keys" ] || return 0
   install -d -m 0755 -o root -g root "$CONF_DIR/trusted-keys"
   old_ifs=$IFS
   IFS=$nl
   for file in $trust_keys; do
-    install -m 0644 -o root -g root "$file" "$CONF_DIR/trusted-keys/$(basename "$file")"
+    install -m 0644 -o root -g root -- "$file" "$CONF_DIR/trusted-keys/$(basename -- "$file")"
   done
   IFS=$old_ifs
 }
@@ -232,6 +300,7 @@ main() {
   insecure=0
   allow_in_place=0
   trust_keys=
+  trust_names=
   nl='
 '
   while [ $# -gt 0 ]; do
@@ -253,6 +322,9 @@ main() {
           *.pub) [ -f "$2" ] && [ -r "$2" ] || die "--trust-key needs a readable .pub file: $2" ;;
           *) die "--trust-key needs a readable .pub file: $2" ;;
         esac
+        base=$(basename -- "$2")
+        case $nl$trust_names in *"$nl$base$nl"*) die "two --trust-key files are named $base; rename one" ;; esac
+        trust_names=$trust_names$base$nl
         trust_keys=$trust_keys$2$nl
         shift 2
         ;;
@@ -285,6 +357,7 @@ main() {
   tmp=$(mktemp -d)
   trap cleanup EXIT
   trap 'exit 1' INT TERM HUP
+  snapshot_trust_keys
   download_agent
 
   install -d -m 0700 "$CONF_DIR" "$STATE_DIR"

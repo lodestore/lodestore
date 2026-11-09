@@ -10,6 +10,8 @@
 .hero h1{font-size:40px;line-height:1.05;letter-spacing:-.03em}
 @media(min-width:1024px){.hero h1{font-size:58px}}
 .rot{display:inline-grid;height:1.05em;overflow:hidden;vertical-align:bottom;color:var(--primary-strong)}
+.rot>*,.rot::after{grid-area:1/1}
+.rot::after{content:attr(data-sizer);visibility:hidden;height:0;white-space:nowrap}
 .rot-in{display:flex;flex-direction:column;transition:transform 600ms cubic-bezier(.22,1,.36,1)}
 .rot-in span{height:1.05em;white-space:nowrap}
 .hero .lead{margin:24px 0 32px}

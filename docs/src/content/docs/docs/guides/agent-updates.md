@@ -80,7 +80,7 @@ Install the public key when you install the agent, or run the installer again la
 curl --proto '=https' --tlsv1.2 -fsSL https://lodestore.example.com/install.sh | sh -s -- --join <token> --trust-key ./own.pub
 ```
 
-`--trust-key` may be repeated. The file name must end in `.pub`. The installer puts it in `/etc/lodestore/trusted-keys/` owned by root with mode 0644; the directory is root's with mode 0755. The agent ignores a key file that is a symlink, larger than 4 KiB, or writable by anyone but its owner, or whose directory is. `install.sh --uninstall` removes the agent and `lodestore-agent.prev`; `--purge` also removes the keys with `/etc/lodestore`.
+`--trust-key` may be repeated. The installer also accepts an agent signed by this key when it installs, so a build signed with your own key installs on a host with `minisign`. The file name must end in `.pub`, and two files may not share a name, because the installer keeps each key under its file name. The installer puts it in `/etc/lodestore/trusted-keys/` owned by root with mode 0644; the directory is root's with mode 0755. The agent ignores a key file that is a symlink, larger than 4 KiB, or writable by anyone but its owner, or whose directory is. `install.sh --uninstall` removes the agent and `lodestore-agent.prev`; `--purge` also removes the keys with `/etc/lodestore`.
 
 An update cannot add a key to a host, so a key that was never installed there is not trusted through the update path.
 
@@ -96,7 +96,7 @@ curl --proto '=https' --tlsv1.2 -fsSL https://lodestore.example.com/install.sh |
 
 If an update is in progress on the host, the installer ends it: it stops the rollback timer and removes `lodestore-agent.prev`, so the timer does not replace the binary you installed.
 
-`install.sh` checks the binary only against a SHA-256 served by the same server, which shows the download is intact, not who built it. On a server you do not trust, verify the binary with `minisign -V` first, as under [Signing your own builds](#signing-your-own-builds).
+When `minisign` is installed on the host, `install.sh` verifies the agent's signature before it installs the binary. The trusted comment must name the product (`lodestore-agent`) and the architecture, and the key must be the project key built into the script or one given with `--trust-key`. The version is not compared on this path. Without `minisign` the installer checks only the SHA-256 served by the same server, which shows the download is intact, not who built it, and prints a `note:` saying so. On a server you do not trust, verify the binary with `minisign -V` first, as under [Signing your own builds](#signing-your-own-builds).
 
 ## When an update fails
 

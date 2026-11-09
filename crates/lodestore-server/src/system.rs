@@ -24,6 +24,7 @@ pub struct ServerInfo {
     pub public_url: String,
     pub grpc_public_address: String,
     pub agent_arches: Vec<String>,
+    pub project_key: String,
     pub demo_mode: bool,
 }
 
@@ -70,6 +71,7 @@ async fn info(
             .into_iter()
             .map(str::to_string)
             .collect(),
+        project_key: install::project_key().to_string(),
         demo_mode: state.config.demo_mode,
     }))
 }
