@@ -16,7 +16,7 @@ use lodestore_format::reader::{Overwrite, Reader, RestoreOptions, RestoreReport}
 use lodestore_format::repo::{InitOptions, PendingInit, Repository};
 use lodestore_format::snapshot::snapshot_object_key;
 use lodestore_format::store::LocalFsStore;
-use lodestore_format::tree::encode_tree;
+use lodestore_format::tree::{MAX_WALK_NODES, MAX_WALK_TREE_BYTES, encode_tree};
 use lodestore_format::writer::Writer;
 
 const LOW_KDF: KdfCost = KdfCost {
@@ -95,14 +95,18 @@ impl Fx {
         self.snapshot(vec![dir("a", first), dir("z", second)]).await
     }
 
+    async fn reader(&self) -> Reader<LocalFsStore> {
+        let store = LocalFsStore::new(self.repo_dir.clone());
+        let repo = Repository::open(&store, b"pw").await.unwrap();
+        Reader::open(store, repo.read_keys().duplicate(), repo.config()).unwrap()
+    }
+
     async fn restore(
         &self,
         snapshot: &BlobId,
         options: &RestoreOptions,
     ) -> Result<RestoreReport, Error> {
-        let store = LocalFsStore::new(self.repo_dir.clone());
-        let repo = Repository::open(&store, b"pw").await.unwrap();
-        let mut reader = Reader::open(store, repo.read_keys().duplicate(), repo.config()).unwrap();
+        let mut reader = self.reader().await;
         reader
             .restore(snapshot, &self.target, options, &|_| {})
             .await
@@ -278,6 +282,105 @@ async fn restore_hostile_deep_tree() {
     );
     assert_eq!(fx.listing(), before);
     fx.assert_check_finds(&snap).await;
+}
+
+/// A valid DAG in which every directory lists the next one sixteen times, so
+/// the single file at the bottom is reached 16^4 times.
+async fn fan_out(fx: &mut Fx) -> BlobId {
+    let content = fx.data(b"fine");
+    let mut inner = fx.tree(vec![file("f", &[content], 4)]);
+    for _ in 0..3 {
+        let entries = (0..16).map(|i| dir(&format!("d{i:02}"), inner)).collect();
+        inner = fx.tree(entries);
+    }
+    let top = (0..16).map(|i| dir(&format!("d{i:02}"), inner)).collect();
+    fx.snapshot(top).await
+}
+
+#[tokio::test]
+async fn restore_hostile_fan_out_stops_by_budget() {
+    let mut fx = Fx::new().await;
+    let snap = fan_out(&mut fx).await;
+    let before = fx.listing();
+
+    let mut reader = fx.reader().await;
+    reader.set_walk_limits(10_000, u64::MAX);
+    let err = reader
+        .restore(&snap, &fx.target, &RestoreOptions::default(), &|_| {})
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::WalkLimit {
+                what: "entries",
+                limit: 10_000
+            }
+        ),
+        "{err:?}"
+    );
+    assert_eq!(fx.listing(), before);
+
+    let err = reader
+        .walk_subtree(&snap, b"/", &mut |_, _| Ok(()))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::WalkLimit {
+                what: "entries",
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+
+    assert_eq!(reader.list_dir(&snap, b"/").await.unwrap().len(), 16);
+}
+
+#[tokio::test]
+async fn restore_hostile_fan_out_bytes_budget() {
+    let mut fx = Fx::new().await;
+    let snap = fan_out(&mut fx).await;
+    let before = fx.listing();
+
+    let mut reader = fx.reader().await;
+    reader.set_walk_limits(u64::MAX, 4096);
+    let err = reader
+        .restore(&snap, &fx.target, &RestoreOptions::default(), &|_| {})
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::WalkLimit {
+                what: "bytes of directory data",
+                limit: 4096
+            }
+        ),
+        "{err:?}"
+    );
+    assert_eq!(fx.listing(), before);
+}
+
+#[tokio::test]
+async fn walk_budget_is_per_operation() {
+    let mut fx = Fx::new().await;
+    let snap = fan_out(&mut fx).await;
+
+    let mut reader = fx.reader().await;
+    reader.set_walk_limits(20, u64::MAX);
+    assert_eq!(reader.list_dir(&snap, b"/").await.unwrap().len(), 16);
+    assert_eq!(reader.list_dir(&snap, b"/").await.unwrap().len(), 16);
+    let err = reader.list_dir(&snap, b"/d00").await.unwrap_err();
+    assert!(matches!(err, Error::WalkLimit { .. }), "{err:?}");
+}
+
+#[test]
+fn walk_budget_defaults() {
+    assert_eq!(MAX_WALK_NODES, 1 << 30);
+    assert_eq!(MAX_WALK_TREE_BYTES, 512 << 30);
 }
 
 #[tokio::test]

@@ -17,6 +17,62 @@ use crate::store::BlobStore;
 /// Directories nested deeper than this make a snapshot unreadable.
 pub const MAX_DEPTH: usize = 4096;
 
+/// The most directory entries one walk of a snapshot may visit; a tree that
+/// shares one directory under many parents is counted at every visit.
+pub const MAX_WALK_NODES: u64 = 1 << 30;
+
+/// The most decoded directory bytes one walk of a snapshot may visit, counted
+/// like [`MAX_WALK_NODES`].
+pub const MAX_WALK_TREE_BYTES: u64 = 512 << 30;
+
+/// What is left of the node and byte allowance of one operation on a snapshot.
+#[derive(Debug, Clone, Copy)]
+pub struct TreeBudget {
+    nodes: u64,
+    bytes: u64,
+    nodes_left: u64,
+    bytes_left: u64,
+}
+
+impl Default for TreeBudget {
+    fn default() -> Self {
+        Self::new(MAX_WALK_NODES, MAX_WALK_TREE_BYTES)
+    }
+}
+
+impl TreeBudget {
+    pub fn new(nodes: u64, bytes: u64) -> Self {
+        TreeBudget {
+            nodes,
+            bytes,
+            nodes_left: nodes,
+            bytes_left: bytes,
+        }
+    }
+
+    /// Starts a new operation with the full allowance.
+    pub fn reset(&mut self) {
+        self.nodes_left = self.nodes;
+        self.bytes_left = self.bytes;
+    }
+
+    pub fn charge_bytes(&mut self, n: u64) -> Result<()> {
+        self.bytes_left = self.bytes_left.checked_sub(n).ok_or(Error::WalkLimit {
+            what: "bytes of directory data",
+            limit: self.bytes,
+        })?;
+        Ok(())
+    }
+
+    pub fn charge_nodes(&mut self, n: u64) -> Result<()> {
+        self.nodes_left = self.nodes_left.checked_sub(n).ok_or(Error::WalkLimit {
+            what: "entries",
+            limit: self.nodes,
+        })?;
+        Ok(())
+    }
+}
+
 /// Longest node name in bytes; above the `NAME_MAX` of common Linux
 /// filesystems, so snapshots from other systems stay readable.
 pub const MAX_NAME_LEN: usize = 1024;

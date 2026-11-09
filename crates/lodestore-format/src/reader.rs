@@ -33,7 +33,8 @@ use crate::snapshot::{
 };
 use crate::store::{BlobError, BlobStore};
 use crate::tree::{
-    Action, SelectedWalk, Step, TreeCursor, decode_tree, selection_totals, validate_subtree,
+    Action, SelectedWalk, Step, TreeBudget, TreeCursor, decode_tree, selection_totals,
+    validate_subtree,
 };
 
 pub use crate::fs::restore::{Overwrite, RestoreFailure, Unapplied};
@@ -234,6 +235,7 @@ pub struct Reader<S: BlobStore> {
     store: S,
     keys: ReadKeys,
     cache: Arc<ReaderCache>,
+    walk: TreeBudget,
 }
 
 impl<S: BlobStore> Reader<S> {
@@ -260,7 +262,18 @@ impl<S: BlobStore> Reader<S> {
                 "the cache belongs to a different repository".into(),
             ));
         }
-        Ok(Reader { store, keys, cache })
+        Ok(Reader {
+            store,
+            keys,
+            cache,
+            walk: TreeBudget::default(),
+        })
+    }
+
+    /// Replaces the allowance of one operation; the next one starts with it.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn set_walk_limits(&mut self, nodes: u64, bytes: u64) {
+        self.walk = TreeBudget::new(nodes, bytes);
     }
 
     pub async fn list_snapshots(&self) -> Result<SnapshotList> {
@@ -535,7 +548,9 @@ impl<S: BlobStore> Reader<S> {
                 .try_into()
                 .map_err(|_| Error::corrupt("tree", "tree id must be 32 bytes"))?;
             let bytes = self.tree_bytes(&id).await?;
+            self.walk.charge_bytes(bytes.len() as u64)?;
             let piece = decode_tree(&bytes, previous.as_deref())?;
+            self.walk.charge_nodes(piece.len() as u64)?;
             if let Some(last) = piece.last() {
                 previous = Some(last.name.clone());
             }
@@ -547,6 +562,7 @@ impl<S: BlobStore> Reader<S> {
     /// Loads a snapshot and the index shards it names; returns it with its
     /// top-level nodes.
     pub(crate) async fn open_root(&mut self, id: &BlobId) -> Result<(pb::Snapshot, Vec<pb::Node>)> {
+        self.walk.reset();
         let snapshot = self.snapshot(id).await?;
         for raw in &snapshot.index_refs {
             let shard_id: BlobId = raw
@@ -805,6 +821,7 @@ impl<S: BlobStore> Reader<S> {
             restore_owners: !options.skip_owners,
             keep_privileges: true,
         };
+        self.walk.reset();
         let mut restorer = Restorer::open(target, settings)?;
         let mut walk = SelectedWalk::new(TreeCursor::new(nodes, base), options.include.as_ref());
         while let Some(action) = walk.next(self).await? {
