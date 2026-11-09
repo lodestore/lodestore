@@ -15,8 +15,8 @@ use lodestore_format::index::{
 };
 use lodestore_format::keys::ReadKeys;
 use lodestore_format::pb;
-use lodestore_format::snapshot::{open_snapshot, snapshot_object_key};
-use lodestore_format::store::{BlobError, BlobStore};
+use lodestore_format::snapshot::{MAX_SNAPSHOT_SIZE, open_snapshot, snapshot_object_key};
+use lodestore_format::store::{BlobError, BlobStore, read_bounded};
 use lodestore_format::verify_snapshot::{
     check_snapshot_resolves, snapshot_index_refs, verify_shard,
 };
@@ -256,9 +256,10 @@ async fn verify_job(state: &AppState, job_id: &str, target: &Target) -> anyhow::
     let snapshot: BlobId = parse_hex32(&target.snapshot_id).context("malformed snapshot id")?;
     let (store, keys) = (&source.store, &source.keys);
 
-    let manifest = match store.get(&snapshot_object_key(&snapshot)).await {
+    let key = snapshot_object_key(&snapshot);
+    let manifest = match read_bounded(store, &key, None, MAX_SNAPSHOT_SIZE, "snapshot").await {
         Ok(bytes) => open_snapshot(keys.hpke_private_key(), keys.repo_id(), &snapshot, &bytes),
-        Err(error) => Err(error.into()),
+        Err(error) => Err(error),
     };
     match manifest {
         Ok(manifest) if manifest.agent_id == target.host_id.as_bytes() => {}

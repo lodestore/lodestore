@@ -6,11 +6,12 @@ use anyhow::Context;
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
+use lodestore_format::config::MAX_CONFIG_SIZE;
 use lodestore_format::index::{hex32, parse_hex32};
 use lodestore_format::keys::{MasterKey, ReadKeys};
 use lodestore_format::pb;
-use lodestore_format::snapshot::{open_snapshot, snapshot_object_key};
-use lodestore_format::store::{BlobDelete, BlobError, BlobStore, Store};
+use lodestore_format::snapshot::{MAX_SNAPSHOT_SIZE, open_snapshot, snapshot_object_key};
+use lodestore_format::store::{BlobDelete, BlobError, BlobStore, Store, read_bounded};
 use lodestore_format::{Error as FormatError, Result as FormatResult};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
@@ -87,12 +88,16 @@ pub async fn open_repository(
         .try_into()
         .map_err(|_| anyhow::anyhow!("master secret must be 32 bytes"))?;
     let store = open_store(&access.location, access.server_creds.as_ref())?;
-    let config_bytes = store.get(CONFIG_OBJECT).await?;
-    let config = match lodestore_format::config::check_recorded(
-        &config_bytes,
-        &access.config_hash,
-        &access.format_repo_id,
-    ) {
+    let checked = match read_bounded(&store, CONFIG_OBJECT, None, MAX_CONFIG_SIZE, "config").await {
+        Ok(config_bytes) => lodestore_format::config::check_recorded(
+            &config_bytes,
+            &access.config_hash,
+            &access.format_repo_id,
+        ),
+        Err(error @ FormatError::Corrupt { .. }) => Err(error),
+        Err(error) => return Err(error.into()),
+    };
+    let config = match checked {
         Ok(config) => {
             if access.open_error.is_some()
                 && let Err(error) = set_open_error(state, repository_id, None).await
@@ -142,7 +147,14 @@ pub async fn probe_repositories(state: AppState) {
 }
 
 async fn read_snapshot(source: &OpenRepository, id: &[u8; 32]) -> FormatResult<pb::Snapshot> {
-    let bytes = source.store.get(&snapshot_object_key(id)).await?;
+    let bytes = read_bounded(
+        &source.store,
+        &snapshot_object_key(id),
+        None,
+        MAX_SNAPSHOT_SIZE,
+        "snapshot",
+    )
+    .await?;
     open_snapshot(
         source.keys.hpke_private_key(),
         source.keys.repo_id(),

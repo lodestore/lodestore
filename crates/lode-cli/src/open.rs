@@ -8,6 +8,7 @@ use lodestore_format::attest::{
     AttestedSet, MARKER_LEGACY_SHARDS, UnverifiedAttestations, peek_attestations,
     read_attestations_complete,
 };
+use lodestore_format::config::MAX_CONFIG_SIZE;
 use lodestore_format::crypto::{BlobId, Entropy};
 use lodestore_format::index::{hex32, parse_hex32};
 use lodestore_format::keys::{ReadKeys, WriteKeys};
@@ -17,7 +18,7 @@ use lodestore_format::locks::{
 use lodestore_format::provenance::{ATTESTATIONS_MISSING, ProvenanceSet};
 use lodestore_format::reader::Reader;
 use lodestore_format::repo::Repository;
-use lodestore_format::store::{BlobError, BlobStore, Store, open_url};
+use lodestore_format::store::{BlobError, Store, open_url, read_bounded};
 use lodestore_format::writer::{Deadline, Writer};
 
 use crate::cli::{SecretArgs, UnlockError, UsageError};
@@ -383,9 +384,9 @@ async fn open_with_writer_keys(
     let keys = WriteKeys::from_file_text(&text)
         .with_context(|| format!("cannot use writer keys {}", path.display()))?;
     let store = open_store(url)?;
-    let config = match store.get("config").await {
+    let config = match read_bounded(&store, "config", None, MAX_CONFIG_SIZE, "config").await {
         Ok(bytes) => bytes,
-        Err(BlobError::NotFound) => return Err(Error::NotInitialized.into()),
+        Err(Error::Store(BlobError::NotFound)) => return Err(Error::NotInitialized.into()),
         Err(e) => return Err(e.into()),
     };
     keys.verify_config(&config)
