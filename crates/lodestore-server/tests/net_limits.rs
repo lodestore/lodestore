@@ -62,3 +62,11 @@ async fn rest_serves_normal_requests() {
     server.api().await;
     server.stop().await;
 }
+
+#[tokio::test]
+async fn grpc_closes_stalled_tls_handshake() {
+    let server = TestServer::start(&Backend::Sqlite).await;
+    let stream = TcpStream::connect(server.config.grpc.listen).await.unwrap();
+    assert_closed_within_timeout(stream).await;
+    server.stop().await;
+}

@@ -1,9 +1,11 @@
 pub mod agent;
+mod capped;
 pub mod dispatch;
 pub mod enrollment;
 pub mod registry;
 pub mod restore;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -12,7 +14,7 @@ use lodestore_proto::agent::v1::enrollment_server::EnrollmentServer;
 use lodestore_proto::agent::v1::{DisconnectReason, Versions};
 use lodestore_proto::{ERROR_METADATA_KEY, PROTOCOL_VERSION};
 use tokio::net::TcpListener;
-use tokio_stream::wrappers::TcpListenerStream;
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tonic::metadata::MetadataValue;
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
@@ -113,6 +115,9 @@ pub fn server_cert_not_after(state: &AppState) -> anyhow::Result<(i64, bool)> {
 type Material = (String, zeroize::Zeroizing<String>);
 
 const STOP_GRACE: Duration = Duration::from_secs(10);
+const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_CONCURRENT_STREAMS: u32 = 32;
+const MAX_GRPC_CONNECTIONS: usize = 4096;
 
 fn current_material(state: &AppState) -> anyhow::Result<Material> {
     Ok(external_identity(&state.config.grpc)?.unwrap_or_else(|| state.pki.grpc_identity()))
@@ -125,10 +130,12 @@ fn build(
     let tls = ServerTlsConfig::new()
         .identity(Identity::from_pem(&material.0, material.1.as_bytes()))
         .client_ca_root(Certificate::from_pem(&state.pki.ca_pem))
-        .client_auth_optional(true);
+        .client_auth_optional(true)
+        .timeout(TLS_HANDSHAKE_TIMEOUT);
     Ok(Server::builder()
         .tls_config(tls)?
         .http2_keepalive_interval(Some(Duration::from_secs(20)))
+        .max_concurrent_streams(Some(MAX_CONCURRENT_STREAMS))
         .add_service(EnrollmentServer::new(enrollment::EnrollmentService {
             state: state.clone(),
         }))
@@ -168,9 +175,10 @@ pub async fn serve(
     let interval = Duration::from_secs(state.config.grpc.cert_reload_secs.max(1));
     let mut material = current_material(&state)?;
     let mut router = build(&state, &material)?;
+    let slots = Arc::new(Semaphore::new(MAX_GRPC_CONNECTIONS));
     loop {
         let round = shutdown.child_token();
-        let incoming = TcpListenerStream::new(TcpListener::from_std(socket.try_clone()?)?);
+        let incoming = capped::incoming(TcpListener::from_std(socket.try_clone()?)?, slots.clone());
         let mut task = tokio::spawn(
             router.serve_with_incoming_shutdown(incoming, round.clone().cancelled_owned()),
         );
