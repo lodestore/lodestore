@@ -1878,6 +1878,14 @@ async fn spent_budget_reads(k: usize) -> usize {
         .filter(|f| f.detail.contains("was not checked"))
         .count();
     assert!(unchecked > 0, "{:?}", report.findings);
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|f| f.detail.contains("at most 1500 bytes of chunks of files")),
+        "{:?}",
+        report.findings
+    );
     blob_reads(&ranged, &pack)
 }
 

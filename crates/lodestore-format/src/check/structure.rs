@@ -971,8 +971,13 @@ async fn check_with_budget<S: BlobStore>(
                             // is unchecked for every snapshot that reaches it.
                             Err(Error::WalkLimit { what, limit }) => {
                                 let file = String::from_utf8_lossy(&node.name);
+                                let what = match what {
+                                    "entries" => "references to chunks",
+                                    "bytes of directory data" => "bytes of chunks",
+                                    other => other,
+                                };
                                 let detail = format!(
-                                    "tree {name}: {file} was not checked: in one run the check reads at most {limit} {what} of the chunks of files whose sizes in the index do not add up"
+                                    "tree {name}: {file} was not checked: in one run the check reads at most {limit} {what} of files whose sizes in the index do not add up"
                                 );
                                 c.report(&key, &mut found, FindingKind::UnreadableTree, detail);
                             }
