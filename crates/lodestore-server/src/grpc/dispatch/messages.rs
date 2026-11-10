@@ -21,6 +21,9 @@ pub(crate) const LOG_LIMIT_MESSAGE: &str = "Log limit reached. Later events are 
 const MAX_TEXT: usize = 4096;
 const MAX_JOB_ID: usize = 64;
 const MAX_REPORTS: usize = 256;
+/// Above the agent's two concurrent stdin streams, so an honest `JobCreated` that
+/// races ahead of the previous job's `JobFinished` is never refused.
+const MAX_OPEN_CLI_JOBS: i64 = 8;
 const INGEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 pub(crate) fn clip(text: &str) -> String {
@@ -161,8 +164,10 @@ async fn reconcile(state: &AppState, agent_id: &str, reports: &[JobReport]) -> a
         } else if job_exists(state, &report.job_id).await? {
             continue;
         } else if let Some(created) = &report.created {
-            insert_cli_job(state, agent_id, &report.job_id, created).await?;
-            adopt(state, agent_id, report).await?;
+            let finished = finished_report(report).is_some();
+            if insert_cli_job(state, agent_id, &report.job_id, created, finished).await? {
+                adopt(state, agent_id, report).await?;
+            }
         } else {
             send(
                 state,
@@ -337,7 +342,7 @@ async fn handle(state: &AppState, agent_id: &str, body: AgentBody) -> anyhow::Re
         }
         AgentBody::JobCreated(m) => {
             let job_id = m.job_id.clone();
-            insert_cli_job(state, agent_id, &job_id, &m).await?;
+            insert_cli_job(state, agent_id, &job_id, &m, false).await?;
         }
         AgentBody::UpdateStatus(m) => {
             crate::agent_update::rollout::on_status(state, agent_id, m).await?;
@@ -601,10 +606,36 @@ async fn insert_cli_job(
     agent_id: &str,
     job_id: &str,
     created: &JobCreated,
-) -> anyhow::Result<()> {
+    finished: bool,
+) -> anyhow::Result<bool> {
     if !valid_job_id(job_id) {
         tracing::warn!(agent_id, "an agent reported a job with a malformed id");
-        return Ok(());
+        return Ok(false);
+    }
+    if !finished {
+        let open: i64 = sqlx::query(
+            "SELECT COUNT(*) FROM jobs WHERE host_id = $1 AND source = 'cli' \
+             AND state IN ('queued', 'assigned', 'running')",
+        )
+        .bind(agent_id)
+        .fetch_one(&state.db.pool)
+        .await?
+        .try_get(0)?;
+        if open >= MAX_OPEN_CLI_JOBS {
+            tracing::warn!(
+                agent_id,
+                job_id,
+                "an agent reported more open CLI jobs than allowed; telling it to forget the job"
+            );
+            send(
+                state,
+                agent_id,
+                ServerBody::JobForget(JobForget {
+                    job_id: job_id.to_string(),
+                }),
+            );
+            return Ok(false);
+        }
     }
     let spec = created.spec.clone().unwrap_or_default();
     let policy_id = if spec.policy_name.is_empty() {
@@ -649,5 +680,5 @@ async fn insert_cli_job(
             break;
         }
     }
-    Ok(())
+    Ok(true)
 }
