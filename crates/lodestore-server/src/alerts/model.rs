@@ -139,6 +139,8 @@ pub enum AlertType {
     AgentUpdateFailed,
     SnapshotQuarantined,
     RepositoryUnavailable,
+    AgentSessionConflict,
+    AgentCertificateRejected,
 }
 
 impl AlertType {
@@ -152,6 +154,8 @@ impl AlertType {
             AlertType::AgentUpdateFailed => "agent_update_failed",
             AlertType::SnapshotQuarantined => "snapshot_quarantined",
             AlertType::RepositoryUnavailable => "repository_unavailable",
+            AlertType::AgentSessionConflict => "agent_session_conflict",
+            AlertType::AgentCertificateRejected => "agent_certificate_rejected",
         }
     }
 
@@ -165,6 +169,8 @@ impl AlertType {
             "agent_update_failed" => AlertType::AgentUpdateFailed,
             "snapshot_quarantined" => AlertType::SnapshotQuarantined,
             "repository_unavailable" => AlertType::RepositoryUnavailable,
+            "agent_session_conflict" => AlertType::AgentSessionConflict,
+            "agent_certificate_rejected" => AlertType::AgentCertificateRejected,
             _ => return None,
         })
     }
@@ -258,6 +264,12 @@ pub struct AlertFacts {
     pub findings: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serial: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ip: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_ip: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

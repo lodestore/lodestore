@@ -32,6 +32,20 @@ groups:
         annotations:
           summary: "Agent update failed on {{ $labels.host }}"
           description: "The last agent update of {{ $labels.host }} was rolled back and the host is not on its target version. The reason is in Jobs, Agent update."
+      - alert: LodestoreAgentSessionConflict
+        expr: lodestore_alerts_active{type="agent_session_conflict"} > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Two live sessions of one agent"
+          description: "A live session of an agent was replaced from another network, or live sessions were replaced over and over. If a host was cloned, re-enroll the copy with a new join token. The host is named in the alert in Lodestore."
+      - alert: LodestoreAgentCertificateRejected
+        expr: lodestore_alerts_active{type="agent_certificate_rejected"} > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "The server refused an agent certificate"
+          description: "An agent presented a certificate that is not the one the server issued last. If the host is legitimate, re-enroll it with a new join token. The host, serial and address are in the alert in Lodestore."
   - name: lodestore-repositories
     rules:
       - alert: LodestoreCheckFailed

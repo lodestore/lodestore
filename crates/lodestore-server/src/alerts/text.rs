@@ -15,6 +15,8 @@ pub fn alertname(kind: AlertType) -> &'static str {
         AlertType::AgentUpdateFailed => "LodestoreAgentUpdateFailed",
         AlertType::SnapshotQuarantined => "LodestoreSnapshotQuarantined",
         AlertType::RepositoryUnavailable => "LodestoreRepositoryUnavailable",
+        AlertType::AgentSessionConflict => "LodestoreAgentSessionConflict",
+        AlertType::AgentCertificateRejected => "LodestoreAgentCertificateRejected",
     }
 }
 
@@ -25,6 +27,8 @@ pub fn title(c: &Candidate, now_ms: i64) -> String {
         AlertType::NoRecentBackup => format!("No recent backup on {host}"),
         AlertType::AgentOffline => format!("{host} is offline"),
         AlertType::AgentUpdateFailed => format!("Agent update failed on {host}"),
+        AlertType::AgentSessionConflict => format!("Two live agent sessions for {host}"),
+        AlertType::AgentCertificateRejected => format!("Agent certificate refused for {host}"),
         AlertType::CheckFailed => format!(
             "{} check failed on {}",
             level_label(c.check_level.as_deref()),
@@ -86,6 +90,19 @@ pub fn detail(c: &Candidate) -> String {
             Some(ms) => format!("Last contact {}.", utc(ms)),
             None => "The agent has not connected yet.".to_string(),
         },
+        AlertType::AgentSessionConflict => format!(
+            "Two live sessions of this agent from {} and {}. If the host was cloned, re-enroll the copy with a new join token.",
+            c.facts.ip.as_deref().unwrap_or("an unknown address"),
+            c.facts
+                .previous_ip
+                .as_deref()
+                .unwrap_or("an unknown address"),
+        ),
+        AlertType::AgentCertificateRejected => format!(
+            "The server refused the agent certificate with serial {} from {}; it is not the certificate the server issued last. If the host is legitimate (restored from an old image, or the server database was restored from a backup), re-enroll it with a new join token (install.sh --force).",
+            c.facts.serial.as_deref().unwrap_or("unknown"),
+            c.facts.ip.as_deref().unwrap_or("an unknown address"),
+        ),
         AlertType::AgentUpdateFailed => c
             .facts
             .error
@@ -222,6 +239,14 @@ mod tests {
             alertname(AlertType::RepositoryUnavailable),
             "LodestoreRepositoryUnavailable"
         );
+        assert_eq!(
+            alertname(AlertType::AgentSessionConflict),
+            "LodestoreAgentSessionConflict"
+        );
+        assert_eq!(
+            alertname(AlertType::AgentCertificateRejected),
+            "LodestoreAgentCertificateRejected"
+        );
     }
 
     #[test]
@@ -293,6 +318,34 @@ mod tests {
         let (title, detail) = text(AlertType::RepositoryUnavailable, unavailable);
         assert_eq!(title, "Repository main is unavailable");
         assert!(detail.contains("config hash mismatch."), "{detail}");
+    }
+
+    #[test]
+    fn agent_security_alert_texts() {
+        let conflict = AlertFacts {
+            ip: Some("203.0.113.9".into()),
+            previous_ip: Some("198.51.100.4".into()),
+            ..AlertFacts::default()
+        };
+        let (title, detail) = text(AlertType::AgentSessionConflict, conflict);
+        assert_eq!(title, "Two live agent sessions for web-1");
+        assert!(
+            detail.contains("from 203.0.113.9 and 198.51.100.4"),
+            "{detail}"
+        );
+        assert!(detail.contains("new join token"), "{detail}");
+        let rejected = AlertFacts {
+            serial: Some("abc123".into()),
+            ip: Some("203.0.113.9".into()),
+            ..AlertFacts::default()
+        };
+        let (title, detail) = text(AlertType::AgentCertificateRejected, rejected);
+        assert_eq!(title, "Agent certificate refused for web-1");
+        assert!(
+            detail.contains("serial abc123 from 203.0.113.9"),
+            "{detail}"
+        );
+        assert!(detail.contains("install.sh --force"), "{detail}");
     }
 
     #[test]

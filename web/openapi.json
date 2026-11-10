@@ -6517,6 +6517,12 @@
             "format": "int64",
             "minimum": 0
           },
+          "ip": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "last_seen_at": {
             "type": [
               "integer",
@@ -6545,6 +6551,18 @@
               "null"
             ],
             "format": "int64"
+          },
+          "previous_ip": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "serial": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -6635,7 +6653,9 @@
           "certificate_expiring",
           "agent_update_failed",
           "snapshot_quarantined",
-          "repository_unavailable"
+          "repository_unavailable",
+          "agent_session_conflict",
+          "agent_certificate_rejected"
         ]
       },
       "Alerts": {

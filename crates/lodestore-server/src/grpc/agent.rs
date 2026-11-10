@@ -162,6 +162,7 @@ impl Agent for AgentService {
         let state = self.state.clone();
         let agent_id = peer_agent_id(&request)?;
         let cert_serial = peer_cert_serial(&request);
+        let peer_ip = request.remote_addr().map(|a| a.ip());
         let mut inbound = request.into_inner();
 
         let hello = match inbound.message().await?.and_then(|m| m.body) {
@@ -202,7 +203,7 @@ impl Agent for AgentService {
                 "the server could not record the agent version; reconnect later",
             ));
         }
-        let mut guard = state.registry.register(&agent_id, &repository_id);
+        let mut guard = state.registry.register(&agent_id, &repository_id, peer_ip);
         let rx = guard.take_rx();
         state.registry.set_capabilities(&agent_id, capabilities);
         let cancel = guard.cancel.clone();

@@ -1135,7 +1135,12 @@ async fn migration_0028_gives_channels_with_every_type_the_new_alerts() {
             .unwrap();
         }
 
-        migrator.migrations = all;
+        migrator.migrations = all
+            .iter()
+            .filter(|m| m.version < 29)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into();
         migrator.run(&pool).await.unwrap();
 
         let types = |id: &'static str| {
@@ -1158,6 +1163,79 @@ async fn migration_0028_gives_channels_with_every_type_the_new_alerts() {
         assert_eq!(types("config").await, SIX);
         assert_eq!(types("done").await, EIGHT);
         assert_eq!(types("seven").await, SEVEN);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn migration_0029_gives_channels_with_every_type_the_security_alerts() {
+    const SIX: &str = r#"["backup_failed","no_recent_backup","agent_offline","check_failed","certificate_expiring","agent_update_failed"]"#;
+    const FOUR: &str = r#"["backup_failed","no_recent_backup","agent_offline","check_failed"]"#;
+    const EIGHT: &str = r#"["backup_failed","no_recent_backup","agent_offline","check_failed","certificate_expiring","agent_update_failed","snapshot_quarantined","repository_unavailable"]"#;
+    const TEN: &str = r#"["backup_failed","no_recent_backup","agent_offline","check_failed","certificate_expiring","agent_update_failed","snapshot_quarantined","repository_unavailable","agent_session_conflict","agent_certificate_rejected"]"#;
+    for backend in backends() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, mut migrator) = match &backend {
+            Backend::Sqlite => (
+                format!("sqlite://{}/old.db?mode=rwc", dir.path().display()),
+                sqlx::migrate!("./migrations/sqlite"),
+            ),
+            Backend::Postgres(admin) => (
+                common::create_postgres_database(admin).await,
+                sqlx::migrate!("./migrations/postgres"),
+            ),
+        };
+        sqlx::any::install_default_drivers();
+        let pool = AnyPool::connect(&url).await.unwrap();
+        let all = migrator.migrations.clone();
+        migrator.migrations = all
+            .iter()
+            .filter(|m| m.version < 29)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into();
+        migrator.run(&pool).await.unwrap();
+        for (id, source, types) in [
+            ("full", "ui", EIGHT),
+            ("partial", "ui", FOUR),
+            ("six", "ui", SIX),
+            ("config", "config", EIGHT),
+            ("done", "ui", TEN),
+        ] {
+            sqlx::query(
+                "INSERT INTO notification_channels (id, name, kind, source, enabled, types_json, \
+                 config_json, created_at, updated_at) VALUES ($1, $1, 'webhook', $2, 1, $3, '{}', 0, 0)",
+            )
+            .bind(id)
+            .bind(source)
+            .bind(types)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        migrator.migrations = all;
+        migrator.run(&pool).await.unwrap();
+
+        let types = |id: &'static str| {
+            let pool = pool.clone();
+            async move {
+                text(
+                    &pool,
+                    "SELECT types_json FROM notification_channels WHERE id = $1",
+                    id,
+                )
+                .await
+                .unwrap()
+            }
+        };
+        let full: Vec<String> = serde_json::from_str(&types("full").await).unwrap();
+        assert_eq!(full.len(), 10, "[{}]", backend.name());
+        assert_eq!(full[8], "agent_session_conflict");
+        assert_eq!(full[9], "agent_certificate_rejected");
+        assert_eq!(types("partial").await, FOUR);
+        assert_eq!(types("six").await, SIX);
+        assert_eq!(types("config").await, EIGHT);
+        assert_eq!(types("done").await, TEN);
     }
 }
 

@@ -18,7 +18,9 @@ use lodestore_proto::agent::v1::{
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::Row;
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Channel;
 
@@ -279,6 +281,84 @@ async fn cert_serial(ts: &TestServer, id: &str) -> String {
 
 fn read_identity(paths: &Paths) -> Value {
     serde_json::from_slice(&std::fs::read(paths.identity_json()).unwrap()).unwrap()
+}
+
+async fn conflict_alerts(ts: &TestServer, api: &Api) -> Vec<Value> {
+    lodestore_server::alerts::tick(ts.state(), lodestore_server::db::now_ms())
+        .await
+        .unwrap();
+    let body: Value = api
+        .get("/api/v1/alerts?state=active")
+        .await
+        .json()
+        .await
+        .unwrap();
+    body["alerts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["type"] == "agent_session_conflict")
+        .cloned()
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adv_two_live_sessions_raise_conflict_alert() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let repo = ts.create_local_repository("main").await;
+        let api = ts.api().await;
+        let (cloned, paths) = enroll_only(&ts, &api, &repo, "clone", json!([])).await;
+        let (calm, calm_paths) = enroll_only(&ts, &api, &repo, "calm", json!([])).await;
+        let channel = agent_channel(&ts, Some(&paths)).await;
+        let calm_channel = agent_channel(&ts, Some(&calm_paths)).await;
+        let open = |channel: Channel| async move {
+            let (tx, rx) = mpsc::channel(4);
+            tx.send(AgentMessage {
+                body: Some(Body::Hello(Hello {
+                    versions: Some(Versions {
+                        min: PROTOCOL_VERSION,
+                        max: PROTOCOL_VERSION,
+                    }),
+                    agent_version: "test".to_string(),
+                    ..Default::default()
+                })),
+            })
+            .await
+            .unwrap();
+            let inbound = AgentClient::new(channel)
+                .session(ReceiverStream::new(rx))
+                .await
+                .expect("session")
+                .into_inner();
+            (tx, inbound)
+        };
+
+        let registry = &ts.state().registry;
+        let mut held = vec![open(calm_channel.clone()).await];
+        let ready = wait_until(Duration::from_secs(10), || async {
+            registry.live.is_ready(&calm)
+        })
+        .await;
+        assert!(ready, "the first session never became ready");
+        held.push(open(calm_channel).await);
+        assert!(
+            conflict_alerts(&ts, &api).await.is_empty(),
+            "one restart from the same address is not a conflict [{}]",
+            backend.name()
+        );
+
+        for _ in 0..6 {
+            held.push(open(channel.clone()).await);
+        }
+        let alerts = conflict_alerts(&ts, &api).await;
+        assert_eq!(alerts.len(), 1, "[{}]", backend.name());
+        assert_eq!(alerts[0]["host"]["id"], cloned.as_str());
+        assert_eq!(alerts[0]["facts"]["ip"], "127.0.0.1");
+        assert_eq!(alerts[0]["facts"]["previous_ip"], "127.0.0.1");
+        drop(held);
+        ts.stop().await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
