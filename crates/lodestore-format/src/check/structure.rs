@@ -18,7 +18,7 @@ use crate::gc::mark::load_shards;
 use crate::index::{BlobLocation, INDEX_PREFIX, Index, PACKS_PREFIX, hex32, parse_hex32};
 use crate::keys::ReadKeys;
 use crate::locks::{LOCKS_PREFIX, MIN_PAUSE, read_gc_locks};
-use crate::pack::pack_object_key;
+use crate::pack::{pack_object_key, parse_entries};
 use crate::pb;
 use crate::reader::{Reader, ReaderCache};
 use crate::snapshot::{MAX_SNAPSHOT_SIZE, SNAPSHOT_PREFIX, open_snapshot, snapshot_object_key};
@@ -440,6 +440,49 @@ fn over_path(name: &str, e: &Error) -> String {
     format!("tree {name}: {e}; lode restore --allow-large-directories lifts this limit")
 }
 
+/// The shards that list a tree larger than the check read it, or a chunk of
+/// a file that added up at a size other than the one the check used, with
+/// the first such record. A restore of a snapshot that names one can stop at
+/// a limit, or charge the chunks of a file, where the check did not.
+fn lying_shards(
+    shards: &[(BlobId, pb::IndexShard)],
+    tree_lens: &HashMap<BlobId, u64>,
+    chunk_lens: &HashMap<BlobId, u32>,
+) -> HashMap<BlobId, String> {
+    let mut lying = HashMap::new();
+    for (id, shard) in shards {
+        let entries = shard
+            .packs
+            .iter()
+            .filter_map(|p| parse_entries(&p.entries).ok())
+            .flatten();
+        let found = entries.into_iter().find_map(|e| {
+            let found = match e.blob_type {
+                BLOB_TYPE_TREE => tree_lens
+                    .get(&e.blob_id)
+                    .copied()
+                    .filter(|&n| u64::from(e.ulen) > n),
+                BLOB_TYPE_DATA => chunk_lens
+                    .get(&e.blob_id)
+                    .map(|&n| u64::from(n))
+                    .filter(|&n| n != u64::from(e.ulen)),
+                _ => None,
+            };
+            found.map(|n| (e, n))
+        });
+        if let Some((e, n)) = found {
+            let detail = format!(
+                "names index shard {} that lists blob {} at {} bytes, not the {n} the check found; a restore takes sizes from the shards its snapshot names",
+                hex32(id),
+                hex32(&e.blob_id),
+                e.ulen
+            );
+            lying.insert(*id, detail);
+        }
+    }
+    lying
+}
+
 fn tally(entries: &[ListEntry], bytes: &mut u64, objects: &mut u64) {
     for e in entries {
         *bytes = bytes.saturating_add(e.size);
@@ -453,7 +496,10 @@ fn tally(entries: &[ListEntry], bytes: &mut u64, objects: &mut u64) {
 /// once for each directory the file is written in, within one walk budget for
 /// the whole run: once the budget is spent no other chunk is read, so the run
 /// reads at most one chunk past it. No other data is read, and no pack is read
-/// whole.
+/// whole. Where the copies of a blob disagree on its size, a snapshot that
+/// names a shard listing a tree larger than the check read it, or a chunk of
+/// a file that added up at another size, is reported: its restore takes sizes
+/// from the shards it names.
 pub async fn check_structure<S: BlobStore>(
     store: &S,
     keys: &ReadKeys,
@@ -699,6 +745,14 @@ async fn check_with_budget<S: BlobStore>(
     let mut links: HashMap<BlobId, Links> = HashMap::new();
     let mut trees_read: HashSet<BlobId> = HashSet::new();
     let mut seen_chunks: HashSet<BlobId> = HashSet::new();
+    // A restore takes sizes from the shards its snapshot names before it
+    // lists the others, and the walk above uses all of them. Where copies
+    // disagree, what the check found is kept, so that a snapshot naming a
+    // shard that lists something else is reported after the walk.
+    let conflicts = c.index.ulen_conflicts();
+    let mut tree_lens: HashMap<BlobId, u64> = HashMap::new();
+    let mut chunk_lens: HashMap<BlobId, u32> = HashMap::new();
+    let mut named: Vec<(String, Vec<BlobId>)> = Vec::new();
     let total = snapshots.len() as u64;
     for (done, (key, id, size)) in snapshots.into_iter().enumerate() {
         progress(StructureStep::Snapshots, done as u64, total);
@@ -746,6 +800,10 @@ async fn check_with_budget<S: BlobStore>(
             );
             continue;
         };
+        if !conflicts.is_empty() {
+            let refs = snapshot.index_refs.iter();
+            named.push((key.clone(), refs.filter_map(|r| blob_ref(r)).collect()));
+        }
         c.snapshot_seen.clear();
         let mut groups = Groups::new();
         let mut merged: HashSet<BlobId> = HashSet::new();
@@ -880,6 +938,9 @@ async fn check_with_budget<S: BlobStore>(
                         Err(e) if is_data_error(&e) => break 'read Some(unreadable(tree, &e)),
                         Err(e) => return Err(e),
                     };
+                    if conflicts.contains(&(*tree, BLOB_TYPE_TREE)) {
+                        tree_lens.insert(*tree, bytes.len() as u64);
+                    }
                     read = read.saturating_add(bytes.len() as u64);
                     if let Err(e) = budget.check_dir_bytes(read) {
                         break 'read Some(Stop::Finding(
@@ -960,7 +1021,16 @@ async fn check_with_budget<S: BlobStore>(
                 if node.r#type == pb::NodeType::File as i32 {
                     if all_known {
                         match reader.check_file(node).await {
-                            Ok((_, None)) => {}
+                            Ok((_, None)) => {
+                                for chunk in node.content.iter().filter_map(|r| blob_ref(r)) {
+                                    if !conflicts.contains(&(chunk, BLOB_TYPE_DATA)) {
+                                        continue;
+                                    }
+                                    if let Some(loc) = c.index.get(&chunk, BLOB_TYPE_DATA) {
+                                        chunk_lens.insert(chunk, loc.ulen);
+                                    }
+                                }
+                            }
                             Ok((_, Some(len))) => {
                                 lies = lies.plus(Held {
                                     entries: node.content.len() as u64,
@@ -1039,6 +1109,15 @@ async fn check_with_budget<S: BlobStore>(
                 frame.members = Vec::new();
                 frame.linked = Vec::new();
                 saturated += 1;
+            }
+        }
+    }
+    if !tree_lens.is_empty() || !chunk_lens.is_empty() {
+        let lying = lying_shards(&shards.shards, &tree_lens, &chunk_lens);
+        for (key, refs) in named {
+            if let Some(detail) = refs.iter().find_map(|r| lying.get(r)) {
+                c.findings
+                    .add(FindingKind::UnreadableIndex, key, detail.clone());
             }
         }
     }

@@ -258,6 +258,21 @@ impl Index {
         Some(others.iter().map(|l| l.ulen).fold(chosen.ulen, u32::min))
     }
 
+    /// The blobs whose known copies do not all list the decoded length of the
+    /// chosen one. Only a shard from a write-key holder makes one.
+    pub(crate) fn ulen_conflicts(&self) -> HashSet<(BlobId, u8)> {
+        self.others
+            .iter()
+            .chain(&self.stale)
+            .filter(|(key, alts)| {
+                self.map
+                    .get(key)
+                    .is_some_and(|chosen| alts.iter().any(|l| l.ulen != chosen.ulen))
+            })
+            .map(|(key, _)| *key)
+            .collect()
+    }
+
     /// Every known location of a blob, the chosen one first. Reading tries
     /// them in order: a shard from a write-key holder can name a pack with
     /// wrong offsets, and the real record is among the others.

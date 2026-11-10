@@ -18,8 +18,8 @@ use lodestore_format::pb;
 use lodestore_format::reader::{Overwrite, Reader, RestoreOptions, RestoreReport};
 use lodestore_format::repo::{InitOptions, PendingInit, Repository};
 use lodestore_format::selection::Selection;
-use lodestore_format::snapshot::{ParentTree, snapshot_object_key};
-use lodestore_format::store::{BlobStore, LocalFsStore};
+use lodestore_format::snapshot::{ParentTree, seal_snapshot, snapshot_object_key};
+use lodestore_format::store::{BlobStore, LocalFsStore, put_named};
 use lodestore_format::tree::{
     MAX_DEPTH, MAX_DIR_ENTRIES, MAX_DIR_TREE_BYTES, MAX_HELD_ENTRIES, MAX_HELD_TREE_BYTES,
     MAX_WALK_NODES, MAX_WALK_TREE_BYTES, TreeBudget, encode_tree,
@@ -31,7 +31,7 @@ mod adv_support;
 mod planted;
 mod tree_support;
 
-use adv_support::{attacker_keys, open_all_shards, plant_shard_where};
+use adv_support::{attacker_keys, open_all_shards, plant_shard, plant_shard_where};
 use lodestore_format::pack::{ENTRY_LEN, pack_object_key, parse_entries};
 use planted::RangedOnly;
 
@@ -1896,6 +1896,130 @@ async fn check_hostile_spent_budget_reads_no_more_chunks() {
     for k in [4usize, 64, 1024] {
         assert_eq!(spent_budget_reads(k).await, 1, "k={k}");
     }
+}
+
+/// The same record with the decoded size of every blob `f` picks changed.
+fn change_ulen(record: &pb::PackRecord, f: impl Fn(u8, u32) -> u32) -> pb::PackRecord {
+    let mut entries = Vec::with_capacity(record.entries.len());
+    for e in parse_entries(&record.entries).unwrap() {
+        entries.extend_from_slice(&e.blob_id);
+        entries.push(e.blob_type);
+        entries.extend_from_slice(&e.offset.to_le_bytes());
+        entries.extend_from_slice(&e.enc_len.to_le_bytes());
+        entries.extend_from_slice(&f(e.blob_type, e.ulen).to_le_bytes());
+    }
+    pb::PackRecord {
+        entries,
+        ..record.clone()
+    }
+}
+
+/// `snap` sealed again by a writer-keys holder, naming only `refs`.
+async fn reseal(fx: &Fx, snap: &BlobId, refs: &[BlobId]) -> BlobId {
+    let store = LocalFsStore::new(fx.repo_dir.clone());
+    let repo = Repository::open(&store, b"pw").await.unwrap();
+    let keys = attacker_keys(&repo);
+    let mut snapshot = fx.reader().await.snapshot(snap).await.unwrap();
+    snapshot.index_refs = refs.iter().map(|r| r.to_vec()).collect();
+    let (id, bytes) = seal_snapshot(
+        &snapshot,
+        &keys.hpke_public,
+        &keys.repo_id,
+        &mut Entropy::os(),
+    )
+    .unwrap();
+    put_named(&store, &snapshot_object_key(&id), bytes)
+        .await
+        .unwrap();
+    id
+}
+
+/// A shard that copies the real records with every tree listed larger, and
+/// a copy of an honest snapshot that names only that shard. A restore sizes a
+/// directory by the shards its snapshot names, so it refuses the copy before
+/// reading the root; the structure check reports the copy and not the
+/// original, in whichever order it reads them.
+#[tokio::test]
+async fn check_hostile_snapshot_shard_lists_trees_larger_like_restore() {
+    let mut fx = Fx::new().await;
+    let top = files("f", 3);
+    let limit = encode_tree(top.clone()).len() as u64;
+    let honest = fx.snapshot(top).await;
+    let store = LocalFsStore::new(fx.repo_dir.clone());
+    let repo = Repository::open(&store, b"pw").await.unwrap();
+    let keys = attacker_keys(&repo);
+    let shards = open_all_shards(&store, &keys).await;
+    assert_eq!(shards.len(), 1);
+    let grown = shards[0]
+        .1
+        .packs
+        .iter()
+        .map(|r| change_ulen(r, |t, u| if t == BLOB_TYPE_TREE { u + 1000 } else { u }))
+        .collect();
+    let planted = plant_shard(&store, &keys, grown, Vec::new()).await;
+    let copy = reseal(&fx, &honest, &[planted]).await;
+
+    let mut reader = fx.reader().await;
+    reader.set_dir_byte_limits(limit, u64::MAX);
+    let err = reader
+        .restore(&copy, &fx.target, &RestoreOptions::default(), &|_| {})
+        .await
+        .unwrap_err();
+    assert!(bytes_in_dir_limit(&err, limit), "{err:?}");
+    let mut reader = fx.reader().await;
+    reader.set_dir_byte_limits(limit, u64::MAX);
+    reader
+        .restore(&honest, &fx.target, &RestoreOptions::default(), &|_| {})
+        .await
+        .unwrap();
+
+    let budget = TreeBudget::default().with_dir_byte_limits(limit, u64::MAX);
+    let report = fx.check_budget(budget).await;
+    let keys: Vec<&str> = report.findings.iter().map(|f| f.key.as_str()).collect();
+    assert_eq!(keys, [snapshot_object_key(&copy)], "{:?}", report.findings);
+    assert_eq!(report.findings[0].kind, FindingKind::UnreadableIndex);
+}
+
+/// The same for the sizes of chunks: the planted shard lists every chunk one
+/// byte short and sorts after the real one, so the check's index keeps the
+/// real sizes and the file adds up, while a restore of the copy takes the
+/// planted sizes first, reads the chunks and charges their bytes.
+#[tokio::test]
+async fn check_hostile_snapshot_shard_lists_chunks_wrong_like_restore() {
+    let mut fx = Fx::new().await;
+    let chunks = [fx.data(&[1u8; 1000]), fx.data(&[2u8; 500])];
+    let top = vec![file("f", &chunks, 1500)];
+    let tree_bytes = encode_tree(top.clone()).len() as u64;
+    let honest = fx.snapshot(top).await;
+    let store = LocalFsStore::new(fx.repo_dir.clone());
+    let repo = Repository::open(&store, b"pw").await.unwrap();
+    let keys = attacker_keys(&repo);
+    let shards = open_all_shards(&store, &keys).await;
+    assert_eq!(shards.len(), 1);
+    let (real_id, real) = &shards[0];
+    let forged = real.packs.iter().map(shrink_ulen).collect();
+    let planted = plant_shard_where(&store, &keys, forged, Vec::new(), |id| id > real_id).await;
+    let copy = reseal(&fx, &honest, &[planted]).await;
+
+    let limits = (MAX_WALK_NODES, tree_bytes + 1499);
+    let mut reader = fx.reader().await;
+    reader.set_walk_limits(limits.0, limits.1);
+    let err = reader
+        .restore(&copy, &fx.target, &RestoreOptions::default(), &|_| {})
+        .await
+        .unwrap_err();
+    assert!(is_walk_limit(&err, "bytes of directory data"), "{err:?}");
+    let mut reader = fx.reader().await;
+    reader.set_walk_limits(limits.0, limits.1);
+    reader
+        .restore(&honest, &fx.target, &RestoreOptions::default(), &|_| {})
+        .await
+        .unwrap();
+
+    let report = fx.check_budget(TreeBudget::new(limits.0, limits.1)).await;
+    let keys: Vec<&str> = report.findings.iter().map(|f| f.key.as_str()).collect();
+    assert_eq!(keys, [snapshot_object_key(&copy)], "{:?}", report.findings);
+    assert_eq!(report.findings[0].kind, FindingKind::UnreadableIndex);
 }
 
 async fn root_over(fx: &mut Fx, inner: BlobId, i: usize) -> BlobId {
