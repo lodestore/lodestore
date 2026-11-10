@@ -166,24 +166,30 @@ impl DirSource {
         (blob_id(&self.k_id, &bytes) == id).then_some(bytes)
     }
 
-    fn nodes(&self, ids: &[Vec<u8>]) -> Option<Vec<pb::Node>> {
+    fn nodes(&self, ids: &[Vec<u8>]) -> Option<(Vec<pb::Node>, u64)> {
         let mut nodes = Vec::new();
+        let mut bytes = 0u64;
         let mut previous: Option<Vec<u8>> = None;
         for id in ids {
-            let piece = decode_tree(&self.piece(id)?, previous.as_deref()).ok()?;
+            let raw = self.piece(id)?;
+            bytes = bytes.saturating_add(raw.len() as u64);
+            let piece = decode_tree(&raw, previous.as_deref()).ok()?;
             if let Some(last) = piece.last() {
                 previous = Some(last.name.clone());
             }
             nodes.extend(piece);
         }
-        Some(nodes)
+        Some((nodes, bytes))
     }
 }
 
 impl TreeSource for DirSource {
-    fn snapshot_root<'a>(&'a mut self, _id: &'a BlobId) -> Fut<'a, (pb::Snapshot, Vec<pb::Node>)> {
+    fn snapshot_root<'a>(
+        &'a mut self,
+        _id: &'a BlobId,
+    ) -> Fut<'a, (pb::Snapshot, Vec<pb::Node>, u64)> {
         Box::pin(async move {
-            let root = self
+            let (root, bytes) = self
                 .nodes(&[self.meta.root_tree.to_vec()])
                 .ok_or_else(|| Error::corrupt("tree cache", "the root tree does not verify"))?;
             let snapshot = pb::Snapshot {
@@ -191,11 +197,17 @@ impl TreeSource for DirSource {
                 root_tree: self.meta.root_tree.to_vec(),
                 ..Default::default()
             };
-            Ok((snapshot, root))
+            Ok((snapshot, root, bytes))
         })
     }
 
-    fn tree<'a>(&'a mut self, ids: &'a [Vec<u8>]) -> Fut<'a, Vec<pb::Node>> {
+    // The cache holds trees this host wrote itself, so the limits of a path are not applied.
+    fn tree<'a>(
+        &'a mut self,
+        ids: &'a [Vec<u8>],
+        _above_entries: u64,
+        _above_bytes: u64,
+    ) -> Fut<'a, (Vec<pb::Node>, u64)> {
         Box::pin(async move { Ok(self.nodes(ids).unwrap_or_default()) })
     }
 }

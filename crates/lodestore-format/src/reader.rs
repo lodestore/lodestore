@@ -226,15 +226,20 @@ impl ReaderCache {
 }
 
 impl<S: BlobStore> TreeSource for Reader<S> {
-    fn snapshot_root<'a>(&'a mut self, id: &'a BlobId) -> Fut<'a, (pb::Snapshot, Vec<pb::Node>)> {
-        Box::pin(async move {
-            let (snapshot, root, _) = self.open_root(id).await?;
-            Ok((snapshot, root))
-        })
+    fn snapshot_root<'a>(
+        &'a mut self,
+        id: &'a BlobId,
+    ) -> Fut<'a, (pb::Snapshot, Vec<pb::Node>, u64)> {
+        Box::pin(async move { self.open_root(id).await })
     }
 
-    fn tree<'a>(&'a mut self, ids: &'a [Vec<u8>]) -> Fut<'a, Vec<pb::Node>> {
-        Box::pin(async move { Ok(self.load_tree(ids, 0, 0).await?.0) })
+    fn tree<'a>(
+        &'a mut self,
+        ids: &'a [Vec<u8>],
+        above_entries: u64,
+        above_bytes: u64,
+    ) -> Fut<'a, (Vec<pb::Node>, u64)> {
+        Box::pin(async move { self.load_tree(ids, above_entries, above_bytes).await })
     }
 }
 

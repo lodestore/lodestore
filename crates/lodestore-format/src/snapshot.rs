@@ -179,20 +179,33 @@ pub fn find_parent<'a>(
 
 /// What [`ParentTree`] needs from a reader; implemented by `Reader` and by
 /// the agent's local tree cache.
+///
+/// Each tree comes back with the tree bytes it came to, and `tree` is told
+/// what the directories above it already hold, so a source that reads from
+/// the bucket can apply the limits of a path before it reads more.
 pub trait TreeSource {
-    fn snapshot_root<'a>(&'a mut self, id: &'a BlobId) -> Fut<'a, (pb::Snapshot, Vec<pb::Node>)>;
-    fn tree<'a>(&'a mut self, ids: &'a [Vec<u8>]) -> Fut<'a, Vec<pb::Node>>;
+    fn snapshot_root<'a>(
+        &'a mut self,
+        id: &'a BlobId,
+    ) -> Fut<'a, (pb::Snapshot, Vec<pb::Node>, u64)>;
+    fn tree<'a>(
+        &'a mut self,
+        ids: &'a [Vec<u8>],
+        above_entries: u64,
+        above_bytes: u64,
+    ) -> Fut<'a, (Vec<pb::Node>, u64)>;
 }
 
 /// A parent snapshot's tree, loaded one directory at a time as the backup
 /// walk asks for paths. Only the chain of directories leading to the last
-/// path asked for stays in memory. The writer itself holds no read key, so
+/// path asked for stays in memory, under the limits a restore applies to the
+/// directories it holds open along a path. The writer itself holds no read key, so
 /// the parent is read through a `Reader` handed in by the caller (D-22).
 pub struct ParentTree<'a> {
     id: BlobId,
     time: pb::Timestamp,
     source: Box<dyn TreeSource + 'a>,
-    dirs: HashMap<Vec<u8>, Vec<pb::Node>>,
+    dirs: HashMap<Vec<u8>, (Vec<pb::Node>, u64)>,
 }
 
 impl<'a> ParentTree<'a> {
@@ -201,12 +214,12 @@ impl<'a> ParentTree<'a> {
     }
 
     pub async fn from_source(mut source: Box<dyn TreeSource + 'a>, id: BlobId) -> Result<Self> {
-        let (snapshot, root) = source.snapshot_root(&id).await?;
+        let (snapshot, root, bytes) = source.snapshot_root(&id).await?;
         Ok(ParentTree {
             id,
             time: snapshot.time.unwrap_or_default(),
             source,
-            dirs: HashMap::from([(Vec::new(), root)]),
+            dirs: HashMap::from([(Vec::new(), (root, bytes))]),
         })
     }
 
@@ -225,28 +238,40 @@ impl<'a> ParentTree<'a> {
             return Ok(None);
         };
         let (dir, name) = (&path[..cut], &path[cut + 1..]);
+        self.dirs.retain(|k, _| {
+            k.is_empty() || dir == k || (dir.starts_with(k) && dir.get(k.len()) == Some(&b'/'))
+        });
         let mut current = Vec::new();
         for part in dir.split(|&b| b == b'/').filter(|c| !c.is_empty()) {
             let mut next = current.clone();
             next.push(b'/');
             next.extend_from_slice(part);
             if !self.dirs.contains_key(&next) {
-                let Some(node) = find_node(&self.dirs[&current], part) else {
+                let Some(node) = find_node(&self.dirs[&current].0, part) else {
                     return Ok(None);
                 };
                 if node.r#type != pb::NodeType::Dir as i32 {
                     return Ok(None);
                 }
                 let subtrees = node.subtrees.clone();
-                let nodes = self.source.tree(&subtrees).await?;
-                self.dirs.insert(next.clone(), nodes);
+                let (above_entries, above_bytes) =
+                    self.dirs
+                        .values()
+                        .fold((0u64, 0u64), |(entries, bytes), (nodes, size)| {
+                            (
+                                entries.saturating_add(nodes.len() as u64),
+                                bytes.saturating_add(*size),
+                            )
+                        });
+                let loaded = self
+                    .source
+                    .tree(&subtrees, above_entries, above_bytes)
+                    .await?;
+                self.dirs.insert(next.clone(), loaded);
             }
             current = next;
         }
-        self.dirs.retain(|k, _| {
-            k.is_empty() || dir == k || (dir.starts_with(k) && dir.get(k.len()) == Some(&b'/'))
-        });
-        Ok(find_node(&self.dirs[&current], name).cloned())
+        Ok(find_node(&self.dirs[&current].0, name).cloned())
     }
 }
 

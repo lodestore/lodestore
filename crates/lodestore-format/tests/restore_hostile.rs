@@ -18,7 +18,7 @@ use lodestore_format::pb;
 use lodestore_format::reader::{Overwrite, Reader, RestoreOptions, RestoreReport};
 use lodestore_format::repo::{InitOptions, PendingInit, Repository};
 use lodestore_format::selection::Selection;
-use lodestore_format::snapshot::snapshot_object_key;
+use lodestore_format::snapshot::{ParentTree, snapshot_object_key};
 use lodestore_format::store::{BlobStore, LocalFsStore};
 use lodestore_format::tree::{
     MAX_DEPTH, MAX_DIR_ENTRIES, MAX_DIR_TREE_BYTES, MAX_HELD_ENTRIES, MAX_HELD_TREE_BYTES,
@@ -705,6 +705,79 @@ async fn check_hostile_held_entries_count_consumed_directories() {
 
     let report = fx.check_limited(10, 20).await;
     assert!(report.findings.is_empty(), "{:?}", report.findings);
+}
+
+/// The chain of the tests above: a root and two levels of `f0..f3` plus `z`,
+/// and a leaf of `f0..f4`; with the tree bytes of the four directories.
+async fn held_chain(fx: &mut Fx) -> (BlobId, u64) {
+    let mut held = encode_tree(files("f", 5)).len() as u64;
+    let mut inner = fx.tree(files("f", 5));
+    for _ in 0..2 {
+        let mut nodes = files("f", 4);
+        nodes.push(dir("z", inner));
+        held += encode_tree(nodes.clone()).len() as u64;
+        inner = fx.tree(nodes);
+    }
+    let mut top = files("f", 4);
+    top.push(dir("z", inner));
+    held += encode_tree(top.clone()).len() as u64;
+    (fx.snapshot(top).await, held)
+}
+
+/// The parent a backup reads is held to the limits of a path, as a restore is.
+#[tokio::test]
+async fn parent_tree_held_entries_stop_by_limit() {
+    let mut fx = Fx::new().await;
+    let (snap, _) = held_chain(&mut fx).await;
+
+    let mut reader = fx.reader().await;
+    reader.set_dir_limits(10, 12);
+    let mut parent = ParentTree::open(reader, snap).await.unwrap();
+    let err = parent.lookup(b"/z/z/z/f0").await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::WalkLimit {
+                what: "entries held at once",
+                limit: 12
+            }
+        ),
+        "{err:?}"
+    );
+
+    let mut reader = fx.reader().await;
+    reader.set_dir_limits(10, 20);
+    let mut parent = ParentTree::open(reader, snap).await.unwrap();
+    let node = parent.lookup(b"/z/z/z/f0").await.unwrap().unwrap();
+    assert_eq!(node.name, b"f0");
+    assert!(parent.lookup(b"/z/f1").await.unwrap().is_some());
+    assert!(parent.lookup(b"/z/z/z/f9").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn parent_tree_held_bytes_stop_by_limit() {
+    let mut fx = Fx::new().await;
+    let (snap, held) = held_chain(&mut fx).await;
+
+    let mut reader = fx.reader().await;
+    reader.set_dir_byte_limits(u64::MAX, held - 1);
+    let mut parent = ParentTree::open(reader, snap).await.unwrap();
+    let err = parent.lookup(b"/z/z/z/f0").await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::WalkLimit {
+                what: "bytes held at once",
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+
+    let mut reader = fx.reader().await;
+    reader.set_dir_byte_limits(u64::MAX, held);
+    let mut parent = ParentTree::open(reader, snap).await.unwrap();
+    assert!(parent.lookup(b"/z/z/z/f0").await.unwrap().is_some());
 }
 
 fn finding_kinds(report: &StructureReport, snapshot: &BlobId) -> Vec<FindingKind> {
