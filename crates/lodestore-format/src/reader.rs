@@ -252,6 +252,7 @@ pub struct Reader<S: BlobStore> {
     /// of its list of chunk ids. Only files whose sizes in the index do not
     /// add up are put here, so a file reached from many parents is read once.
     file_lens: HashMap<[u8; 32], u64>,
+    file_lens_limit: usize,
 }
 
 /// The most entries `Reader::file_lens` holds.
@@ -287,6 +288,7 @@ impl<S: BlobStore> Reader<S> {
             cache,
             walk: TreeBudget::default(),
             file_lens: HashMap::new(),
+            file_lens_limit: MAX_FILE_LENS,
         })
     }
 
@@ -294,6 +296,18 @@ impl<S: BlobStore> Reader<S> {
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn set_walk_limits(&mut self, nodes: u64, bytes: u64) {
         self.walk = TreeBudget::new(nodes, bytes);
+    }
+
+    /// Replaces the number of files whose chunk lengths are remembered.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn set_file_lens_limit(&mut self, n: usize) {
+        self.file_lens_limit = n;
+    }
+
+    /// Takes the limits off the walk budget of this reader, for a caller that
+    /// judges the budget from its own counts.
+    pub(crate) fn lift_walk_budget(&mut self) {
+        self.walk = TreeBudget::new(u64::MAX, u64::MAX);
     }
 
     /// Replaces the limit on one directory and on the entries held at once.
@@ -801,8 +815,14 @@ impl<S: BlobStore> Reader<S> {
     /// Checks that the chunks of a regular file add up to the size it claims.
     /// The sizes come from the index; when they do not add up, the chunks are
     /// read, since a shard from a write-key holder can list a copy with a
-    /// wrong size ahead of the real one.
-    pub(crate) async fn check_file(&mut self, node: &pb::Node) -> Result<Vec<(u64, u64)>> {
+    /// wrong size ahead of the real one. Every visit of such a file charges its
+    /// chunks and their bytes to the walk budget, whether the length is found
+    /// by reading or in `file_lens`; the cache only saves the reading. Returns
+    /// the extents and, when the sizes did not add up, the length found.
+    pub(crate) async fn check_file(
+        &mut self,
+        node: &pb::Node,
+    ) -> Result<(Vec<(u64, u64)>, Option<u64>)> {
         let extents = check_extents(node)?;
         let expected = if extents.is_empty() {
             node.size
@@ -810,20 +830,22 @@ impl<S: BlobStore> Reader<S> {
             extents.iter().map(|e| e.1).sum()
         };
         let mut total = self.content_len(node, false).await?;
+        let mut found = None;
         if total != expected {
+            self.walk.charge_nodes(node.content.len() as u64)?;
             let key = *blake3::hash(&node.content.concat()).as_bytes();
             total = match self.file_lens.get(&key) {
                 Some(&known) => known,
                 None => {
                     let read = self.content_len(node, true).await?;
-                    // shortcut: past MAX_FILE_LENS distinct files a revisit reads the chunks
-                    // again, within the walk budget; raise it once those reads are counted
-                    if self.file_lens.len() < MAX_FILE_LENS {
+                    if self.file_lens.len() < self.file_lens_limit {
                         self.file_lens.insert(key, read);
                     }
                     read
                 }
             };
+            self.walk.charge_bytes(total)?;
+            found = Some(total);
         }
         if total != expected {
             return Err(Error::corrupt(
@@ -831,7 +853,7 @@ impl<S: BlobStore> Reader<S> {
                 format!("its chunks hold {total} bytes, the node says {expected}"),
             ));
         }
-        Ok(extents)
+        Ok((extents, found))
     }
 
     /// The size of a file's chunks, from the index or, with `read`, from the
@@ -872,7 +894,7 @@ impl<S: BlobStore> Reader<S> {
                 )));
             }
         };
-        let extents = self.check_file(&node).await?;
+        let (extents, _) = self.check_file(&node).await?;
         let (mut pos, mut extent, mut extent_pos) = (0u64, 0usize, 0u64);
         for raw in &node.content {
             let id: BlobId = raw.as_slice().try_into().expect("length checked");

@@ -1444,6 +1444,61 @@ fn shrink_ulen(record: &pb::PackRecord) -> pb::PackRecord {
     }
 }
 
+struct SizeLie {
+    fx: Fx,
+    store: LocalFsStore,
+    data_packs: Vec<String>,
+    /// Parents of one directory whose file the index lists too short.
+    snap: BlobId,
+    /// A snapshot the shard lies about nothing in.
+    aux: BlobId,
+    /// The tree bytes a restore of `snap` reads: the top once, the shared
+    /// directory eight times.
+    tree_bytes: u64,
+    expected: Vec<u8>,
+}
+
+/// A file of two chunks, 1000 and 500 bytes, whose index entries a shard
+/// planted ahead of the real one lists one byte short each.
+async fn size_lie(parents: usize) -> SizeLie {
+    let mut fx = Fx::new().await;
+    let (first, second) = (vec![1u8; 1000], vec![2u8; 500]);
+    let chunks = [fx.data(&first), fx.data(&second)];
+    let shared_nodes = vec![file("f", &chunks, 1500)];
+    let shared = fx.tree(shared_nodes.clone());
+    let aux = fx.snapshot(files("x", 1)).await;
+
+    let store = LocalFsStore::new(fx.repo_dir.clone());
+    let repo = Repository::open(&store, b"pw").await.unwrap();
+    let keys = attacker_keys(&repo);
+    let shards = open_all_shards(&store, &keys).await;
+    assert_eq!(shards.len(), 1);
+    let (real_id, real) = &shards[0];
+    let forged = real.packs.iter().map(shrink_ulen).collect();
+    plant_shard_where(&store, &keys, forged, Vec::new(), |id| id < real_id).await;
+    let data_packs: Vec<String> = real
+        .packs
+        .iter()
+        .map(|p| pack_object_key(&p.pack_id.as_slice().try_into().unwrap()))
+        .collect();
+
+    let top: Vec<pb::Node> = (0..parents)
+        .map(|i| dir(&format!("p{i}"), shared))
+        .collect();
+    let tree_bytes =
+        (encode_tree(top.clone()).len() + parents * encode_tree(shared_nodes).len()) as u64;
+    let snap = fx.snapshot(top).await;
+    SizeLie {
+        fx,
+        store,
+        data_packs,
+        snap,
+        aux,
+        tree_bytes,
+        expected: [first, second].concat(),
+    }
+}
+
 /// A file whose chunks the index lists with a wrong size is read to be
 /// checked; however many parents reach the file, that happens once.
 #[tokio::test]
@@ -1500,6 +1555,134 @@ async fn restore_hostile_diamond_size_lie_reads_chunks_once() {
         .unwrap();
     let expected = [first, second].concat();
     assert_eq!(fs::read(fx.target.join("p5/f")).unwrap(), expected);
+}
+
+fn is_walk_limit(err: &Error, what: &str) -> bool {
+    matches!(err, Error::WalkLimit { what: w, .. } if *w == what)
+}
+
+/// Each visit of a file whose sizes in the index do not add up charges its
+/// chunks and their bytes, whether the cache has its length or not. The
+/// eight visits of the file cost 8 x 2 entries and 8 x 1500 bytes on top of
+/// the 8 + 8 entries and the tree bytes of the directories: 32 in all, the
+/// same for a totals pass and for a restore.
+#[tokio::test]
+async fn restore_hostile_size_lie_counts_against_the_walk() {
+    let lie = size_lie(8).await;
+    let fx = &lie.fx;
+    for lens in [None, Some(0)] {
+        let reader = || async {
+            let mut reader = fx.reader().await;
+            if let Some(n) = lens {
+                reader.set_file_lens_limit(n);
+            }
+            reader
+        };
+        for (nodes, bytes, ok) in [
+            (32, u64::MAX, true),
+            (31, u64::MAX, false),
+            (u64::MAX, lie.tree_bytes + 12_000, true),
+            (u64::MAX, lie.tree_bytes + 11_999, false),
+        ] {
+            let mut r = reader().await;
+            r.set_walk_limits(nodes, bytes);
+            let totals = r.selection_totals(&lie.snap, &Selection::all()).await;
+            let mut r = reader().await;
+            r.set_walk_limits(nodes, bytes);
+            let restored = r
+                .restore(&lie.snap, &fx.target, &RestoreOptions::default(), &|_| {})
+                .await;
+            let what = if nodes == u64::MAX {
+                "bytes of directory data"
+            } else {
+                "entries"
+            };
+            for result in [totals.map(|_| ()), restored.map(|_| ())] {
+                match (ok, result) {
+                    (true, Ok(())) => {}
+                    (false, Err(e)) => assert!(is_walk_limit(&e, what), "{lens:?} {e:?}"),
+                    (ok, other) => panic!("{lens:?} {nodes} {bytes} ok={ok}: {other:?}"),
+                }
+            }
+        }
+    }
+
+    let mut reader = fx.reader().await;
+    reader.set_file_lens_limit(0);
+    reader
+        .restore(&lie.snap, &fx.target, &RestoreOptions::default(), &|_| {})
+        .await
+        .unwrap();
+    assert_eq!(fs::read(fx.target.join("p5/f")).unwrap(), lie.expected);
+}
+
+/// The structure check charges the same, once per occurrence of the shared
+/// directory, and reads the chunks of the file once however many parents it
+/// has.
+#[tokio::test]
+async fn check_hostile_size_lie_counts_against_the_walk_like_restore() {
+    let lie = size_lie(8).await;
+    let fx = &lie.fx;
+    let refused = |limits: (u64, u64)| {
+        let reader = fx.reader();
+        async move {
+            let mut reader = reader.await;
+            reader.set_walk_limits(limits.0, limits.1);
+            reader
+                .restore(&lie.snap, &fx.target, &RestoreOptions::default(), &|_| {})
+                .await
+                .unwrap_err()
+        }
+    };
+    let cases = [
+        ((31, u64::MAX), TreeBudget::new(31, MAX_WALK_TREE_BYTES)),
+        (
+            (u64::MAX, lie.tree_bytes + 11_999),
+            TreeBudget::new(MAX_WALK_NODES, lie.tree_bytes + 11_999),
+        ),
+    ];
+    for (limits, budget) in cases {
+        let err = refused(limits).await;
+        let report = fx.check_budget(budget).await;
+        assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
+        let f = &report.findings[0];
+        assert_eq!(f.key, snapshot_object_key(&lie.snap));
+        assert_eq!(f.kind, FindingKind::UnreadableTree);
+        assert_eq!(f.detail, err.to_string());
+        assert_ne!(f.key, snapshot_object_key(&lie.aux));
+    }
+    for budget in [
+        TreeBudget::new(32, MAX_WALK_TREE_BYTES),
+        TreeBudget::new(MAX_WALK_NODES, lie.tree_bytes + 12_000),
+    ] {
+        let report = fx.check_budget(budget).await;
+        assert!(report.findings.is_empty(), "{:?}", report.findings);
+    }
+
+    let single = size_lie(1).await;
+    let (once, many) = (pack_reads(&single).await, pack_reads(&lie).await);
+    assert!(once > 0, "the chunks were never read");
+    assert_eq!(once, many, "chunks were read again for another parent");
+}
+
+/// How many ranges the default structure check reads from the packs.
+async fn pack_reads(lie: &SizeLie) -> usize {
+    let ranged = RangedOnly::new(&lie.store, &[]);
+    let repo = Repository::open(&lie.store, b"pw").await.unwrap();
+    let report = check_structure_with_budget(
+        &ranged,
+        repo.read_keys(),
+        repo.config(),
+        &|_, _, _| {},
+        TreeBudget::default(),
+    )
+    .await
+    .unwrap();
+    assert!(report.findings.is_empty(), "{:?}", report.findings);
+    lie.data_packs
+        .iter()
+        .map(|key| ranged.ranges_of(key).len())
+        .sum()
 }
 
 async fn root_over(fx: &mut Fx, inner: BlobId, i: usize) -> BlobId {

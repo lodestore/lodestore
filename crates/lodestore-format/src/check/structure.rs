@@ -686,6 +686,8 @@ async fn check_with_budget<S: BlobStore>(
     }
 
     let mut reader = Reader::open_shared(store, keys.duplicate(), config, ReaderCache::new(0))?;
+    // The verdict on the budget is `check_walk`'s, from the counts of the memo.
+    reader.lift_walk_budget();
     let mut memo: HashMap<BlobId, DirMemo> = HashMap::new();
     let mut links: HashMap<BlobId, Links> = HashMap::new();
     let mut trees_read: HashSet<BlobId> = HashSet::new();
@@ -920,6 +922,7 @@ async fn check_with_budget<S: BlobStore>(
             let mut height = 0;
             let mut subdirs = Vec::new();
             let mut members = Vec::new();
+            let mut lies = Held::default();
             for node in &nodes {
                 let mut all_known = true;
                 for raw in &node.content {
@@ -945,7 +948,13 @@ async fn check_with_budget<S: BlobStore>(
                 if node.r#type == pb::NodeType::File as i32 {
                     if all_known {
                         match reader.check_file(node).await {
-                            Ok(_) => {}
+                            Ok((_, None)) => {}
+                            Ok((_, Some(len))) => {
+                                lies = lies.plus(Held {
+                                    entries: node.content.len() as u64,
+                                    bytes: len,
+                                });
+                            }
                             Err(e) if is_data_error(&e) => {
                                 let detail = format!("tree {name}: {e}");
                                 c.report(&key, &mut found, FindingKind::UnreadableTree, detail);
@@ -984,7 +993,7 @@ async fn check_with_budget<S: BlobStore>(
                 subdirs,
                 below: own,
                 height,
-                walk: own,
+                walk: own.plus(lies),
                 finding: found,
                 members,
                 linked: Vec::new(),
