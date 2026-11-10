@@ -810,6 +810,131 @@ async fn dispatch_cli_job_created() {
     }
 }
 
+fn cli_created(id: &str) -> JobCreated {
+    JobCreated {
+        job_id: id.to_string(),
+        spec: Some(JobSpec {
+            stdin_name: "app.dump".to_string(),
+            ..Default::default()
+        }),
+        caller_uid: 1000,
+        caller_gid: 100,
+        created_at_ms: now_ms(),
+    }
+}
+
+fn forgotten(bodies: &[ServerBody]) -> Vec<String> {
+    let mut ids: Vec<String> = bodies
+        .iter()
+        .filter_map(|b| match b {
+            ServerBody::JobForget(f) => Some(f.job_id.clone()),
+            _ => None,
+        })
+        .collect();
+    ids.sort();
+    ids
+}
+
+async fn open_cli_jobs(pool: &AnyPool, host: &str) -> i64 {
+    number(
+        pool,
+        "SELECT COUNT(*) FROM jobs WHERE host_id = $1 AND source = 'cli' \
+         AND state IN ('queued', 'assigned', 'running')",
+        host,
+    )
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adv_cli_job_flood_is_capped() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let host = enroll(&ts, &api, &repo, "host-a").await;
+        let pool = &ts.state().db.pool;
+        let mut agent = Fake::connect(&ts, &host, vec![]).await;
+
+        for n in 0..13 {
+            agent
+                .send(AgentBody::JobCreated(cli_created(&format!("flood-{n:02}"))))
+                .await;
+        }
+        let seen = agent.drain(Duration::from_millis(1500)).await;
+        assert_eq!(
+            open_cli_jobs(pool, &host.id).await,
+            8,
+            "[{}]",
+            backend.name()
+        );
+        let want: Vec<String> = (8..13).map(|n| format!("flood-{n:02}")).collect();
+        assert_eq!(forgotten(&seen), want);
+
+        agent
+            .send(AgentBody::JobFinished(finished(
+                "flood-00",
+                JobOutcome::Warnings,
+                "",
+            )))
+            .await;
+        wait_state(pool, "flood-00", "warnings").await;
+        agent
+            .send(AgentBody::JobCreated(cli_created("after")))
+            .await;
+        wait_state(pool, "after", "running").await;
+        assert_eq!(open_cli_jobs(pool, &host.id).await, 8);
+        drop(agent);
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adv_cli_job_backlog_survives_the_cap() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let pool = &ts.state().db.pool;
+
+        let host = enroll(&ts, &api, &repo, "h-open").await;
+        let reports = (0..12)
+            .map(|n| {
+                let id = format!("open-{n:02}");
+                let mut r = report(&id, JobReportState::Running);
+                r.created = Some(cli_created(&id));
+                r
+            })
+            .collect();
+        let mut agent = Fake::connect(&ts, &host, reports).await;
+        let seen = agent.drain(Duration::from_millis(1500)).await;
+        assert_eq!(
+            open_cli_jobs(pool, &host.id).await,
+            8,
+            "[{}]",
+            backend.name()
+        );
+        assert_eq!(forgotten(&seen).len(), 4);
+        drop(agent);
+
+        let host = enroll(&ts, &api, &repo, "h-done").await;
+        let reports = (0..12)
+            .map(|n| {
+                let id = format!("done-{n:02}");
+                let mut r = report(&id, JobReportState::Finished);
+                r.created = Some(cli_created(&id));
+                r.finished = Some(finished(&id, JobOutcome::Warnings, ""));
+                r
+            })
+            .collect();
+        let agent = Fake::connect(&ts, &host, reports).await;
+        for n in 0..12 {
+            wait_state(pool, &format!("done-{n:02}"), "warnings").await;
+        }
+        drop(agent);
+        ts.stop().await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn dispatch_rejects_foreign_job_messages() {
     for backend in backends() {
