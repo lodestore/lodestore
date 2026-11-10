@@ -371,6 +371,182 @@ async fn backup_refuses_tree_over_held_limit() {
     );
 }
 
+/// The smallest byte limit a backup of `src` passes: each refusal names the
+/// size that tripped it, which is the next limit to try. The probe runs in a
+/// repository of its own, so the passing run leaves no snapshot behind.
+async fn byte_bound(src: &PathBuf, held: bool) -> u64 {
+    let probe = tempfile::tempdir().unwrap();
+    let store = init_repo(probe.path()).await;
+    let store = &store;
+    let mut limit = 1;
+    for _ in 0..64 {
+        let mut w = writer(store).await;
+        if held {
+            w.set_held_byte_limit(limit);
+        } else {
+            w.set_dir_byte_limit(limit);
+        }
+        match w
+            .backup(std::slice::from_ref(src), BackupOptions::default(), &|_| {})
+            .await
+        {
+            Ok(_) => return limit,
+            Err(err) => {
+                let text = err.to_string();
+                let (_, rest) = text
+                    .split_once(if held { "hold " } else { "holds " })
+                    .unwrap();
+                limit = rest.split(' ').next().unwrap().parse().unwrap();
+            }
+        }
+    }
+    panic!("no byte limit found");
+}
+
+#[tokio::test]
+async fn backup_refuses_directory_over_byte_limit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo_dir, target) = (tmp.path().join("repo"), tmp.path().join("out"));
+    fs::create_dir(&repo_dir).unwrap();
+    let src = tmp.path().canonicalize().unwrap().join("src");
+    let (big, small) = (src.join("big"), src.join("small"));
+    fs::create_dir_all(&big).unwrap();
+    fs::create_dir_all(&small).unwrap();
+    for i in 0..20 {
+        fs::write(big.join(format!("{i:02}-{}", "n".repeat(100))), b"x").unwrap();
+    }
+    fs::write(small.join("f"), b"x").unwrap();
+    let store = init_repo(&repo_dir).await;
+    let bound = byte_bound(&src, false).await;
+    assert!(bound > 2000, "{bound}");
+
+    let mut w = writer(&store).await;
+    w.set_dir_byte_limit(bound - 1);
+    let err = w
+        .backup(
+            std::slice::from_ref(&src),
+            BackupOptions::default(),
+            &|_| {},
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
+    assert!(
+        err.to_string()
+            .contains(&format!("more than the {} a restore reads", bound - 1)),
+        "{err}"
+    );
+    assert!(objects(&store, "snapshots/").await.is_empty());
+
+    let mut w = writer(&store).await;
+    w.set_dir_byte_limit(bound);
+    w.backup(
+        std::slice::from_ref(&src),
+        BackupOptions::default(),
+        &|_| {},
+    )
+    .await
+    .unwrap();
+    let mut r = reader(&store).await;
+    let id = r.list_snapshots().await.unwrap().entries.remove(0).id;
+    r.set_dir_byte_limits(bound - 1, u64::MAX);
+    let err = r
+        .restore(&id, &target, &RestoreOptions::default(), &|_| {})
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::WalkLimit {
+                what: "bytes in one directory",
+                limit
+            } if limit == bound - 1
+        ),
+        "{err:?}"
+    );
+    r.set_dir_byte_limits(bound, u64::MAX);
+    r.restore(&id, &target, &RestoreOptions::default(), &|_| {})
+        .await
+        .unwrap();
+    assert_eq!(
+        fs::read(restored_path(&target, &small).join("f")).unwrap(),
+        b"x"
+    );
+}
+
+/// The writer and the reader add up the tree bytes of a path the same way.
+#[tokio::test]
+async fn backup_refuses_tree_over_held_byte_limit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo_dir, target) = (tmp.path().join("repo"), tmp.path().join("out"));
+    fs::create_dir(&repo_dir).unwrap();
+    let src = tmp.path().canonicalize().unwrap().join("src");
+    let deepest = src.join("b").join("c");
+    fs::create_dir_all(&deepest).unwrap();
+    for (dir, n) in [(&src, 4), (&src.join("b"), 4), (&deepest, 5)] {
+        for i in 0..n {
+            fs::write(dir.join(format!("f{i}")), b"x").unwrap();
+        }
+    }
+    let store = init_repo(&repo_dir).await;
+    let held = byte_bound(&src, true).await;
+
+    let mut w = writer(&store).await;
+    w.set_held_byte_limit(held - 1);
+    let err = w
+        .backup(
+            std::slice::from_ref(&src),
+            BackupOptions::default(),
+            &|_| {},
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
+    assert!(
+        err.to_string().contains(&format!(
+            "more than the {} a restore holds at once",
+            held - 1
+        )),
+        "{err}"
+    );
+    assert!(objects(&store, "snapshots/").await.is_empty());
+
+    let mut w = writer(&store).await;
+    w.set_held_byte_limit(held);
+    w.backup(
+        std::slice::from_ref(&src),
+        BackupOptions::default(),
+        &|_| {},
+    )
+    .await
+    .unwrap();
+    let mut r = reader(&store).await;
+    let id = r.list_snapshots().await.unwrap().entries.remove(0).id;
+    r.set_dir_byte_limits(u64::MAX, held - 1);
+    let err = r
+        .restore(&id, &target, &RestoreOptions::default(), &|_| {})
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::WalkLimit {
+                what: "bytes held at once",
+                limit
+            } if limit == held - 1
+        ),
+        "{err:?}"
+    );
+    r.set_dir_byte_limits(u64::MAX, held);
+    r.restore(&id, &target, &RestoreOptions::default(), &|_| {})
+        .await
+        .unwrap();
+    assert_eq!(
+        fs::read(restored_path(&target, &deepest).join("f4")).unwrap(),
+        b"x"
+    );
+}
+
 #[tokio::test]
 async fn backup_large_dir_split() {
     const FILES: usize = 30_000;
