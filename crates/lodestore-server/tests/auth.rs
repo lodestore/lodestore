@@ -939,3 +939,81 @@ async fn malformed_body_gets_a_json_error() {
     assert_eq!(body["code"], "unsupported_media_type");
     ts.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn login_rejects_oversized_password_without_counting() {
+    for backend in backends() {
+        let name = backend.name();
+        let ts = TestServer::start(&backend).await;
+        let (client, base) = (Client::new(), ts.rest_url());
+        let huge = json!({ "username": "admin", "password": "a".repeat(4097) });
+        for _ in 0..6 {
+            let response = post(&client, &base, "/api/v1/auth/login", huge.clone()).await;
+            assert_eq!(response.status(), 401, "[{name}]");
+        }
+        let admin = json!({ "username": "admin", "password": common::ADMIN_PASSWORD });
+        let ok = post(&client, &base, "/api/v1/auth/login", admin).await;
+        assert_eq!(ok.status(), 204, "[{name}] oversized tries are not counted");
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn login_accepts_existing_long_utf8_password() {
+    for backend in backends() {
+        let name = backend.name();
+        let ts = TestServer::start(&backend).await;
+        let (client, base) = (Client::new(), ts.rest_url());
+        let long = "ж".repeat(1000);
+        let hash = lodestore_server::auth::hash_password(&long).unwrap();
+        sqlx::query("UPDATE admin_users SET password_hash = $1")
+            .bind(hash)
+            .execute(&ts.state().db.pool)
+            .await
+            .unwrap();
+        let body = json!({ "username": "admin", "password": long });
+        let ok = post(&client, &base, "/api/v1/auth/login", body).await;
+        assert_eq!(ok.status(), 204, "[{name}]");
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn busy_login_returns_503_and_does_not_spend_the_attempt() {
+    for backend in backends() {
+        let name = backend.name();
+        let ts = TestServer::start(&backend).await;
+        let (client, base) = (Client::new(), ts.rest_url());
+        let gate = ts.state().auth.argon.clone();
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let held = Arc::new(Mutex::new(held));
+        let mut holders = Vec::new();
+        for _ in 0..gate.available() {
+            let (gate, held) = (gate.clone(), held.clone());
+            holders.push(tokio::spawn(async move {
+                gate.run(move || {
+                    let _ = held.lock().unwrap().recv();
+                })
+                .await
+            }));
+        }
+        while gate.available() > 0 {
+            tokio::task::yield_now().await;
+        }
+
+        let admin = json!({ "username": "admin", "password": common::ADMIN_PASSWORD });
+        for _ in 0..6 {
+            let busy = post(&client, &base, "/api/v1/auth/login", admin.clone()).await;
+            assert_eq!(busy.status(), 503, "[{name}]");
+            assert_eq!(busy.headers()["retry-after"], "2");
+            assert_eq!(error_code(busy).await, "busy");
+        }
+        drop(release);
+        for holder in holders {
+            holder.await.unwrap().unwrap();
+        }
+        let ok = post(&client, &base, "/api/v1/auth/login", admin).await;
+        assert_eq!(ok.status(), 204, "[{name}] a busy answer is not an attempt");
+        ts.stop().await;
+    }
+}

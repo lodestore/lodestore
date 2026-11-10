@@ -4,10 +4,9 @@ pub mod setup;
 pub mod tokens;
 
 use std::net::SocketAddr;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
-use anyhow::Context;
 use argon2::password_hash::PasswordVerifier;
 use argon2::{Argon2, PasswordHasher};
 use axum::Json;
@@ -23,6 +22,7 @@ use lodestore_format::crypto::Entropy;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::Row;
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use utoipa::ToSchema;
 use utoipa_axum::router::OpenApiRouter;
@@ -36,7 +36,12 @@ use crate::state::AppState;
 pub const SESSION_COOKIE: &str = "lodestore_session";
 pub const CSRF_HEADER: &str = "x-csrf-token";
 pub const MIN_PASSWORD_CHARS: usize = 12;
-pub const MAX_PASSWORD_CHARS: usize = 1024;
+pub const MAX_PASSWORD_BYTES: usize = 1024;
+/// A password set under the earlier limit of 1024 characters is at most 4096
+/// bytes of UTF-8, so anything longer cannot be a password that signs in.
+pub const MAX_SUBMITTED_PASSWORD_BYTES: usize = 4096;
+const ARGON_WAIT: Duration = Duration::from_secs(2);
+const ARGON_RETRY_AFTER_S: u64 = 2;
 pub const MAX_USERNAME_CHARS: usize = 64;
 const SESSION_DAYS: i64 = 7;
 const SESSION_LIFETIME: Duration = Duration::from_secs(7 * 86_400);
@@ -48,6 +53,57 @@ const SESSION_TOUCH_MS: i64 = 3_600_000;
 pub struct AuthState {
     pub setup: setup::SetupState,
     pub limits: limits::Limits,
+    pub argon: ArgonGate,
+}
+
+/// Caps how many Argon2 hashes run at once; each holds about 19 MiB. A request
+/// that cannot get a slot within two seconds is answered 503.
+#[derive(Clone)]
+pub struct ArgonGate(Arc<Semaphore>);
+
+impl Default for ArgonGate {
+    fn default() -> Self {
+        let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+        ArgonGate::with_permits((2 * cores).clamp(2, 32))
+    }
+}
+
+impl ArgonGate {
+    pub(crate) fn with_permits(permits: usize) -> Self {
+        ArgonGate(Arc::new(Semaphore::new(permits)))
+    }
+
+    pub fn available(&self) -> usize {
+        self.0.available_permits()
+    }
+
+    pub async fn run<T: Send + 'static>(
+        &self,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> Result<T, GuardError> {
+        self.run_within(ARGON_WAIT, work).await
+    }
+
+    /// The permit moves into the blocking closure: a client that hangs up
+    /// drops this future, but the hash keeps running and keeps its slot until
+    /// it ends, so abandoned requests cannot pile up past the cap.
+    async fn run_within<T: Send + 'static>(
+        &self,
+        wait: Duration,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> Result<T, GuardError> {
+        let permit = tokio::time::timeout(wait, self.0.clone().acquire_owned())
+            .await
+            .map_err(|_| GuardError::Busy(ARGON_RETRY_AFTER_S))?
+            .map_err(|e| ApiError::Internal(e.into()))?;
+        tokio::task::spawn_blocking(move || {
+            let result = work();
+            drop(permit);
+            result
+        })
+        .await
+        .map_err(|e| ApiError::Internal(e.into()).into())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -79,7 +135,7 @@ pub fn check_username(username: &str) -> Result<(), &'static str> {
 pub fn check_password(password: &str) -> Result<(), &'static str> {
     match password.chars().count() {
         n if n < MIN_PASSWORD_CHARS => Err("At least 12 characters."),
-        n if n > MAX_PASSWORD_CHARS => Err("At most 1024 characters."),
+        _ if password.len() > MAX_PASSWORD_BYTES => Err("At most 1024 bytes."),
         _ => Ok(()),
     }
 }
@@ -160,9 +216,12 @@ pub async fn bootstrap_admin(state: &AppState) -> anyhow::Result<()> {
     check_username(&state.config.admin_username).map_err(anyhow::Error::msg)?;
     check_password(password.expose()).map_err(anyhow::Error::msg)?;
     let pw = password.expose().to_owned();
-    let hash = tokio::task::spawn_blocking(move || hash_password(&pw))
+    let hash = state
+        .auth
+        .argon
+        .run(move || hash_password(&pw))
         .await
-        .context("hashing task")??;
+        .map_err(|e| anyhow::anyhow!("hashing the admin password: {e:?}"))??;
     sqlx::query(
         "INSERT INTO admin_users (id, username, password_hash, created_at) VALUES ($1, $2, $3, $4)",
     )
@@ -352,6 +411,25 @@ pub(crate) async fn start_session_for(
     Ok(jar.add(cookie))
 }
 
+async fn has_live_session(
+    state: &AppState,
+    jar: &CookieJar,
+    user_id: &str,
+) -> Result<bool, sqlx::Error> {
+    let Some(cookie) = jar.get(SESSION_COOKIE) else {
+        return Ok(false);
+    };
+    Ok(sqlx::query(
+        "SELECT 1 FROM sessions WHERE id_hash = $1 AND user_id = $2 AND expires_at > $3",
+    )
+    .bind(session_hash(cookie.value()))
+    .bind(user_id)
+    .bind(now_ms())
+    .fetch_optional(&state.db.pool)
+    .await?
+    .is_some())
+}
+
 #[utoipa::path(
     post,
     tag = "Auth",
@@ -373,6 +451,9 @@ async fn login(
     jar: CookieJar,
     Json(req): Json<LoginRequest>,
 ) -> Result<(CookieJar, StatusCode), GuardError> {
+    if req.password.len() > MAX_SUBMITTED_PASSWORD_BYTES {
+        return Err(ApiError::Unauthorized.into());
+    }
     let client = limits::client_ip(&state.config, peer, &headers);
     state.auth.limits.check_login(client, &req.username)?;
     if admin_count(&state).await? == 0 {
@@ -382,23 +463,50 @@ async fn login(
         .bind(&req.username)
         .fetch_optional(&state.db.pool)
         .await?;
-    let (user_id, hash) = match user {
+    let (user_id, stored) = match user {
         Some(row) => (
             Some(row.try_get::<String, _>("id")?),
-            row.try_get::<String, _>("password_hash")?,
+            Some(row.try_get::<String, _>("password_hash")?),
         ),
-        None => (None, DUMMY_HASH.clone()),
+        None => (None, None),
     };
+    let mut name_counted = false;
+    if let Some(id) = &user_id {
+        let has_session = has_live_session(&state, &jar, id).await?;
+        name_counted = state
+            .auth
+            .limits
+            .check_login_name(client, id, has_session)?;
+    }
     let password = req.password;
-    let verified = hash.clone();
-    let ok = tokio::task::spawn_blocking(move || verify_password(&password, &verified))
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
-    let user_id = match (ok, user_id) {
-        (true, Some(id)) => id,
+    let verified = stored.clone();
+    let judged = state
+        .auth
+        .argon
+        .run(move || match verified {
+            Some(hash) => verify_password(&password, &hash),
+            None => verify_password(&password, &DUMMY_HASH),
+        })
+        .await;
+    let ok = match judged {
+        Ok(ok) => ok,
+        Err(busy) => {
+            state.auth.limits.login_released(client, &req.username);
+            if let Some(id) = &user_id {
+                state.auth.limits.name_released(id, name_counted);
+            }
+            return Err(busy);
+        }
+    };
+    let (user_id, hash) = match (ok, user_id, stored) {
+        (true, Some(id), Some(hash)) => (id, hash),
         _ => return Err(ApiError::Unauthorized.into()),
     };
     state.auth.limits.login_succeeded(client, &req.username);
+    state
+        .auth
+        .limits
+        .name_succeeded(client, &user_id, name_counted);
     let jar = start_session(&state, jar, &user_id, &hash).await?;
     Ok((jar, StatusCode::NO_CONTENT))
 }
@@ -458,6 +566,65 @@ pub fn routes() -> OpenApiRouter<AppState> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc;
+
+    use super::*;
+
+    const SHORT: Duration = Duration::from_millis(100);
+
+    #[tokio::test]
+    async fn argon_gate_returns_busy_when_full() {
+        let gate = ArgonGate::with_permits(1);
+        let (release, held) = mpsc::channel::<()>();
+        let first = tokio::spawn({
+            let gate = gate.clone();
+            async move { gate.run(move || held.recv().is_ok()).await }
+        });
+        while gate.available() > 0 {
+            tokio::task::yield_now().await;
+        }
+        let second = gate.run_within(SHORT, || 1).await;
+        assert!(matches!(second, Err(GuardError::Busy(ARGON_RETRY_AFTER_S))));
+        release.send(()).unwrap();
+        assert!(first.await.unwrap().unwrap());
+        assert_eq!(gate.run_within(SHORT, || 2).await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn argon_gate_holds_permit_until_work_ends() {
+        let gate = ArgonGate::with_permits(1);
+        let (release, held) = mpsc::channel::<()>();
+        let abandoned = tokio::time::timeout(
+            Duration::from_millis(50),
+            gate.run(move || held.recv().is_ok()),
+        )
+        .await;
+        assert!(abandoned.is_err());
+        assert!(matches!(
+            gate.run_within(SHORT, || 1).await,
+            Err(GuardError::Busy(_))
+        ));
+        release.send(()).unwrap();
+        assert_eq!(
+            gate.run_within(Duration::from_secs(5), || 2).await.unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn password_limits_count_bytes() {
+        assert!(check_password(&"a".repeat(1024)).is_ok());
+        assert_eq!(
+            check_password(&"a".repeat(1025)),
+            Err("At most 1024 bytes.")
+        );
+        assert_eq!(check_password(&"ж".repeat(513)), Err("At most 1024 bytes."));
+        assert_eq!(
+            check_password(&"ж".repeat(11)),
+            Err("At least 12 characters.")
+        );
+    }
+
     use super::origin_allowed;
 
     #[test]
