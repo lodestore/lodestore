@@ -26,10 +26,13 @@ use lodestore_format::tree::{
 };
 use lodestore_format::writer::Writer;
 
+mod adv_support;
 #[path = "adv_support/planted.rs"]
 mod planted;
 mod tree_support;
 
+use adv_support::{attacker_keys, open_all_shards, plant_shard_where};
+use lodestore_format::pack::{ENTRY_LEN, pack_object_key, parse_entries};
 use planted::RangedOnly;
 
 const LOW_KDF: KdfCost = KdfCost {
@@ -1047,4 +1050,80 @@ async fn restore_hostile_held_bytes_count_subtree_lists() {
         .restore(&snap, &fx.target, &RestoreOptions::default(), &|_| {})
         .await
         .unwrap();
+}
+
+/// Every blob of the record one byte shorter than it is.
+fn shrink_ulen(record: &pb::PackRecord) -> pb::PackRecord {
+    let mut entries = Vec::with_capacity(record.entries.len());
+    for e in parse_entries(&record.entries).unwrap() {
+        entries.extend_from_slice(&e.blob_id);
+        entries.push(e.blob_type);
+        entries.extend_from_slice(&e.offset.to_le_bytes());
+        entries.extend_from_slice(&e.enc_len.to_le_bytes());
+        entries.extend_from_slice(&(e.ulen - 1).to_le_bytes());
+    }
+    assert_eq!(entries.len(), record.entries.len());
+    assert!(entries.len().is_multiple_of(ENTRY_LEN));
+    pb::PackRecord {
+        entries,
+        ..record.clone()
+    }
+}
+
+/// A file whose chunks the index lists with a wrong size is read to be
+/// checked; however many parents reach the file, that happens once.
+#[tokio::test]
+async fn restore_hostile_diamond_size_lie_reads_chunks_once() {
+    let mut fx = Fx::new().await;
+    let (first, second) = (vec![1u8; 1000], vec![2u8; 500]);
+    let chunks = [fx.data(&first), fx.data(&second)];
+    let shared = fx.tree(vec![file("f", &chunks, 1500)]);
+    fx.snapshot(files("x", 1)).await;
+
+    let store = LocalFsStore::new(fx.repo_dir.clone());
+    let repo = Repository::open(&store, b"pw").await.unwrap();
+    let keys = attacker_keys(&repo);
+    let shards = open_all_shards(&store, &keys).await;
+    assert_eq!(shards.len(), 1);
+    let (real_id, real) = &shards[0];
+    let forged = real.packs.iter().map(shrink_ulen).collect();
+    plant_shard_where(&store, &keys, forged, Vec::new(), |id| id < real_id).await;
+    let data_packs: Vec<String> = real
+        .packs
+        .iter()
+        .map(|p| pack_object_key(&p.pack_id.as_slice().try_into().unwrap()))
+        .collect();
+
+    let mut snapshots = Vec::new();
+    for parents in [2, 8] {
+        let top = (0..parents)
+            .map(|i| dir(&format!("p{i}"), shared))
+            .collect();
+        snapshots.push(fx.snapshot(top).await);
+    }
+
+    let mut reads = Vec::new();
+    for snap in &snapshots {
+        let ranged = RangedOnly::new(&store, &[]);
+        let mut reader =
+            Reader::open(&ranged, repo.read_keys().duplicate(), repo.config()).unwrap();
+        let totals = reader
+            .selection_totals(snap, &Selection::all())
+            .await
+            .unwrap();
+        assert_eq!(totals.bytes % 1500, 0);
+        let n = data_packs
+            .iter()
+            .map(|key| ranged.ranges_of(key).len())
+            .sum::<usize>();
+        reads.push(n);
+    }
+    assert!(reads[0] > 0, "the lie was never reached");
+    assert_eq!(reads[0], reads[1], "chunks were read again on a revisit");
+
+    fx.restore(&snapshots[1], &RestoreOptions::default())
+        .await
+        .unwrap();
+    let expected = [first, second].concat();
+    assert_eq!(fs::read(fx.target.join("p5/f")).unwrap(), expected);
 }

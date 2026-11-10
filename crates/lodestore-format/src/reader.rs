@@ -243,7 +243,14 @@ pub struct Reader<S: BlobStore> {
     keys: ReadKeys,
     cache: Arc<ReaderCache>,
     walk: TreeBudget,
+    /// The size the chunks of a file hold, found by reading them, by the hash
+    /// of its list of chunk ids. Only files whose sizes in the index do not
+    /// add up are put here, so a file reached from many parents is read once.
+    file_lens: HashMap<[u8; 32], u64>,
 }
+
+/// The most entries `Reader::file_lens` holds.
+const MAX_FILE_LENS: usize = 1 << 16;
 
 impl<S: BlobStore> Reader<S> {
     /// A reader with a cache of its own.
@@ -274,6 +281,7 @@ impl<S: BlobStore> Reader<S> {
             keys,
             cache,
             walk: TreeBudget::default(),
+            file_lens: HashMap::new(),
         })
     }
 
@@ -802,7 +810,19 @@ impl<S: BlobStore> Reader<S> {
         };
         let mut total = self.content_len(node, false).await?;
         if total != expected {
-            total = self.content_len(node, true).await?;
+            let key = *blake3::hash(&node.content.concat()).as_bytes();
+            total = match self.file_lens.get(&key) {
+                Some(&known) => known,
+                None => {
+                    let read = self.content_len(node, true).await?;
+                    // shortcut: past MAX_FILE_LENS distinct files a revisit reads the chunks
+                    // again, within the walk budget; raise it once those reads are counted
+                    if self.file_lens.len() < MAX_FILE_LENS {
+                        self.file_lens.insert(key, read);
+                    }
+                    read
+                }
+            };
         }
         if total != expected {
             return Err(Error::corrupt(
