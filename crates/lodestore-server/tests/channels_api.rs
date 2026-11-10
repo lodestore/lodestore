@@ -145,7 +145,7 @@ async fn channels_api_webhook_create_and_test() {
         assert_eq!(created["source"], "ui");
         assert_eq!(created["secret_set"], true);
         assert_eq!(created["settings"]["url"], stub.url("/hook"));
-        assert_eq!(created["alert_types"].as_array().unwrap().len(), 8);
+        assert_eq!(created["alert_types"].as_array().unwrap().len(), 10);
         assert!(created["last_delivery"].is_null());
         let id = created["id"].as_str().unwrap().to_string();
 

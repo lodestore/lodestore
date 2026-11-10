@@ -2,6 +2,7 @@ use super::inputs::Inputs;
 use super::model::{AlertFacts, AlertType, CertKind, HostFacts, Severity, Thresholds, offline};
 
 const DAY_MS: i64 = 86_400_000;
+pub const SECURITY_ALERT_WINDOW_MS: i64 = DAY_MS;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Candidate {
@@ -145,6 +146,27 @@ pub fn evaluate(
                 AlertType::AgentUpdateFailed,
                 format!("agent_update_failed:{}", h.host_id),
                 Severity::Critical,
+            )
+        });
+    }
+    for s in &inputs.security {
+        let Some(h) = inputs.hosts.iter().find(|h| h.host_id == s.host_id) else {
+            continue;
+        };
+        if s.at_ms <= now_ms - SECURITY_ALERT_WINDOW_MS {
+            continue;
+        }
+        let severity = match s.kind {
+            AlertType::AgentCertificateRejected => Severity::Critical,
+            _ => Severity::Warning,
+        };
+        out.push(Candidate {
+            facts: s.facts.clone(),
+            ..Candidate::for_host(
+                h,
+                s.kind,
+                format!("{}:{}", s.kind.as_str(), h.host_id),
+                severity,
             )
         });
     }
@@ -314,5 +336,47 @@ mod tests {
         assert_eq!(out[2].severity, Severity::Warning);
         assert_eq!(out[2].host_id, None);
         assert_eq!(out[2].facts.external, Some(true));
+    }
+
+    fn security(
+        kind: AlertType,
+        host_id: &str,
+        at_ms: i64,
+    ) -> crate::alerts::inputs::SecurityAlert {
+        crate::alerts::inputs::SecurityAlert {
+            host_id: host_id.into(),
+            kind,
+            at_ms,
+            facts: AlertFacts {
+                serial: Some("abc".into()),
+                ip: Some("203.0.113.9".into()),
+                ..AlertFacts::default()
+            },
+        }
+    }
+
+    #[test]
+    fn security_events_raise_alerts_for_a_day_on_known_hosts_only() {
+        let inputs = Inputs {
+            hosts: vec![host(vec![])],
+            security: vec![
+                security(AlertType::AgentSessionConflict, "h1", NOW - HOUR),
+                security(AlertType::AgentCertificateRejected, "h1", NOW - 23 * HOUR),
+                security(AlertType::AgentCertificateRejected, "gone", NOW),
+            ],
+            ..Inputs::default()
+        };
+        let out = evaluate(&inputs, NOW, NOW, &T);
+        assert_eq!(
+            keys(&out),
+            ["agent_session_conflict:h1", "agent_certificate_rejected:h1"]
+        );
+        assert_eq!(out[0].severity, Severity::Warning);
+        assert_eq!(out[1].severity, Severity::Critical);
+        assert_eq!(out[1].facts.serial.as_deref(), Some("abc"));
+        let later = evaluate(&inputs, NOW + 2 * HOUR, 0, &T);
+        assert_eq!(keys(&later), ["agent_session_conflict:h1"]);
+        let much_later = evaluate(&inputs, NOW + 25 * HOUR, 0, &T);
+        assert!(much_later.is_empty());
     }
 }

@@ -1063,3 +1063,74 @@ async fn alerts_agent_update_failed_silenced_and_revoked() {
         env.stop().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn alerts_certificate_rejected_opens_and_resolves() {
+    for backend in backends() {
+        let env = Env::start(&backend).await;
+        let now = now_ms();
+        let registry = &env.ts.state().registry;
+        let ip = Some("10.0.0.7".parse().unwrap());
+        env.host("a2", "gone").await;
+        sqlx::query("UPDATE agents SET status = 'revoked' WHERE id = 'a2'")
+            .execute(env.pool())
+            .await
+            .unwrap();
+        registry.note_cert_rejected("a2", "dead", ip);
+        assert_eq!(env.tick(now).await.fired, 0, "[{}]", backend.name());
+
+        env.host("a1", "web-1").await;
+        registry.note_cert_rejected("a1", "abc", ip);
+        assert_eq!(env.tick(now).await.fired, 1, "[{}]", backend.name());
+        let alerts = env.alerts("active").await;
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0]["type"], "agent_certificate_rejected");
+        assert_eq!(alerts[0]["severity"], "critical");
+        assert_eq!(alerts[0]["host"]["id"], "a1");
+        assert_eq!(alerts[0]["facts"]["serial"], "abc");
+        assert_eq!(alerts[0]["facts"]["ip"], "10.0.0.7");
+        let id = alerts[0]["id"].as_str().unwrap().to_string();
+
+        registry.note_cert_rejected("a1", "def", ip);
+        assert_eq!(env.tick(now + MINUTE).await.fired, 0);
+        let alerts = env.alerts("active").await;
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0]["facts"]["serial"], "def");
+
+        assert_eq!(env.tick(now + DAY + MINUTE).await.resolved, 1);
+        assert!(env.alerts("active").await.is_empty());
+        assert_eq!(env.events(&id).await, ["firing", "resolved"]);
+        env.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn alerts_security_alert_survives_a_restart_until_its_day_is_over() {
+    for backend in backends() {
+        let env = Env::start(&backend).await;
+        let now = now_ms();
+        env.host("a1", "web-1").await;
+        sqlx::query(
+            "INSERT INTO alerts (id, type, key, severity, state, host_id, title, detail, \
+             facts_json, started_at, updated_at, notified_at) \
+             VALUES ('s1', 'agent_session_conflict', 'agent_session_conflict:a1', 'warning', \
+             'firing', 'a1', 't', 'd', '{\"ip\":\"10.0.0.8\",\"previous_ip\":\"10.0.0.7\"}', \
+             $1, $1, $1)",
+        )
+        .bind(now - 2 * HOUR)
+        .execute(env.pool())
+        .await
+        .unwrap();
+
+        let held = env.tick(now).await;
+        assert_eq!((held.fired, held.resolved), (0, 0), "[{}]", backend.name());
+        let alerts = env.alerts("active").await;
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0]["facts"]["previous_ip"], "10.0.0.7");
+
+        assert_eq!(env.tick(now + 21 * HOUR).await.resolved, 0);
+        assert_eq!(env.tick(now + 23 * HOUR).await.resolved, 1);
+        assert!(env.alerts("active").await.is_empty());
+        env.stop().await;
+    }
+}
