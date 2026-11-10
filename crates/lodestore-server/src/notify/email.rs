@@ -1,7 +1,9 @@
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use lettre::message::{Mailbox, MultiPart};
 use lettre::transport::smtp::authentication::Credentials;
+use lettre::transport::smtp::client::{Tls, TlsParameters};
 use lettre::{AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
 
 use super::channels::{Channel, ChannelSecrets, ChannelSettings, SmtpMode};
@@ -98,21 +100,22 @@ fn smtp_error(error: &lettre::transport::smtp::Error, secrets: &ChannelSecrets) 
 pub fn transport(
     settings: &ChannelSettings,
     secrets: &ChannelSecrets,
+    addr: SocketAddr,
 ) -> Result<AsyncSmtpTransport<Tokio1Executor>, DeliveryError> {
     let host = settings
         .smtp_host
         .as_deref()
         .ok_or_else(|| DeliveryError::new("The email channel has no SMTP server."))?;
-    let relay = match settings.security.unwrap_or(SmtpMode::Starttls) {
-        SmtpMode::Tls => AsyncSmtpTransport::<Tokio1Executor>::relay(host),
-        SmtpMode::Starttls => AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(host),
+    let parameters = TlsParameters::new(host.to_string()).map_err(|e| smtp_error(&e, secrets))?;
+    let tls = match settings.security.unwrap_or(SmtpMode::Starttls) {
+        SmtpMode::Tls => Tls::Wrapper(parameters),
+        SmtpMode::Starttls => Tls::Required(parameters),
     };
-    let mut builder = relay
-        .map_err(|e| smtp_error(&e, secrets))?
-        .timeout(Some(TIMEOUT));
-    if let Some(port) = settings.port {
-        builder = builder.port(port);
-    }
+    let mut builder =
+        AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(addr.ip().to_string())
+            .port(addr.port())
+            .tls(tls)
+            .timeout(Some(TIMEOUT));
     if let Some(username) = &settings.username {
         let password = secrets.smtp_password.as_ref().map_or("", |p| p.expose());
         builder = builder.credentials(Credentials::new(username.clone(), password.to_string()));
@@ -145,8 +148,11 @@ pub async fn send(
         None
     };
     let email = build_for(channel, message, admin.as_deref())?;
-    let transport = transport(&channel.settings, &channel.secrets)?;
-    let host = channel.settings.smtp_host.as_deref().unwrap_or_default();
+    let host = channel
+        .settings
+        .smtp_host
+        .as_deref()
+        .ok_or_else(|| DeliveryError::new("The email channel has no SMTP server."))?;
     let port = channel
         .settings
         .port
@@ -154,7 +160,9 @@ pub async fn send(
             Some(SmtpMode::Tls) => 465,
             _ => 587,
         });
-    net::check_host(host, port, state.config.notifications.allow_private_targets).await?;
+    let addr =
+        net::resolve_allowed(host, port, state.config.notifications.allow_private_targets).await?;
+    let transport = transport(&channel.settings, &channel.secrets, addr)?;
     deliver(&transport, email, &channel.secrets).await
 }
 
@@ -330,5 +338,30 @@ mod tests {
         assert!(data.contains("Content-Type: text/plain"));
         assert!(data.contains("Content-Type: text/html"));
         assert!(data.contains("FIRING: Backup failed on web-1"));
+    }
+
+    #[tokio::test]
+    async fn smtp_connects_to_the_checked_address() {
+        let (port, _) = smtp_receiver().await;
+        let mut channel = channel(Some(port), &["ops@example.test"]);
+        channel.settings.smtp_host = Some("smtp.example.invalid".to_string());
+        let addr: SocketAddr = ([127, 0, 0, 1], port).into();
+        let transport = transport(&channel.settings, &channel.secrets, addr).unwrap();
+        let message = build(
+            &channel,
+            &for_event(
+                "https://lodestore.example.test",
+                &backup_failed(),
+                MessageKind::Firing,
+                0,
+            ),
+        )
+        .unwrap();
+        let error = deliver(&transport, message, &channel.secrets)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("resolve"), "{error}");
+        assert!(error.to_lowercase().contains("starttls"), "{error}");
     }
 }

@@ -1,4 +1,4 @@
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -10,28 +10,89 @@ use crate::config::NotificationsConfig;
 const TIMEOUT: Duration = Duration::from_secs(10);
 const BODY_LIMIT: usize = 200;
 
-fn blocked(ip: IpAddr, allow_private: bool) -> bool {
+fn always_blocked(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
             v4.is_link_local()
                 || v4.is_unspecified()
                 || v4.is_multicast()
                 || v4.is_broadcast()
-                || (!allow_private
-                    && (v4.is_loopback()
-                        || v4.is_private()
-                        || (v4.octets()[0] == 100 && v4.octets()[1] & 0xc0 == 64)))
+                || v4.octets()[0] == 0
+                || v4.octets()[0] >= 240
+                || v4 == Ipv4Addr::new(100, 100, 100, 200)
         }
         IpAddr::V6(v6) => {
             v6.is_unicast_link_local()
                 || v6.is_unspecified()
                 || v6.is_multicast()
-                || (!allow_private && (v6.is_loopback() || v6.is_unique_local()))
-                || v6
-                    .to_ipv4_mapped()
-                    .is_some_and(|v4| blocked(IpAddr::V4(v4), allow_private))
+                || v6 == Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x254)
         }
     }
+}
+
+fn private_range(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_loopback()
+                || v4.is_private()
+                || (o[0] == 100 && o[1] & 0xc0 == 64)
+                || (o[0] == 192 && o[1] == 0 && o[2] == 0)
+                || (o[0] == 198 && o[1] & 0xfe == 18)
+        }
+        IpAddr::V6(v6) => {
+            let s = v6.segments();
+            v6.is_loopback()
+                || v6.is_unique_local()
+                || s[0] & 0xffc0 == 0xfec0
+                || (s[0] == 0x64 && s[1] == 0xff9b && s[2] == 1)
+        }
+    }
+}
+
+fn embedded_v4(v6: Ipv6Addr) -> Vec<Ipv4Addr> {
+    let s = v6.segments();
+    let low = Ipv4Addr::new((s[6] >> 8) as u8, s[6] as u8, (s[7] >> 8) as u8, s[7] as u8);
+    let high_zero = s[..5].iter().all(|&x| x == 0);
+    let mut found = Vec::new();
+    if high_zero && s[5] == 0xffff {
+        found.push(low);
+    }
+    if high_zero && s[5] == 0 && u32::from(low) >= 2 {
+        found.push(low);
+    }
+    if s[0] == 0x64 && s[1] == 0xff9b && s[2..6].iter().all(|&x| x == 0) {
+        found.push(low);
+    }
+    if s[0] == 0x2002 {
+        found.push(Ipv4Addr::new(
+            (s[1] >> 8) as u8,
+            s[1] as u8,
+            (s[2] >> 8) as u8,
+            s[2] as u8,
+        ));
+    }
+    if s[0] == 0x2001 && s[1] == 0 {
+        found.push(Ipv4Addr::new(
+            (s[2] >> 8) as u8,
+            s[2] as u8,
+            (s[3] >> 8) as u8,
+            s[3] as u8,
+        ));
+        found.push(Ipv4Addr::from(!u32::from(low)));
+    }
+    found
+}
+
+fn blocked(ip: IpAddr, allow_private: bool) -> bool {
+    always_blocked(ip)
+        || (!allow_private && private_range(ip))
+        || match ip {
+            IpAddr::V4(_) => false,
+            IpAddr::V6(v6) => embedded_v4(v6)
+                .into_iter()
+                .any(|v4| blocked(IpAddr::V4(v4), allow_private)),
+        }
 }
 
 fn not_allowed(host: &str) -> DeliveryError {
@@ -100,16 +161,16 @@ pub fn check_target(url: &str, allow_private: bool) -> Result<(), DeliveryError>
     }
 }
 
-/// The SMTP client resolves the host itself, so the addresses are checked
-/// just before it connects; a record changed in between is not caught.
-pub async fn check_host(host: &str, port: u16, allow_private: bool) -> Result<(), DeliveryError> {
-    let addrs = tokio::net::lookup_host((host, port))
+pub async fn resolve_allowed(
+    host: &str,
+    port: u16,
+    allow_private: bool,
+) -> Result<SocketAddr, DeliveryError> {
+    tokio::net::lookup_host((host, port))
         .await
-        .map_err(|e| DeliveryError::new(format!("The host {host} cannot be resolved: {e}")))?;
-    if addrs.into_iter().any(|a| blocked(a.ip(), allow_private)) {
-        return Err(not_allowed(host));
-    }
-    Ok(())
+        .map_err(|e| DeliveryError::new(format!("The host {host} cannot be resolved: {e}")))?
+        .find(|addr| !blocked(addr.ip(), allow_private))
+        .ok_or_else(|| not_allowed(host))
 }
 
 pub fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
@@ -165,36 +226,74 @@ mod tests {
     }
 
     #[test]
-    fn private_ranges_need_the_opt_in() {
-        for text in [
-            "127.0.0.1",
-            "10.1.2.3",
-            "172.16.0.1",
-            "192.168.1.1",
-            "100.64.0.1",
-            "::1",
-            "fd00::1",
-            "::ffff:10.0.0.1",
-        ] {
-            assert!(blocked(ip(text), false), "{text}");
-            assert!(!blocked(ip(text), true), "{text}");
+    fn blocked_ranges_table() {
+        let teredo = |server: Ipv4Addr, client: Ipv4Addr| {
+            let (s, c) = (server.octets(), (!u32::from(client)).to_be_bytes());
+            IpAddr::V6(Ipv6Addr::new(
+                0x2001,
+                0,
+                u16::from_be_bytes([s[0], s[1]]),
+                u16::from_be_bytes([s[2], s[3]]),
+                0x1234,
+                0x5678,
+                u16::from_be_bytes([c[0], c[1]]),
+                u16::from_be_bytes([c[2], c[3]]),
+            ))
+        };
+        let public = Ipv4Addr::new(8, 8, 8, 8);
+        let table: Vec<(IpAddr, bool, bool)> = [
+            ("0.1.2.3", true, true),
+            ("192.0.0.8", true, false),
+            ("198.18.0.1", true, false),
+            ("198.19.255.255", true, false),
+            ("198.20.0.1", false, false),
+            ("240.0.0.1", true, true),
+            ("100.100.100.200", true, true),
+            ("100.64.0.1", true, false),
+            ("8.8.8.8", false, false),
+            ("127.0.0.1", true, false),
+            ("169.254.169.254", true, true),
+            ("::ffff:127.0.0.1", true, false),
+            ("::127.0.0.1", true, false),
+            ("::1", true, false),
+            ("::", true, true),
+            ("64:ff9b::a9fe:a9fe", true, true),
+            ("64:ff9b::808:808", false, false),
+            ("64:ff9b:1::1", true, false),
+            ("2002:7f00:1::", true, false),
+            ("2002:808:808::", false, false),
+            ("fec0::1", true, false),
+            ("fd00:ec2::254", true, true),
+            ("fd00::1", true, false),
+            ("fe80::1", true, true),
+            ("ff02::1", true, true),
+            ("2606:4700::1111", false, false),
+        ]
+        .into_iter()
+        .map(|(text, strict, lan)| (ip(text), strict, lan))
+        .chain([
+            (teredo(public, Ipv4Addr::LOCALHOST), true, false),
+            (teredo(Ipv4Addr::LOCALHOST, public), true, false),
+            (
+                teredo(Ipv4Addr::new(169, 254, 169, 254), public),
+                true,
+                true,
+            ),
+            (teredo(public, public), false, false),
+        ])
+        .collect();
+        for (addr, strict, lan) in table {
+            assert_eq!(blocked(addr, false), strict, "{addr} without the opt-in");
+            assert_eq!(blocked(addr, true), lan, "{addr} with the opt-in");
         }
-        for text in [
-            "169.254.169.254",
-            "0.0.0.0",
-            "224.0.0.1",
-            "255.255.255.255",
-            "fe80::1",
-            "::",
-            "ff02::1",
-            "::ffff:169.254.169.254",
-        ] {
-            assert!(blocked(ip(text), false), "{text}");
-            assert!(blocked(ip(text), true), "{text}");
-        }
-        for text in ["93.184.216.34", "2606:4700::1111", "100.128.0.1"] {
-            assert!(!blocked(ip(text), false), "{text}");
-        }
+    }
+
+    #[tokio::test]
+    async fn resolved_host_is_filtered() {
+        let addr = resolve_allowed("localhost", 2525, true).await.unwrap();
+        assert!(addr.ip().is_loopback());
+        assert_eq!(addr.port(), 2525);
+        assert!(resolve_allowed("localhost", 2525, false).await.is_err());
     }
 
     #[test]
