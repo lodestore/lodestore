@@ -1459,6 +1459,11 @@ async fn check_hostile_depth_cut_shared_dir_deep_first() {
 }
 
 #[tokio::test]
+async fn check_hostile_depth_cut_shared_dir_shallow_first() {
+    assert_depth_is_found_only_for_deep(false).await;
+}
+
+#[tokio::test]
 async fn check_hostile_short_subtree_id_is_a_finding() {
     let mut fx = Fx::new().await;
     let mut bad = dir("z", [0u8; 32]);
@@ -1472,4 +1477,63 @@ async fn check_hostile_short_subtree_id_is_a_finding() {
     assert_eq!(f.key, snapshot_object_key(&snap));
     assert_eq!(f.kind, FindingKind::UnreadableTree);
     assert!(f.detail.contains("32 bytes"), "{f:?}");
+}
+
+#[tokio::test]
+async fn check_hostile_fan_out_over_walk_budget_matches_restore() {
+    let mut fx = Fx::new().await;
+    let snap = fan_out(&mut fx).await;
+
+    let report = fx.check().await;
+    assert!(report.findings.is_empty(), "{:?}", report.findings);
+    assert_eq!(report.trees_checked, 5);
+
+    let mut reader = fx.reader().await;
+    reader.set_walk_limits(10_000, u64::MAX);
+    let nodes = reader
+        .restore(&snap, &fx.target, &RestoreOptions::default(), &|_| {})
+        .await
+        .unwrap_err();
+    let mut reader = fx.reader().await;
+    reader.set_walk_limits(u64::MAX, 4096);
+    let bytes = reader
+        .restore(&snap, &fx.target, &RestoreOptions::default(), &|_| {})
+        .await
+        .unwrap_err();
+    let budgets = [
+        (nodes, TreeBudget::new(10_000, MAX_WALK_TREE_BYTES)),
+        (bytes, TreeBudget::new(MAX_WALK_NODES, 4096)),
+    ];
+    for (err, budget) in budgets {
+        let report = fx.check_budget(budget).await;
+        assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
+        let f = &report.findings[0];
+        assert_eq!(f.key, snapshot_object_key(&snap));
+        assert_eq!(f.kind, FindingKind::UnreadableTree);
+        assert_eq!(f.detail, err.to_string());
+    }
+}
+
+/// Forty levels of two directory nodes that name the same directory below:
+/// 2^40 visits of the file at the bottom, from 42 trees.
+#[tokio::test]
+async fn check_hostile_huge_diamond_is_not_expanded() {
+    let mut fx = Fx::new().await;
+    let content = fx.data(b"fine");
+    let mut inner = fx.tree(vec![file("f", &[content], 4)]);
+    for _ in 0..40 {
+        inner = fx.tree(vec![dir("a", inner), dir("b", inner)]);
+    }
+    let snap = fx.snapshot(vec![dir("a", inner)]).await;
+
+    let report = fx.check().await;
+    assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
+    let f = &report.findings[0];
+    assert_eq!(f.key, snapshot_object_key(&snap));
+    assert_eq!(f.kind, FindingKind::UnreadableTree);
+    let limit = Error::WalkLimit {
+        what: "entries",
+        limit: MAX_WALK_NODES,
+    };
+    assert_eq!(f.detail, limit.to_string());
 }
