@@ -65,6 +65,9 @@ All notable changes to Lodestore are recorded here. The format follows [Keep a C
 
 ### Fixed
 
+- A file whose chunk sizes in the index do not add up made a restore read every chunk it names before charging them to the walk budget, and the structure check read them without any limit, so one planted file naming one chunk many times could make the nightly check read terabytes. Now each distinct chunk of such a file is read once per visit, every reference to a chunk is charged as it is read, and charging and reading stop once the chunks hold more than the file says. The structure check reads such chunks within the walk budget of one restore per run and reports a file it could not read for every snapshot that reaches it.
+- The structure check kept the lists of subdirectories and the hardlink members of a directory whose subtree had taken the path over a limit while it walked below; it now lets go of them.
+- The size of the repository the structure check counts no longer overflows on a listing with impossible object sizes.
 - `lode backup` held the chain of directories of its parent snapshot without the limits of a path, so a planted parent could make it hold a gigabyte of tree data per level; the parent now stops at 2^24 entries and 2 GiB of tree data held at once, and the backup goes on without it.
 - A file whose chunk sizes in the index do not add up charges its chunks and their bytes to the walk budget on every visit, and its chunks are read once per operation for up to 65,536 such files; the structure check counts the same charge.
 - The structure check reported a finding in a directory shared by several snapshots for the first snapshot only and called the others ok; every snapshot that reaches the directory now gets it.
