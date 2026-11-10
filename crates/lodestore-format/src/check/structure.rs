@@ -451,7 +451,9 @@ fn tally(entries: &[ListEntry], bytes: &mut u64, objects: &mut u64) {
 /// index shards, the snapshots and the tree blobs, and, only for a file whose
 /// chunk sizes in the index do not add up, its chunks: each distinct chunk
 /// once for each directory the file is written in, within one walk budget for
-/// the whole run. No other data is read, and no pack is read whole.
+/// the whole run: once the budget is spent no other chunk is read, so the run
+/// reads at most one chunk past it. No other data is read, and no pack is read
+/// whole.
 pub async fn check_structure<S: BlobStore>(
     store: &S,
     keys: &ReadKeys,

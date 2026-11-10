@@ -889,7 +889,10 @@ impl<S: BlobStore> Reader<S> {
 
     /// The size of a file's chunks, read from the chunks themselves, each
     /// distinct one once, charging the bytes of every reference as it goes.
-    /// Stops once the sum is over `expected`, so it may then be partial.
+    /// Stops once the sum is over `expected`, so it may then be partial. A
+    /// chunk is read only while bytes of the budget are left, and a charge
+    /// that fails spends them, so a check that goes on after the error reads
+    /// at most one chunk past the budget over its whole run.
     async fn read_len(&mut self, node: &pb::Node, expected: u64) -> Result<u64> {
         let mut lens: HashMap<BlobId, u64> = HashMap::new();
         let mut total = 0u64;
@@ -901,6 +904,7 @@ impl<S: BlobStore> Reader<S> {
             let len = match lens.get(&id) {
                 Some(&len) => len,
                 None => {
+                    self.walk.check_bytes_left()?;
                     let len = self.read_blob(&id, BLOB_TYPE_DATA).await?.len() as u64;
                     lens.insert(id, len);
                     len

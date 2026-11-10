@@ -157,20 +157,43 @@ impl TreeBudget {
         self.bytes_left = self.bytes;
     }
 
+    /// Charges `n` bytes; a charge that does not fit spends the rest, so the
+    /// bytes stay spent for an operation that goes on after the error.
     pub fn charge_bytes(&mut self, n: u64) -> Result<()> {
-        self.bytes_left = self.bytes_left.checked_sub(n).ok_or(Error::WalkLimit {
-            what: "bytes of directory data",
-            limit: self.bytes,
-        })?;
+        let Some(left) = self.bytes_left.checked_sub(n) else {
+            self.bytes_left = 0;
+            return Err(self.bytes_spent());
+        };
+        self.bytes_left = left;
         Ok(())
     }
 
+    /// Charges `n` entries; a charge that does not fit spends the rest.
     pub fn charge_nodes(&mut self, n: u64) -> Result<()> {
-        self.nodes_left = self.nodes_left.checked_sub(n).ok_or(Error::WalkLimit {
-            what: "entries",
-            limit: self.nodes,
-        })?;
+        let Some(left) = self.nodes_left.checked_sub(n) else {
+            self.nodes_left = 0;
+            return Err(Error::WalkLimit {
+                what: "entries",
+                limit: self.nodes,
+            });
+        };
+        self.nodes_left = left;
         Ok(())
+    }
+
+    /// Refuses work once the bytes are spent, before anything is read for it.
+    pub fn check_bytes_left(&self) -> Result<()> {
+        if self.bytes_left == 0 {
+            return Err(self.bytes_spent());
+        }
+        Ok(())
+    }
+
+    fn bytes_spent(&self) -> Error {
+        Error::WalkLimit {
+            what: "bytes of directory data",
+            limit: self.bytes,
+        }
     }
 }
 

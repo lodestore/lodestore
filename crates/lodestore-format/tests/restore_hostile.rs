@@ -1820,6 +1820,79 @@ async fn check_hostile_chunk_read_limit_is_a_finding() {
     assert!(report.findings.is_empty(), "{:?}", report.findings);
 }
 
+/// The key of the pack that holds the data blob `id`.
+async fn data_pack_of(store: &LocalFsStore, repo: &Repository, id: &BlobId) -> String {
+    let pack = open_all_shards(store, &attacker_keys(repo))
+        .await
+        .into_iter()
+        .flat_map(|(_, shard)| shard.packs)
+        .find(|p| {
+            parse_entries(&p.entries)
+                .unwrap()
+                .iter()
+                .any(|e| e.blob_type == BLOB_TYPE_DATA && e.blob_id == *id)
+        })
+        .unwrap();
+    pack_object_key(&pack.pack_id.as_slice().try_into().unwrap())
+}
+
+/// The blobs read from `pack`, leaving out the reads of its prefix.
+fn blob_reads<S>(ranged: &RangedOnly<S>, pack: &str) -> usize {
+    let prefix = 0..PACK_PREFIX_LEN as u64;
+    ranged
+        .ranges_of(pack)
+        .into_iter()
+        .filter(|r| *r != prefix)
+        .count()
+}
+
+/// The reads of one 1000-byte chunk by a check of one directory: `e` names
+/// the chunk twice and spends the bytes of the budget on its second reference,
+/// then `k` files each name it once and say they are empty. The index is
+/// honest. The snapshot is reported, with files not checked.
+async fn spent_budget_reads(k: usize) -> usize {
+    let mut fx = Fx::new().await;
+    let c = fx.data(&[7u8; 1000]);
+    let mut nodes = vec![file("e", &[c, c], 1999)];
+    nodes.extend((0..k).map(|i| file(&format!("f{i:04}"), &[c], 0)));
+    let d = fx.tree(nodes);
+    let snap = fx.snapshot(vec![dir("d", d)]).await;
+    let store = LocalFsStore::new(fx.repo_dir.clone());
+    let repo = Repository::open(&store, b"pw").await.unwrap();
+    let pack = data_pack_of(&store, &repo, &c).await;
+
+    let ranged = RangedOnly::new(&store, &[]);
+    let report = check_structure_with_budget(
+        &ranged,
+        repo.read_keys(),
+        repo.config(),
+        &|_, _, _| {},
+        TreeBudget::new(MAX_WALK_NODES, 1500),
+    )
+    .await
+    .unwrap();
+    for f in &report.findings {
+        assert_eq!(f.key, snapshot_object_key(&snap));
+        assert_eq!(f.kind, FindingKind::UnreadableTree, "{f:?}");
+    }
+    let unchecked = report
+        .findings
+        .iter()
+        .filter(|f| f.detail.contains("was not checked"))
+        .count();
+    assert!(unchecked > 0, "{:?}", report.findings);
+    blob_reads(&ranged, &pack)
+}
+
+/// Once the bytes of the check's budget are spent, the files after that read
+/// no chunk, however many there are.
+#[tokio::test]
+async fn check_hostile_spent_budget_reads_no_more_chunks() {
+    for k in [4usize, 64, 1024] {
+        assert_eq!(spent_budget_reads(k).await, 1, "k={k}");
+    }
+}
+
 async fn root_over(fx: &mut Fx, inner: BlobId, i: usize) -> BlobId {
     let mut top = files(&format!("f{i}"), 1);
     top.push(dir("z", inner));
