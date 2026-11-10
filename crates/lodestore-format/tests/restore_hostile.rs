@@ -950,3 +950,101 @@ async fn restore_hostile_byte_limit_counts_pieces_the_index_did_not_list() {
         .await
         .unwrap();
 }
+
+fn held_bytes_limit(err: &Error, limit: u64) -> bool {
+    matches!(
+        err,
+        Error::WalkLimit {
+            what: "bytes held at once",
+            limit: l
+        } if *l == limit
+    )
+}
+
+/// The directories open together are held by their tree bytes, and the
+/// directory that would pass the limit is not read.
+#[tokio::test]
+async fn restore_hostile_held_bytes_stop_by_limit() {
+    let mut fx = Fx::new().await;
+    let inner_nodes = files("i", 6);
+    let inner = fx.tree(inner_nodes.clone());
+    let mut top = vec![dir("d0", inner)];
+    top.extend(files("f", 5));
+    let held = (encode_tree(top.clone()).len() + encode_tree(inner_nodes).len()) as u64;
+    let snap = fx.snapshot(top).await;
+    let before = fx.listing();
+
+    let mut reader = fx.reader().await;
+    reader.set_dir_byte_limits(u64::MAX, held - 1);
+    let err = reader
+        .restore(&snap, &fx.target, &RestoreOptions::default(), &|_| {})
+        .await
+        .unwrap_err();
+    assert!(held_bytes_limit(&err, held - 1), "{err:?}");
+    assert_eq!(fx.listing(), before);
+    let err = reader
+        .walk_subtree(&snap, b"/", &mut |_, _| Ok(()))
+        .await
+        .unwrap_err();
+    assert!(held_bytes_limit(&err, held - 1), "{err:?}");
+    assert_eq!(reader.list_dir(&snap, b"/").await.unwrap().len(), 6);
+
+    reader.allow_large_directories();
+    reader
+        .restore(&snap, &fx.target, &RestoreOptions::default(), &|_| {})
+        .await
+        .unwrap();
+
+    let mut reader = fx.reader().await;
+    reader.set_dir_byte_limits(u64::MAX, held);
+    reader
+        .restore(&snap, &fx.target, &RestoreOptions::default(), &|_| {})
+        .await
+        .unwrap();
+
+    let mut pack_reads = Vec::new();
+    for held_limit in [held - 1, held] {
+        let store = RangedOnly::new(LocalFsStore::new(fx.repo_dir.clone()), &[]);
+        let repo = Repository::open(&store, b"pw").await.unwrap();
+        let mut reader = Reader::open(&store, repo.read_keys().duplicate(), repo.config()).unwrap();
+        reader.set_dir_byte_limits(u64::MAX, held_limit);
+        let _ = reader.walk_subtree(&snap, b"/", &mut |_, _| Ok(())).await;
+        pack_reads.push(store.ranges_under("packs/").len());
+    }
+    assert!(pack_reads[0] < pack_reads[1], "{pack_reads:?}");
+}
+
+/// A chain of directories whose `subtrees` lists are long and whose entries
+/// are few: the bytes on the stack, not the entries, run out.
+#[tokio::test]
+async fn restore_hostile_held_bytes_count_subtree_lists() {
+    let mut fx = Fx::new().await;
+    let empty = fx.tree(Vec::new());
+    let level = |next: BlobId| {
+        let mut d = dir("z", empty);
+        d.subtrees = vec![empty.to_vec(); 100];
+        d.subtrees.push(next.to_vec());
+        d
+    };
+    let mut inner = fx.tree(files("f", 1));
+    for _ in 0..9 {
+        inner = fx.tree(vec![level(inner)]);
+    }
+    let snap = fx.snapshot(vec![level(inner)]).await;
+    let before = fx.listing();
+
+    let mut reader = fx.reader().await;
+    reader.set_dir_byte_limits(u64::MAX, 20_000);
+    let err = reader
+        .restore(&snap, &fx.target, &RestoreOptions::default(), &|_| {})
+        .await
+        .unwrap_err();
+    assert!(held_bytes_limit(&err, 20_000), "{err:?}");
+    assert_eq!(fx.listing(), before);
+
+    reader.allow_large_directories();
+    reader
+        .restore(&snap, &fx.target, &RestoreOptions::default(), &|_| {})
+        .await
+        .unwrap();
+}

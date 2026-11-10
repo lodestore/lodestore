@@ -227,6 +227,25 @@ fn check_ids(ids: &[Vec<u8>], what: &str) -> Result<()> {
     Ok(())
 }
 
+#[derive(Clone, PartialEq, prost::Message)]
+struct NodeCount {}
+
+/// `Tree` with its nodes left undecoded, for counting them.
+#[derive(Clone, PartialEq, prost::Message)]
+struct TreeCount {
+    #[prost(message, repeated, tag = "1")]
+    nodes: Vec<NodeCount>,
+}
+
+/// The number of nodes in a tree blob, counted before the blob becomes a
+/// `Vec<pb::Node>`, so a blob that would overrun a limit is never decoded.
+/// Fails like [`decode_tree`] on bytes that are not a tree.
+pub(crate) fn count_tree_nodes(bytes: &[u8]) -> Result<u64> {
+    let tree = TreeCount::decode(bytes)
+        .map_err(|e| Error::corrupt("tree", format!("undecodable: {e}")))?;
+    Ok(tree.nodes.len() as u64)
+}
+
 /// Decodes one tree blob and validates it. `previous` is the last name of the
 /// piece before this one in the same directory, so ordering is checked across
 /// the cut as well as inside it.
@@ -279,6 +298,10 @@ struct Level {
     /// Entries the directory was read with; its buffer holds them all until
     /// the level is left, whatever has been handed out.
     len: u64,
+    /// Tree bytes the directory was read with, held until the level is left.
+    /// A directory node kept on the walk's frames, with its `subtrees` list,
+    /// is an entry of the level above and counted through that level.
+    bytes: u64,
     /// Length of the cursor path before this level was entered.
     path_len: usize,
 }
@@ -295,10 +318,11 @@ pub(crate) struct TreeCursor {
 impl TreeCursor {
     /// `nodes` are the entries of the directory at `base` (an absolute path,
     /// empty for the top of the snapshot).
-    pub(crate) fn new(nodes: Vec<pb::Node>, base: Vec<u8>) -> Self {
+    pub(crate) fn new(nodes: Vec<pb::Node>, bytes: u64, base: Vec<u8>) -> Self {
         TreeCursor {
             levels: vec![Level {
                 len: nodes.len() as u64,
+                bytes,
                 nodes: nodes.into_iter(),
                 path_len: 0,
             }],
@@ -337,17 +361,18 @@ impl TreeCursor {
         if self.levels.len() > MAX_DEPTH {
             return Err(Error::corrupt("tree", "directories are nested too deeply"));
         }
-        let (nodes, _) = reader.load_tree(&dir.subtrees).await?;
+        let (above_entries, above_bytes) = self.levels.iter().fold((0u64, 0u64), |(e, b), l| {
+            (e.saturating_add(l.len), b.saturating_add(l.bytes))
+        });
+        let (nodes, bytes) = reader
+            .load_tree(&dir.subtrees, above_entries, above_bytes)
+            .await?;
         let len = nodes.len() as u64;
-        let held = self
-            .levels
-            .iter()
-            .fold(len, |sum, l| sum.saturating_add(l.len));
-        reader.walk_budget().check_held(held)?;
         let path_len = self.path.len();
         self.path = self.path_of(&dir.name);
         self.levels.push(Level {
             len,
+            bytes,
             nodes: nodes.into_iter(),
             path_len,
         });
@@ -540,9 +565,9 @@ impl<'s> SelectionWalk<'s> {
         snapshot_id: &BlobId,
         selection: &'s Selection,
     ) -> Result<Self> {
-        let (_, top) = reader.open_root(snapshot_id).await?;
+        let (_, top, bytes) = reader.open_root(snapshot_id).await?;
         Ok(SelectionWalk {
-            walk: SelectedWalk::new(TreeCursor::new(top, Vec::new()), selection),
+            walk: SelectedWalk::new(TreeCursor::new(top, bytes, Vec::new()), selection),
         })
     }
 
@@ -592,10 +617,11 @@ pub(crate) async fn check_node<S: BlobStore>(
 pub(crate) async fn validate_subtree<S: BlobStore>(
     reader: &mut Reader<S>,
     nodes: Vec<pb::Node>,
+    bytes: u64,
     base: Vec<u8>,
     matcher: Option<&PathMatcher>,
 ) -> Result<()> {
-    let mut walk = SelectedWalk::new(TreeCursor::new(nodes, base), matcher);
+    let mut walk = SelectedWalk::new(TreeCursor::new(nodes, bytes, base), matcher);
     let mut groups = HashMap::new();
     while let Some(action) = walk.next(reader).await? {
         let (Action::Enter { node, .. } | Action::Entry(node)) = action else {
@@ -634,6 +660,9 @@ pub(crate) async fn selection_totals<S: BlobStore>(
 
 #[cfg(test)]
 mod tests {
+    use rand_chacha::ChaCha20Rng;
+    use rand_chacha::rand_core::{Rng, SeedableRng};
+
     use super::*;
 
     fn node(name: &[u8]) -> pb::Node {
@@ -712,6 +741,74 @@ mod tests {
             assert!(bytes.len() < 2 * TREE_SPLIT_SIZE);
             let decoded = decode_tree(&bytes, previous.as_deref()).unwrap();
             previous = decoded.last().map(|n| n.name.clone());
+        }
+    }
+
+    fn generated_tree(rng: &mut ChaCha20Rng) -> Vec<pb::Node> {
+        let below = |rng: &mut ChaCha20Rng, n: u32| rng.next_u32() % n;
+        (0..below(rng, 50))
+            .map(|i| {
+                let mut node = node(format!("n{i:03}").as_bytes());
+                match below(rng, 3) {
+                    0 => {
+                        node.content = (0..below(rng, 5)).map(|_| vec![7u8; 32]).collect();
+                    }
+                    1 => {
+                        node.r#type = pb::NodeType::Dir as i32;
+                        node.subtrees = (0..below(rng, 3)).map(|_| vec![9u8; 32]).collect();
+                    }
+                    _ => {
+                        node.r#type = pb::NodeType::Symlink as i32;
+                        node.link_target = b"t".to_vec();
+                    }
+                }
+                node
+            })
+            .collect()
+    }
+
+    #[test]
+    fn count_tree_nodes_agrees_with_decode() {
+        let mut rng = ChaCha20Rng::from_seed([31; 32]);
+        for _ in 0..200 {
+            let bytes = encode_tree(generated_tree(&mut rng));
+            let decoded = decode_tree(&bytes, None).unwrap();
+            assert_eq!(count_tree_nodes(&bytes).unwrap(), decoded.len() as u64);
+        }
+    }
+
+    #[test]
+    fn count_tree_nodes_survives_hostile_bytes() {
+        let mut rng = ChaCha20Rng::from_seed([32; 32]);
+        for _ in 0..2000 {
+            let valid = encode_tree(generated_tree(&mut rng));
+            let mut hostile = valid.clone();
+            match rng.next_u32() % 4 {
+                0 if !hostile.is_empty() => {
+                    let at = rng.next_u64() as usize % hostile.len();
+                    hostile[at] ^= 1 << (rng.next_u32() % 8);
+                }
+                1 if !hostile.is_empty() => {
+                    hostile.truncate(rng.next_u64() as usize % hostile.len());
+                }
+                2 => {
+                    let mut extra = vec![0u8; 1 + rng.next_u32() as usize % 64];
+                    rng.fill_bytes(&mut extra);
+                    hostile.extend(extra);
+                }
+                _ => {
+                    hostile = vec![0u8; rng.next_u32() as usize % 300];
+                    rng.fill_bytes(&mut hostile);
+                }
+            }
+            match count_tree_nodes(&hostile) {
+                Ok(n) => {
+                    if let Ok(nodes) = decode_tree(&hostile, None) {
+                        assert_eq!(n, nodes.len() as u64);
+                    }
+                }
+                Err(e) => assert!(matches!(e, Error::Corrupt { .. }), "{e:?}"),
+            }
         }
     }
 }
