@@ -32,11 +32,22 @@ pub const MAX_DIR_ENTRIES: u64 = 1 << 23;
 /// directories it has open.
 pub const MAX_HELD_ENTRIES: u64 = 1 << 24;
 
+/// The most tree bytes one directory may have on the wire: the sum of the
+/// decoded lengths of the tree blobs it is made of. Writer, reader and check
+/// use the same number.
+pub const MAX_DIR_TREE_BYTES: u64 = 1 << 30;
+
+/// The most tree bytes one operation holds at once, summed over the
+/// directories it has open, counted like [`MAX_DIR_TREE_BYTES`].
+pub const MAX_HELD_TREE_BYTES: u64 = 2 << 30;
+
 /// What is left of the node and byte allowance of one operation on a snapshot.
 #[derive(Debug, Clone, Copy)]
 pub struct TreeBudget {
     dir: u64,
     held: u64,
+    dir_bytes: u64,
+    held_bytes: u64,
     nodes: u64,
     bytes: u64,
     nodes_left: u64,
@@ -54,6 +65,8 @@ impl TreeBudget {
         TreeBudget {
             dir: MAX_DIR_ENTRIES,
             held: MAX_HELD_ENTRIES,
+            dir_bytes: MAX_DIR_TREE_BYTES,
+            held_bytes: MAX_HELD_TREE_BYTES,
             nodes,
             bytes,
             nodes_left: nodes,
@@ -66,6 +79,54 @@ impl TreeBudget {
         self.dir = dir;
         self.held = held;
         self
+    }
+
+    /// Replaces the per-directory and held-at-once limits on tree bytes.
+    pub fn with_dir_byte_limits(mut self, dir_bytes: u64, held_bytes: u64) -> Self {
+        self.dir_bytes = dir_bytes;
+        self.held_bytes = held_bytes;
+        self
+    }
+
+    /// Refuses a directory that would be `n` tree bytes.
+    pub fn check_dir_bytes(&self, n: u64) -> Result<()> {
+        if n > self.dir_bytes {
+            return Err(Error::WalkLimit {
+                what: "bytes in one directory",
+                limit: self.dir_bytes,
+            });
+        }
+        Ok(())
+    }
+
+    /// Refuses an operation that would hold `n` tree bytes at once.
+    pub fn check_held_bytes(&self, n: u64) -> Result<()> {
+        if n > self.held_bytes {
+            return Err(Error::WalkLimit {
+                what: "bytes held at once",
+                limit: self.held_bytes,
+            });
+        }
+        Ok(())
+    }
+
+    /// Refuses a walk that has visited `nodes` entries and `bytes` of
+    /// directory data, with the error [`TreeBudget::charge_nodes`] and
+    /// [`TreeBudget::charge_bytes`] give.
+    pub fn check_walk(&self, nodes: u64, bytes: u64) -> Result<()> {
+        if nodes > self.nodes {
+            return Err(Error::WalkLimit {
+                what: "entries",
+                limit: self.nodes,
+            });
+        }
+        if bytes > self.bytes {
+            return Err(Error::WalkLimit {
+                what: "bytes of directory data",
+                limit: self.bytes,
+            });
+        }
+        Ok(())
     }
 
     /// Refuses a directory that would have `n` entries.
@@ -276,7 +337,7 @@ impl TreeCursor {
         if self.levels.len() > MAX_DEPTH {
             return Err(Error::corrupt("tree", "directories are nested too deeply"));
         }
-        let nodes = reader.load_tree(&dir.subtrees).await?;
+        let (nodes, _) = reader.load_tree(&dir.subtrees).await?;
         let len = nodes.len() as u64;
         let held = self
             .levels

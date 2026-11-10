@@ -228,7 +228,7 @@ impl<S: BlobStore> TreeSource for Reader<S> {
     }
 
     fn tree<'a>(&'a mut self, ids: &'a [Vec<u8>]) -> Fut<'a, Vec<pb::Node>> {
-        Box::pin(self.load_tree(ids))
+        Box::pin(async move { Ok(self.load_tree(ids).await?.0) })
     }
 }
 
@@ -282,12 +282,20 @@ impl<S: BlobStore> Reader<S> {
         self.walk = self.walk.with_dir_limits(dir, held);
     }
 
-    /// Lifts the limit on one directory and on the entries held at once, for
-    /// a snapshot written before a backup refused such a tree. Memory is then
-    /// bounded only by the snapshot and the whole-walk limits; a reader shared
-    /// by many users, as the server's, never calls this.
+    /// Replaces the limit on the tree bytes of one directory and on the tree
+    /// bytes held at once.
+    pub fn set_dir_byte_limits(&mut self, dir: u64, held: u64) {
+        self.walk = self.walk.with_dir_byte_limits(dir, held);
+    }
+
+    /// Lifts the limits on one directory and on what is held at once, entries
+    /// and tree bytes alike, for a snapshot written before a backup refused
+    /// such a tree. Memory is then bounded only by the snapshot and the
+    /// whole-walk limits; a reader shared by many users, as the server's,
+    /// never calls this.
     pub fn allow_large_directories(&mut self) {
         self.set_dir_limits(u64::MAX, u64::MAX);
+        self.set_dir_byte_limits(u64::MAX, u64::MAX);
     }
 
     pub(crate) fn walk_budget(&self) -> &TreeBudget {
@@ -578,17 +586,33 @@ impl<S: BlobStore> Reader<S> {
         Ok(bytes)
     }
 
-    /// Loads one directory: its tree blobs read back as one ordered run.
-    pub(crate) async fn load_tree(&mut self, ids: &[Vec<u8>]) -> Result<Vec<pb::Node>> {
+    /// Loads one directory: its tree blobs read back as one ordered run, with
+    /// the tree bytes they came to.
+    pub(crate) async fn load_tree(&mut self, ids: &[Vec<u8>]) -> Result<(Vec<pb::Node>, u64)> {
+        let ids = ids
+            .iter()
+            .map(|raw| {
+                BlobId::try_from(raw.as_slice())
+                    .map_err(|_| Error::corrupt("tree", "tree id must be 32 bytes"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let listed = {
+            let index = self.cache.index.read().await;
+            ids.iter().fold(0u64, |sum, id| {
+                sum.saturating_add(u64::from(
+                    index.smallest_ulen(id, BLOB_TYPE_TREE).unwrap_or(0),
+                ))
+            })
+        };
+        self.walk.check_dir_bytes(listed)?;
         let mut nodes = Vec::new();
+        let mut read = 0u64;
         let mut previous: Option<Vec<u8>> = None;
-        for raw in ids {
-            let id: BlobId = raw
-                .as_slice()
-                .try_into()
-                .map_err(|_| Error::corrupt("tree", "tree id must be 32 bytes"))?;
-            let bytes = self.tree_bytes(&id).await?;
+        for id in &ids {
+            let bytes = self.tree_bytes(id).await?;
             self.walk.charge_bytes(bytes.len() as u64)?;
+            read = read.saturating_add(bytes.len() as u64);
+            self.walk.check_dir_bytes(read)?;
             let piece = decode_tree(&bytes, previous.as_deref())?;
             self.walk
                 .check_dir(nodes.len() as u64 + piece.len() as u64)?;
@@ -598,7 +622,7 @@ impl<S: BlobStore> Reader<S> {
             }
             nodes.extend(piece);
         }
-        Ok(nodes)
+        Ok((nodes, read))
     }
 
     /// Loads a snapshot and the index shards it names; returns it with its
@@ -615,7 +639,8 @@ impl<S: BlobStore> Reader<S> {
         }
         let root = self
             .load_tree(std::slice::from_ref(&snapshot.root_tree))
-            .await?;
+            .await?
+            .0;
         Ok((snapshot, root))
     }
 
@@ -647,7 +672,7 @@ impl<S: BlobStore> Reader<S> {
             if i + 1 == parts.len() {
                 found = Some(node);
             } else if node.r#type == pb::NodeType::Dir as i32 {
-                nodes = self.load_tree(&node.subtrees).await?;
+                nodes = self.load_tree(&node.subtrees).await?.0;
             } else {
                 return Err(missing());
             }
@@ -671,7 +696,7 @@ impl<S: BlobStore> Reader<S> {
         match at.node {
             None => Ok((at.top, Vec::new())),
             Some(node) if node.r#type == pb::NodeType::Dir as i32 => {
-                Ok((self.load_tree(&node.subtrees).await?, at.path))
+                Ok((self.load_tree(&node.subtrees).await?.0, at.path))
             }
             Some(node) => {
                 let parent = at.path[..at.path.len() - node.name.len() - 1].to_vec();
@@ -688,7 +713,7 @@ impl<S: BlobStore> Reader<S> {
         match at.node {
             None => Ok(at.top),
             Some(node) if node.r#type == pb::NodeType::Dir as i32 => {
-                self.load_tree(&node.subtrees).await
+                Ok(self.load_tree(&node.subtrees).await?.0)
             }
             Some(_) => Err(Error::InvalidInput(format!(
                 "{:?} is not a directory",
@@ -725,7 +750,7 @@ impl<S: BlobStore> Reader<S> {
                 if node.r#type != pb::NodeType::Dir as i32 {
                     return Ok(());
                 }
-                (self.load_tree(&node.subtrees).await?, at.path)
+                (self.load_tree(&node.subtrees).await?.0, at.path)
             }
         };
         let mut cursor = TreeCursor::new(nodes, base);

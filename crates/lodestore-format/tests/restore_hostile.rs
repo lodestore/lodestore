@@ -17,12 +17,20 @@ use lodestore_format::pack::{CODEC_RAW, CODEC_ZSTD};
 use lodestore_format::pb;
 use lodestore_format::reader::{Overwrite, Reader, RestoreOptions, RestoreReport};
 use lodestore_format::repo::{InitOptions, PendingInit, Repository};
+use lodestore_format::selection::Selection;
 use lodestore_format::snapshot::snapshot_object_key;
 use lodestore_format::store::LocalFsStore;
 use lodestore_format::tree::{
-    MAX_DIR_ENTRIES, MAX_HELD_ENTRIES, MAX_WALK_NODES, MAX_WALK_TREE_BYTES, encode_tree,
+    MAX_DIR_ENTRIES, MAX_DIR_TREE_BYTES, MAX_HELD_ENTRIES, MAX_HELD_TREE_BYTES, MAX_WALK_NODES,
+    MAX_WALK_TREE_BYTES, encode_tree,
 };
 use lodestore_format::writer::Writer;
+
+#[path = "adv_support/planted.rs"]
+mod planted;
+mod tree_support;
+
+use planted::RangedOnly;
 
 const LOW_KDF: KdfCost = KdfCost {
     memory_kib: 64,
@@ -404,6 +412,8 @@ fn walk_budget_defaults() {
     assert_eq!(MAX_WALK_TREE_BYTES, 512 << 30);
     assert_eq!(MAX_DIR_ENTRIES, 1 << 23);
     assert_eq!(MAX_HELD_ENTRIES, 1 << 24);
+    assert_eq!(MAX_DIR_TREE_BYTES, 1 << 30);
+    assert_eq!(MAX_HELD_TREE_BYTES, 2 << 30);
 }
 
 fn files(prefix: &str, n: usize) -> Vec<pb::Node> {
@@ -862,4 +872,81 @@ async fn restore_hostile_no_owners_drops_setuid_and_capabilities() {
     fs::remove_file(&out).unwrap();
     fx.restore(&snap, &RestoreOptions::default()).await.unwrap();
     assert_eq!(fs::metadata(&out).unwrap().mode() & 0o7777, 0o4755);
+}
+
+fn bytes_in_dir_limit(err: &Error, limit: u64) -> bool {
+    matches!(
+        err,
+        Error::WalkLimit {
+            what: "bytes in one directory",
+            limit: l
+        } if *l == limit
+    )
+}
+
+/// A directory of pieces that add up to more than the real limit is refused
+/// by the sizes the index lists, before any piece is downloaded.
+#[tokio::test]
+async fn restore_hostile_wide_directory_stops_by_byte_limit() {
+    let mut fx = Fx::new().await;
+    let pieces = tree_support::wide_piece_count();
+    let snap = tree_support::wide_snapshot(&mut fx.writer, pieces).await;
+    let before = fx.listing();
+
+    let store = RangedOnly::new(LocalFsStore::new(fx.repo_dir.clone()), &[]);
+    let repo = Repository::open(&store, b"pw").await.unwrap();
+    let mut reader = Reader::open(&store, repo.read_keys().duplicate(), repo.config()).unwrap();
+
+    let err = reader
+        .restore(&snap, &fx.target, &RestoreOptions::default(), &|_| {})
+        .await
+        .unwrap_err();
+    assert!(bytes_in_dir_limit(&err, MAX_DIR_TREE_BYTES), "{err:?}");
+    assert_eq!(fx.listing(), before);
+    let err = reader.list_dir(&snap, b"/wide").await.unwrap_err();
+    assert!(bytes_in_dir_limit(&err, MAX_DIR_TREE_BYTES), "{err:?}");
+    let err = reader
+        .walk_subtree(&snap, b"/", &mut |_, _| Ok(()))
+        .await
+        .unwrap_err();
+    assert!(bytes_in_dir_limit(&err, MAX_DIR_TREE_BYTES), "{err:?}");
+    let err = reader
+        .selection_totals(&snap, &Selection::all())
+        .await
+        .unwrap_err();
+    assert!(bytes_in_dir_limit(&err, MAX_DIR_TREE_BYTES), "{err:?}");
+
+    let pack_reads = store.ranges_under("packs/").len();
+    assert!(pack_reads < pieces, "{pack_reads} reads of packs");
+}
+
+/// Pieces the shards the snapshot names do not list count for nothing before
+/// they are read, and by their length once they are.
+#[tokio::test]
+async fn restore_hostile_byte_limit_counts_pieces_the_index_did_not_list() {
+    let mut fx = Fx::new().await;
+    let sets = ["a", "b", "c", "d"].map(|p| files(p, 5));
+    let lens = sets.clone().map(|n| encode_tree(n).len() as u64);
+    let ids = sets.map(|n| fx.tree(n));
+    fx.snapshot(files("x", 1)).await;
+    let mut wide = dir("w", fx.tree(Vec::new()));
+    wide.subtrees = ids.iter().map(|id| id.to_vec()).collect();
+    let snap = fx.snapshot(vec![wide]).await;
+    let before = fx.listing();
+
+    let mut reader = fx.reader().await;
+    let limit = lens[0] + lens[1];
+    reader.set_dir_byte_limits(limit, u64::MAX);
+    let err = reader
+        .restore(&snap, &fx.target, &RestoreOptions::default(), &|_| {})
+        .await
+        .unwrap_err();
+    assert!(bytes_in_dir_limit(&err, limit), "{err:?}");
+    assert_eq!(fx.listing(), before);
+
+    reader.set_dir_byte_limits(lens.iter().sum(), u64::MAX);
+    reader
+        .restore(&snap, &fx.target, &RestoreOptions::default(), &|_| {})
+        .await
+        .unwrap();
 }

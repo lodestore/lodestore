@@ -248,6 +248,16 @@ impl Index {
         self.map.get(&(*id, blob_type))
     }
 
+    /// The smallest decoded length any known copy of a blob claims. A copy
+    /// from a write-key holder can state a length that is too large or too
+    /// small, and the honest one is among them.
+    pub fn smallest_ulen(&self, id: &BlobId, blob_type: u8) -> Option<u32> {
+        let key = (*id, blob_type);
+        let chosen = self.map.get(&key)?;
+        let others = self.others.get(&key).map_or(&[][..], Vec::as_slice);
+        Some(others.iter().map(|l| l.ulen).fold(chosen.ulen, u32::min))
+    }
+
     /// Every known location of a blob, the chosen one first. Reading tries
     /// them in order: a shard from a write-key holder can name a pack with
     /// wrong offsets, and the real record is among the others.
