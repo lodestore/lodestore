@@ -1175,8 +1175,9 @@ async fn check_hostile_wide_directory_over_byte_limit_is_a_finding() {
     assert_eq!(report.trees_checked, 2);
 }
 
-/// The directories on the path are held by their tree bytes, and the
-/// directory that would pass the limit is not read.
+/// The directories on the path are held by their tree bytes. The check does
+/// not stop reading at the limit of a path: the directory that passes it is
+/// read, once, and the snapshot gets the finding.
 #[tokio::test]
 async fn check_hostile_held_bytes_are_a_finding() {
     let mut fx = Fx::new().await;
@@ -1213,7 +1214,7 @@ async fn check_hostile_held_bytes_are_a_finding() {
         .unwrap();
         pack_reads.push(store.ranges_under("packs/").len());
     }
-    assert!(pack_reads[0] < pack_reads[1], "{pack_reads:?}");
+    assert_eq!(pack_reads[0], pack_reads[1], "{pack_reads:?}");
 }
 
 /// A chain of directories whose `subtrees` lists are long and whose entries
@@ -1330,8 +1331,8 @@ async fn root_over(fx: &mut Fx, inner: BlobId, i: usize) -> BlobId {
     fx.snapshot(top).await
 }
 
-/// Snapshots whose roots differ but reach the same directory the same way
-/// stop at the same place; the directories on the way are read once.
+/// Snapshots whose roots differ but reach the same directory the same way read
+/// the directories on the way once, down to the leaf.
 async fn cut_path_pack_reads(snapshots: usize) -> (usize, StructureReport, Vec<BlobId>) {
     let mut fx = Fx::new().await;
     let mut inner = fx.tree(files("d", 3));
@@ -1384,11 +1385,229 @@ async fn check_hostile_shared_cut_path_is_walked_once() {
             assert_eq!(mine.len(), 1, "{:?}", report.findings);
             assert!(mine[0].detail.contains("entries held at once"), "{mine:?}");
         }
-        assert_eq!(report.trees_checked, n as u64 + 9);
+        assert_eq!(report.trees_checked, n as u64 + 11);
         reads.push(count);
     }
     assert!(reads[0] > 0, "the path was never read");
     assert_eq!(reads[0], reads[1], "the shared path was read again");
+}
+
+/// A diamond of `levels` steps over a chain of 60 directories, with
+/// incomparable paths: at each step `a` is heavy in bytes and `b` in entries,
+/// and both lead on to the next step. Three snapshots reach the top, with
+/// roots that are heavier in entries, in bytes, and light. The limit is one
+/// byte below the lightest path, so every path passes it.
+struct Diamond {
+    fx: Fx,
+    snapshots: Vec<BlobId>,
+    built: u64,
+    held: u64,
+}
+
+async fn incomparable_diamond(levels: usize) -> Diamond {
+    let mut fx = Fx::new().await;
+    let size = |nodes: &[pb::Node]| encode_tree(nodes.to_vec()).len() as u64;
+    let mut built = 0u64;
+    let mut lightest = 0u64;
+    let leaf = files("l", 1);
+    lightest += size(&leaf);
+    let mut below = fx.tree(leaf);
+    built += 1;
+    for _ in 0..60 {
+        let nodes = vec![file("c", &[], 0), dir("p", below)];
+        lightest += size(&nodes);
+        below = fx.tree(nodes);
+        built += 1;
+    }
+    for j in (0..levels).rev() {
+        let heavy: Vec<pb::Node> = (0..1usize << j)
+            .map(|i| file(&format!("{i:0>200}"), &[], 0))
+            .chain([dir("p", below)])
+            .collect();
+        let many: Vec<pb::Node> = (0..4usize << j)
+            .map(|i| file(&format!("{i:08}"), &[], 0))
+            .chain([dir("p", below)])
+            .collect();
+        lightest += size(&many);
+        let top = vec![dir("a", fx.tree(heavy)), dir("b", fx.tree(many))];
+        lightest += size(&top);
+        below = fx.tree(top);
+        built += 3;
+    }
+    let by_entries: Vec<pb::Node> = (0..1000usize)
+        .map(|i| file(&format!("{i:08}"), &[], 0))
+        .chain([dir("z", below)])
+        .collect();
+    let by_bytes: Vec<pb::Node> = (0..20usize)
+        .map(|i| file(&format!("{i:0>200}"), &[], 0))
+        .chain([dir("z", below)])
+        .collect();
+    let light = vec![dir("z", below)];
+    lightest += size(&light);
+    let mut snapshots = Vec::new();
+    for root in [by_entries, by_bytes, light] {
+        snapshots.push(fx.snapshot(root).await);
+        built += 1;
+    }
+    Diamond {
+        fx,
+        snapshots,
+        built,
+        held: lightest - 1,
+    }
+}
+
+/// A directory is read once however many incomparable paths lead to it, so
+/// the reads are the trees checked and do not grow with the number of paths.
+#[tokio::test]
+async fn check_hostile_incomparable_paths_read_each_tree_once() {
+    for levels in [4usize, 10] {
+        let d = incomparable_diamond(levels).await;
+        let store = RangedOnly::new(LocalFsStore::new(d.fx.repo_dir.clone()), &[]);
+        let repo = Repository::open(&store, b"pw").await.unwrap();
+        let report = check_structure_with_budget(
+            &store,
+            repo.read_keys(),
+            repo.config(),
+            &|_, _, _| {},
+            TreeBudget::default().with_dir_byte_limits(u64::MAX, d.held),
+        )
+        .await
+        .unwrap();
+        let prefix = 0..PACK_PREFIX_LEN as u64;
+        let reads = store
+            .ranges_under("packs/")
+            .into_iter()
+            .filter(|(_, r)| *r != prefix)
+            .count() as u64;
+        assert_eq!(reads, report.trees_checked, "levels={levels}");
+        assert!(report.trees_checked <= d.built, "levels={levels}");
+        for snap in &d.snapshots {
+            let key = snapshot_object_key(snap);
+            let mine: Vec<_> = report.findings.iter().filter(|f| f.key == key).collect();
+            assert_eq!(mine.len(), 1, "levels={levels}: {:?}", report.findings);
+            assert_eq!(mine[0].kind, FindingKind::UnreadableTree);
+            assert!(mine[0].detail.contains("bytes held at once"), "{mine:?}");
+        }
+        let mut reader = d.fx.reader().await;
+        reader.set_dir_byte_limits(u64::MAX, d.held);
+        let err = reader
+            .restore(
+                &d.snapshots[0],
+                &d.fx.target,
+                &RestoreOptions::default(),
+                &|_| {},
+            )
+            .await
+            .unwrap_err();
+        assert!(held_bytes_limit(&err, d.held), "levels={levels}: {err:?}");
+    }
+}
+
+/// `R` reaches `H`, whose subtree passes the limit of a path on its own, and
+/// then `X`, which has a finding. `R` gets the limit and nothing from `X`; `S`
+/// reaches `X` alone and gets its finding.
+#[tokio::test]
+async fn check_hostile_directory_over_path_limit_alone_skips_the_rest() {
+    let mut fx = Fx::new().await;
+    let bottom = fx.tree(files("f", 5));
+    let mut middle = files("f", 5);
+    middle.push(dir("z", bottom));
+    let middle = fx.tree(middle);
+    let mut h = files("f", 5);
+    h.push(dir("z", middle));
+    let h = fx.tree(h);
+    let x = fx.tree(vec![file("x", &[[9u8; 32]], 1)]);
+    let r = fx
+        .snapshot(vec![dir("a", h), dir("b", x), dir("c", h)])
+        .await;
+    let s = fx.snapshot(vec![dir("x", x)]).await;
+
+    let report = fx.check_limited(10, 10).await;
+    assert_eq!(report.snapshots_checked, 2);
+    assert_eq!(
+        finding_kinds(&report, &r),
+        [FindingKind::UnreadableTree],
+        "{:?}",
+        report.findings
+    );
+    let key = snapshot_object_key(&r);
+    let f = report.findings.iter().find(|f| f.key == key).unwrap();
+    assert!(f.detail.contains("entries held at once"), "{f:?}");
+    assert!(
+        finding_kinds(&report, &s).contains(&FindingKind::UnknownBlob),
+        "{:?}",
+        report.findings
+    );
+
+    let mut reader = fx.reader().await;
+    reader.set_dir_limits(10, 10);
+    let err = reader
+        .restore(&r, &fx.target, &RestoreOptions::default(), &|_| {})
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::WalkLimit {
+                what: "entries held at once",
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    fx.restore(&s, &RestoreOptions::default())
+        .await
+        .unwrap_err();
+}
+
+/// The same with nesting: `R` reaches a chain deeper than the limit, then `X`.
+#[tokio::test]
+async fn check_hostile_directory_too_deep_alone_skips_the_rest() {
+    let mut fx = Fx::new().await;
+    let mut deep = fx.tree(files("l", 1));
+    for _ in 0..=MAX_DEPTH {
+        deep = fx.tree(vec![dir("d", deep)]);
+    }
+    let x = fx.tree(vec![file("x", &[[9u8; 32]], 1)]);
+    let r = fx
+        .snapshot(vec![dir("a", deep), dir("b", x), dir("c", deep)])
+        .await;
+    let s = fx.snapshot(vec![dir("x", x)]).await;
+
+    let report = fx.check().await;
+    assert_eq!(report.snapshots_checked, 2);
+    let key = snapshot_object_key(&r);
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|f| f.key == key && f.detail.contains("nested too deeply")),
+        "{:?}",
+        report.findings
+    );
+    assert!(
+        !finding_kinds(&report, &r).contains(&FindingKind::UnknownBlob),
+        "{:?}",
+        report.findings
+    );
+    assert!(
+        finding_kinds(&report, &s).contains(&FindingKind::UnknownBlob),
+        "{:?}",
+        report.findings
+    );
+
+    let err = fx
+        .restore(&r, &RestoreOptions::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, Error::Corrupt { reason, .. } if reason.contains("nested")),
+        "{err:?}"
+    );
+    fx.restore(&s, &RestoreOptions::default())
+        .await
+        .unwrap_err();
 }
 
 /// `D -> E -> F` with an unknown chunk in `F`. One snapshot reaches `D` at

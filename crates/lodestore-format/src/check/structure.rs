@@ -153,6 +153,13 @@ impl<S: BlobStore> Checker<'_, S> {
         }
     }
 
+    /// The finding a path to a directory gives the snapshot, at most one.
+    fn path_hit(&mut self, key: &str, hit: &mut bool, detail: String) {
+        if !std::mem::replace(hit, true) {
+            self.add_once(key, FindingKind::UnreadableTree, detail);
+        }
+    }
+
     /// A finding that holds for every snapshot that reaches the directory
     /// being walked: it goes to this snapshot and into `found`, which the
     /// directory's memo keeps for the snapshots that come later.
@@ -222,27 +229,9 @@ impl Held {
     }
 }
 
-/// Where a walk stopped because of the path to a directory: what is held
-/// above it, how deep it is, and the finding. Any visit with at least as much
-/// above it and at least as deep stops at the same place, because every
-/// figure only grows down a path.
-#[derive(Debug, Clone)]
-struct Cut {
-    above: Held,
-    depth: usize,
-    detail: String,
-}
-
-impl Cut {
-    fn covers(&self, above: Held, depth: usize) -> bool {
-        above.entries >= self.above.entries
-            && above.bytes >= self.above.bytes
-            && depth >= self.depth
-    }
-}
-
 /// What a finished walk of a directory leaves for the snapshots that reach it
-/// again.
+/// again. Nothing in it depends on the path the directory was reached by, so a
+/// directory is walked once.
 struct DirMemo {
     /// The most a walk holds from this directory down, the directory counted
     /// whole.
@@ -253,10 +242,6 @@ struct DirMemo {
     /// everything below it, every occurrence of a shared directory counted.
     walk: Held,
     finding: Found,
-    /// Set when the walk stopped at something that depends on the path (the
-    /// held limits, the depth): the figures are then a lower bound, and a
-    /// visit the cut does not cover walks the directory again.
-    cut: Option<Cut>,
 }
 
 /// What a directory gives the directory above it.
@@ -265,7 +250,6 @@ struct Done {
     height: usize,
     walk: Held,
     finding: Found,
-    cut: Option<Cut>,
 }
 
 impl Done {
@@ -275,7 +259,6 @@ impl Done {
             height: 0,
             walk: Held::default(),
             finding,
-            cut: None,
         }
     }
 }
@@ -298,7 +281,6 @@ struct Frame {
     below: Held,
     height: usize,
     walk: Held,
-    cut: Option<Cut>,
     finding: Found,
 }
 
@@ -316,7 +298,6 @@ impl Frame {
             below: Held::default(),
             height: 0,
             walk: Held::default(),
-            cut: None,
             finding: None,
         }
     }
@@ -327,14 +308,11 @@ impl Frame {
             height: self.height,
             walk: self.walk,
             finding: self.finding,
-            cut: self.cut,
         }
     }
 }
 
-/// Hands what a finished subdirectory holds to the directory above it. A cut
-/// of the subdirectory is a cut of the directory, at the directory's own
-/// place.
+/// Hands what a finished subdirectory holds to the directory above it.
 fn climb(frames: &mut [Frame], done: &Done) {
     if let Some(parent) = frames.last_mut() {
         parent.below = parent.below.max(parent.own.plus(done.below));
@@ -342,15 +320,6 @@ fn climb(frames: &mut [Frame], done: &Done) {
         parent.walk = parent.walk.plus(done.walk);
         if parent.finding.is_none() {
             parent.finding.clone_from(&done.finding);
-        }
-        if parent.cut.is_none()
-            && let Some(cut) = &done.cut
-        {
-            parent.cut = Some(Cut {
-                above: parent.above,
-                depth: parent.depth,
-                detail: cut.detail.clone(),
-            });
         }
     }
 }
@@ -366,7 +335,6 @@ fn close(memo: &mut HashMap<BlobId, DirMemo>, frames: &mut [Frame], dir: BlobId,
             height: done.height,
             walk: done.walk,
             finding: done.finding,
-            cut: done.cut,
         },
     );
 }
@@ -375,8 +343,8 @@ fn too_deep(name: &str) -> String {
     format!("tree {name}: directories are nested too deeply")
 }
 
-/// The finding a visit to a memoized directory with no cut gets from the path
-/// to it, or none.
+/// The finding a visit to a memoized directory gets from the path to it, or
+/// none.
 fn path_finding(
     known: &DirMemo,
     above: Held,
@@ -385,10 +353,10 @@ fn path_finding(
     name: &str,
 ) -> Option<String> {
     if let Err(e) = above.plus(known.below).check(budget) {
-        return Some(too_large(name, &e));
+        return Some(over_path(name, &e));
     }
     // The deepest directory node sits `height - 1` levels below this directory.
-    if known.height >= 1 && depth.saturating_add(known.height - 1) > MAX_DEPTH {
+    if known.height >= 1 && depth.saturating_add(known.height.saturating_sub(1)) > MAX_DEPTH {
         return Some(too_deep(name));
     }
     None
@@ -398,17 +366,20 @@ fn path_finding(
 enum Stop {
     /// A finding true for any path to the directory.
     Finding(FindingKind, String),
-    /// A limit on what the walk holds, which depends on the path: with what
-    /// the directory held by then.
-    Path(Error, Held),
     /// A pack that a cleanup still running may have removed: no finding.
     Pending,
 }
 
+/// A limit of one directory: the directory was not decoded.
 fn too_large(name: &str, e: &Error) -> String {
     format!(
         "tree {name}: {e}; nothing below it was checked; lode restore --allow-large-directories lifts this limit"
     )
+}
+
+/// A limit of a path: the directory was read and what is below it is checked.
+fn over_path(name: &str, e: &Error) -> String {
+    format!("tree {name}: {e}; lode restore --allow-large-directories lifts this limit")
 }
 
 fn tally(entries: &[ListEntry], bytes: &mut u64, objects: &mut u64) {
@@ -708,9 +679,8 @@ async fn check_with_budget<S: BlobStore>(
             continue;
         };
         // shortcut: hardlink members are not checked across snapshots, and a
-        // subtree seen in an earlier snapshot is not walked again unless it
-        // was only partly walked because of the path to it; a per-snapshot
-        // walk would cost a full tree walk per snapshot.
+        // subtree seen in an earlier snapshot is not walked again; a
+        // per-snapshot walk would cost a full tree walk per snapshot.
         c.snapshot_seen.clear();
         let mut groups = HashMap::new();
         // A finding that depends on the path to a directory is reported once
@@ -723,11 +693,17 @@ async fn check_with_budget<S: BlobStore>(
         // is known when it is. The bottom frame stands for the level above
         // the root and ends up with what a restore of the snapshot charges.
         let mut frames: Vec<Frame> = vec![Frame::above_root(root)];
+        // The frames from the bottom whose subtree alone passes a limit of a
+        // path: the snapshot has that finding however the rest is walked, so
+        // their remaining subdirectories are not walked and the memory of the
+        // walk stays within the limits of a path, like a restore's.
+        let mut saturated = 0usize;
         while let Some(top) = frames.last_mut() {
             let Some(pieces) = top.subdirs.pop() else {
                 let Some(frame) = frames.pop() else {
                     break;
                 };
+                saturated = saturated.min(frames.len());
                 if frames.is_empty() {
                     if let Err(e) = budget.check_walk(frame.walk.entries, frame.walk.bytes) {
                         c.add_once(&key, FindingKind::UnreadableTree, e.to_string());
@@ -737,7 +713,7 @@ async fn check_with_budget<S: BlobStore>(
                 close(&mut memo, &mut frames, frame.dir, frame.done());
                 continue;
             };
-            let depth = top.depth + 1;
+            let depth = top.depth.saturating_add(1);
             let above = top.held;
             let dir = match pieces.as_slice() {
                 [one] => *one,
@@ -746,37 +722,20 @@ async fn check_with_budget<S: BlobStore>(
             let name = hex32(pieces.first().unwrap_or(&dir));
             let mut found: Found = None;
             if let Some(known) = memo.get(&dir) {
-                let cut = match &known.cut {
-                    Some(cut) => cut.covers(above, depth).then(|| cut.detail.clone()),
-                    None => path_finding(known, above, depth, &budget, &name),
-                };
-                if cut.is_some() || known.cut.is_none() {
-                    if let Some(detail) = &cut
-                        && !std::mem::replace(&mut path_found, true)
-                    {
-                        c.add_once(&key, FindingKind::UnreadableTree, detail.clone());
-                    }
-                    if let Some((kind, detail)) = known.finding.clone() {
-                        c.add_once(&key, kind, detail);
-                    }
-                    let done = Done {
-                        below: known.below,
-                        height: known.height,
-                        walk: known.walk,
-                        finding: known.finding.clone(),
-                        cut: cut.map(|detail| Cut {
-                            above,
-                            depth,
-                            detail,
-                        }),
-                    };
-                    climb(&mut frames, &done);
-                    continue;
+                if let Some(detail) = path_finding(known, above, depth, &budget, &name) {
+                    c.path_hit(&key, &mut path_found, detail);
                 }
-                // What an earlier walk found does not depend on the path.
                 if let Some((kind, detail)) = known.finding.clone() {
-                    c.report(&key, &mut found, kind, detail);
+                    c.add_once(&key, kind, detail);
                 }
+                let done = Done {
+                    below: known.below,
+                    height: known.height,
+                    walk: known.walk,
+                    finding: known.finding.clone(),
+                };
+                climb(&mut frames, &done);
+                continue;
             }
             let mut nodes = Vec::new();
             let mut previous: Option<Vec<u8>> = None;
@@ -800,13 +759,6 @@ async fn check_with_budget<S: BlobStore>(
                         FindingKind::UnreadableTree,
                         too_large(&name, &e),
                     ));
-                }
-                if let Err(e) = budget.check_held_bytes(above.bytes.saturating_add(listed)) {
-                    let at = Held {
-                        entries: 0,
-                        bytes: listed,
-                    };
-                    break 'read Some(Stop::Path(e, at));
                 }
                 for tree in &pieces {
                     let Some(loc) = c.find(tree, BLOB_TYPE_TREE).await? else {
@@ -842,13 +794,6 @@ async fn check_with_budget<S: BlobStore>(
                             too_large(&name, &e),
                         ));
                     }
-                    if let Err(e) = budget.check_held_bytes(above.bytes.saturating_add(read)) {
-                        let at = Held {
-                            entries: nodes.len() as u64,
-                            bytes: read,
-                        };
-                        break 'read Some(Stop::Path(e, at));
-                    }
                     let count = match count_tree_nodes(&bytes) {
                         Ok(count) => count,
                         Err(e) if is_data_error(&e) => break 'read Some(unreadable(tree, &e)),
@@ -860,13 +805,6 @@ async fn check_with_budget<S: BlobStore>(
                             FindingKind::UnreadableTree,
                             too_large(&name, &e),
                         ));
-                    }
-                    if let Err(e) = budget.check_held(above.entries.saturating_add(n)) {
-                        let at = Held {
-                            entries: n,
-                            bytes: read,
-                        };
-                        break 'read Some(Stop::Path(e, at));
                     }
                     let piece = match decode_tree(&bytes, previous.as_deref()) {
                         Ok(piece) => piece,
@@ -887,25 +825,6 @@ async fn check_with_budget<S: BlobStore>(
                     close(&mut memo, &mut frames, dir, Done::empty(found));
                     continue;
                 }
-                Some(Stop::Path(e, at)) => {
-                    let detail = too_large(&name, &e);
-                    if !std::mem::replace(&mut path_found, true) {
-                        c.add_once(&key, FindingKind::UnreadableTree, detail.clone());
-                    }
-                    let done = Done {
-                        below: at,
-                        height: 0,
-                        walk: at,
-                        finding: found,
-                        cut: Some(Cut {
-                            above,
-                            depth,
-                            detail,
-                        }),
-                    };
-                    close(&mut memo, &mut frames, dir, done);
-                    continue;
-                }
                 Some(Stop::Pending) => {
                     close(&mut memo, &mut frames, dir, Done::empty(found));
                     continue;
@@ -915,7 +834,10 @@ async fn check_with_budget<S: BlobStore>(
                 entries: nodes.len() as u64,
                 bytes: read,
             };
-            let mut cut: Option<Cut> = None;
+            let reached = above.plus(own);
+            if let Err(e) = reached.check(&budget) {
+                c.path_hit(&key, &mut path_found, over_path(&name, &e));
+            }
             let mut height = 0;
             let mut subdirs = Vec::new();
             for node in &nodes {
@@ -953,16 +875,7 @@ async fn check_with_budget<S: BlobStore>(
                 if node.r#type == pb::NodeType::Dir as i32 {
                     height = 1;
                     if depth > MAX_DEPTH {
-                        let detail = too_deep(&name);
-                        if !std::mem::replace(&mut path_found, true) {
-                            c.add_once(&key, FindingKind::UnreadableTree, detail.clone());
-                        }
-                        cut.get_or_insert(Cut {
-                            above,
-                            depth,
-                            detail,
-                        });
-                        continue;
+                        c.path_hit(&key, &mut path_found, too_deep(&name));
                     }
                     let subtrees: Option<Vec<BlobId>> =
                         node.subtrees.iter().map(|raw| blob_ref(raw)).collect();
@@ -980,15 +893,26 @@ async fn check_with_budget<S: BlobStore>(
                 dir,
                 depth,
                 above,
-                held: above.plus(own),
+                held: reached,
                 own,
                 subdirs,
                 below: own,
                 height,
                 walk: own,
-                cut,
                 finding: found,
             });
+            while let Some(frame) = frames.get_mut(saturated) {
+                let subtree = Held {
+                    entries: reached.entries.saturating_sub(frame.above.entries),
+                    bytes: reached.bytes.saturating_sub(frame.above.bytes),
+                };
+                if subtree.check(&budget).is_ok() && depth.saturating_sub(frame.depth) <= MAX_DEPTH
+                {
+                    break;
+                }
+                frame.subdirs.clear();
+                saturated += 1;
+            }
         }
     }
     report.trees_checked = trees_read.len() as u64;
