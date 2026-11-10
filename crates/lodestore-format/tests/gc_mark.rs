@@ -381,6 +381,43 @@ async fn gc_mark_quarantine_rollback_shared_subtree() {
     assert!(!s.live.contains(&root, BLOB_TYPE_TREE));
 }
 
+#[tokio::test]
+async fn gc_mark_quarantine_missing_tree_pack() {
+    let fx = Fx::new().await;
+    let a = fx.backup(1).await;
+    let a_trees = fx.packs_of_type(BLOB_TYPE_TREE).await;
+    let b = fx.backup(2).await;
+    let all_trees = fx.packs_of_type(BLOB_TYPE_TREE).await;
+    assert!(!a_trees.is_empty() && all_trees.len() > a_trees.len());
+    for key in &a_trees {
+        fx.store.delete(key).await.unwrap();
+    }
+    let before = fx.bucket();
+
+    assert!(fx.survey(&opts()).await.is_err());
+    let s = fx.survey_with(&quarantining()).await.unwrap();
+    assert_eq!(s.quarantined.len(), 1);
+    assert_eq!(s.quarantined[0].id, a.snapshot_id);
+    assert!(
+        s.quarantined[0].reason.contains("its pack is missing"),
+        "{}",
+        s.quarantined[0].reason
+    );
+    assert!(s.snapshots.contains(&b.snapshot_id));
+    assert!(s.plan.delete.is_empty() && s.plan.repack.is_empty());
+
+    let policy = MarkPolicy {
+        excluded: [a.snapshot_id].into(),
+        ..quarantining()
+    };
+    let s = fx.survey_with(&policy).await.unwrap();
+    assert!(s.quarantined.is_empty());
+    assert_eq!(s.ignored.len(), 1);
+    assert_eq!(s.ignored[0].0, snapshot_object_key(&a.snapshot_id));
+    assert!(s.snapshots.contains(&b.snapshot_id));
+    assert_eq!(fx.bucket(), before);
+}
+
 struct FailingSnapshotRead<'a>(&'a LocalFsStore);
 
 impl BlobStore for FailingSnapshotRead<'_> {
