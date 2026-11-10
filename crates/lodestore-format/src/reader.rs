@@ -815,10 +815,13 @@ impl<S: BlobStore> Reader<S> {
     /// Checks that the chunks of a regular file add up to the size it claims.
     /// The sizes come from the index; when they do not add up, the chunks are
     /// read, since a shard from a write-key holder can list a copy with a
-    /// wrong size ahead of the real one. Every visit of such a file charges its
-    /// chunks and their bytes to the walk budget, whether the length is found
-    /// by reading or in `file_lens`; the cache only saves the reading. Returns
-    /// the extents and, when the sizes did not add up, the length found.
+    /// wrong size ahead of the real one. On every visit of such a file each
+    /// distinct chunk is read once, the bytes of every reference are charged
+    /// to the walk budget as they are read, and reading and charging stop
+    /// once the chunks hold more than the node says; the error then names no
+    /// sum. A length found in `file_lens` is charged the same; the cache only
+    /// saves the reading. Returns the extents and, when the sizes did not add
+    /// up, the length found.
     pub(crate) async fn check_file(
         &mut self,
         node: &pb::Node,
@@ -829,23 +832,37 @@ impl<S: BlobStore> Reader<S> {
         } else {
             extents.iter().map(|e| e.1).sum()
         };
-        let mut total = self.content_len(node, false).await?;
+        let mut total = self.content_len(node).await?;
         let mut found = None;
         if total != expected {
             self.walk.charge_nodes(node.content.len() as u64)?;
-            let key = *blake3::hash(&node.content.concat()).as_bytes();
+            // A sum cut short depends on `expected`, so it is part of the key.
+            let mut hasher = blake3::Hasher::new();
+            for raw in &node.content {
+                hasher.update(raw);
+            }
+            hasher.update(&expected.to_le_bytes());
+            let key = *hasher.finalize().as_bytes();
             total = match self.file_lens.get(&key) {
-                Some(&known) => known,
+                Some(&known) => {
+                    self.walk.charge_bytes(known)?;
+                    known
+                }
                 None => {
-                    let read = self.content_len(node, true).await?;
+                    let read = self.read_len(node, expected).await?;
                     if self.file_lens.len() < self.file_lens_limit {
                         self.file_lens.insert(key, read);
                     }
                     read
                 }
             };
-            self.walk.charge_bytes(total)?;
             found = Some(total);
+        }
+        if total > expected {
+            return Err(Error::corrupt(
+                String::from_utf8_lossy(&node.name),
+                format!("its chunks hold more than the {expected} bytes the node says"),
+            ));
         }
         if total != expected {
             return Err(Error::corrupt(
@@ -856,21 +873,44 @@ impl<S: BlobStore> Reader<S> {
         Ok((extents, found))
     }
 
-    /// The size of a file's chunks, from the index or, with `read`, from the
-    /// chunks themselves.
-    async fn content_len(&mut self, node: &pb::Node, read: bool) -> Result<u64> {
+    /// The size of a file's chunks, from the index.
+    async fn content_len(&mut self, node: &pb::Node) -> Result<u64> {
         let mut total = 0u64;
         for raw in &node.content {
             let id: BlobId = raw
                 .as_slice()
                 .try_into()
                 .map_err(|_| Error::corrupt("tree", "content id must be 32 bytes"))?;
-            let len = if read {
-                self.read_blob(&id, BLOB_TYPE_DATA).await?.len() as u64
-            } else {
-                u64::from(self.locate_blob(&id, BLOB_TYPE_DATA).await?.ulen)
-            };
+            let len = u64::from(self.locate_blob(&id, BLOB_TYPE_DATA).await?.ulen);
             total = total.saturating_add(len);
+        }
+        Ok(total)
+    }
+
+    /// The size of a file's chunks, read from the chunks themselves, each
+    /// distinct one once, charging the bytes of every reference as it goes.
+    /// Stops once the sum is over `expected`, so it may then be partial.
+    async fn read_len(&mut self, node: &pb::Node, expected: u64) -> Result<u64> {
+        let mut lens: HashMap<BlobId, u64> = HashMap::new();
+        let mut total = 0u64;
+        for raw in &node.content {
+            let id: BlobId = raw
+                .as_slice()
+                .try_into()
+                .map_err(|_| Error::corrupt("tree", "content id must be 32 bytes"))?;
+            let len = match lens.get(&id) {
+                Some(&len) => len,
+                None => {
+                    let len = self.read_blob(&id, BLOB_TYPE_DATA).await?.len() as u64;
+                    lens.insert(id, len);
+                    len
+                }
+            };
+            self.walk.charge_bytes(len)?;
+            total = total.saturating_add(len);
+            if total > expected {
+                break;
+            }
         }
         Ok(total)
     }

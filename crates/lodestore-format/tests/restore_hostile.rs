@@ -1685,6 +1685,78 @@ async fn pack_reads(lie: &SizeLie) -> usize {
         .sum()
 }
 
+/// A snapshot of one file that names the same 1000-byte chunk `n` times and
+/// says it holds `size` bytes; the index is honest. Returns the ranges read
+/// from the packs by a restore and by the structure check, each of which
+/// must refuse the file without naming a partial sum.
+async fn repeated_chunk(n: usize, size: u64) -> (usize, usize) {
+    let mut fx = Fx::new().await;
+    let c = fx.data(&[7u8; 1000]);
+    let snap = fx.snapshot(vec![file("f", &vec![c; n], size)]).await;
+    let store = LocalFsStore::new(fx.repo_dir.clone());
+    let repo = Repository::open(&store, b"pw").await.unwrap();
+    let says = format!("hold more than the {size} bytes the node says");
+
+    let ranged = RangedOnly::new(&store, &[]);
+    let mut reader = Reader::open(&ranged, repo.read_keys().duplicate(), repo.config()).unwrap();
+    let err = reader
+        .restore(&snap, &fx.target, &RestoreOptions::default(), &|_| {})
+        .await
+        .unwrap_err();
+    let restore_reads = ranged.ranges_under("packs/").len();
+    assert!(matches!(err, Error::Corrupt { .. }), "{err:?}");
+    assert!(err.to_string().contains(&says), "{err}");
+
+    let ranged = RangedOnly::new(&store, &[]);
+    let report = check_structure_with_budget(
+        &ranged,
+        repo.read_keys(),
+        repo.config(),
+        &|_, _, _| {},
+        TreeBudget::default(),
+    )
+    .await
+    .unwrap();
+    let check_reads = ranged.ranges_under("packs/").len();
+    assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
+    let f = &report.findings[0];
+    assert_eq!(f.key, snapshot_object_key(&snap));
+    assert_eq!(f.kind, FindingKind::UnreadableTree);
+    assert!(f.detail.contains("chunks hold"), "{f:?}");
+    assert!(f.detail.contains(&says), "{f:?}");
+    (restore_reads, check_reads)
+}
+
+/// The reads of each operation, for 4, 64 and 1024 references, at a size of
+/// zero and at one byte short of what the chunks hold.
+async fn repeated_chunk_reads(pick: fn((usize, usize)) -> usize) {
+    for short in [false, true] {
+        let mut reads = Vec::new();
+        for n in [4usize, 64, 1024] {
+            let size = if short { n as u64 * 1000 - 1 } else { 0 };
+            reads.push(pick(repeated_chunk(n, size).await));
+        }
+        assert!(reads[0] > 0, "the chunk was never read");
+        assert!(
+            reads.iter().all(|r| *r == reads[0]),
+            "short={short}: {reads:?}"
+        );
+    }
+}
+
+/// A file that names one chunk many times and lies about its size costs a
+/// restore the same reads however many times it names the chunk.
+#[tokio::test]
+async fn restore_hostile_repeated_chunk_reads_do_not_grow() {
+    repeated_chunk_reads(|(restore, _)| restore).await;
+}
+
+/// The same for the structure check.
+#[tokio::test]
+async fn check_hostile_repeated_chunk_reads_do_not_grow() {
+    repeated_chunk_reads(|(_, check)| check).await;
+}
+
 async fn root_over(fx: &mut Fx, inner: BlobId, i: usize) -> BlobId {
     let mut top = files(&format!("f{i}"), 1);
     top.push(dir("z", inner));
