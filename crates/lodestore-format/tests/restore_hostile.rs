@@ -13,16 +13,16 @@ use lodestore_format::check::structure::{
 use lodestore_format::crypto::{BLOB_TYPE_DATA, BLOB_TYPE_TREE, BlobId, Entropy};
 use lodestore_format::error::Error;
 use lodestore_format::keys::KdfCost;
-use lodestore_format::pack::{CODEC_RAW, CODEC_ZSTD};
+use lodestore_format::pack::{CODEC_RAW, CODEC_ZSTD, PACK_PREFIX_LEN};
 use lodestore_format::pb;
 use lodestore_format::reader::{Overwrite, Reader, RestoreOptions, RestoreReport};
 use lodestore_format::repo::{InitOptions, PendingInit, Repository};
 use lodestore_format::selection::Selection;
 use lodestore_format::snapshot::snapshot_object_key;
-use lodestore_format::store::LocalFsStore;
+use lodestore_format::store::{BlobStore, LocalFsStore};
 use lodestore_format::tree::{
-    MAX_DIR_ENTRIES, MAX_DIR_TREE_BYTES, MAX_HELD_ENTRIES, MAX_HELD_TREE_BYTES, MAX_WALK_NODES,
-    MAX_WALK_TREE_BYTES, TreeBudget, encode_tree,
+    MAX_DEPTH, MAX_DIR_ENTRIES, MAX_DIR_TREE_BYTES, MAX_HELD_ENTRIES, MAX_HELD_TREE_BYTES,
+    MAX_WALK_NODES, MAX_WALK_TREE_BYTES, TreeBudget, encode_tree,
 };
 use lodestore_format::writer::Writer;
 
@@ -1322,4 +1322,154 @@ async fn restore_hostile_diamond_size_lie_reads_chunks_once() {
         .unwrap();
     let expected = [first, second].concat();
     assert_eq!(fs::read(fx.target.join("p5/f")).unwrap(), expected);
+}
+
+async fn root_over(fx: &mut Fx, inner: BlobId, i: usize) -> BlobId {
+    let mut top = files(&format!("f{i}"), 1);
+    top.push(dir("z", inner));
+    fx.snapshot(top).await
+}
+
+/// Snapshots whose roots differ but reach the same directory the same way
+/// stop at the same place; the directories on the way are read once.
+async fn cut_path_pack_reads(snapshots: usize) -> (usize, StructureReport, Vec<BlobId>) {
+    let mut fx = Fx::new().await;
+    let mut inner = fx.tree(files("d", 3));
+    for _ in 0..10 {
+        inner = fx.tree(vec![dir("p", inner)]);
+    }
+    let mut ids = vec![root_over(&mut fx, inner, 0).await];
+    let store = LocalFsStore::new(fx.repo_dir.clone());
+    let path_packs: Vec<String> = store
+        .list("packs/")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|e| e.key)
+        .collect();
+    assert!(!path_packs.is_empty());
+    for i in 1..snapshots {
+        ids.push(root_over(&mut fx, inner, i).await);
+    }
+
+    let ranged = RangedOnly::new(&store, &[]);
+    let repo = Repository::open(&store, b"pw").await.unwrap();
+    let report = check_structure_with_budget(
+        &ranged,
+        repo.read_keys(),
+        repo.config(),
+        &|_, _, _| {},
+        TreeBudget::default().with_dir_limits(u64::MAX, 10),
+    )
+    .await
+    .unwrap();
+    let prefix = 0..PACK_PREFIX_LEN as u64;
+    let reads = path_packs
+        .iter()
+        .flat_map(|key| ranged.ranges_of(key))
+        .filter(|r| *r != prefix)
+        .count();
+    (reads, report, ids)
+}
+
+#[tokio::test]
+async fn check_hostile_shared_cut_path_is_walked_once() {
+    let mut reads = Vec::new();
+    for n in [2usize, 8] {
+        let (count, report, ids) = cut_path_pack_reads(n).await;
+        assert_eq!(report.snapshots_checked, n as u64);
+        for id in &ids {
+            let key = snapshot_object_key(id);
+            let mine: Vec<_> = report.findings.iter().filter(|f| f.key == key).collect();
+            assert_eq!(mine.len(), 1, "{:?}", report.findings);
+            assert!(mine[0].detail.contains("entries held at once"), "{mine:?}");
+        }
+        assert_eq!(report.trees_checked, n as u64 + 9);
+        reads.push(count);
+    }
+    assert!(reads[0] > 0, "the path was never read");
+    assert_eq!(reads[0], reads[1], "the shared path was read again");
+}
+
+/// `D -> E -> F` with an unknown chunk in `F`. One snapshot reaches `D` at
+/// `MAX_DEPTH`, so its restore stops before `F`; the other reaches it near the
+/// root and restores as far as the chunk.
+async fn depth_cut_pair(deep_first: bool) -> (Fx, BlobId, BlobId) {
+    let mut fx = Fx::new().await;
+    let f = fx.tree(vec![file("x", &[[9u8; 32]], 1)]);
+    let e = fx.tree(vec![dir("f", f)]);
+    let d = fx.tree(vec![dir("e", e)]);
+    let mut chain = d;
+    for _ in 0..MAX_DEPTH - 2 {
+        chain = fx.tree(vec![dir("d", chain)]);
+    }
+    for _ in 0..64 {
+        let deep = fx.snapshot(vec![dir("d", chain)]).await;
+        let shallow = fx.snapshot(vec![dir("d", d)]).await;
+        if (snapshot_object_key(&deep) < snapshot_object_key(&shallow)) == deep_first {
+            return (fx, deep, shallow);
+        }
+        for id in [&deep, &shallow] {
+            fs::remove_file(fx.repo_dir.join(snapshot_object_key(id))).unwrap();
+        }
+    }
+    panic!("no pair in the wanted order");
+}
+
+async fn assert_depth_is_found_only_for_deep(deep_first: bool) {
+    let (fx, deep, shallow) = depth_cut_pair(deep_first).await;
+    let report = fx.check().await;
+    assert_eq!(report.snapshots_checked, 2);
+    let nested = |snap: &BlobId| {
+        let key = snapshot_object_key(snap);
+        report
+            .findings
+            .iter()
+            .any(|f| f.key == key && f.detail.contains("nested too deeply"))
+    };
+    assert!(nested(&deep), "{:?}", report.findings);
+    assert!(!nested(&shallow), "{:?}", report.findings);
+    assert!(
+        finding_kinds(&report, &shallow).contains(&FindingKind::UnknownBlob),
+        "{:?}",
+        report.findings
+    );
+
+    let err = fx
+        .restore(&deep, &RestoreOptions::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, Error::Corrupt { reason, .. } if reason.contains("nested")),
+        "{err:?}"
+    );
+    let err = fx
+        .restore(&shallow, &RestoreOptions::default())
+        .await
+        .unwrap_err();
+    assert!(
+        !matches!(&err, Error::Corrupt { reason, .. } if reason.contains("nested")),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
+async fn check_hostile_depth_cut_shared_dir_deep_first() {
+    assert_depth_is_found_only_for_deep(true).await;
+}
+
+#[tokio::test]
+async fn check_hostile_short_subtree_id_is_a_finding() {
+    let mut fx = Fx::new().await;
+    let mut bad = dir("z", [0u8; 32]);
+    bad.subtrees = vec![vec![7u8; 31]];
+    let snap = fx.snapshot(vec![bad]).await;
+
+    fx.assert_refused(&snap).await;
+    let report = fx.check().await;
+    assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
+    let f = &report.findings[0];
+    assert_eq!(f.key, snapshot_object_key(&snap));
+    assert_eq!(f.kind, FindingKind::UnreadableTree);
+    assert!(f.detail.contains("32 bytes"), "{f:?}");
 }

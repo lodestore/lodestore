@@ -222,17 +222,62 @@ impl Held {
     }
 }
 
+/// Where a walk stopped because of the path to a directory: what is held
+/// above it, how deep it is, and the finding. Any visit with at least as much
+/// above it and at least as deep stops at the same place, because every
+/// figure only grows down a path.
+#[derive(Debug, Clone)]
+struct Cut {
+    above: Held,
+    depth: usize,
+    detail: String,
+}
+
+impl Cut {
+    fn covers(&self, above: Held, depth: usize) -> bool {
+        above.entries >= self.above.entries
+            && above.bytes >= self.above.bytes
+            && depth >= self.depth
+    }
+}
+
 /// What a finished walk of a directory leaves for the snapshots that reach it
 /// again.
 struct DirMemo {
     /// The most a walk holds from this directory down, the directory counted
     /// whole.
     below: Held,
+    /// Levels of directory nodes from this directory down: 0 without any.
+    height: usize,
+    /// Entries and tree bytes a restore charges for this directory and
+    /// everything below it, every occurrence of a shared directory counted.
+    walk: Held,
     finding: Found,
-    /// `false` when the walk stopped at something that depends on the path
-    /// (the held limit, the depth): the figures are then a lower bound, and a
-    /// snapshot that reaches the directory with less above it walks it again.
-    exact: bool,
+    /// Set when the walk stopped at something that depends on the path (the
+    /// held limits, the depth): the figures are then a lower bound, and a
+    /// visit the cut does not cover walks the directory again.
+    cut: Option<Cut>,
+}
+
+/// What a directory gives the directory above it.
+struct Done {
+    below: Held,
+    height: usize,
+    walk: Held,
+    finding: Found,
+    cut: Option<Cut>,
+}
+
+impl Done {
+    fn empty(finding: Found) -> Done {
+        Done {
+            below: Held::default(),
+            height: 0,
+            walk: Held::default(),
+            finding,
+            cut: None,
+        }
+    }
 }
 
 /// A directory whose entries are checked and whose subdirectories are being
@@ -240,6 +285,8 @@ struct DirMemo {
 struct Frame {
     dir: BlobId,
     depth: usize,
+    /// Every directory above this one.
+    above: Held,
     /// This directory and every directory above it.
     held: Held,
     /// This directory alone. The `subtrees` lists of its subdirectories are
@@ -249,46 +296,102 @@ struct Frame {
     /// The most held from this directory down, over the subdirectories walked
     /// so far.
     below: Held,
-    exact: bool,
+    height: usize,
+    walk: Held,
+    cut: Option<Cut>,
     finding: Found,
 }
 
-/// Hands what a finished subdirectory holds to the directory above it.
-fn climb(frames: &mut [Frame], below: Held, exact: bool, finding: &Found) {
+impl Frame {
+    /// The level above the root of a snapshot: it holds nothing and ends up
+    /// with the totals of the whole snapshot.
+    fn above_root(root: BlobId) -> Frame {
+        Frame {
+            dir: [0; 32],
+            depth: 0,
+            above: Held::default(),
+            held: Held::default(),
+            own: Held::default(),
+            subdirs: vec![vec![root]],
+            below: Held::default(),
+            height: 0,
+            walk: Held::default(),
+            cut: None,
+            finding: None,
+        }
+    }
+
+    fn done(self) -> Done {
+        Done {
+            below: self.below,
+            height: self.height,
+            walk: self.walk,
+            finding: self.finding,
+            cut: self.cut,
+        }
+    }
+}
+
+/// Hands what a finished subdirectory holds to the directory above it. A cut
+/// of the subdirectory is a cut of the directory, at the directory's own
+/// place.
+fn climb(frames: &mut [Frame], done: &Done) {
     if let Some(parent) = frames.last_mut() {
-        parent.below = parent.below.max(parent.own.plus(below));
-        parent.exact &= exact;
+        parent.below = parent.below.max(parent.own.plus(done.below));
+        parent.height = parent.height.max(done.height.saturating_add(1));
+        parent.walk = parent.walk.plus(done.walk);
         if parent.finding.is_none() {
-            parent.finding.clone_from(finding);
+            parent.finding.clone_from(&done.finding);
+        }
+        if parent.cut.is_none()
+            && let Some(cut) = &done.cut
+        {
+            parent.cut = Some(Cut {
+                above: parent.above,
+                depth: parent.depth,
+                detail: cut.detail.clone(),
+            });
         }
     }
 }
 
 /// Remembers a walked directory and hands what it holds to the directory
-/// above it. The figures of a memo that is not exact only grow.
-fn close(
-    memo: &mut HashMap<BlobId, DirMemo>,
-    frames: &mut [Frame],
-    dir: BlobId,
-    below: Held,
-    exact: bool,
-    finding: Found,
-) {
-    let known = memo.remove(&dir);
-    let stored = match known.as_ref() {
-        Some(k) if !exact => k.below.max(below),
-        _ => below,
-    };
-    let finding = finding.or_else(|| known.and_then(|k| k.finding));
-    climb(frames, below, exact, &finding);
+/// above it.
+fn close(memo: &mut HashMap<BlobId, DirMemo>, frames: &mut [Frame], dir: BlobId, done: Done) {
+    climb(frames, &done);
     memo.insert(
         dir,
         DirMemo {
-            below: stored,
-            finding,
-            exact,
+            below: done.below,
+            height: done.height,
+            walk: done.walk,
+            finding: done.finding,
+            cut: done.cut,
         },
     );
+}
+
+fn too_deep(name: &str) -> String {
+    format!("tree {name}: directories are nested too deeply")
+}
+
+/// The finding a visit to a memoized directory with no cut gets from the path
+/// to it, or none.
+fn path_finding(
+    known: &DirMemo,
+    above: Held,
+    depth: usize,
+    budget: &TreeBudget,
+    name: &str,
+) -> Option<String> {
+    if let Err(e) = above.plus(known.below).check(budget) {
+        return Some(too_large(name, &e));
+    }
+    // The deepest directory node sits `height - 1` levels below this directory.
+    if known.height >= 1 && depth.saturating_add(known.height - 1) > MAX_DEPTH {
+        return Some(too_deep(name));
+    }
+    None
 }
 
 /// Why a directory was not read to the end.
@@ -610,61 +713,71 @@ async fn check_with_budget<S: BlobStore>(
         // walk would cost a full tree walk per snapshot.
         c.snapshot_seen.clear();
         let mut groups = HashMap::new();
-        let mut held_found = false;
+        // A finding that depends on the path to a directory is reported once
+        // per snapshot.
+        let mut path_found = false;
         // A directory is its tree pieces, read as one run like a restore does,
         // with its depth and what the directories above it hold counted the
         // way the restore's cursor counts them. Subdirectories are walked
         // before their parent is done, so the most held below each directory
-        // is known when it is.
-        let mut frames: Vec<Frame> = Vec::new();
-        let mut next = Some((vec![root], 1));
-        loop {
-            let (pieces, depth) = match next.take() {
-                Some(dir) => dir,
-                None => {
-                    let Some(top) = frames.last_mut() else {
-                        break;
-                    };
-                    if let Some(pieces) = top.subdirs.pop() {
-                        (pieces, top.depth + 1)
-                    } else {
-                        let Some(done) = frames.pop() else {
-                            break;
-                        };
-                        close(
-                            &mut memo,
-                            &mut frames,
-                            done.dir,
-                            done.below,
-                            done.exact,
-                            done.finding,
-                        );
-                        continue;
+        // is known when it is. The bottom frame stands for the level above
+        // the root and ends up with what a restore of the snapshot charges.
+        let mut frames: Vec<Frame> = vec![Frame::above_root(root)];
+        while let Some(top) = frames.last_mut() {
+            let Some(pieces) = top.subdirs.pop() else {
+                let Some(frame) = frames.pop() else {
+                    break;
+                };
+                if frames.is_empty() {
+                    if let Err(e) = budget.check_walk(frame.walk.entries, frame.walk.bytes) {
+                        c.add_once(&key, FindingKind::UnreadableTree, e.to_string());
                     }
+                    break;
                 }
+                close(&mut memo, &mut frames, frame.dir, frame.done());
+                continue;
             };
-            let above = frames.last().map_or(Held::default(), |f| f.held);
+            let depth = top.depth + 1;
+            let above = top.held;
             let dir = match pieces.as_slice() {
                 [one] => *one,
                 _ => *blake3::hash(&pieces.concat()).as_bytes(),
             };
             let name = hex32(pieces.first().unwrap_or(&dir));
+            let mut found: Found = None;
             if let Some(known) = memo.get(&dir) {
-                let over = above.plus(known.below).check(&budget);
-                if known.exact || over.is_err() || held_found {
-                    if let Err(e) = over
-                        && !std::mem::replace(&mut held_found, true)
+                let cut = match &known.cut {
+                    Some(cut) => cut.covers(above, depth).then(|| cut.detail.clone()),
+                    None => path_finding(known, above, depth, &budget, &name),
+                };
+                if cut.is_some() || known.cut.is_none() {
+                    if let Some(detail) = &cut
+                        && !std::mem::replace(&mut path_found, true)
                     {
-                        c.add_once(&key, FindingKind::UnreadableTree, too_large(&name, &e));
+                        c.add_once(&key, FindingKind::UnreadableTree, detail.clone());
                     }
                     if let Some((kind, detail)) = known.finding.clone() {
                         c.add_once(&key, kind, detail);
                     }
-                    climb(&mut frames, known.below, known.exact, &known.finding);
+                    let done = Done {
+                        below: known.below,
+                        height: known.height,
+                        walk: known.walk,
+                        finding: known.finding.clone(),
+                        cut: cut.map(|detail| Cut {
+                            above,
+                            depth,
+                            detail,
+                        }),
+                    };
+                    climb(&mut frames, &done);
                     continue;
                 }
+                // What an earlier walk found does not depend on the path.
+                if let Some((kind, detail)) = known.finding.clone() {
+                    c.report(&key, &mut found, kind, detail);
+                }
             }
-            let mut found: Found = None;
             let mut nodes = Vec::new();
             let mut previous: Option<Vec<u8>> = None;
             let mut read = 0u64;
@@ -771,18 +884,30 @@ async fn check_with_budget<S: BlobStore>(
                 None => {}
                 Some(Stop::Finding(kind, detail)) => {
                     c.report(&key, &mut found, kind, detail);
-                    close(&mut memo, &mut frames, dir, Held::default(), true, found);
+                    close(&mut memo, &mut frames, dir, Done::empty(found));
                     continue;
                 }
                 Some(Stop::Path(e, at)) => {
-                    if !std::mem::replace(&mut held_found, true) {
-                        c.add_once(&key, FindingKind::UnreadableTree, too_large(&name, &e));
+                    let detail = too_large(&name, &e);
+                    if !std::mem::replace(&mut path_found, true) {
+                        c.add_once(&key, FindingKind::UnreadableTree, detail.clone());
                     }
-                    close(&mut memo, &mut frames, dir, at, false, found);
+                    let done = Done {
+                        below: at,
+                        height: 0,
+                        walk: at,
+                        finding: found,
+                        cut: Some(Cut {
+                            above,
+                            depth,
+                            detail,
+                        }),
+                    };
+                    close(&mut memo, &mut frames, dir, done);
                     continue;
                 }
                 Some(Stop::Pending) => {
-                    close(&mut memo, &mut frames, dir, Held::default(), false, found);
+                    close(&mut memo, &mut frames, dir, Done::empty(found));
                     continue;
                 }
             }
@@ -790,7 +915,8 @@ async fn check_with_budget<S: BlobStore>(
                 entries: nodes.len() as u64,
                 bytes: read,
             };
-            let mut exact = true;
+            let mut cut: Option<Cut> = None;
+            let mut height = 0;
             let mut subdirs = Vec::new();
             for node in &nodes {
                 let mut all_known = true;
@@ -825,30 +951,42 @@ async fn check_with_budget<S: BlobStore>(
                     }
                 }
                 if node.r#type == pb::NodeType::Dir as i32 {
+                    height = 1;
                     if depth > MAX_DEPTH {
-                        let detail = format!("tree {name}: directories are nested too deeply");
-                        c.add_once(&key, FindingKind::UnreadableTree, detail);
-                        exact = false;
+                        let detail = too_deep(&name);
+                        if !std::mem::replace(&mut path_found, true) {
+                            c.add_once(&key, FindingKind::UnreadableTree, detail.clone());
+                        }
+                        cut.get_or_insert(Cut {
+                            above,
+                            depth,
+                            detail,
+                        });
                         continue;
                     }
-                    let subtrees: Vec<BlobId> = node
-                        .subtrees
-                        .iter()
-                        .filter_map(|raw| blob_ref(raw))
-                        .collect();
-                    if !subtrees.is_empty() {
-                        subdirs.push(subtrees);
+                    let subtrees: Option<Vec<BlobId>> =
+                        node.subtrees.iter().map(|raw| blob_ref(raw)).collect();
+                    match subtrees {
+                        Some(subtrees) if subtrees.is_empty() => {}
+                        Some(subtrees) => subdirs.push(subtrees),
+                        None => {
+                            let detail = format!("tree {name}: subtree id must be 32 bytes");
+                            c.report(&key, &mut found, FindingKind::UnreadableTree, detail);
+                        }
                     }
                 }
             }
             frames.push(Frame {
                 dir,
                 depth,
+                above,
                 held: above.plus(own),
                 own,
                 subdirs,
                 below: own,
-                exact,
+                height,
+                walk: own,
+                cut,
                 finding: found,
             });
         }
