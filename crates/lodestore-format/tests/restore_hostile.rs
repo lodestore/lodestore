@@ -1686,9 +1686,9 @@ async fn pack_reads(lie: &SizeLie) -> usize {
 }
 
 /// A snapshot of one file that names the same 1000-byte chunk `n` times and
-/// says it holds `size` bytes; the index is honest. Returns the ranges read
-/// from the packs by a restore and by the structure check, each of which
-/// must refuse the file without naming a partial sum.
+/// says it holds `size` bytes; the index is honest. Returns the blobs read
+/// from the pack of the chunk by a restore and by the structure check, each
+/// of which must refuse the file without naming a partial sum.
 async fn repeated_chunk(n: usize, size: u64) -> (usize, usize) {
     let mut fx = Fx::new().await;
     let c = fx.data(&[7u8; 1000]);
@@ -1696,6 +1696,7 @@ async fn repeated_chunk(n: usize, size: u64) -> (usize, usize) {
     let store = LocalFsStore::new(fx.repo_dir.clone());
     let repo = Repository::open(&store, b"pw").await.unwrap();
     let says = format!("hold more than the {size} bytes the node says");
+    let pack = data_pack_of(&store, &repo, &c).await;
 
     let ranged = RangedOnly::new(&store, &[]);
     let mut reader = Reader::open(&ranged, repo.read_keys().duplicate(), repo.config()).unwrap();
@@ -1703,7 +1704,7 @@ async fn repeated_chunk(n: usize, size: u64) -> (usize, usize) {
         .restore(&snap, &fx.target, &RestoreOptions::default(), &|_| {})
         .await
         .unwrap_err();
-    let restore_reads = ranged.ranges_under("packs/").len();
+    let restore_reads = blob_reads(&ranged, &pack);
     assert!(matches!(err, Error::Corrupt { .. }), "{err:?}");
     assert!(err.to_string().contains(&says), "{err}");
 
@@ -1717,7 +1718,7 @@ async fn repeated_chunk(n: usize, size: u64) -> (usize, usize) {
     )
     .await
     .unwrap();
-    let check_reads = ranged.ranges_under("packs/").len();
+    let check_reads = blob_reads(&ranged, &pack);
     assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
     let f = &report.findings[0];
     assert_eq!(f.key, snapshot_object_key(&snap));
@@ -1727,20 +1728,16 @@ async fn repeated_chunk(n: usize, size: u64) -> (usize, usize) {
     (restore_reads, check_reads)
 }
 
-/// The reads of each operation, for 4, 64 and 1024 references, at a size of
-/// zero and at one byte short of what the chunks hold.
+/// Each operation reads the chunk exactly once, for 4, 64 and 1024
+/// references, at a size of zero and at one byte short of what the chunks
+/// hold.
 async fn repeated_chunk_reads(pick: fn((usize, usize)) -> usize) {
     for short in [false, true] {
-        let mut reads = Vec::new();
         for n in [4usize, 64, 1024] {
             let size = if short { n as u64 * 1000 - 1 } else { 0 };
-            reads.push(pick(repeated_chunk(n, size).await));
+            let reads = pick(repeated_chunk(n, size).await);
+            assert_eq!(reads, 1, "short={short}, n={n}");
         }
-        assert!(reads[0] > 0, "the chunk was never read");
-        assert!(
-            reads.iter().all(|r| *r == reads[0]),
-            "short={short}: {reads:?}"
-        );
     }
 }
 
