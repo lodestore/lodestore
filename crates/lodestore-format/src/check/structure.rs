@@ -78,6 +78,9 @@ struct Checker<'a, S: BlobStore> {
     /// Blobs found unknown or unreadable, so that every snapshot that
     /// refers to one gets the finding, not only the first.
     bad: HashMap<BlobId, (FindingKind, String)>,
+    /// What the snapshot being checked already has, so that the same finding
+    /// is not added twice to one snapshot.
+    snapshot_seen: HashSet<(FindingKind, String)>,
     findings: Findings,
     notes: Notes,
 }
@@ -143,25 +146,64 @@ impl<S: BlobStore> Checker<'_, S> {
         }
     }
 
-    fn bad_blob(&mut self, snapshot_key: &str, id: &BlobId, kind: FindingKind, detail: String) {
-        self.findings.add(kind, snapshot_key, detail.clone());
-        self.bad.insert(*id, (kind, detail));
-    }
-
-    /// Reports `id` again for a snapshot that reaches it after the first.
-    fn again(&mut self, snapshot_key: &str, id: &BlobId) {
-        if let Some((kind, detail)) = self.bad.get(id) {
-            self.findings.add(*kind, snapshot_key, detail.clone());
+    /// Adds a finding to the snapshot at `key` unless it has this one.
+    fn add_once(&mut self, key: &str, kind: FindingKind, detail: String) {
+        if self.snapshot_seen.insert((kind, detail.clone())) {
+            self.findings.add(kind, key, detail);
         }
     }
 
-    fn unknown_blob(&mut self, snapshot_key: &str, id: &BlobId) {
+    /// A finding that holds for every snapshot that reaches the directory
+    /// being walked: it goes to this snapshot and into `found`, which the
+    /// directory's memo keeps for the snapshots that come later.
+    fn report(&mut self, key: &str, found: &mut Found, kind: FindingKind, detail: String) {
+        if found.is_none() {
+            *found = Some((kind, detail.clone()));
+        }
+        self.add_once(key, kind, detail);
+    }
+
+    fn bad_blob(
+        &mut self,
+        key: &str,
+        found: &mut Found,
+        id: &BlobId,
+        kind: FindingKind,
+        detail: String,
+    ) {
+        self.bad.insert(*id, (kind, detail.clone()));
+        self.report(key, found, kind, detail);
+    }
+
+    /// Reports `id` again for a snapshot that reaches it after the first.
+    fn again(&mut self, key: &str, found: &mut Found, id: &BlobId) {
+        if let Some((kind, detail)) = self.bad.get(id).cloned() {
+            self.report(key, found, kind, detail);
+        }
+    }
+
+    fn unknown_blob(&mut self, key: &str, found: &mut Found, id: &BlobId) {
         let detail = format!(
             "references blob {} that no index shard describes",
             hex32(id)
         );
-        self.bad_blob(snapshot_key, id, FindingKind::UnknownBlob, detail);
+        self.bad_blob(key, found, id, FindingKind::UnknownBlob, detail);
     }
+}
+
+/// The first finding at or below a directory that is true for any path to it.
+type Found = Option<(FindingKind, String)>;
+
+/// What a finished walk of a directory leaves for the snapshots that reach it
+/// again.
+struct DirMemo {
+    /// The most entries held from this directory down, the directory counted.
+    entries_below: u64,
+    finding: Found,
+    /// `false` when the walk stopped at something that depends on the path
+    /// (the held limit, the depth): the figures are then a lower bound, and a
+    /// snapshot that reaches the directory with less above it walks it again.
+    exact: bool,
 }
 
 /// A directory whose entries are checked and whose subdirectories are being
@@ -177,23 +219,45 @@ struct Frame {
     /// walked so far.
     below: u64,
     exact: bool,
+    finding: Found,
 }
 
-/// Counts what a finished subdirectory holds into the directory above it.
-fn add_below(frames: &mut [Frame], below: u64, exact: bool) {
+/// Hands what a finished subdirectory holds to the directory above it.
+fn climb(frames: &mut [Frame], below: u64, exact: bool, finding: &Found) {
     if let Some(parent) = frames.last_mut() {
         parent.below = parent.below.max(parent.len.saturating_add(below));
         parent.exact &= exact;
+        if parent.finding.is_none() {
+            parent.finding.clone_from(finding);
+        }
     }
 }
 
-fn record_below(map: &mut HashMap<BlobId, (u64, bool)>, dir: BlobId, below: u64, exact: bool) {
-    let known = map.entry(dir).or_insert((0, false));
-    if exact {
-        *known = (below, true);
-    } else {
-        known.0 = known.0.max(below);
-    }
+/// Remembers a walked directory and hands what it holds to the directory
+/// above it. The figures of a memo that is not exact only grow.
+fn close(
+    memo: &mut HashMap<BlobId, DirMemo>,
+    frames: &mut [Frame],
+    dir: BlobId,
+    below: u64,
+    exact: bool,
+    finding: Found,
+) {
+    let known = memo.remove(&dir);
+    let entries_below = match known.as_ref() {
+        Some(k) if !exact => k.entries_below.max(below),
+        _ => below,
+    };
+    let finding = finding.or_else(|| known.and_then(|k| k.finding));
+    climb(frames, below, exact, &finding);
+    memo.insert(
+        dir,
+        DirMemo {
+            entries_below,
+            finding,
+            exact,
+        },
+    );
 }
 
 fn too_large(name: &str, e: &Error) -> String {
@@ -389,6 +453,7 @@ async fn check_with_limits<S: BlobStore>(
         missing: HashSet::new(),
         noted_pending: HashSet::new(),
         bad: HashMap::new(),
+        snapshot_seen: HashSet::new(),
         findings,
         notes,
     };
@@ -444,11 +509,8 @@ async fn check_with_limits<S: BlobStore>(
 
     let mut reader = Reader::open_shared(store, keys.duplicate(), config, ReaderCache::new(0))?;
     reader.set_dir_limits(dir_limit, held_limit);
-    let mut seen_dirs: HashSet<BlobId> = HashSet::new();
-    // The most entries a walk holds from a directory down, the directory
-    // counted; `false` marks a lower bound of a subtree that was only partly
-    // walked.
-    let mut held_below: HashMap<BlobId, (u64, bool)> = HashMap::new();
+    let mut memo: HashMap<BlobId, DirMemo> = HashMap::new();
+    let mut trees_read: HashSet<BlobId> = HashSet::new();
     let mut seen_chunks: HashSet<BlobId> = HashSet::new();
     let total = snapshots.len() as u64;
     for (done, (key, id, size)) in snapshots.into_iter().enumerate() {
@@ -497,11 +559,11 @@ async fn check_with_limits<S: BlobStore>(
             );
             continue;
         };
-        // shortcut: hardlink members and the depth of a subtree seen in an
-        // earlier snapshot are not checked again; a per-snapshot walk would
-        // cost a full tree walk per snapshot. A subtree that was only partly
-        // walked because it passed the held limit is walked again when a later
-        // snapshot reaches it with fewer entries above it.
+        // shortcut: hardlink members are not checked across snapshots, and a
+        // subtree seen in an earlier snapshot is not walked again unless it
+        // was only partly walked because of the path to it; a per-snapshot
+        // walk would cost a full tree walk per snapshot.
+        c.snapshot_seen.clear();
         let mut groups = HashMap::new();
         let mut held_found = false;
         // A directory is its tree pieces, read as one run like a restore does,
@@ -524,11 +586,14 @@ async fn check_with_limits<S: BlobStore>(
                         let Some(done) = frames.pop() else {
                             break;
                         };
-                        if !done.exact {
-                            seen_dirs.remove(&done.dir);
-                        }
-                        record_below(&mut held_below, done.dir, done.below, done.exact);
-                        add_below(&mut frames, done.below, done.exact);
+                        close(
+                            &mut memo,
+                            &mut frames,
+                            done.dir,
+                            done.below,
+                            done.exact,
+                            done.finding,
+                        );
                         continue;
                     }
                 }
@@ -539,24 +604,29 @@ async fn check_with_limits<S: BlobStore>(
                 _ => *blake3::hash(&pieces.concat()).as_bytes(),
             };
             let name = hex32(pieces.first().unwrap_or(&dir));
-            if let Some(&(below, exact)) = held_below.get(&dir) {
-                let over = reader.walk_budget().check_held(above.saturating_add(below));
-                if exact || over.is_err() || held_found {
+            if let Some(known) = memo.get(&dir) {
+                let over = reader
+                    .walk_budget()
+                    .check_held(above.saturating_add(known.entries_below));
+                if known.exact || over.is_err() || held_found {
                     if let Err(e) = over
                         && !std::mem::replace(&mut held_found, true)
                     {
-                        c.findings
-                            .add(FindingKind::UnreadableTree, &key, too_large(&name, &e));
+                        c.add_once(&key, FindingKind::UnreadableTree, too_large(&name, &e));
                     }
-                    c.again(&key, &dir);
-                    add_below(&mut frames, below, exact);
+                    if let Some((kind, detail)) = known.finding.clone() {
+                        c.add_once(&key, kind, detail);
+                    }
+                    climb(
+                        &mut frames,
+                        known.entries_below,
+                        known.exact,
+                        &known.finding,
+                    );
                     continue;
                 }
             }
-            if !seen_dirs.insert(dir) {
-                c.again(&key, &dir);
-                continue;
-            }
+            let mut found: Found = None;
             let mut nodes = Vec::new();
             let mut previous: Option<Vec<u8>> = None;
             for tree in &pieces {
@@ -565,23 +635,36 @@ async fn check_with_limits<S: BlobStore>(
                         "references blob {} that no index shard describes",
                         hex32(tree)
                     );
-                    c.bad_blob(&key, &dir, FindingKind::UnknownBlob, detail);
+                    c.report(&key, &mut found, FindingKind::UnknownBlob, detail);
+                    close(&mut memo, &mut frames, dir, 0, true, found);
                     continue 'dirs;
                 };
                 if !c.pack_present(&loc.pack_id, &key).await? {
+                    if c.pending.contains(&loc.pack_id) {
+                        close(&mut memo, &mut frames, dir, 0, false, found);
+                    } else {
+                        let detail = format!(
+                            "tree {}: its pack {} is missing from the bucket",
+                            hex32(tree),
+                            pack_object_key(&loc.pack_id)
+                        );
+                        c.report(&key, &mut found, FindingKind::UnreadableTree, detail);
+                        close(&mut memo, &mut frames, dir, 0, true, found);
+                    }
                     continue 'dirs;
                 }
                 let piece = match reader.read_blob(tree, BLOB_TYPE_TREE).await {
                     Ok(bytes) => decode_tree(&bytes, previous.as_deref()),
                     Err(e) => Err(e),
                 };
-                report.trees_checked += 1;
+                trees_read.insert(*tree);
                 match piece {
                     Ok(piece) => {
                         let n = nodes.len() as u64 + piece.len() as u64;
                         if let Err(e) = reader.walk_budget().check_dir(n) {
                             let detail = too_large(&name, &e);
-                            c.bad_blob(&key, &dir, FindingKind::UnreadableTree, detail);
+                            c.report(&key, &mut found, FindingKind::UnreadableTree, detail);
+                            close(&mut memo, &mut frames, dir, 0, true, found);
                             continue 'dirs;
                         }
                         if let Some(last) = piece.last() {
@@ -591,7 +674,8 @@ async fn check_with_limits<S: BlobStore>(
                     }
                     Err(e) if is_data_error(&e) => {
                         let detail = format!("tree {}: {}", hex32(tree), reason(&e));
-                        c.bad_blob(&key, &dir, FindingKind::UnreadableTree, detail);
+                        c.report(&key, &mut found, FindingKind::UnreadableTree, detail);
+                        close(&mut memo, &mut frames, dir, 0, true, found);
                         continue 'dirs;
                     }
                     Err(e) => return Err(e),
@@ -601,14 +685,12 @@ async fn check_with_limits<S: BlobStore>(
             let held = above.saturating_add(len);
             if let Err(e) = reader.walk_budget().check_held(held) {
                 if !std::mem::replace(&mut held_found, true) {
-                    c.findings
-                        .add(FindingKind::UnreadableTree, &key, too_large(&name, &e));
+                    c.add_once(&key, FindingKind::UnreadableTree, too_large(&name, &e));
                 }
-                seen_dirs.remove(&dir);
-                record_below(&mut held_below, dir, len, false);
-                add_below(&mut frames, len, false);
+                close(&mut memo, &mut frames, dir, len, false, found);
                 continue;
             }
+            let mut exact = true;
             let mut subdirs = Vec::new();
             for node in &nodes {
                 let mut all_known = true;
@@ -619,13 +701,13 @@ async fn check_with_limits<S: BlobStore>(
                     };
                     if !seen_chunks.insert(chunk) {
                         all_known &= !c.bad.contains_key(&chunk);
-                        c.again(&key, &chunk);
+                        c.again(&key, &mut found, &chunk);
                         continue;
                     }
                     match c.find(&chunk, BLOB_TYPE_DATA).await? {
                         None => {
                             all_known = false;
-                            c.unknown_blob(&key, &chunk);
+                            c.unknown_blob(&key, &mut found, &chunk);
                         }
                         Some(loc) => {
                             c.pack_present(&loc.pack_id, &key).await?;
@@ -636,12 +718,8 @@ async fn check_with_limits<S: BlobStore>(
                     match check_node(&mut reader, &mut groups, node).await {
                         Ok(()) => {}
                         Err(e) if is_data_error(&e) => {
-                            c.bad_blob(
-                                &key,
-                                &dir,
-                                FindingKind::UnreadableTree,
-                                format!("tree {name}: {e}"),
-                            );
+                            let detail = format!("tree {name}: {e}");
+                            c.report(&key, &mut found, FindingKind::UnreadableTree, detail);
                         }
                         Err(e) => return Err(e),
                     }
@@ -649,7 +727,8 @@ async fn check_with_limits<S: BlobStore>(
                 if node.r#type == pb::NodeType::Dir as i32 {
                     if depth > MAX_DEPTH {
                         let detail = format!("tree {name}: directories are nested too deeply");
-                        c.bad_blob(&key, &dir, FindingKind::UnreadableTree, detail);
+                        c.add_once(&key, FindingKind::UnreadableTree, detail);
+                        exact = false;
                         continue;
                     }
                     let subtrees: Vec<BlobId> = node
@@ -669,10 +748,12 @@ async fn check_with_limits<S: BlobStore>(
                 len,
                 subdirs,
                 below: len,
-                exact: true,
+                exact,
+                finding: found,
             });
         }
     }
+    report.trees_checked = trees_read.len() as u64;
     progress(StructureStep::Snapshots, total, total);
 
     report.packs_listed = c.listed.len() as u64;

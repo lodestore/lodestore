@@ -147,6 +147,15 @@ impl Fx {
         );
     }
 
+    /// The structure check with the default limits.
+    async fn check(&self) -> StructureReport {
+        let store = LocalFsStore::new(self.repo_dir.clone());
+        let repo = Repository::open(&store, b"pw").await.unwrap();
+        check_structure(&store, repo.read_keys(), repo.config(), &|_, _, _| {})
+            .await
+            .unwrap()
+    }
+
     /// The structure check with smaller directory limits.
     async fn check_limited(&self, dir: u64, held: u64) -> StructureReport {
         let store = LocalFsStore::new(self.repo_dir.clone());
@@ -681,6 +690,84 @@ async fn check_hostile_held_entries_count_consumed_directories() {
 
     let report = fx.check_limited(10, 20).await;
     assert!(report.findings.is_empty(), "{:?}", report.findings);
+}
+
+fn finding_kinds(report: &StructureReport, snapshot: &BlobId) -> Vec<FindingKind> {
+    let key = snapshot_object_key(snapshot);
+    report
+        .findings
+        .iter()
+        .filter(|f| f.key == key)
+        .map(|f| f.kind)
+        .collect()
+}
+
+/// A finding in a directory two snapshots share belongs to each of them, in
+/// whatever order the check reads them.
+#[tokio::test]
+async fn check_hostile_finding_below_shared_dir_reaches_every_snapshot() {
+    for deep in [false, true] {
+        let mut fx = Fx::new().await;
+        let mut shared = fx.tree(vec![file("x", &[[9u8; 32]], 1)]);
+        let mut trees = 3;
+        if deep {
+            shared = fx.tree(vec![dir("e", shared)]);
+            trees += 1;
+        }
+        let first = fx.snapshot(vec![dir("d", shared)]).await;
+        let mut top = vec![dir("d", shared)];
+        top.push(file("f", &[], 0));
+        let second = fx.snapshot(top).await;
+
+        let report = fx.check().await;
+        assert_eq!(report.snapshots_checked, 2);
+        for snap in [&first, &second] {
+            assert_eq!(
+                finding_kinds(&report, snap),
+                [FindingKind::UnknownBlob],
+                "deep={deep}: {:?}",
+                report.findings
+            );
+        }
+        assert_eq!(report.trees_checked, trees, "deep={deep}");
+    }
+}
+
+/// A tree blob whose pack is gone is a finding of every snapshot that reaches
+/// it, and the check goes on to the next one.
+#[tokio::test]
+async fn check_hostile_missing_tree_pack_is_a_snapshot_finding() {
+    let mut fx = Fx::new().await;
+    let shared = fx.tree(files("s", 3));
+    let decoy = fx.snapshot(files("pad", 1)).await;
+    fs::remove_dir_all(fx.repo_dir.join("packs")).unwrap();
+    fs::remove_file(fx.repo_dir.join(snapshot_object_key(&decoy))).unwrap();
+    let first = fx.snapshot(vec![dir("s", shared)]).await;
+    let mut top = vec![dir("s", shared)];
+    top.extend(files("f", 2));
+    let second = fx.snapshot(top).await;
+    let clean = fx.snapshot(files("c", 2)).await;
+
+    let report = fx.check().await;
+    assert_eq!(report.snapshots_checked, 3);
+    for snap in [&first, &second] {
+        assert_eq!(
+            finding_kinds(&report, snap),
+            [FindingKind::UnreadableTree],
+            "{:?}",
+            report.findings
+        );
+    }
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|f| f.kind == FindingKind::UnreadableTree
+                && f.detail.contains("is missing from the bucket")),
+        "{:?}",
+        report.findings
+    );
+    assert!(finding_kinds(&report, &clean).is_empty());
 }
 
 #[tokio::test]

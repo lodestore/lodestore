@@ -88,8 +88,13 @@ async fn check_structure_missing_pack_found() {
     let pack = fx.packs().await.into_keys().next().unwrap();
     fs::remove_file(repo_dir(&fx).join(&pack)).unwrap();
     let report = structure(&fx).await;
-    assert_eq!(kinds(&report), [FindingKind::MissingPack]);
+    assert_eq!(report.findings[0].kind, FindingKind::MissingPack);
     assert_eq!(report.findings[0].key, pack);
+    // a pack of trees also fails the snapshots that read from it
+    for f in &report.findings[1..] {
+        assert_eq!(f.kind, FindingKind::UnreadableTree);
+        assert!(f.detail.contains("is missing from the bucket"), "{f:?}");
+    }
     assert_eq!(report.missing_packs, 1);
 }
 
