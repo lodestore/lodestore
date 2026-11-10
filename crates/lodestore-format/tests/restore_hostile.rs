@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use lodestore_format::check::FindingKind;
 use lodestore_format::check::structure::{
-    StructureReport, check_structure, check_structure_with_dir_limits,
+    StructureReport, check_structure, check_structure_with_budget, check_structure_with_dir_limits,
 };
 use lodestore_format::crypto::{BLOB_TYPE_DATA, BLOB_TYPE_TREE, BlobId, Entropy};
 use lodestore_format::error::Error;
@@ -22,7 +22,7 @@ use lodestore_format::snapshot::snapshot_object_key;
 use lodestore_format::store::LocalFsStore;
 use lodestore_format::tree::{
     MAX_DIR_ENTRIES, MAX_DIR_TREE_BYTES, MAX_HELD_ENTRIES, MAX_HELD_TREE_BYTES, MAX_WALK_NODES,
-    MAX_WALK_TREE_BYTES, encode_tree,
+    MAX_WALK_TREE_BYTES, TreeBudget, encode_tree,
 };
 use lodestore_format::writer::Writer;
 
@@ -154,6 +154,21 @@ impl Fx {
         check_structure(&store, repo.read_keys(), repo.config(), &|_, _, _| {})
             .await
             .unwrap()
+    }
+
+    /// The structure check with a budget of the test's.
+    async fn check_budget(&self, budget: TreeBudget) -> StructureReport {
+        let store = LocalFsStore::new(self.repo_dir.clone());
+        let repo = Repository::open(&store, b"pw").await.unwrap();
+        check_structure_with_budget(
+            &store,
+            repo.read_keys(),
+            repo.config(),
+            &|_, _, _| {},
+            budget,
+        )
+        .await
+        .unwrap()
     }
 
     /// The structure check with smaller directory limits.
@@ -1137,6 +1152,100 @@ async fn restore_hostile_held_bytes_count_subtree_lists() {
         .restore(&snap, &fx.target, &RestoreOptions::default(), &|_| {})
         .await
         .unwrap();
+}
+
+/// The check refuses a directory that is over the byte limit by the sizes the
+/// index lists, without reading its pieces, and goes on with the next snapshot.
+#[tokio::test]
+async fn check_hostile_wide_directory_over_byte_limit_is_a_finding() {
+    let mut fx = Fx::new().await;
+    let pieces = tree_support::wide_piece_count();
+    let wide = tree_support::write_wide_dir(&mut fx.writer, "wide", pieces);
+    let snap = fx.snapshot(vec![wide]).await;
+    fx.snapshot(files("g", 2)).await;
+
+    let report = fx.check().await;
+    assert_eq!(report.snapshots_checked, 2);
+    assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
+    let f = &report.findings[0];
+    assert_eq!(f.key, snapshot_object_key(&snap));
+    assert_eq!(f.kind, FindingKind::UnreadableTree);
+    assert!(f.detail.contains("bytes in one directory"), "{f:?}");
+    assert!(f.detail.contains("--allow-large-directories"), "{f:?}");
+    assert_eq!(report.trees_checked, 2);
+}
+
+/// The directories on the path are held by their tree bytes, and the
+/// directory that would pass the limit is not read.
+#[tokio::test]
+async fn check_hostile_held_bytes_are_a_finding() {
+    let mut fx = Fx::new().await;
+    let inner_nodes = files("i", 6);
+    let inner = fx.tree(inner_nodes.clone());
+    let mut top = vec![dir("d0", inner)];
+    top.extend(files("f", 5));
+    let held = (encode_tree(top.clone()).len() + encode_tree(inner_nodes).len()) as u64;
+    let snap = fx.snapshot(top).await;
+    let budget = |held_bytes| TreeBudget::default().with_dir_byte_limits(u64::MAX, held_bytes);
+
+    let report = fx.check_budget(budget(held - 1)).await;
+    assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
+    let f = &report.findings[0];
+    assert_eq!(f.key, snapshot_object_key(&snap));
+    assert_eq!(f.kind, FindingKind::UnreadableTree);
+    assert!(f.detail.contains("bytes held at once"), "{f:?}");
+
+    let report = fx.check_budget(budget(held)).await;
+    assert!(report.findings.is_empty(), "{:?}", report.findings);
+
+    let mut pack_reads = Vec::new();
+    for held_limit in [held - 1, held] {
+        let store = RangedOnly::new(LocalFsStore::new(fx.repo_dir.clone()), &[]);
+        let repo = Repository::open(&store, b"pw").await.unwrap();
+        check_structure_with_budget(
+            &store,
+            repo.read_keys(),
+            repo.config(),
+            &|_, _, _| {},
+            budget(held_limit),
+        )
+        .await
+        .unwrap();
+        pack_reads.push(store.ranges_under("packs/").len());
+    }
+    assert!(pack_reads[0] < pack_reads[1], "{pack_reads:?}");
+}
+
+/// A chain of directories whose `subtrees` lists are long and whose entries
+/// are few: the bytes on the path, not the entries, run out.
+#[tokio::test]
+async fn check_hostile_held_bytes_count_subtree_lists() {
+    let mut fx = Fx::new().await;
+    let empty = fx.tree(Vec::new());
+    let level = |next: BlobId| {
+        let mut d = dir("z", empty);
+        d.subtrees = vec![empty.to_vec(); 100];
+        d.subtrees.push(next.to_vec());
+        d
+    };
+    let mut inner = fx.tree(files("f", 1));
+    for _ in 0..9 {
+        inner = fx.tree(vec![level(inner)]);
+    }
+    let snap = fx.snapshot(vec![level(inner)]).await;
+
+    let report = fx
+        .check_budget(TreeBudget::default().with_dir_byte_limits(u64::MAX, 20_000))
+        .await;
+    assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
+    let f = &report.findings[0];
+    assert_eq!(f.key, snapshot_object_key(&snap));
+    assert!(f.detail.contains("bytes held at once"), "{f:?}");
+
+    let report = fx
+        .check_budget(TreeBudget::default().with_dir_byte_limits(u64::MAX, u64::MAX))
+        .await;
+    assert!(report.findings.is_empty(), "{:?}", report.findings);
 }
 
 /// Every blob of the record one byte shorter than it is.

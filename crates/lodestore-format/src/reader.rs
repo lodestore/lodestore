@@ -312,10 +312,6 @@ impl<S: BlobStore> Reader<S> {
         self.set_dir_byte_limits(u64::MAX, u64::MAX);
     }
 
-    pub(crate) fn walk_budget(&self) -> &TreeBudget {
-        &self.walk
-    }
-
     pub async fn list_snapshots(&self) -> Result<SnapshotList> {
         list_snapshots(&self.store, &self.keys).await
     }

@@ -23,7 +23,7 @@ use crate::pb;
 use crate::reader::{Reader, ReaderCache};
 use crate::snapshot::{MAX_SNAPSHOT_SIZE, SNAPSHOT_PREFIX, open_snapshot, snapshot_object_key};
 use crate::store::{BlobError, BlobStore, ListEntry, read_bounded};
-use crate::tree::{MAX_DEPTH, MAX_DIR_ENTRIES, MAX_HELD_ENTRIES, check_node, decode_tree};
+use crate::tree::{MAX_DEPTH, TreeBudget, check_node, count_tree_nodes, decode_tree};
 
 const KEYS_PREFIX: &str = "keys/";
 
@@ -194,11 +194,40 @@ impl<S: BlobStore> Checker<'_, S> {
 /// The first finding at or below a directory that is true for any path to it.
 type Found = Option<(FindingKind, String)>;
 
+/// Entries and tree bytes a walk holds.
+#[derive(Debug, Clone, Copy, Default)]
+struct Held {
+    entries: u64,
+    bytes: u64,
+}
+
+impl Held {
+    fn plus(self, other: Held) -> Held {
+        Held {
+            entries: self.entries.saturating_add(other.entries),
+            bytes: self.bytes.saturating_add(other.bytes),
+        }
+    }
+
+    fn max(self, other: Held) -> Held {
+        Held {
+            entries: self.entries.max(other.entries),
+            bytes: self.bytes.max(other.bytes),
+        }
+    }
+
+    fn check(self, budget: &TreeBudget) -> Result<()> {
+        budget.check_held(self.entries)?;
+        budget.check_held_bytes(self.bytes)
+    }
+}
+
 /// What a finished walk of a directory leaves for the snapshots that reach it
 /// again.
 struct DirMemo {
-    /// The most entries held from this directory down, the directory counted.
-    entries_below: u64,
+    /// The most a walk holds from this directory down, the directory counted
+    /// whole.
+    below: Held,
     finding: Found,
     /// `false` when the walk stopped at something that depends on the path
     /// (the held limit, the depth): the figures are then a lower bound, and a
@@ -211,21 +240,23 @@ struct DirMemo {
 struct Frame {
     dir: BlobId,
     depth: usize,
-    /// Entries of this directory and of every directory above it.
-    held: u64,
-    len: u64,
+    /// This directory and every directory above it.
+    held: Held,
+    /// This directory alone. The `subtrees` lists of its subdirectories are
+    /// part of its tree bytes.
+    own: Held,
     subdirs: Vec<Vec<BlobId>>,
-    /// The most entries held from this directory down, over the subdirectories
-    /// walked so far.
-    below: u64,
+    /// The most held from this directory down, over the subdirectories walked
+    /// so far.
+    below: Held,
     exact: bool,
     finding: Found,
 }
 
 /// Hands what a finished subdirectory holds to the directory above it.
-fn climb(frames: &mut [Frame], below: u64, exact: bool, finding: &Found) {
+fn climb(frames: &mut [Frame], below: Held, exact: bool, finding: &Found) {
     if let Some(parent) = frames.last_mut() {
-        parent.below = parent.below.max(parent.len.saturating_add(below));
+        parent.below = parent.below.max(parent.own.plus(below));
         parent.exact &= exact;
         if parent.finding.is_none() {
             parent.finding.clone_from(finding);
@@ -239,13 +270,13 @@ fn close(
     memo: &mut HashMap<BlobId, DirMemo>,
     frames: &mut [Frame],
     dir: BlobId,
-    below: u64,
+    below: Held,
     exact: bool,
     finding: Found,
 ) {
     let known = memo.remove(&dir);
-    let entries_below = match known.as_ref() {
-        Some(k) if !exact => k.entries_below.max(below),
+    let stored = match known.as_ref() {
+        Some(k) if !exact => k.below.max(below),
         _ => below,
     };
     let finding = finding.or_else(|| known.and_then(|k| k.finding));
@@ -253,11 +284,22 @@ fn close(
     memo.insert(
         dir,
         DirMemo {
-            entries_below,
+            below: stored,
             finding,
             exact,
         },
     );
+}
+
+/// Why a directory was not read to the end.
+enum Stop {
+    /// A finding true for any path to the directory.
+    Finding(FindingKind, String),
+    /// A limit on what the walk holds, which depends on the path: with what
+    /// the directory held by then.
+    Path(Error, Held),
+    /// A pack that a cleanup still running may have removed: no finding.
+    Pending,
 }
 
 fn too_large(name: &str, e: &Error) -> String {
@@ -282,15 +324,7 @@ pub async fn check_structure<S: BlobStore>(
     config: &pb::Config,
     progress: &(dyn Fn(StructureStep, u64, u64) + Sync),
 ) -> Result<StructureReport> {
-    check_with_limits(
-        store,
-        keys,
-        config,
-        progress,
-        MAX_DIR_ENTRIES,
-        MAX_HELD_ENTRIES,
-    )
-    .await
+    check_with_budget(store, keys, config, progress, TreeBudget::default()).await
 }
 
 /// [`check_structure`] with smaller directory limits, for tests.
@@ -303,16 +337,28 @@ pub async fn check_structure_with_dir_limits<S: BlobStore>(
     dir: u64,
     held: u64,
 ) -> Result<StructureReport> {
-    check_with_limits(store, keys, config, progress, dir, held).await
+    let budget = TreeBudget::default().with_dir_limits(dir, held);
+    check_with_budget(store, keys, config, progress, budget).await
 }
 
-async fn check_with_limits<S: BlobStore>(
+/// [`check_structure`] with a budget of the caller's, for tests.
+#[cfg(any(test, feature = "test-hooks"))]
+pub async fn check_structure_with_budget<S: BlobStore>(
     store: &S,
     keys: &ReadKeys,
     config: &pb::Config,
     progress: &(dyn Fn(StructureStep, u64, u64) + Sync),
-    dir_limit: u64,
-    held_limit: u64,
+    budget: TreeBudget,
+) -> Result<StructureReport> {
+    check_with_budget(store, keys, config, progress, budget).await
+}
+
+async fn check_with_budget<S: BlobStore>(
+    store: &S,
+    keys: &ReadKeys,
+    config: &pb::Config,
+    progress: &(dyn Fn(StructureStep, u64, u64) + Sync),
+    budget: TreeBudget,
 ) -> Result<StructureReport> {
     let mut report = StructureReport::default();
     let mut findings = Findings::default();
@@ -508,7 +554,6 @@ async fn check_with_limits<S: BlobStore>(
     }
 
     let mut reader = Reader::open_shared(store, keys.duplicate(), config, ReaderCache::new(0))?;
-    reader.set_dir_limits(dir_limit, held_limit);
     let mut memo: HashMap<BlobId, DirMemo> = HashMap::new();
     let mut trees_read: HashSet<BlobId> = HashSet::new();
     let mut seen_chunks: HashSet<BlobId> = HashSet::new();
@@ -567,13 +612,13 @@ async fn check_with_limits<S: BlobStore>(
         let mut groups = HashMap::new();
         let mut held_found = false;
         // A directory is its tree pieces, read as one run like a restore does,
-        // with its depth and the entries of the directories above it counted
-        // the way the restore's cursor counts them. Subdirectories are walked
-        // before their parent is done, so the most entries held below each
-        // directory is known when it is.
+        // with its depth and what the directories above it hold counted the
+        // way the restore's cursor counts them. Subdirectories are walked
+        // before their parent is done, so the most held below each directory
+        // is known when it is.
         let mut frames: Vec<Frame> = Vec::new();
         let mut next = Some((vec![root], 1));
-        'dirs: loop {
+        loop {
             let (pieces, depth) = match next.take() {
                 Some(dir) => dir,
                 None => {
@@ -598,16 +643,14 @@ async fn check_with_limits<S: BlobStore>(
                     }
                 }
             };
-            let above = frames.last().map_or(0, |f| f.held);
+            let above = frames.last().map_or(Held::default(), |f| f.held);
             let dir = match pieces.as_slice() {
                 [one] => *one,
                 _ => *blake3::hash(&pieces.concat()).as_bytes(),
             };
             let name = hex32(pieces.first().unwrap_or(&dir));
             if let Some(known) = memo.get(&dir) {
-                let over = reader
-                    .walk_budget()
-                    .check_held(above.saturating_add(known.entries_below));
+                let over = above.plus(known.below).check(&budget);
                 if known.exact || over.is_err() || held_found {
                     if let Err(e) = over
                         && !std::mem::replace(&mut held_found, true)
@@ -617,79 +660,136 @@ async fn check_with_limits<S: BlobStore>(
                     if let Some((kind, detail)) = known.finding.clone() {
                         c.add_once(&key, kind, detail);
                     }
-                    climb(
-                        &mut frames,
-                        known.entries_below,
-                        known.exact,
-                        &known.finding,
-                    );
+                    climb(&mut frames, known.below, known.exact, &known.finding);
                     continue;
                 }
             }
             let mut found: Found = None;
             let mut nodes = Vec::new();
             let mut previous: Option<Vec<u8>> = None;
-            for tree in &pieces {
-                let Some(loc) = c.find(tree, BLOB_TYPE_TREE).await? else {
-                    let detail = format!(
-                        "references blob {} that no index shard describes",
-                        hex32(tree)
-                    );
-                    c.report(&key, &mut found, FindingKind::UnknownBlob, detail);
-                    close(&mut memo, &mut frames, dir, 0, true, found);
-                    continue 'dirs;
-                };
-                if !c.pack_present(&loc.pack_id, &key).await? {
-                    if c.pending.contains(&loc.pack_id) {
-                        close(&mut memo, &mut frames, dir, 0, false, found);
-                    } else {
+            let mut read = 0u64;
+            let unreadable = |tree: &BlobId, e: &Error| {
+                Stop::Finding(
+                    FindingKind::UnreadableTree,
+                    format!("tree {}: {}", hex32(tree), reason(e)),
+                )
+            };
+            // Every limit is checked before the data it guards is decoded, and
+            // before it is read where the index already says enough, in the
+            // order a restore checks them.
+            let stop: Option<Stop> = 'read: {
+                let listed = pieces.iter().fold(0u64, |sum, piece| {
+                    let ulen = c.index.smallest_ulen(piece, BLOB_TYPE_TREE);
+                    sum.saturating_add(u64::from(ulen.unwrap_or(0)))
+                });
+                if let Err(e) = budget.check_dir_bytes(listed) {
+                    break 'read Some(Stop::Finding(
+                        FindingKind::UnreadableTree,
+                        too_large(&name, &e),
+                    ));
+                }
+                if let Err(e) = budget.check_held_bytes(above.bytes.saturating_add(listed)) {
+                    let at = Held {
+                        entries: 0,
+                        bytes: listed,
+                    };
+                    break 'read Some(Stop::Path(e, at));
+                }
+                for tree in &pieces {
+                    let Some(loc) = c.find(tree, BLOB_TYPE_TREE).await? else {
                         let detail = format!(
-                            "tree {}: its pack {} is missing from the bucket",
-                            hex32(tree),
-                            pack_object_key(&loc.pack_id)
+                            "references blob {} that no index shard describes",
+                            hex32(tree)
                         );
-                        c.report(&key, &mut found, FindingKind::UnreadableTree, detail);
-                        close(&mut memo, &mut frames, dir, 0, true, found);
+                        break 'read Some(Stop::Finding(FindingKind::UnknownBlob, detail));
+                    };
+                    if !c.pack_present(&loc.pack_id, &key).await? {
+                        break 'read Some(if c.pending.contains(&loc.pack_id) {
+                            Stop::Pending
+                        } else {
+                            let detail = format!(
+                                "tree {}: its pack {} is missing from the bucket",
+                                hex32(tree),
+                                pack_object_key(&loc.pack_id)
+                            );
+                            Stop::Finding(FindingKind::UnreadableTree, detail)
+                        });
                     }
-                    continue 'dirs;
+                    let got = reader.read_blob(tree, BLOB_TYPE_TREE).await;
+                    trees_read.insert(*tree);
+                    let bytes = match got {
+                        Ok(bytes) => bytes,
+                        Err(e) if is_data_error(&e) => break 'read Some(unreadable(tree, &e)),
+                        Err(e) => return Err(e),
+                    };
+                    read = read.saturating_add(bytes.len() as u64);
+                    if let Err(e) = budget.check_dir_bytes(read) {
+                        break 'read Some(Stop::Finding(
+                            FindingKind::UnreadableTree,
+                            too_large(&name, &e),
+                        ));
+                    }
+                    if let Err(e) = budget.check_held_bytes(above.bytes.saturating_add(read)) {
+                        let at = Held {
+                            entries: nodes.len() as u64,
+                            bytes: read,
+                        };
+                        break 'read Some(Stop::Path(e, at));
+                    }
+                    let count = match count_tree_nodes(&bytes) {
+                        Ok(count) => count,
+                        Err(e) if is_data_error(&e) => break 'read Some(unreadable(tree, &e)),
+                        Err(e) => return Err(e),
+                    };
+                    let n = (nodes.len() as u64).saturating_add(count);
+                    if let Err(e) = budget.check_dir(n) {
+                        break 'read Some(Stop::Finding(
+                            FindingKind::UnreadableTree,
+                            too_large(&name, &e),
+                        ));
+                    }
+                    if let Err(e) = budget.check_held(above.entries.saturating_add(n)) {
+                        let at = Held {
+                            entries: n,
+                            bytes: read,
+                        };
+                        break 'read Some(Stop::Path(e, at));
+                    }
+                    let piece = match decode_tree(&bytes, previous.as_deref()) {
+                        Ok(piece) => piece,
+                        Err(e) if is_data_error(&e) => break 'read Some(unreadable(tree, &e)),
+                        Err(e) => return Err(e),
+                    };
+                    if let Some(last) = piece.last() {
+                        previous = Some(last.name.clone());
+                    }
+                    nodes.extend(piece);
                 }
-                let piece = match reader.read_blob(tree, BLOB_TYPE_TREE).await {
-                    Ok(bytes) => decode_tree(&bytes, previous.as_deref()),
-                    Err(e) => Err(e),
-                };
-                trees_read.insert(*tree);
-                match piece {
-                    Ok(piece) => {
-                        let n = nodes.len() as u64 + piece.len() as u64;
-                        if let Err(e) = reader.walk_budget().check_dir(n) {
-                            let detail = too_large(&name, &e);
-                            c.report(&key, &mut found, FindingKind::UnreadableTree, detail);
-                            close(&mut memo, &mut frames, dir, 0, true, found);
-                            continue 'dirs;
-                        }
-                        if let Some(last) = piece.last() {
-                            previous = Some(last.name.clone());
-                        }
-                        nodes.extend(piece);
+                None
+            };
+            match stop {
+                None => {}
+                Some(Stop::Finding(kind, detail)) => {
+                    c.report(&key, &mut found, kind, detail);
+                    close(&mut memo, &mut frames, dir, Held::default(), true, found);
+                    continue;
+                }
+                Some(Stop::Path(e, at)) => {
+                    if !std::mem::replace(&mut held_found, true) {
+                        c.add_once(&key, FindingKind::UnreadableTree, too_large(&name, &e));
                     }
-                    Err(e) if is_data_error(&e) => {
-                        let detail = format!("tree {}: {}", hex32(tree), reason(&e));
-                        c.report(&key, &mut found, FindingKind::UnreadableTree, detail);
-                        close(&mut memo, &mut frames, dir, 0, true, found);
-                        continue 'dirs;
-                    }
-                    Err(e) => return Err(e),
+                    close(&mut memo, &mut frames, dir, at, false, found);
+                    continue;
+                }
+                Some(Stop::Pending) => {
+                    close(&mut memo, &mut frames, dir, Held::default(), false, found);
+                    continue;
                 }
             }
-            let len = nodes.len() as u64;
-            let held = above.saturating_add(len);
-            if let Err(e) = reader.walk_budget().check_held(held) {
-                if !std::mem::replace(&mut held_found, true) {
-                    c.add_once(&key, FindingKind::UnreadableTree, too_large(&name, &e));
-                }
-                close(&mut memo, &mut frames, dir, len, false, found);
-                continue;
-            }
+            let own = Held {
+                entries: nodes.len() as u64,
+                bytes: read,
+            };
             let mut exact = true;
             let mut subdirs = Vec::new();
             for node in &nodes {
@@ -744,10 +844,10 @@ async fn check_with_limits<S: BlobStore>(
             frames.push(Frame {
                 dir,
                 depth,
-                held,
-                len,
+                held: above.plus(own),
+                own,
                 subdirs,
-                below: len,
+                below: own,
                 exact,
                 finding: found,
             });

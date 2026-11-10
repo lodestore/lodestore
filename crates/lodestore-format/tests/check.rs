@@ -49,6 +49,17 @@ fn kinds(report: &StructureReport) -> Vec<FindingKind> {
     report.findings.iter().map(|f| f.kind).collect()
 }
 
+/// The pack is reported missing; a pack of trees also fails the snapshots
+/// that read from it.
+fn assert_missing_pack(report: &StructureReport, pack: &str) {
+    assert_eq!(report.findings[0].kind, FindingKind::MissingPack);
+    assert_eq!(report.findings[0].key, pack);
+    for f in &report.findings[1..] {
+        assert_eq!(f.kind, FindingKind::UnreadableTree);
+        assert!(f.detail.contains("is missing from the bucket"), "{f:?}");
+    }
+}
+
 fn folder_bytes(dir: &Path) -> u64 {
     fs::read_dir(dir)
         .unwrap()
@@ -88,13 +99,7 @@ async fn check_structure_missing_pack_found() {
     let pack = fx.packs().await.into_keys().next().unwrap();
     fs::remove_file(repo_dir(&fx).join(&pack)).unwrap();
     let report = structure(&fx).await;
-    assert_eq!(report.findings[0].kind, FindingKind::MissingPack);
-    assert_eq!(report.findings[0].key, pack);
-    // a pack of trees also fails the snapshots that read from it
-    for f in &report.findings[1..] {
-        assert_eq!(f.kind, FindingKind::UnreadableTree);
-        assert!(f.detail.contains("is missing from the bucket"), "{f:?}");
-    }
+    assert_missing_pack(&report, &pack);
     assert_eq!(report.missing_packs, 1);
 }
 
@@ -250,8 +255,7 @@ async fn check_structure_stale_gc_manifest_does_not_excuse_missing_pack() {
         .unwrap();
     fs::remove_file(repo_dir(&fx).join(&pack)).unwrap();
     let report = structure(&fx).await;
-    assert_eq!(kinds(&report), [FindingKind::MissingPack]);
-    assert_eq!(report.findings[0].key, pack);
+    assert_missing_pack(&report, &pack);
     assert!(
         report
             .notes
