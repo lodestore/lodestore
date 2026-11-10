@@ -2056,6 +2056,82 @@ async fn check_hostile_failed_copies_count_against_the_budget() {
     );
 }
 
+/// A planted shard that lists the root tree first at a frame of another blob
+/// does not move the walk budget of a restore away from the one the
+/// structure check counts: neither charges a tree copy that does not open.
+#[tokio::test]
+async fn check_hostile_failed_tree_copy_counts_like_restore() {
+    let mut fx = Fx::new().await;
+    let big = fx.data(&vec![7u8; 1 << 20]);
+    let top = files("f", 3);
+    let root_len = encode_tree(top.clone()).len() as u64;
+    let snap = fx.snapshot(top).await;
+    let root = fx.reader().await.snapshot(&snap).await.unwrap().root_tree;
+    let root: BlobId = root.as_slice().try_into().unwrap();
+
+    let store = LocalFsStore::new(fx.repo_dir.clone());
+    let repo = Repository::open(&store, b"pw").await.unwrap();
+    let keys = attacker_keys(&repo);
+    let shards = open_all_shards(&store, &keys).await;
+    let (record, at) = shards
+        .iter()
+        .flat_map(|(_, s)| &s.packs)
+        .find_map(|p| {
+            parse_entries(&p.entries)
+                .unwrap()
+                .into_iter()
+                .find(|e| e.blob_id == big)
+                .map(|e| (p, e))
+        })
+        .unwrap();
+    let mut entries = Vec::new();
+    entries.extend_from_slice(&root);
+    entries.push(BLOB_TYPE_TREE);
+    entries.extend_from_slice(&at.offset.to_le_bytes());
+    entries.extend_from_slice(&at.enc_len.to_le_bytes());
+    entries.extend_from_slice(&(root_len as u32).to_le_bytes());
+    let forged = pb::PackRecord {
+        entries,
+        ..record.clone()
+    };
+    plant_shard_where(&store, &keys, vec![forged], Vec::new(), |id| {
+        shards.iter().all(|(real, _)| id < real)
+    })
+    .await;
+    let mut refs: Vec<BlobId> = open_all_shards(&store, &keys)
+        .await
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    refs.sort();
+    let snap = reseal(&fx, &snap, &refs).await;
+    let key = snapshot_object_key(&snap);
+
+    let mut disagree = Vec::new();
+    for (run, limit) in [root_len - 1, root_len].into_iter().enumerate() {
+        let mut reader = fx.reader().await;
+        reader.set_walk_limits(MAX_WALK_NODES, limit);
+        let target = fx.root.join(format!("t{run}"));
+        fs::create_dir_all(&target).unwrap();
+        let restored = reader
+            .restore(&snap, &target, &RestoreOptions::default(), &|_| {})
+            .await;
+        if limit == root_len {
+            restored.unwrap();
+        } else {
+            let err = restored.unwrap_err();
+            assert!(is_walk_limit(&err, "bytes of directory data"), "{err:?}");
+        }
+        let report = fx
+            .check_budget(TreeBudget::new(MAX_WALK_NODES, limit))
+            .await;
+        if report.findings.iter().any(|f| f.key == key) != (limit != root_len) {
+            disagree.push((limit, report.findings));
+        }
+    }
+    assert!(disagree.is_empty(), "{disagree:?}");
+}
+
 /// The reads of the packs by a check of a directory whose pieces are one
 /// empty tree listed `n` times, which a restore takes as an empty directory.
 async fn repeated_piece_reads(n: usize) -> usize {

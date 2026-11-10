@@ -697,7 +697,7 @@ impl<S: BlobStore> Reader<S> {
         if let Some(bytes) = known {
             return Ok(bytes);
         }
-        let bytes = Arc::new(self.read_copies(id, BLOB_TYPE_TREE, true).await?);
+        let bytes = Arc::new(self.read_copies(id, BLOB_TYPE_TREE, false).await?);
         locked(&self.cache.trees).insert(*id, Arc::clone(&bytes));
         Ok(bytes)
     }
