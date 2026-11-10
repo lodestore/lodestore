@@ -67,6 +67,7 @@ zstd = "0.14.3"
 rust-embed = { version = "8.13.0", optional = true }
 
 [dev-dependencies]
+lodestore-format = { path = "../lodestore-format", features = ["test-hooks"] }
 tempfile = "3.27.0"
 bytes = "1"
 opendal = { version = "0.59.4", default-features = false, features = ["services-s3"] }
