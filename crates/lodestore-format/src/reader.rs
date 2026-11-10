@@ -253,6 +253,9 @@ pub struct Reader<S: BlobStore> {
     /// add up are put here, so a file reached from many parents is read once.
     file_lens: HashMap<[u8; 32], u64>,
     file_lens_limit: usize,
+    /// Chunks of such files that did not read, with the error, so that an
+    /// operation that goes on after the error does not read them again.
+    unreadable: HashMap<BlobId, (String, String)>,
 }
 
 /// The most entries `Reader::file_lens` holds.
@@ -289,6 +292,7 @@ impl<S: BlobStore> Reader<S> {
             walk: TreeBudget::default(),
             file_lens: HashMap::new(),
             file_lens_limit: MAX_FILE_LENS,
+            unreadable: HashMap::new(),
         })
     }
 
@@ -890,9 +894,11 @@ impl<S: BlobStore> Reader<S> {
     /// The size of a file's chunks, read from the chunks themselves, each
     /// distinct one once, charging the bytes of every reference as it goes.
     /// Stops once the sum is over `expected`, so it may then be partial. A
-    /// chunk is read only while bytes of the budget are left, and a charge
-    /// that fails spends them, so a check that goes on after the error reads
-    /// at most one chunk past the budget over its whole run.
+    /// chunk is read only while bytes of the budget are left; a read that
+    /// fails charges the frames it may have fetched and is remembered, so the
+    /// chunk is not read again; and a charge that fails spends what is left.
+    /// A check that goes on after the error therefore reads at most one chunk
+    /// past the budget over its whole run.
     async fn read_len(&mut self, node: &pb::Node, expected: u64) -> Result<u64> {
         let mut lens: HashMap<BlobId, u64> = HashMap::new();
         let mut total = 0u64;
@@ -904,8 +910,27 @@ impl<S: BlobStore> Reader<S> {
             let len = match lens.get(&id) {
                 Some(&len) => len,
                 None => {
+                    if let Some((object, reason)) = self.unreadable.get(&id) {
+                        return Err(Error::corrupt(object.clone(), reason.clone()));
+                    }
                     self.walk.check_bytes_left()?;
-                    let len = self.read_blob(&id, BLOB_TYPE_DATA).await?.len() as u64;
+                    let len = match self.read_blob(&id, BLOB_TYPE_DATA).await {
+                        Ok(bytes) => bytes.len() as u64,
+                        Err(e) => {
+                            if let Error::Corrupt { object, reason } = &e
+                                && self.unreadable.len() < self.file_lens_limit
+                            {
+                                self.unreadable.insert(id, (object.clone(), reason.clone()));
+                            }
+                            let tried = match self.locate_blob_all(&id, BLOB_TYPE_DATA).await {
+                                Ok(locs) => locs.iter().map(|l| u64::from(l.enc_len)).sum(),
+                                Err(_) => 0,
+                            };
+                            // Spent or not, the error is the read's.
+                            let _ = self.walk.charge_bytes(tried);
+                            return Err(e);
+                        }
+                    };
                     lens.insert(id, len);
                     len
                 }

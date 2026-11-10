@@ -1898,6 +1898,70 @@ async fn check_hostile_spent_budget_reads_no_more_chunks() {
     }
 }
 
+/// The reads of one 1000-byte chunk whose frame is damaged by a check of `k`
+/// files that each name it and say they are empty, under `budget`. Every
+/// file is reported, and the chunk is read once however many name it.
+async fn unreadable_chunk_reads(k: usize, budget: TreeBudget) -> usize {
+    let mut fx = Fx::new().await;
+    let c = fx.data(&[7u8; 1000]);
+    let nodes = (0..k).map(|i| file(&format!("f{i:04}"), &[c], 0)).collect();
+    let d = fx.tree(nodes);
+    let snap = fx.snapshot(vec![dir("d", d)]).await;
+    let store = LocalFsStore::new(fx.repo_dir.clone());
+    let repo = Repository::open(&store, b"pw").await.unwrap();
+    let pack = data_pack_of(&store, &repo, &c).await;
+    let path = fx.repo_dir.join(&pack);
+    let entry = open_all_shards(&store, &attacker_keys(&repo))
+        .await
+        .into_iter()
+        .flat_map(|(_, shard)| shard.packs)
+        .flat_map(|p| parse_entries(&p.entries).unwrap())
+        .find(|e| e.blob_type == BLOB_TYPE_DATA && e.blob_id == c)
+        .unwrap();
+    let mut bytes = fs::read(&path).unwrap();
+    bytes[(entry.offset + entry.enc_len / 2) as usize] ^= 0xff;
+    let mut perm = fs::metadata(&path).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    perm.set_readonly(false);
+    fs::set_permissions(&path, perm).unwrap();
+    fs::write(&path, bytes).unwrap();
+
+    let ranged = RangedOnly::new(&store, &[]);
+    let report = check_structure_with_budget(
+        &ranged,
+        repo.read_keys(),
+        repo.config(),
+        &|_, _, _| {},
+        budget,
+    )
+    .await
+    .unwrap();
+    assert!(!report.findings.is_empty());
+    for f in &report.findings {
+        assert_eq!(f.key, snapshot_object_key(&snap), "{f:?}");
+    }
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|f| f.detail.contains("authentication failed")),
+        "{:?}",
+        report.findings
+    );
+    blob_reads(&ranged, &pack)
+}
+
+/// A chunk that does not read is not read again for the next file that names
+/// it, with the default budget and with one that its first read spends.
+#[tokio::test]
+async fn check_hostile_unreadable_chunk_reads_do_not_grow() {
+    for budget in [TreeBudget::default(), TreeBudget::new(MAX_WALK_NODES, 1500)] {
+        for k in [4usize, 64, 1024] {
+            assert_eq!(unreadable_chunk_reads(k, budget).await, 1, "k={k}");
+        }
+    }
+}
+
 /// The same record with the decoded size of every blob `f` picks changed.
 fn change_ulen(record: &pb::PackRecord, f: impl Fn(u8, u32) -> u32) -> pb::PackRecord {
     let mut entries = Vec::with_capacity(record.entries.len());
