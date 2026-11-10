@@ -65,6 +65,8 @@ All notable changes to Lodestore are recorded here. The format follows [Keep a C
 
 ### Fixed
 
+- `lode backup` held the chain of directories of its parent snapshot without the limits of a path, so a planted parent could make it hold a gigabyte of tree data per level; the parent now stops at 2^24 entries and 2 GiB of tree data held at once, and the backup goes on without it.
+- A file whose chunk sizes in the index do not add up charges its chunks and their bytes to the walk budget on every visit, and its chunks are read once per operation for up to 65,536 such files; the structure check counts the same charge.
 - The structure check reported a finding in a directory shared by several snapshots for the first snapshot only and called the others ok; every snapshot that reaches the directory now gets it.
 - The structure check could read a tree again for every new path to a directory several snapshots share, and a planted tree made that number grow exponentially; it now reads each directory once and judges each snapshot by its own path, in whichever order the snapshots are read.
 - The structure check gave a conflict between hardlink members of a shared directory and another directory to every snapshot that shares the directory, and could leave without a finding a snapshot that was checked after another with the same directory; only the snapshot in which the members of a group differ now gets the finding.
