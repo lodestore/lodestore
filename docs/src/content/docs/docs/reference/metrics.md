@@ -15,7 +15,7 @@ There are two ways, and you can use both.
 metrics_listen: "127.0.0.1:9464"
 ```
 
-The separate address has no authentication, so keep it on loopback or on a network that only your monitoring can reach. Metrics name every host, policy and repository you have. In Kubernetes, expose the port only inside the cluster (`metrics.port` of the chart, see [Deploying with Helm](/docs/install/helm/#server-configuration-and-notification-channels)) and restrict it with a NetworkPolicy, or use the token on the main port instead. Never publish it through an ingress.
+The separate address has no authentication, so keep it on loopback or on a network that only your monitoring can reach. Metrics name every host, policy and repository you have. In Kubernetes, expose the port only inside the cluster (`metrics.port` of the chart, see [Deploying with Helm](/docs/install/helm/#metrics)); the chart's NetworkPolicy lets in only the sources in `networkPolicy.metricsFrom`. Or use the token on the main port instead. Never publish it through an ingress.
 
 The metrics are computed from the database on every scrape. A scrape every 30 seconds to a minute is plenty; a fleet of 500 hosts does not need a faster rate.
 

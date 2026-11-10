@@ -12,8 +12,3 @@ spec:
     - name: http
       port: 8080
       targetPort: http
-    {{- if gt (int .Values.metrics.port) 0 }}
-    - name: metrics
-      port: {{ int .Values.metrics.port }}
-      targetPort: metrics
-    {{- end }}
