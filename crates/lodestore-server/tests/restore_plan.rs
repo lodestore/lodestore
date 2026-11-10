@@ -1,4 +1,6 @@
 mod common;
+#[path = "../../lodestore-format/tests/tree_support/mod.rs"]
+mod tree_support;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -459,6 +461,50 @@ async fn restore_plan_streams_selected_files() {
         );
         ts.stop().await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restore_plan_refuses_wide_directory_by_byte_limit() {
+    let backend = backends().remove(0);
+    let ts = TestServer::start(&backend).await;
+    let api = ts.api().await;
+    let repo = ts.create_local_repository("main").await;
+    let host = enroll(&ts, &api, &repo, "host-a").await;
+    let store = LocalFsStore::new(ts.local_repo_root("main"));
+    let opened = Repository::open(&store, PASSWORD).await.unwrap();
+    let keys = opened.read_keys().write_keys(opened.config_hash());
+    let mut writer = Writer::new(&store, keys, opened.config()).await.unwrap();
+    let pieces = tree_support::wide_piece_count();
+    let wide = hex32(&tree_support::wide_snapshot(&mut writer, pieces).await);
+    ingest_snapshot(ts.state(), &repo, &wide, None)
+        .await
+        .expect("ingest");
+    let fx = Fixture {
+        root: PathBuf::from("/"),
+        snapshot: wide,
+    };
+
+    let mut agent = Fake::connect(&ts, &host, &[CAP]).await;
+    let job = queue(&ts, &fx, &host, vec![fx.item("wide")]).await;
+    let (assigned, _) = agent.assigned().await;
+    assert_eq!(assigned, job);
+
+    let mut client = AgentClient::new(channel(&ts, &host.paths).await);
+    let request = RestorePlanRequest { job_id: job };
+    let status = match client.restore_plan(request).await {
+        Err(status) => status,
+        Ok(response) => response
+            .into_inner()
+            .message()
+            .await
+            .expect_err("the plan of the wide directory must fail"),
+    };
+    assert_eq!(status.code(), Code::ResourceExhausted, "{status}");
+    assert!(
+        status.message().contains("bytes in one directory"),
+        "{status}"
+    );
+    ts.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
