@@ -494,8 +494,8 @@ fn tally(entries: &[ListEntry], bytes: &mut u64, objects: &mut u64) {
 /// index shards, the snapshots and the tree blobs, and, only for a file whose
 /// chunk sizes in the index do not add up, its chunks: each distinct chunk
 /// once for each directory the file is written in, within one walk budget for
-/// the whole run: once the budget is spent no other chunk is read, so the run
-/// reads at most one chunk past it. No other data is read, and no pack is read
+/// the whole run: once the budget is spent no other frame is fetched, so the
+/// run reads at most one frame and one pack prefix past it. No other data is read, and no pack is read
 /// whole. Where the copies of a blob disagree on its size, a snapshot that
 /// names a shard listing a tree larger than the check read it, or a chunk of
 /// a file that added up at another size, is reported: its restore takes sizes
