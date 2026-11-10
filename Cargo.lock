@@ -2298,6 +2298,8 @@ dependencies = [
  "globset",
  "governor",
  "http",
+ "hyper",
+ "hyper-util",
  "lettre",
  "lodestore-agent",
  "lodestore-format",
