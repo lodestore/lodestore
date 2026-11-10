@@ -83,13 +83,36 @@ A channel defined here appears in the web interface read-only, marked from the s
 
 ## Metrics
 
-`metrics.port` is `0` by default and the server serves no extra port. Set it, for example `metrics.port=9464`, and the chart sets `LODESTORE_METRICS_LISTEN=0.0.0.0:9464`, opens the container port `metrics` and adds the port `metrics` to the Service `<release>-lodestore`:
+`metrics.port` is `0` by default and the server serves no extra port. Set it, for example `metrics.port=9464`, and the chart sets `LODESTORE_METRICS_LISTEN=0.0.0.0:9464`, opens the container port `metrics` and publishes it in its own ClusterIP Service `<release>-lodestore-metrics`. The shared Service `<release>-lodestore` never carries it.
 
 ```sh
 helm upgrade lodestore deploy/helm/lodestore --reuse-values --set metrics.port=9464
 ```
 
-That port answers `/metrics` to anyone who can reach it, with no token. Keep it inside the cluster, add a NetworkPolicy that lets only your Prometheus in, and do not route it through an ingress. If you would rather not open it, leave `metrics.port` at 0 and scrape the main port with a `metrics:read` token. See [Metrics](/docs/reference/metrics/) for the scrape configuration, the dashboard and the alert rules.
+That port answers `/metrics` to anyone who can reach it, with no token, so the chart's NetworkPolicy lets in only the sources you list in `networkPolicy.metricsFrom`. With the list empty the port is closed to every pod. Name your Prometheus:
+
+```yaml
+networkPolicy:
+  metricsFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: monitoring
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: prometheus
+```
+
+Do not route the port through an ingress. If you would rather not open it, leave `metrics.port` at 0 and scrape the main port with a `metrics:read` token. See [Metrics](/docs/reference/metrics/) for the scrape configuration, the dashboard and the alert rules.
+
+## Pod security defaults
+
+The server pod is closed by default:
+
+- The root filesystem is read-only. The server writes only to the data volume and to `/tmp`, which is a 64Mi `emptyDir`.
+- The pod runs as the non-root user 65532, with `seccompProfile: RuntimeDefault`, no privilege escalation and every capability dropped.
+- The chart creates its own ServiceAccount and does not mount its token into the pod, because the server never talks to the Kubernetes API. Set `serviceAccount.create=false` to use an existing account (`serviceAccount.name`, or `default` when empty); the token stays unmounted either way.
+- `networkPolicy.enabled` (on by default) renders a NetworkPolicy that restricts ingress only: the web and agent ports are open to every source, and the metrics port follows `networkPolicy.metricsFrom` as above. Set it to `false` if your cluster has its own policy.
+- Egress stays open, because the server reaches S3, notification channels and the database. To restrict it, set `networkPolicy.egress` to a list of NetworkPolicy egress rules; once it is set, only those destinations are allowed, so include DNS yourself.
 
 ## Other values
 

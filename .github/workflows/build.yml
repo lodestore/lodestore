@@ -100,6 +100,14 @@ jobs:
             kubectl logs statefulset/lodestore >&2
             exit 1
           fi
+      - name: Check the metrics Service and the network policy
+        run: |
+          if kubectl get svc lodestore -o jsonpath='{.spec.ports[*].name}' | grep -q metrics; then
+            echo "the shared Service exposes metrics" >&2
+            exit 1
+          fi
+          kubectl get svc lodestore-metrics
+          kubectl get networkpolicy lodestore
       - name: Check /healthz through the Service
         run: |
           kubectl port-forward svc/lodestore 18080:8080 &
@@ -159,6 +167,14 @@ jobs:
           persist-credentials: false
       - run: helm lint deploy/helm/lodestore --set grpc.publicAddress=lodestore.example:8443 --set unlockKey=ci-render-only
       - run: helm template lodestore deploy/helm/lodestore --set grpc.publicAddress=lodestore.example:8443 --set unlockKey=ci-render-only
+      - run: helm lint deploy/helm/lodestore --set grpc.publicAddress=lodestore.example:8443 --set unlockKey=ci-render-only --set networkPolicy.enabled=false
+      - run: helm lint deploy/helm/lodestore --set grpc.publicAddress=lodestore.example:8443 --set unlockKey=ci-render-only --set serviceAccount.create=false
+      - name: Check the metrics Service and the network policy
+        run: |
+          helm template lodestore deploy/helm/lodestore --set grpc.publicAddress=lodestore.example:8443 --set unlockKey=ci-render-only --set metrics.port=9464 >rendered.yaml
+          ! helm template lodestore deploy/helm/lodestore --set grpc.publicAddress=lodestore.example:8443 --set unlockKey=ci-render-only --set metrics.port=9464 -s templates/service.yaml | grep -q 'name: metrics'
+          grep -q 'name: lodestore-metrics' rendered.yaml
+          grep -q 'kind: NetworkPolicy' rendered.yaml
 
   advisories:
     runs-on: ubuntu-latest
