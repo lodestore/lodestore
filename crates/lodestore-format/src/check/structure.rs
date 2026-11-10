@@ -911,14 +911,24 @@ async fn check_with_budget<S: BlobStore>(
                         too_large(&name, &e),
                     ));
                 }
-                // Whether each piece read so far had entries. A piece listed
-                // again adds nothing when empty and breaks the order of names
-                // when not, so it is not read again.
-                let mut seen_pieces: HashMap<BlobId, bool> = HashMap::new();
+                // Whether each piece read so far had entries, and its length.
+                // A piece listed again breaks the order of names when it has
+                // entries; when it has none it costs its bytes again, as in a
+                // restore. Either way it is not read again.
+                let mut seen_pieces: HashMap<BlobId, (bool, u64)> = HashMap::new();
                 for tree in &pieces {
                     match seen_pieces.get(tree) {
-                        Some(false) => continue,
-                        Some(true) => {
+                        Some(&(false, len)) => {
+                            read = read.saturating_add(len);
+                            if let Err(e) = budget.check_dir_bytes(read) {
+                                break 'read Some(Stop::Finding(
+                                    FindingKind::UnreadableTree,
+                                    too_large(&name, &e),
+                                ));
+                            }
+                            continue;
+                        }
+                        Some((true, _)) => {
                             let e = Error::corrupt("tree", "names are not strictly ascending");
                             break 'read Some(unreadable(tree, &e));
                         }
@@ -977,7 +987,7 @@ async fn check_with_budget<S: BlobStore>(
                         Err(e) if is_data_error(&e) => break 'read Some(unreadable(tree, &e)),
                         Err(e) => return Err(e),
                     };
-                    seen_pieces.insert(*tree, !piece.is_empty());
+                    seen_pieces.insert(*tree, (!piece.is_empty(), bytes.len() as u64));
                     if let Some(last) = piece.last() {
                         previous = Some(last.name.clone());
                     }

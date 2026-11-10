@@ -2035,6 +2035,110 @@ async fn check_hostile_repeated_piece_with_entries_is_a_finding() {
     assert_eq!(reads, 2, "the root and the piece once");
 }
 
+/// The length of the piece `blank_tree` writes.
+const BLANK: u64 = 1027;
+
+/// A tree of no nodes and `BLANK` bytes: one field of 1 KiB the schema of a
+/// tree does not have, which decoding skips.
+fn blank_tree(fx: &mut Fx) -> BlobId {
+    let mut bytes = vec![0x7a, 0x80, 0x08];
+    bytes.extend_from_slice(&[0u8; 1024]);
+    fx.writer.put_tree_raw(&bytes).unwrap()
+}
+
+/// A snapshot with one directory whose pieces are a blank tree listed `n`
+/// times and then a piece with files; with the tree bytes of the root and of
+/// that directory.
+async fn blank_pieces(n: usize) -> (Fx, BlobId, u64, u64) {
+    let mut fx = Fx::new().await;
+    let blank = blank_tree(&mut fx);
+    let inner_nodes = files("i", 3);
+    let inner_len = encode_tree(inner_nodes.clone()).len() as u64;
+    let inner = fx.tree(inner_nodes);
+    let mut wide = dir("w", blank);
+    wide.subtrees = vec![blank.to_vec(); n];
+    wide.subtrees.push(inner.to_vec());
+    let top = vec![wide];
+    let root_len = encode_tree(top.clone()).len() as u64;
+    let snap = fx.snapshot(top).await;
+    (fx, snap, root_len, n as u64 * BLANK + inner_len)
+}
+
+/// A blank piece listed again costs a restore its bytes every time, so the
+/// check charges them every time too: it reports the snapshot exactly when
+/// a restore refuses it, for the bytes held at once, the bytes of one
+/// directory and the bytes of the walk.
+#[tokio::test]
+async fn check_hostile_repeated_blank_piece_counts_like_restore() {
+    let n = 10u64;
+    let (fx, snap, root_len, dir_len) = blank_pieces(n as usize).await;
+    let held = root_len + dir_len;
+    let key = snapshot_object_key(&snap);
+    let cases = [
+        ("bytes held at once", held),
+        ("bytes in one directory", dir_len),
+        ("bytes of directory data", held),
+    ];
+    let mut run = 0;
+    let mut disagree = Vec::new();
+    for (what, total) in cases {
+        for limit in [total - (n - 1) * BLANK, total - 1, total] {
+            let (dir_bytes, held_bytes, walk_bytes) = match what {
+                "bytes held at once" => (u64::MAX, limit, MAX_WALK_TREE_BYTES),
+                "bytes in one directory" => (limit, u64::MAX, MAX_WALK_TREE_BYTES),
+                _ => (u64::MAX, u64::MAX, limit),
+            };
+            let mut reader = fx.reader().await;
+            reader.set_walk_limits(MAX_WALK_NODES, walk_bytes);
+            reader.set_dir_byte_limits(dir_bytes, held_bytes);
+            run += 1;
+            let target = fx.root.join(format!("r{run}"));
+            fs::create_dir_all(&target).unwrap();
+            let restored = reader
+                .restore(&snap, &target, &RestoreOptions::default(), &|_| {})
+                .await;
+            if limit == total {
+                restored.unwrap();
+            } else {
+                let err = restored.unwrap_err();
+                assert!(is_walk_limit(&err, what), "{what} {limit}: {err:?}");
+            }
+            let budget = TreeBudget::new(MAX_WALK_NODES, walk_bytes)
+                .with_dir_byte_limits(dir_bytes, held_bytes);
+            let report = fx.check_budget(budget).await;
+            if report.findings.iter().any(|f| f.key == key) != (limit != total) {
+                disagree.push((what, limit, report.findings));
+            }
+        }
+    }
+    assert!(disagree.is_empty(), "{disagree:?}");
+}
+
+/// A blank piece listed many times is still read once.
+#[tokio::test]
+async fn check_hostile_repeated_blank_piece_reads_do_not_grow() {
+    let mut reads = Vec::new();
+    for n in [1usize, 64, 2000] {
+        let (fx, snap, _, _) = blank_pieces(n).await;
+        fx.restore(&snap, &RestoreOptions::default()).await.unwrap();
+        let store = LocalFsStore::new(fx.repo_dir.clone());
+        let repo = Repository::open(&store, b"pw").await.unwrap();
+        let ranged = RangedOnly::new(&store, &[]);
+        let report = check_structure(&ranged, repo.read_keys(), repo.config(), &|_, _, _| {})
+            .await
+            .unwrap();
+        assert!(report.findings.is_empty(), "{:?}", report.findings);
+        let prefix = 0..PACK_PREFIX_LEN as u64;
+        let n_reads = ranged
+            .ranges_under("packs/")
+            .into_iter()
+            .filter(|(_, r)| *r != prefix)
+            .count();
+        reads.push(n_reads);
+    }
+    assert_eq!(reads, [reads[0]; 3], "{reads:?}");
+}
+
 /// The same record with the decoded size of every blob `f` picks changed.
 fn change_ulen(record: &pb::PackRecord, f: impl Fn(u8, u32) -> u32) -> pb::PackRecord {
     let mut entries = Vec::with_capacity(record.entries.len());
