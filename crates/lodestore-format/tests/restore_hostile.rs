@@ -1962,6 +1962,100 @@ async fn check_hostile_unreadable_chunk_reads_do_not_grow() {
     }
 }
 
+/// Files of one 1-byte chunk each, which a planted shard lists first at `K`
+/// extents of a large frame in their own pack, one byte too long, ahead of
+/// the real record. Every file needs its chunk read and every read fetches
+/// the `K` frames that do not open before the real one. Under a budget of a
+/// few frames the check stops, and reads from the pack no more than the
+/// budget, one frame past it and the frames of the chunks that opened.
+#[tokio::test]
+async fn check_hostile_failed_copies_count_against_the_budget() {
+    const K: u32 = 8;
+    const FRAME: u32 = 64 << 10;
+    const FILES: usize = 64;
+    let mut fx = Fx::new().await;
+    let big = fx.data(&vec![9u8; 1 << 20]);
+    let chunks: Vec<BlobId> = (0..FILES).map(|i| fx.data(&[i as u8])).collect();
+    let nodes = (chunks.iter().enumerate())
+        .map(|(i, c)| file(&format!("f{i:02}"), &[*c], 1))
+        .collect();
+    let d = fx.tree(nodes);
+    let snap = fx.snapshot(vec![dir("d", d)]).await;
+
+    let store = LocalFsStore::new(fx.repo_dir.clone());
+    let repo = Repository::open(&store, b"pw").await.unwrap();
+    let keys = attacker_keys(&repo);
+    let shards = open_all_shards(&store, &keys).await;
+    let record = shards
+        .iter()
+        .flat_map(|(_, s)| &s.packs)
+        .find(|p| {
+            parse_entries(&p.entries)
+                .unwrap()
+                .iter()
+                .any(|e| e.blob_id == big)
+        })
+        .unwrap();
+    let at = parse_entries(&record.entries)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.blob_id == big)
+        .unwrap()
+        .offset;
+    let mut entries = Vec::new();
+    for c in &chunks {
+        for j in 0..K {
+            entries.extend_from_slice(c);
+            entries.push(BLOB_TYPE_DATA);
+            entries.extend_from_slice(&(at + j).to_le_bytes());
+            entries.extend_from_slice(&FRAME.to_le_bytes());
+            entries.extend_from_slice(&2u32.to_le_bytes());
+        }
+    }
+    let forged = pb::PackRecord {
+        entries,
+        ..record.clone()
+    };
+    plant_shard_where(&store, &keys, vec![forged], Vec::new(), |id| {
+        shards.iter().all(|(real, _)| id < real)
+    })
+    .await;
+    let pack = pack_object_key(&record.pack_id.as_slice().try_into().unwrap());
+
+    let budget = 4 * u64::from(FRAME);
+    let ranged = RangedOnly::new(&store, &[]);
+    let report = check_structure_with_budget(
+        &ranged,
+        repo.read_keys(),
+        repo.config(),
+        &|_, _, _| {},
+        TreeBudget::new(MAX_WALK_NODES, budget),
+    )
+    .await
+    .unwrap();
+    let prefix = 0..PACK_PREFIX_LEN as u64;
+    let read: u64 = ranged
+        .ranges_of(&pack)
+        .into_iter()
+        .filter(|r| *r != prefix)
+        .map(|r| r.end - r.start)
+        .sum();
+    let key = snapshot_object_key(&snap);
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|f| f.key == key && f.detail.contains("was not checked")),
+        "{read} bytes read: {:?}",
+        report.findings
+    );
+    let opened = FILES as u64 * 64;
+    assert!(
+        read <= budget + u64::from(FRAME) + opened,
+        "{read} bytes read under a budget of {budget}"
+    );
+}
+
 /// The reads of the packs by a check of a directory whose pieces are one
 /// empty tree listed `n` times, which a restore takes as an empty directory.
 async fn repeated_piece_reads(n: usize) -> usize {

@@ -24,7 +24,7 @@ use crate::index::{
     fetch_shard_bytes, hex32, index_object_key, open_shard, parse_hex32,
 };
 use crate::keys::ReadKeys;
-use crate::pack::{PACK_PREFIX_LEN, decompress, open_prefix, pack_object_key};
+use crate::pack::{HEADER_OVERHEAD, PACK_PREFIX_LEN, decompress, open_prefix, pack_object_key};
 use crate::pb;
 use crate::provenance::{LatestPick, ProvenanceSet, pick_latest};
 use crate::selection::Selection;
@@ -526,7 +526,12 @@ impl<S: BlobStore> Reader<S> {
         Ok(self.locate_blob_all(id, blob_type).await?.remove(0))
     }
 
-    async fn read_at(&mut self, loc: &BlobLocation, id: &BlobId, blob_type: u8) -> Result<Vec<u8>> {
+    /// The pack key and the frame of one copy of a blob.
+    async fn fetch_frame(
+        &mut self,
+        loc: &BlobLocation,
+        id: &BlobId,
+    ) -> Result<(Key32, bytes::Bytes)> {
         let name = || format!("blob {}", hex32(id));
         let missing = |e: Error| match e {
             Error::Store(BlobError::NotFound) => {
@@ -550,15 +555,7 @@ impl<S: BlobStore> Reader<S> {
                 "pack is shorter than the index says",
             ));
         }
-        open_chunk(
-            &pack_key,
-            self.keys.repo_id(),
-            blob_type,
-            id,
-            &frame,
-            loc.ulen,
-            self.keys.k_id(),
-        )
+        Ok((pack_key, frame))
     }
 
     /// Reads, decrypts, decompresses and verifies one blob. A location that
@@ -568,30 +565,116 @@ impl<S: BlobStore> Reader<S> {
     /// since the real record may sit in one not loaded yet. Store errors
     /// other than a missing pack are returned at once.
     pub async fn read_blob(&mut self, id: &BlobId, blob_type: u8) -> Result<Vec<u8>> {
+        self.read_copies(id, blob_type, false).await
+    }
+
+    /// [`Reader::read_blob`], charging the walk budget as
+    /// [`Reader::read_frames`] says when `charge` is set.
+    async fn read_copies(&mut self, id: &BlobId, blob_type: u8, charge: bool) -> Result<Vec<u8>> {
         let locs = self.locate_blob_all(id, blob_type).await?;
-        let mut first_err = None;
-        for loc in &locs {
-            match self.read_at(loc, id, blob_type).await {
+        let first_err = match self.read_frames(&locs, id, blob_type, charge).await {
+            Ok(bytes) => return Ok(bytes),
+            Err(e) if is_data_error(&e) => e,
+            Err(e) => return Err(e),
+        };
+        if self.cache.may_list() {
+            self.load_all_shards().await?;
+            let fresh: Vec<BlobLocation> = (self.cache.index.read().await)
+                .locations(id, blob_type)
+                .into_iter()
+                .filter(|l| !locs.contains(l))
+                .collect();
+            match self.read_frames(&fresh, id, blob_type, charge).await {
                 Ok(bytes) => return Ok(bytes),
+                Err(e) if is_data_error(&e) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Err(first_err)
+    }
+
+    /// Tries the copies `locs` in order, fetching each frame once: copies at
+    /// one extent of a pack differ only in the length they declare, and are
+    /// tried one after another against the same bytes. Returns the first data
+    /// error when none opens. With `charge`, a frame is fetched only while
+    /// bytes of the walk budget are left, and what it fetched beyond the
+    /// decoded length its caller charges is charged: a frame none of whose
+    /// copies opens costs its length, and the pack prefix when the pack key
+    /// was not known before; the frame of the copy that opens costs its
+    /// length less the nonce, codec byte and tag, where that is more than the
+    /// decoded length. A blob whose first copy opens, as in an honest
+    /// repository, costs nothing here.
+    async fn read_frames(
+        &mut self,
+        locs: &[BlobLocation],
+        id: &BlobId,
+        blob_type: u8,
+        charge: bool,
+    ) -> Result<Vec<u8>> {
+        let mut groups: Vec<Vec<&BlobLocation>> = Vec::new();
+        let mut at: HashMap<(BlobId, u32, u32), usize> = HashMap::new();
+        for loc in locs {
+            let i = *at
+                .entry((loc.pack_id, loc.offset, loc.enc_len))
+                .or_insert_with(|| {
+                    groups.push(Vec::new());
+                    groups.len() - 1
+                });
+            if let Some(group) = groups.get_mut(i) {
+                group.push(loc);
+            }
+        }
+        let unreadable = || Error::corrupt(format!("blob {}", hex32(id)), "unreadable");
+        let mut first_err = None;
+        for group in &groups {
+            let Some(first) = group.first() else {
+                continue;
+            };
+            if charge {
+                self.walk.check_bytes_left()?;
+            }
+            let cold = !locked(&self.cache.pack_keys).contains_key(&first.pack_id);
+            let got = match self.fetch_frame(first, id).await {
+                Ok((key, frame)) => {
+                    let mut got = Err(unreadable());
+                    for (n, loc) in group.iter().enumerate() {
+                        let k_id = self.keys.k_id();
+                        let repo_id = self.keys.repo_id();
+                        match open_chunk(&key, repo_id, blob_type, id, &frame, loc.ulen, k_id) {
+                            Ok(bytes) => {
+                                got = Ok(bytes);
+                                break;
+                            }
+                            Err(e) if n == 0 => got = Err(e),
+                            Err(_) => {}
+                        }
+                    }
+                    got
+                }
+                Err(e) => Err(e),
+            };
+            let frame = u64::from(first.enc_len);
+            match got {
+                Ok(bytes) => {
+                    if charge {
+                        let framing = (HEADER_OVERHEAD + 1) as u64;
+                        let over = frame.saturating_sub(framing + bytes.len() as u64);
+                        self.walk.charge_bytes(over)?;
+                    }
+                    return Ok(bytes);
+                }
                 Err(e) if is_data_error(&e) => {
+                    if charge {
+                        let prefix = if cold { PACK_PREFIX_LEN as u64 } else { 0 };
+                        // Spent or not, the error is the read's.
+                        let _ = self.walk.charge_bytes(frame + prefix);
+                    }
                     first_err.get_or_insert(e);
                 }
                 Err(e) => return Err(e),
             }
         }
-        if self.cache.may_list() {
-            self.load_all_shards().await?;
-            let fresh = self.cache.index.read().await.locations(id, blob_type);
-            for loc in fresh.iter().filter(|l| !locs.contains(l)) {
-                match self.read_at(loc, id, blob_type).await {
-                    Ok(bytes) => return Ok(bytes),
-                    Err(e) if is_data_error(&e) => {}
-                    Err(e) => return Err(e),
-                }
-            }
-        }
-        Err(first_err
-            .unwrap_or_else(|| Error::corrupt(format!("blob {}", hex32(id)), "unreadable")))
+        Err(first_err.unwrap_or_else(unreadable))
     }
 
     /// Where the data chunks of a file are stored, in content order.
@@ -614,7 +697,7 @@ impl<S: BlobStore> Reader<S> {
         if let Some(bytes) = known {
             return Ok(bytes);
         }
-        let bytes = Arc::new(self.read_blob(id, BLOB_TYPE_TREE).await?);
+        let bytes = Arc::new(self.read_copies(id, BLOB_TYPE_TREE, true).await?);
         locked(&self.cache.trees).insert(*id, Arc::clone(&bytes));
         Ok(bytes)
     }
@@ -893,12 +976,16 @@ impl<S: BlobStore> Reader<S> {
 
     /// The size of a file's chunks, read from the chunks themselves, each
     /// distinct one once, charging the bytes of every reference as it goes.
-    /// Stops once the sum is over `expected`, so it may then be partial. A
-    /// chunk is read only while bytes of the budget are left; a read that
-    /// fails charges the frames it may have fetched and is remembered, so the
-    /// chunk is not read again; and a charge that fails spends what is left.
-    /// A check that goes on after the error therefore reads at most one chunk
-    /// past the budget over its whole run.
+    /// Stops once the sum is over `expected`, so it may then be partial. Each
+    /// frame of a chunk is fetched only while bytes of the budget are left
+    /// and is charged as [`Reader::read_frames`] says, so a shard that lists
+    /// a chunk first at copies that do not open pays for them; a chunk none
+    /// of whose copies opens is remembered and not read again; and a charge
+    /// that fails spends what is left. A check that goes on after the error
+    /// therefore fetches at most one frame and one pack prefix past the
+    /// budget over its whole run. Below the budget, what is fetched and not
+    /// charged is the 41 bytes of framing of each chunk read and the prefix
+    /// of each pack the first time its key opens.
     async fn read_len(&mut self, node: &pb::Node, expected: u64) -> Result<u64> {
         let mut lens: HashMap<BlobId, u64> = HashMap::new();
         let mut total = 0u64;
@@ -913,8 +1000,7 @@ impl<S: BlobStore> Reader<S> {
                     if let Some((object, reason)) = self.unreadable.get(&id) {
                         return Err(Error::corrupt(object.clone(), reason.clone()));
                     }
-                    self.walk.check_bytes_left()?;
-                    let len = match self.read_blob(&id, BLOB_TYPE_DATA).await {
+                    let len = match self.read_copies(&id, BLOB_TYPE_DATA, true).await {
                         Ok(bytes) => bytes.len() as u64,
                         Err(e) => {
                             if let Error::Corrupt { object, reason } = &e
@@ -922,12 +1008,6 @@ impl<S: BlobStore> Reader<S> {
                             {
                                 self.unreadable.insert(id, (object.clone(), reason.clone()));
                             }
-                            let tried = match self.locate_blob_all(&id, BLOB_TYPE_DATA).await {
-                                Ok(locs) => locs.iter().map(|l| u64::from(l.enc_len)).sum(),
-                                Err(_) => 0,
-                            };
-                            // Spent or not, the error is the read's.
-                            let _ = self.walk.charge_bytes(tried);
                             return Err(e);
                         }
                     };
