@@ -23,13 +23,7 @@ pub async fn send(
         .ok_or_else(|| DeliveryError::new("The Slack channel has no webhook URL."))?;
     let body = serde_json::to_vec(&json!({ "text": escape(&text(message)) }))
         .map_err(|e| DeliveryError::new(e.to_string()))?;
-    let response = net::post_json(
-        state.config.notifications.allow_private_targets,
-        url.expose(),
-        body,
-        None,
-    )
-    .await?;
+    let response = net::post_json(&state.config.notifications, url.expose(), body, None).await?;
     net::expect_success(response).await
 }
 

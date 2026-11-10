@@ -132,6 +132,7 @@ impl Default for AgentUpdateConfig {
 pub struct NotificationsConfig {
     pub channels: Vec<ConfigChannel>,
     pub allow_private_targets: bool,
+    pub proxy: Option<Secret>,
 }
 
 #[derive(Debug, Clone)]
@@ -405,6 +406,7 @@ fn resolve_find(file: FileFind) -> anyhow::Result<FindConfig> {
 struct FileNotifications {
     channels: Vec<FileChannel>,
     allow_private_targets: bool,
+    proxy: Option<Secret>,
 }
 
 fn yes() -> bool {
@@ -592,7 +594,7 @@ fn secret_value(
 
 impl Config {
     pub fn from_args(args: ConfigArgs) -> anyhow::Result<Config> {
-        let file = load_file(args.config.as_deref())?;
+        let mut file = load_file(args.config.as_deref())?;
         let mut c = Config::default();
         if let Some(v) = args.listen.or(file.listen) {
             c.listen = v;
@@ -669,6 +671,15 @@ impl Config {
         c.find = resolve_find(file.find)?;
         c.agent_updates = resolve_agent_updates(file.agent_updates)?;
         c.notifications.allow_private_targets = file.notifications.allow_private_targets;
+        c.notifications.proxy = file.notifications.proxy.take();
+        if let Some(proxy) = &c.notifications.proxy {
+            let valid = reqwest::Url::parse(proxy.expose())
+                .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.host().is_some());
+            anyhow::ensure!(
+                valid,
+                "notifications.proxy must be an http:// or https:// URL"
+            );
+        }
         c.notifications.channels = resolve_channels(file.notifications)?;
         c.validate().context("invalid configuration")?;
         Ok(c)
@@ -1028,6 +1039,20 @@ mod tests {
         assert!(!load("", &[]).unwrap().notifications.allow_private_targets);
         let c = load("notifications:\n  allow_private_targets: true", &[]).unwrap();
         assert!(c.notifications.allow_private_targets);
+    }
+
+    #[test]
+    fn notifications_proxy_is_validated_and_hidden() {
+        assert!(load("", &[]).unwrap().notifications.proxy.is_none());
+        let c = load("notifications:\n  proxy: http://u:secret@p:3128", &[]).unwrap();
+        assert_eq!(
+            c.notifications.proxy.as_ref().unwrap().expose(),
+            "http://u:secret@p:3128"
+        );
+        assert!(!format!("{c:?}").contains("secret"));
+        let text = chain(load("notifications:\n  proxy: ftp://x", &[]));
+        assert!(text.contains("notifications.proxy"), "{text}");
+        assert!(!text.contains("ftp://x"), "{text}");
     }
 
     #[test]

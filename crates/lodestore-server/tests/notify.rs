@@ -10,7 +10,9 @@ use axum::http::{HeaderMap, StatusCode, Uri};
 use common::{TestServer, backends};
 use lodestore_policy::jiff::Timestamp;
 use lodestore_server::alerts::{self, model::AlertType};
-use lodestore_server::config::{ChannelSpec, ConfigChannel, Secret, SmtpSecurity};
+use lodestore_server::config::{
+    ChannelSpec, ConfigChannel, NotificationsConfig, Secret, SmtpSecurity,
+};
 use lodestore_server::db::now_ms;
 use lodestore_server::notify;
 use serde_json::{Value, json};
@@ -294,6 +296,13 @@ impl Env {
     }
 }
 
+fn lan() -> NotificationsConfig {
+    NotificationsConfig {
+        allow_private_targets: true,
+        ..Default::default()
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn notify_webhook_payload_golden() {
     for backend in backends() {
@@ -474,7 +483,7 @@ async fn notify_telegram_request_and_errors() {
 
     let stub = Stub::start().await;
     stub.respond(200, r#"{"ok":true}"#);
-    notify::telegram::send_to(true, &stub.base, "123:abc", "-100", "FIRING: x")
+    notify::telegram::send_to(&lan(), &stub.base, "123:abc", "-100", "FIRING: x")
         .await
         .unwrap();
     let hits = stub.hits();
@@ -487,7 +496,7 @@ async fn notify_telegram_request_and_errors() {
         400,
         r#"{"ok":false,"description":"Bad Request: chat not found"}"#,
     );
-    let error = notify::telegram::send_to(true, &stub.base, "123:abc", "-100", "x")
+    let error = notify::telegram::send_to(&lan(), &stub.base, "123:abc", "-100", "x")
         .await
         .unwrap_err();
     assert_eq!(error.to_string(), "Telegram: Bad Request: chat not found");
@@ -496,7 +505,7 @@ async fn notify_telegram_request_and_errors() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn notify_secret_not_in_errors() {
     let error =
-        notify::telegram::send_to(true, "http://127.0.0.1:1", "123:TOKENVALUE", "-100", "x")
+        notify::telegram::send_to(&lan(), "http://127.0.0.1:1", "123:TOKENVALUE", "-100", "x")
             .await
             .unwrap_err()
             .to_string();

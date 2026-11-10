@@ -5,6 +5,7 @@ use std::time::Duration;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 
 use super::DeliveryError;
+use crate::config::NotificationsConfig;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 const BODY_LIMIT: usize = 200;
@@ -58,20 +59,34 @@ impl Resolve for Screened {
     }
 }
 
-fn build(allow_private: bool) -> reqwest::Client {
-    reqwest::Client::builder()
-        .dns_resolver(Arc::new(Screened { allow_private }))
+fn build(config: &NotificationsConfig) -> reqwest::Client {
+    let builder = reqwest::Client::builder()
+        .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(TIMEOUT)
+        .timeout(TIMEOUT);
+    let builder = match &config.proxy {
+        Some(proxy) => builder
+            .proxy(reqwest::Proxy::all(proxy.expose()).expect("notifications.proxy was validated")),
+        None => builder.dns_resolver(Arc::new(Screened {
+            allow_private: config.allow_private_targets,
+        })),
+    };
+    builder
         .build()
         .expect("building the notification HTTP client")
 }
 
-pub fn client(allow_private: bool) -> reqwest::Client {
+pub fn client(config: &NotificationsConfig) -> reqwest::Client {
+    // shortcut: the client is built from the config on first use, so the proxy is read once per
+    // process; the server has one config per process, upgrade when config can reload.
     static STRICT: OnceLock<reqwest::Client> = OnceLock::new();
     static LAN: OnceLock<reqwest::Client> = OnceLock::new();
-    let cell = if allow_private { &LAN } else { &STRICT };
-    cell.get_or_init(|| build(allow_private)).clone()
+    let cell = if config.allow_private_targets {
+        &LAN
+    } else {
+        &STRICT
+    };
+    cell.get_or_init(|| build(config)).clone()
 }
 
 pub fn check_target(url: &str, allow_private: bool) -> Result<(), DeliveryError> {
@@ -117,13 +132,13 @@ pub fn clip(text: &str) -> String {
 }
 
 pub async fn post_json(
-    allow_private: bool,
+    config: &NotificationsConfig,
     url: &str,
     body: Vec<u8>,
     bearer: Option<&str>,
 ) -> Result<reqwest::Response, DeliveryError> {
-    check_target(url, allow_private)?;
-    let mut request = client(allow_private)
+    check_target(url, config.allow_private_targets)?;
+    let mut request = client(config)
         .post(url)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .body(body);
