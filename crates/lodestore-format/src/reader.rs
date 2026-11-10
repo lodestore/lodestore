@@ -304,10 +304,10 @@ impl<S: BlobStore> Reader<S> {
         self.file_lens_limit = n;
     }
 
-    /// Takes the limits off the walk budget of this reader, for a caller that
-    /// judges the budget from its own counts.
-    pub(crate) fn lift_walk_budget(&mut self) {
-        self.walk = TreeBudget::new(u64::MAX, u64::MAX);
+    /// The budget the next operations of this reader are charged to, until it
+    /// is replaced; `open_root` and a restore start it again.
+    pub(crate) fn set_walk_budget(&mut self, walk: TreeBudget) {
+        self.walk = walk;
     }
 
     /// Replaces the limit on one directory and on the entries held at once.

@@ -1757,6 +1757,69 @@ async fn check_hostile_repeated_chunk_reads_do_not_grow() {
     repeated_chunk_reads(|(_, check)| check).await;
 }
 
+/// The chunks of files whose sizes in the index do not add up are read
+/// within one walk budget for the whole check. Only `check_file` charges it:
+/// 1500 bytes for `d1` and 1500 for `d2`, once each, since a directory is
+/// read once; `aux` charges nothing. With 3000 there is no finding, so the
+/// tree bytes every snapshot has are not charged to it; with 2999 there is
+/// one, although `d1` and `d2` sit in different snapshots that would each
+/// charge 1500 alone, so the budget is not started again between snapshots.
+/// The directory read second is the one not checked, and every snapshot that
+/// reaches it has the finding.
+#[tokio::test]
+async fn check_hostile_chunk_read_limit_is_a_finding() {
+    let mut fx = Fx::new().await;
+    let c1 = fx.data(&[1u8; 1000]);
+    let c2 = fx.data(&[2u8; 500]);
+    let c3 = fx.data(&[3u8; 1000]);
+    let c4 = fx.data(&[4u8; 500]);
+    let d1_nodes = vec![file("f", &[c1, c2], 1500)];
+    let d2_nodes = vec![file("g", &[c3, c4], 1500)];
+    let d1 = fx.tree(d1_nodes.clone());
+    let d2 = fx.tree(d2_nodes.clone());
+    let aux = fx.snapshot(files("x", 1)).await;
+
+    let store = LocalFsStore::new(fx.repo_dir.clone());
+    let repo = Repository::open(&store, b"pw").await.unwrap();
+    let keys = attacker_keys(&repo);
+    let shards = open_all_shards(&store, &keys).await;
+    assert_eq!(shards.len(), 1);
+    let (real_id, real) = &shards[0];
+    let forged = real.packs.iter().map(shrink_ulen).collect();
+    plant_shard_where(&store, &keys, forged, Vec::new(), |id| id < real_id).await;
+
+    for (top, nodes) in [
+        (vec![dir("p", d1)], &d1_nodes),
+        (vec![dir("p", d2)], &d2_nodes),
+        (vec![dir("q", d2)], &d2_nodes),
+    ] {
+        let tree_bytes = encode_tree(top).len() + encode_tree(nodes.clone()).len();
+        assert!(tree_bytes + 1500 <= 2999, "{tree_bytes}");
+    }
+    let s1 = fx.snapshot(vec![dir("p", d1)]).await;
+    let s2 = fx.snapshot(vec![dir("p", d2)]).await;
+    let s3 = fx.snapshot(vec![dir("q", d2)]).await;
+
+    let report = fx.check_budget(TreeBudget::new(MAX_WALK_NODES, 2999)).await;
+    assert!(!report.findings.is_empty());
+    for f in &report.findings {
+        assert_eq!(f.kind, FindingKind::UnreadableTree, "{f:?}");
+        assert!(f.detail.contains("was not checked"), "{f:?}");
+    }
+    let keys: std::collections::BTreeSet<String> =
+        report.findings.iter().map(|f| f.key.clone()).collect();
+    let set = |ids: &[&BlobId]| ids.iter().map(|id| snapshot_object_key(id)).collect();
+    assert!(
+        keys == set(&[&s1]) || keys == set(&[&s2, &s3]),
+        "{:?}",
+        report.findings
+    );
+    assert!(!keys.contains(&snapshot_object_key(&aux)));
+
+    let report = fx.check_budget(TreeBudget::new(MAX_WALK_NODES, 3000)).await;
+    assert!(report.findings.is_empty(), "{:?}", report.findings);
+}
+
 async fn root_over(fx: &mut Fx, inner: BlobId, i: usize) -> BlobId {
     let mut top = files(&format!("f{i}"), 1);
     top.push(dir("z", inner));

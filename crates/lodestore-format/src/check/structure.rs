@@ -442,14 +442,16 @@ fn over_path(name: &str, e: &Error) -> String {
 
 fn tally(entries: &[ListEntry], bytes: &mut u64, objects: &mut u64) {
     for e in entries {
-        *bytes += e.size;
-        *objects += 1;
+        *bytes = bytes.saturating_add(e.size);
+        *objects = objects.saturating_add(1);
     }
 }
 
 /// Checks the structure of the repository in `store`. Reads the listings, the
-/// index shards, the snapshots and the tree blobs; no data blob and no pack
-/// body is read.
+/// index shards, the snapshots and the tree blobs, and, only for a file whose
+/// chunk sizes in the index do not add up, its chunks: each distinct chunk
+/// once for each directory the file is written in, within one walk budget for
+/// the whole run. No other data is read, and no pack is read whole.
 pub async fn check_structure<S: BlobStore>(
     store: &S,
     keys: &ReadKeys,
@@ -564,8 +566,8 @@ async fn check_with_budget<S: BlobStore>(
     }
     match read_bounded(store, "config", None, MAX_CONFIG_SIZE, "config").await {
         Ok(bytes) => {
-            report.physical_bytes += bytes.len() as u64;
-            report.objects += 1;
+            report.physical_bytes = report.physical_bytes.saturating_add(bytes.len() as u64);
+            report.objects = report.objects.saturating_add(1);
         }
         Err(Error::Store(BlobError::NotFound)) => {}
         Err(e @ Error::Corrupt { .. }) => {
@@ -686,8 +688,11 @@ async fn check_with_budget<S: BlobStore>(
     }
 
     let mut reader = Reader::open_shared(store, keys.duplicate(), config, ReaderCache::new(0))?;
-    // The verdict on the budget is `check_walk`'s, from the counts of the memo.
-    reader.lift_walk_budget();
+    // Only `check_file` charges this reader, for the chunks of files whose
+    // sizes do not add up, and nothing on the check's path starts it again, so
+    // it is one budget for the whole run; the verdict on the budget of a
+    // snapshot is `check_walk`'s, from the counts of the memo.
+    reader.set_walk_budget(budget);
     let mut memo: HashMap<BlobId, DirMemo> = HashMap::new();
     let mut links: HashMap<BlobId, Links> = HashMap::new();
     let mut trees_read: HashSet<BlobId> = HashSet::new();
@@ -754,8 +759,13 @@ async fn check_with_budget<S: BlobStore>(
         let mut frames: Vec<Frame> = vec![Frame::above_root(root)];
         // The frames from the bottom whose subtree alone passes a limit of a
         // path: the snapshot has that finding however the rest is walked, so
-        // their remaining subdirectories are not walked and the memory of the
-        // walk stays within the limits of a path, like a restore's.
+        // their remaining subdirectories are not walked and they let go of
+        // what they held, keeping a fixed amount each. The frames above them,
+        // still walked, hold no more tree data than the limits of a path plus
+        // one directory. A frame is pushed after its directory is read, and a
+        // directory is read once per check, so there are no more frames than
+        // directories read, as there are entries in the memo; neither the
+        // limits of a path nor the depth bound their number.
         let mut saturated = 0usize;
         while let Some(top) = frames.last_mut() {
             let Some(pieces) = top.subdirs.pop() else {
@@ -955,6 +965,15 @@ async fn check_with_budget<S: BlobStore>(
                                     bytes: len,
                                 });
                             }
+                            // The directory is read once per check, so the file
+                            // is unchecked for every snapshot that reaches it.
+                            Err(Error::WalkLimit { what, limit }) => {
+                                let file = String::from_utf8_lossy(&node.name);
+                                let detail = format!(
+                                    "tree {name}: {file} was not checked: in one run the check reads at most {limit} {what} of the chunks of files whose sizes in the index do not add up"
+                                );
+                                c.report(&key, &mut found, FindingKind::UnreadableTree, detail);
+                            }
                             Err(e) if is_data_error(&e) => {
                                 let detail = format!("tree {name}: {e}");
                                 c.report(&key, &mut found, FindingKind::UnreadableTree, detail);
@@ -1007,7 +1026,11 @@ async fn check_with_budget<S: BlobStore>(
                 {
                     break;
                 }
-                frame.subdirs.clear();
+                // A snapshot that reaches this directory has the finding of
+                // its path, so what is below need not be walked or merged.
+                frame.subdirs = Vec::new();
+                frame.members = Vec::new();
+                frame.linked = Vec::new();
                 saturated += 1;
             }
         }
