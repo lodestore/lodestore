@@ -28,3 +28,11 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- define "lodestore.hasDatabase" -}}
 {{- if or .Values.externalDatabase.url .Values.externalDatabase.existingSecret -}}true{{- end -}}
 {{- end -}}
+
+{{- define "lodestore.serviceAccountName" -}}
+{{- if .Values.serviceAccount.create -}}
+{{- default (include "lodestore.fullname" .) .Values.serviceAccount.name -}}
+{{- else -}}
+{{- default "default" .Values.serviceAccount.name -}}
+{{- end -}}
+{{- end -}}
