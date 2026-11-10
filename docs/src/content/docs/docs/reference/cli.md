@@ -294,11 +294,11 @@ Lists print a table with the same columns and status words as the web interface.
 
 ### Restoring a very large directory
 
-`lode restore` holds a directory in memory whole and stops at a directory of more than 2^23 entries, or at more than 2^24 entries held at once across the directories it has open, each directory counted at its full length. `lode backup` refuses such a tree and writes no snapshot, so a snapshot made by this version never needs more. A snapshot written before backups refused them can. The error names the limit and the flag:
+`lode restore` holds a directory in memory whole and stops at a directory of more than 2^23 entries or 1 GiB of tree data (the decoded length of its pieces), or at more than 2^24 entries or 2 GiB of tree data held at once across the directories it has open, each directory counted at its full length. The error names the limit: `entries in one directory`, `bytes in one directory`, `entries held at once` or `bytes held at once`. `lode backup` refuses such a tree and writes no snapshot, so a snapshot made by this version never needs more. A snapshot written before backups refused them can. The error names the limit and the flag:
 
 | Option | Meaning |
 |--------|---------|
-| `--allow-large-directories` | Restore a snapshot with a directory above 2^23 entries, or with more than 2^24 entries held at once. Each such directory is held in memory whole. The limits of the whole walk (2^30 entries, 512 GiB of directory data) stay |
+| `--allow-large-directories` | Restore a snapshot with a directory above 2^23 entries or 1 GiB of tree data, or with more than 2^24 entries or 2 GiB of tree data held at once. Each such directory is held in memory whole. The limits of the whole walk (2^30 entries, 512 GiB of directory data) stay |
 
 The server never lifts these limits; the flag acts only in the `lode restore` process it is given to.
 
