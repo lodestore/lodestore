@@ -16,7 +16,8 @@ use utoipa_axum::routes;
 
 use super::limits::{GuardError, client_ip};
 use super::{
-    AuthUser, SESSION_COOKIE, check_password, hash_password, session_hash, verify_password,
+    AuthUser, MAX_SUBMITTED_PASSWORD_BYTES, SESSION_COOKIE, check_password, hash_password,
+    session_hash, verify_password,
 };
 use crate::error::{ApiError, ErrorBody};
 use crate::maintenance::gc::api::FieldError;
@@ -194,6 +195,9 @@ async fn change_password(
     if let Err(message) = check_password(&input.new_password) {
         return Err(AccountFailure::Rejected("weak_password", message));
     }
+    if input.current_password.len() > MAX_SUBMITTED_PASSWORD_BYTES {
+        return Err(AccountFailure::Rejected("wrong_password", WRONG_PASSWORD));
+    }
     let client = client_ip(&state.config, peer, &headers);
     state.auth.limits.check_login(client, &user.username)?;
 
@@ -204,18 +208,25 @@ async fn change_password(
         .map_err(ApiError::from)?;
     let current_hash: String = row.try_get("password_hash").map_err(ApiError::from)?;
     let current = input.current_password;
-    let correct = tokio::task::spawn_blocking(move || verify_password(&current, &current_hash))
+    let correct = match state
+        .auth
+        .argon
+        .run(move || verify_password(&current, &current_hash))
         .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
+    {
+        Ok(correct) => correct,
+        Err(busy) => {
+            state.auth.limits.login_released(client, &user.username);
+            return Err(busy.into());
+        }
+    };
     if !correct {
         return Err(AccountFailure::Rejected("wrong_password", WRONG_PASSWORD));
     }
     state.auth.limits.login_succeeded(client, &user.username);
 
     let new = input.new_password;
-    let new_hash = tokio::task::spawn_blocking(move || hash_password(&new))
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))??;
+    let new_hash = state.auth.argon.run(move || hash_password(&new)).await??;
     let keep = jar
         .get(SESSION_COOKIE)
         .map(|cookie| session_hash(cookie.value()))

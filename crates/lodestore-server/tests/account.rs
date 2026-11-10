@@ -276,3 +276,29 @@ async fn account_password_change_beats_pending_sign_in() {
         ts.stop().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn change_password_rejects_new_password_over_1024_bytes() {
+    for backend in backends() {
+        let name = backend.name();
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+
+        for new in ["a".repeat(1025), "ж".repeat(513)] {
+            let response = change_password(&ts, &api, ADMIN_PASSWORD, &new).await;
+            assert_eq!(response.status(), 422, "[{name}]");
+            let body: Value = response.json().await.unwrap();
+            assert_eq!(body["code"], "weak_password");
+            assert_eq!(body["message"], "At most 1024 bytes.");
+        }
+
+        let response = change_password(&ts, &api, &"a".repeat(4097), NEW_PASSWORD).await;
+        assert_eq!(response.status(), 422, "[{name}]");
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(body["code"], "wrong_password");
+
+        let ok = change_password(&ts, &api, ADMIN_PASSWORD, &"a".repeat(1024)).await;
+        assert_eq!(ok.status(), 204, "[{name}]");
+        ts.stop().await;
+    }
+}
