@@ -1962,6 +1962,79 @@ async fn check_hostile_unreadable_chunk_reads_do_not_grow() {
     }
 }
 
+/// The reads of the packs by a check of a directory whose pieces are one
+/// empty tree listed `n` times, which a restore takes as an empty directory.
+async fn repeated_piece_reads(n: usize) -> usize {
+    let mut fx = Fx::new().await;
+    let empty = fx.tree(Vec::new());
+    let mut wide = dir("w", empty);
+    wide.subtrees = vec![empty.to_vec(); n];
+    let snap = fx.snapshot(vec![wide]).await;
+    fx.restore(&snap, &RestoreOptions::default()).await.unwrap();
+    let store = LocalFsStore::new(fx.repo_dir.clone());
+    let repo = Repository::open(&store, b"pw").await.unwrap();
+    let ranged = RangedOnly::new(&store, &[]);
+    let report = check_structure(&ranged, repo.read_keys(), repo.config(), &|_, _, _| {})
+        .await
+        .unwrap();
+    assert!(report.findings.is_empty(), "{:?}", report.findings);
+    let prefix = 0..PACK_PREFIX_LEN as u64;
+    ranged
+        .ranges_under("packs/")
+        .into_iter()
+        .filter(|(_, r)| *r != prefix)
+        .count()
+}
+
+/// A piece listed many times in one directory is read once.
+#[tokio::test]
+async fn check_hostile_repeated_piece_reads_do_not_grow() {
+    let once = repeated_piece_reads(1).await;
+    for n in [64usize, 2000] {
+        assert_eq!(repeated_piece_reads(n).await, once, "n={n}");
+    }
+}
+
+/// A piece with entries listed twice in one directory breaks the order of
+/// names: a restore refuses it, and the check reports it with the same reason
+/// without reading the piece again.
+#[tokio::test]
+async fn check_hostile_repeated_piece_with_entries_is_a_finding() {
+    let mut fx = Fx::new().await;
+    let piece = fx.tree(files("a", 2));
+    let mut wide = dir("w", piece);
+    wide.subtrees = vec![piece.to_vec(); 64];
+    let snap = fx.snapshot(vec![wide]).await;
+    let err = fx
+        .restore(&snap, &RestoreOptions::default())
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("names are not strictly ascending"),
+        "{err}"
+    );
+    let store = LocalFsStore::new(fx.repo_dir.clone());
+    let repo = Repository::open(&store, b"pw").await.unwrap();
+    let ranged = RangedOnly::new(&store, &[]);
+    let report = check_structure(&ranged, repo.read_keys(), repo.config(), &|_, _, _| {})
+        .await
+        .unwrap();
+    assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
+    let f = &report.findings[0];
+    assert_eq!(f.key, snapshot_object_key(&snap));
+    assert!(
+        f.detail.ends_with("names are not strictly ascending"),
+        "{f:?}"
+    );
+    let prefix = 0..PACK_PREFIX_LEN as u64;
+    let reads = ranged
+        .ranges_under("packs/")
+        .into_iter()
+        .filter(|(_, r)| *r != prefix)
+        .count();
+    assert_eq!(reads, 2, "the root and the piece once");
+}
+
 /// The same record with the decoded size of every blob `f` picks changed.
 fn change_ulen(record: &pb::PackRecord, f: impl Fn(u8, u32) -> u32) -> pb::PackRecord {
     let mut entries = Vec::with_capacity(record.entries.len());

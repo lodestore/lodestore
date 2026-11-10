@@ -911,7 +911,19 @@ async fn check_with_budget<S: BlobStore>(
                         too_large(&name, &e),
                     ));
                 }
+                // Whether each piece read so far had entries. A piece listed
+                // again adds nothing when empty and breaks the order of names
+                // when not, so it is not read again.
+                let mut seen_pieces: HashMap<BlobId, bool> = HashMap::new();
                 for tree in &pieces {
+                    match seen_pieces.get(tree) {
+                        Some(false) => continue,
+                        Some(true) => {
+                            let e = Error::corrupt("tree", "names are not strictly ascending");
+                            break 'read Some(unreadable(tree, &e));
+                        }
+                        None => {}
+                    }
                     let Some(loc) = c.find(tree, BLOB_TYPE_TREE).await? else {
                         let detail = format!(
                             "references blob {} that no index shard describes",
@@ -965,6 +977,7 @@ async fn check_with_budget<S: BlobStore>(
                         Err(e) if is_data_error(&e) => break 'read Some(unreadable(tree, &e)),
                         Err(e) => return Err(e),
                     };
+                    seen_pieces.insert(*tree, !piece.is_empty());
                     if let Some(last) = piece.last() {
                         previous = Some(last.name.clone());
                     }
