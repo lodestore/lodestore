@@ -368,3 +368,49 @@ fn restore_large_directory_needs_the_flag() {
         b"x"
     );
 }
+
+/// A snapshot from before backups refused directories with much tree data
+/// restores only when asked to; the debug build lowers the byte limits.
+#[test]
+fn restore_large_directory_by_bytes_needs_the_flag() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, src, target) = (
+        tmp.path().join("repo"),
+        tmp.path().join("src"),
+        tmp.path().join("out"),
+    );
+    fs::create_dir(&src).unwrap();
+    for i in 0..5 {
+        fs::write(src.join(format!("f{i}")), b"x").unwrap();
+    }
+    init_repo(&repo);
+    lode(&repo).arg("backup").arg(&src).assert().success();
+
+    let out = lode(&repo)
+        .env("LODE_TEST_DIR_BYTE_LIMITS", "64,100000")
+        .args(["restore", "latest", "--target"])
+        .arg(&target)
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8(out).unwrap();
+    assert!(
+        stderr.contains("more than 64 bytes in one directory"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("--allow-large-directories"), "{stderr}");
+    assert!(!restored_path(&target, &src).join("f0").exists());
+
+    lode(&repo)
+        .env("LODE_TEST_DIR_BYTE_LIMITS", "64,100000")
+        .args(["restore", "latest", "--allow-large-directories", "--target"])
+        .arg(&target)
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read(restored_path(&target, &src).join("f4")).unwrap(),
+        b"x"
+    );
+}

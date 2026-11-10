@@ -80,6 +80,16 @@ pub async fn run(
     }) {
         reader.set_dir_limits(dir, held);
     }
+    #[cfg(debug_assertions)]
+    if let Some((dir, held)) = std::env::var("LODE_TEST_DIR_BYTE_LIMITS")
+        .ok()
+        .and_then(|v| {
+            let (d, h) = v.split_once(',')?;
+            Some((d.parse().ok()?, h.parse().ok()?))
+        })
+    {
+        reader.set_dir_byte_limits(dir, held);
+    }
     if flags.allow_large_directories {
         reader.allow_large_directories();
     }
@@ -130,7 +140,11 @@ pub async fn run(
     let report = match report {
         Err(
             e @ Error::WalkLimit {
-                what: "entries in one directory" | "entries held at once",
+                what:
+                    "entries in one directory"
+                    | "entries held at once"
+                    | "bytes in one directory"
+                    | "bytes held at once",
                 ..
             },
         ) if !flags.allow_large_directories => {
