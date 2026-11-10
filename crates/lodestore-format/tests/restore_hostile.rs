@@ -1156,6 +1156,72 @@ async fn restore_hostile_no_owners_drops_setuid_and_capabilities() {
     assert_eq!(fs::metadata(&out).unwrap().mode() & 0o7777, 0o4755);
 }
 
+#[tokio::test]
+async fn restore_hostile_no_owners_skips_acl_security_trusted_xattrs() {
+    let mut fx = Fx::new().await;
+    let data = fx.data(b"payload");
+    let mut f = file("labelled", &[data], 7);
+    let acl = [
+        2u8, 0, 0, 0, 1, 0, 6, 0, 255, 255, 255, 255, 4, 0, 4, 0, 255, 255, 255, 255, 32, 0, 4, 0,
+        255, 255, 255, 255,
+    ];
+    let skipped = [
+        "system.posix_acl_access",
+        "system.nfs4_acl",
+        "security.selinux",
+        "trusted.lodestore.test",
+    ];
+    f.xattrs = skipped
+        .iter()
+        .map(|n| pb::Xattr {
+            name: n.as_bytes().to_vec(),
+            value: if n.ends_with("acl_access") {
+                acl.to_vec()
+            } else {
+                b"v".to_vec()
+            },
+        })
+        .chain([pb::Xattr {
+            name: b"user.lodestore.test".to_vec(),
+            value: b"kept".to_vec(),
+        }])
+        .collect();
+    let snap = fx.snapshot(vec![f]).await;
+    let out = fx.target.join("labelled");
+
+    let report = fx
+        .restore(
+            &snap,
+            &RestoreOptions {
+                skip_owners: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    for n in skipped {
+        assert_eq!(xattr(&out, n), None, "{n}");
+        assert!(
+            !report.unapplied.iter().any(|u| u.what.contains(n)),
+            "{n}: {:?}",
+            report.unapplied
+        );
+    }
+    assert_eq!(xattr(&out, "user.lodestore.test"), Some(b"kept".to_vec()));
+
+    fs::remove_file(&out).unwrap();
+    let report = fx.restore(&snap, &RestoreOptions::default()).await.unwrap();
+    assert!(
+        xattr(&out, "trusted.lodestore.test").is_some()
+            || report
+                .unapplied
+                .iter()
+                .any(|u| u.what.contains("trusted.lodestore.test")),
+        "{:?}",
+        report.unapplied
+    );
+}
+
 fn bytes_in_dir_limit(err: &Error, limit: u64) -> bool {
     matches!(
         err,

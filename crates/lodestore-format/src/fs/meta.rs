@@ -151,6 +151,14 @@ fn timespec(ts: Option<&pb::Timestamp>) -> rustix::fs::Timespec {
     }
 }
 
+/// Xattr namespaces that carry access control or labels: all ACL flavours live
+/// under `system.`, SELinux and capabilities under `security.`.
+fn needs_owners(name: &[u8]) -> bool {
+    [&b"system."[..], b"security.", b"trusted."]
+        .iter()
+        .any(|p| name.starts_with(p))
+}
+
 /// Applies owner, xattrs, mode and times, in that order: a chown clears
 /// setuid and setgid, an ACL xattr rewrites the group bits, and any of them
 /// touches ctime. Every failure is recorded in `out` and the rest still runs.
@@ -158,7 +166,9 @@ fn timespec(ts: Option<&pb::Timestamp>) -> rustix::fs::Timespec {
 /// and neither setuid, setgid nor file capabilities are applied: they would
 /// grant the snapshot's privileges to whoever runs the restore. With `owners`
 /// but without `keep_privileges` the owner is applied and the privileges are
-/// still dropped.
+/// still dropped. Without `owners`, ACLs, `security.*` and `trusted.*` xattrs
+/// are not applied either: they grant access or labels chosen at backup time
+/// to whoever runs the restore.
 pub fn apply_metadata(
     target: &Target<'_>,
     node: &pb::Node,
@@ -189,7 +199,7 @@ pub fn apply_metadata(
     }
 
     for x in &node.xattrs {
-        if !privileges && x.name == b"security.capability" {
+        if (!owners && needs_owners(&x.name)) || (!privileges && x.name == b"security.capability") {
             continue;
         }
         let set = match target {
@@ -231,6 +241,29 @@ pub fn apply_metadata(
         };
         if let Err(e) = r {
             fail("times".into(), e);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::needs_owners;
+
+    #[test]
+    fn needs_owners_covers_acl_label_and_trusted_namespaces() {
+        for n in [
+            "system.posix_acl_access",
+            "system.posix_acl_default",
+            "system.nfs4_acl",
+            "system.richacl",
+            "security.selinux",
+            "security.capability",
+            "trusted.x",
+        ] {
+            assert!(needs_owners(n.as_bytes()), "{n}");
+        }
+        for n in ["user.x", "Security.x", "systemx", ""] {
+            assert!(!needs_owners(n.as_bytes()), "{n}");
         }
     }
 }
