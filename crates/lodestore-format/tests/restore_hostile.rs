@@ -798,6 +798,110 @@ async fn restore_hostile_hardlink_group_mismatch() {
     fx.assert_check_finds(&snap).await;
 }
 
+fn in_group(mut node: pb::Node, group: u64) -> pb::Node {
+    node.hardlink_group = group;
+    node
+}
+
+/// A hardlink group whose members differ is a finding of the snapshot that
+/// has both members, not of the others that share one of the directories, and
+/// not of the one the check happens to read second.
+#[tokio::test]
+async fn check_hostile_hardlink_conflict_stays_with_its_snapshot() {
+    for conflicted_first in [false, true] {
+        let mut found = None;
+        for _ in 0..64 {
+            let mut fx = Fx::new().await;
+            let (c5, c6) = (fx.data(b"12345"), fx.data(b"123456"));
+            let shared = fx.tree(vec![in_group(file("m", &[c5], 5), 7)]);
+            let other = fx.tree(vec![in_group(file("m", &[c6], 6), 7)]);
+            let conflicted = fx.snapshot(vec![dir("a", shared), dir("b", other)]).await;
+            let honest = fx.snapshot(vec![dir("a", shared)]).await;
+            if (snapshot_object_key(&conflicted) < snapshot_object_key(&honest)) == conflicted_first
+            {
+                found = Some((fx, conflicted, honest));
+                break;
+            }
+        }
+        let (fx, conflicted, honest) = found.expect("no pair in the wanted order");
+
+        let report = fx.check().await;
+        assert_eq!(report.snapshots_checked, 2);
+        assert_eq!(
+            finding_kinds(&report, &conflicted),
+            [FindingKind::UnreadableTree],
+            "first={conflicted_first}: {:?}",
+            report.findings
+        );
+        assert!(
+            report.findings[0].detail.contains("hardlink group"),
+            "{:?}",
+            report.findings
+        );
+        assert!(
+            finding_kinds(&report, &honest).is_empty(),
+            "first={conflicted_first}: {:?}",
+            report.findings
+        );
+
+        let err = fx
+            .restore(&conflicted, &RestoreOptions::default())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, Error::Corrupt { reason, .. } if reason.contains("members of one hardlink group differ")),
+            "{err:?}"
+        );
+        fx.restore(&honest, &RestoreOptions::default())
+            .await
+            .unwrap();
+    }
+}
+
+/// A conflict between a directory and one below it is a finding of every
+/// snapshot that reaches the directory, whichever is read first.
+#[tokio::test]
+async fn check_hostile_hardlink_conflict_inside_shared_dir_reaches_every_snapshot() {
+    for p_first in [false, true] {
+        let mut found = None;
+        for _ in 0..64 {
+            let mut fx = Fx::new().await;
+            let (c5, c6) = (fx.data(b"12345"), fx.data(b"123456"));
+            let below = fx.tree(vec![in_group(file("y", &[c6], 6), 7)]);
+            let shared = fx.tree(vec![dir("s", below), in_group(file("x", &[c5], 5), 7)]);
+            let p = fx.snapshot(vec![dir("d", shared)]).await;
+            let q = fx.snapshot(vec![dir("d", shared), file("f", &[], 0)]).await;
+            if (snapshot_object_key(&p) < snapshot_object_key(&q)) == p_first {
+                found = Some((fx, p, q));
+                break;
+            }
+        }
+        let (fx, p, q) = found.expect("no pair in the wanted order");
+
+        let report = fx.check().await;
+        for snap in [&p, &q] {
+            assert_eq!(
+                finding_kinds(&report, snap),
+                [FindingKind::UnreadableTree],
+                "first={p_first}: {:?}",
+                report.findings
+            );
+            let key = snapshot_object_key(snap);
+            assert!(
+                report
+                    .findings
+                    .iter()
+                    .any(|f| f.key == key && f.detail.contains("hardlink group")),
+                "{:?}",
+                report.findings
+            );
+            fx.restore(snap, &RestoreOptions::default())
+                .await
+                .unwrap_err();
+        }
+    }
+}
+
 #[tokio::test]
 async fn restore_hostile_size_mismatch() {
     let mut fx = Fx::new().await;

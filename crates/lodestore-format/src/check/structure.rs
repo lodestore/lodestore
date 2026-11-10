@@ -23,7 +23,7 @@ use crate::pb;
 use crate::reader::{Reader, ReaderCache};
 use crate::snapshot::{MAX_SNAPSHOT_SIZE, SNAPSHOT_PREFIX, open_snapshot, snapshot_object_key};
 use crate::store::{BlobError, BlobStore, ListEntry, read_bounded};
-use crate::tree::{MAX_DEPTH, TreeBudget, check_node, count_tree_nodes, decode_tree};
+use crate::tree::{MAX_DEPTH, TreeBudget, count_tree_nodes, decode_tree};
 
 const KEYS_PREFIX: &str = "keys/";
 
@@ -153,6 +153,44 @@ impl<S: BlobStore> Checker<'_, S> {
         }
     }
 
+    /// Adds a member to the hardlink groups of the snapshot being checked. A
+    /// member that differs from the first of its group is a finding of this
+    /// snapshot alone: another snapshot that shares the directory may not
+    /// have the other member.
+    fn join(&mut self, key: &str, groups: &mut Groups, group: u64, member: Member, name: &str) {
+        if *groups.entry(group).or_insert(member) != member {
+            let detail =
+                format!("tree {name}: members of one hardlink group differ in size or content");
+            self.add_once(key, FindingKind::UnreadableTree, detail);
+        }
+    }
+
+    /// Adds the members of the directory `from` and of everything below it
+    /// that the snapshot has not taken yet.
+    fn merge_links(
+        &mut self,
+        key: &str,
+        links: &HashMap<BlobId, Links>,
+        merged: &mut HashSet<BlobId>,
+        groups: &mut Groups,
+        from: BlobId,
+    ) {
+        let mut stack = vec![from];
+        while let Some(dir) = stack.pop() {
+            if !merged.insert(dir) {
+                continue;
+            }
+            let Some(known) = links.get(&dir) else {
+                continue;
+            };
+            let name = hex32(&dir);
+            for &(group, member) in &known.members {
+                self.join(key, groups, group, member, &name);
+            }
+            stack.extend(known.below.iter().copied());
+        }
+    }
+
     /// The finding a path to a directory gives the snapshot, at most one.
     fn path_hit(&mut self, key: &str, hit: &mut bool, detail: String) {
         if !std::mem::replace(hit, true) {
@@ -229,6 +267,22 @@ impl Held {
     }
 }
 
+/// A member of a hardlink group: the size and a hash of the chunk ids, which
+/// is what a restore compares.
+type Member = (u64, [u8; 32]);
+
+/// The first member of each hardlink group a snapshot has met.
+type Groups = HashMap<u64, Member>;
+
+/// The hardlink members of a directory and of everything below it, kept apart
+/// from the memo because whether they conflict depends on the snapshot.
+struct Links {
+    /// The members of this directory alone, with their groups.
+    members: Vec<(u64, Member)>,
+    /// The subdirectories that have members in their own subtrees.
+    below: Vec<BlobId>,
+}
+
 /// What a finished walk of a directory leaves for the snapshots that reach it
 /// again. Nothing in it depends on the path the directory was reached by, so a
 /// directory is walked once.
@@ -282,6 +336,8 @@ struct Frame {
     height: usize,
     walk: Held,
     finding: Found,
+    members: Vec<(u64, Member)>,
+    linked: Vec<BlobId>,
 }
 
 impl Frame {
@@ -299,6 +355,8 @@ impl Frame {
             height: 0,
             walk: Held::default(),
             finding: None,
+            members: Vec::new(),
+            linked: Vec::new(),
         }
     }
 
@@ -629,6 +687,7 @@ async fn check_with_budget<S: BlobStore>(
 
     let mut reader = Reader::open_shared(store, keys.duplicate(), config, ReaderCache::new(0))?;
     let mut memo: HashMap<BlobId, DirMemo> = HashMap::new();
+    let mut links: HashMap<BlobId, Links> = HashMap::new();
     let mut trees_read: HashSet<BlobId> = HashSet::new();
     let mut seen_chunks: HashSet<BlobId> = HashSet::new();
     let total = snapshots.len() as u64;
@@ -678,11 +737,9 @@ async fn check_with_budget<S: BlobStore>(
             );
             continue;
         };
-        // shortcut: hardlink members are not checked across snapshots, and a
-        // subtree seen in an earlier snapshot is not walked again; a
-        // per-snapshot walk would cost a full tree walk per snapshot.
         c.snapshot_seen.clear();
-        let mut groups = HashMap::new();
+        let mut groups = Groups::new();
+        let mut merged: HashSet<BlobId> = HashSet::new();
         // A finding that depends on the path to a directory is reported once
         // per snapshot.
         let mut path_found = false;
@@ -700,7 +757,7 @@ async fn check_with_budget<S: BlobStore>(
         let mut saturated = 0usize;
         while let Some(top) = frames.last_mut() {
             let Some(pieces) = top.subdirs.pop() else {
-                let Some(frame) = frames.pop() else {
+                let Some(mut frame) = frames.pop() else {
                     break;
                 };
                 saturated = saturated.min(frames.len());
@@ -710,7 +767,23 @@ async fn check_with_budget<S: BlobStore>(
                     }
                     break;
                 }
-                close(&mut memo, &mut frames, frame.dir, frame.done());
+                let dir = frame.dir;
+                let members = std::mem::take(&mut frame.members);
+                let linked = std::mem::take(&mut frame.linked);
+                close(&mut memo, &mut frames, dir, frame.done());
+                if !members.is_empty() || !linked.is_empty() {
+                    links.insert(
+                        dir,
+                        Links {
+                            members,
+                            below: linked,
+                        },
+                    );
+                    merged.insert(dir);
+                    if let Some(parent) = frames.last_mut() {
+                        parent.linked.push(dir);
+                    }
+                }
                 continue;
             };
             let depth = top.depth.saturating_add(1);
@@ -735,6 +808,12 @@ async fn check_with_budget<S: BlobStore>(
                     finding: known.finding.clone(),
                 };
                 climb(&mut frames, &done);
+                if links.contains_key(&dir) {
+                    c.merge_links(&key, &links, &mut merged, &mut groups, dir);
+                    if let Some(parent) = frames.last_mut() {
+                        parent.linked.push(dir);
+                    }
+                }
                 continue;
             }
             let mut nodes = Vec::new();
@@ -840,6 +919,7 @@ async fn check_with_budget<S: BlobStore>(
             }
             let mut height = 0;
             let mut subdirs = Vec::new();
+            let mut members = Vec::new();
             for node in &nodes {
                 let mut all_known = true;
                 for raw in &node.content {
@@ -862,14 +942,21 @@ async fn check_with_budget<S: BlobStore>(
                         }
                     }
                 }
-                if all_known {
-                    match check_node(&mut reader, &mut groups, node).await {
-                        Ok(()) => {}
-                        Err(e) if is_data_error(&e) => {
-                            let detail = format!("tree {name}: {e}");
-                            c.report(&key, &mut found, FindingKind::UnreadableTree, detail);
+                if node.r#type == pb::NodeType::File as i32 {
+                    if all_known {
+                        match reader.check_file(node).await {
+                            Ok(_) => {}
+                            Err(e) if is_data_error(&e) => {
+                                let detail = format!("tree {name}: {e}");
+                                c.report(&key, &mut found, FindingKind::UnreadableTree, detail);
+                            }
+                            Err(e) => return Err(e),
                         }
-                        Err(e) => return Err(e),
+                    }
+                    if node.hardlink_group != 0 {
+                        let member = (node.size, *blake3::hash(&node.content.concat()).as_bytes());
+                        c.join(&key, &mut groups, node.hardlink_group, member, &name);
+                        members.push((node.hardlink_group, member));
                     }
                 }
                 if node.r#type == pb::NodeType::Dir as i32 {
@@ -877,15 +964,14 @@ async fn check_with_budget<S: BlobStore>(
                     if depth > MAX_DEPTH {
                         c.path_hit(&key, &mut path_found, too_deep(&name));
                     }
-                    let subtrees: Option<Vec<BlobId>> =
-                        node.subtrees.iter().map(|raw| blob_ref(raw)).collect();
-                    match subtrees {
-                        Some(subtrees) if subtrees.is_empty() => {}
-                        Some(subtrees) => subdirs.push(subtrees),
-                        None => {
-                            let detail = format!("tree {name}: subtree id must be 32 bytes");
-                            c.report(&key, &mut found, FindingKind::UnreadableTree, detail);
-                        }
+                    // `decode_tree` has refused an id that is not 32 bytes.
+                    let subtrees: Vec<BlobId> = node
+                        .subtrees
+                        .iter()
+                        .filter_map(|raw| blob_ref(raw))
+                        .collect();
+                    if !subtrees.is_empty() {
+                        subdirs.push(subtrees);
                     }
                 }
             }
@@ -900,6 +986,8 @@ async fn check_with_budget<S: BlobStore>(
                 height,
                 walk: own,
                 finding: found,
+                members,
+                linked: Vec::new(),
             });
             while let Some(frame) = frames.get_mut(saturated) {
                 let subtree = Held {
