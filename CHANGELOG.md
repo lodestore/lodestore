@@ -66,7 +66,8 @@ All notable changes to Lodestore are recorded here. The format follows [Keep a C
 ### Fixed
 
 - The structure check reported a finding in a directory shared by several snapshots for the first snapshot only and called the others ok; every snapshot that reaches the directory now gets it.
-- The structure check read a shared path again for every snapshot that reached it, and took a directory cut because its nesting was too deep for a checked one; a snapshot that reaches such a directory deeper than the first one now gets the finding, and a shallower one checks it.
+- The structure check could read a tree again for every new path to a directory several snapshots share, and a planted tree made that number grow exponentially; it now reads each directory once and judges each snapshot by its own path, in whichever order the snapshots are read.
+- The structure check gave a conflict between hardlink members of a shared directory and another directory to every snapshot that shares the directory, and could leave without a finding a snapshot that was checked after another with the same directory; only the snapshot in which the members of a group differ now gets the finding.
 - The structure check gave no finding for a snapshot whose tree pack is missing from the bucket; it now reports `unreadable_tree` for each snapshot that needs it and goes on.
 - A restore counted only the entries left to hand out of a directory it had already walked into, so a tree of nested directories could pass the limit of 2^24 entries held at once; every open directory now counts at its full length, and `lode backup` refuses a tree a restore could not hold.
 - A failed or incomplete read of the attestations is no longer remembered for the life of the reader: the next load reads them again.
