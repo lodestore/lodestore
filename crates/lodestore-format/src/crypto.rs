@@ -6,7 +6,9 @@ use hpke::aead::ChaCha20Poly1305 as HpkeAead;
 use hpke::kdf::HkdfSha256;
 use hpke::kem::XWing;
 use hpke::{Deserializable, Kem, OpModeR, OpModeS, Serializable};
-use rand_core::{Rng, TryCryptoRng, TryRng};
+#[cfg(any(test, feature = "test-hooks"))]
+use rand_core::Rng;
+use rand_core::{TryCryptoRng, TryRng};
 use zeroize::Zeroizing;
 
 use crate::error::{Error, Result};
@@ -46,12 +48,13 @@ const ATTEST_MAC_DOMAIN: &[u8] = b"lodestore v1 attestation";
 const AAD_PROVENANCE: &[u8] = b"lodestore v1 provenance";
 
 /// The only source of randomness in the format: master key, pack keys,
-/// nonces, salts and HPKE encapsulation all draw from here, so a test can swap
-/// in a deterministic generator.
+/// nonces, salts and HPKE encapsulation all draw from here. Only tests can swap
+/// in a deterministic generator; release builds always read the operating system.
 pub struct Entropy(Source);
 
 enum Source {
     Os,
+    #[cfg(any(test, feature = "test-hooks"))]
     Custom(Box<dyn Rng + Send>),
 }
 
@@ -60,6 +63,7 @@ impl Entropy {
         Entropy(Source::Os)
     }
 
+    #[cfg(any(test, feature = "test-hooks"))]
     pub fn from_rng<R: Rng + Send + 'static>(rng: R) -> Self {
         Entropy(Source::Custom(Box::new(rng)))
     }
@@ -67,6 +71,7 @@ impl Entropy {
     pub fn fill(&mut self, buf: &mut [u8]) {
         match &mut self.0 {
             Source::Os => getrandom::fill(buf).expect("operating system RNG failed"),
+            #[cfg(any(test, feature = "test-hooks"))]
             Source::Custom(rng) => rng.fill_bytes(buf),
         }
     }

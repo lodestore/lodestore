@@ -41,6 +41,20 @@ groups:
         annotations:
           summary: "{{ if eq $labels.level \"packs\" }}Pack reading{{ else if eq $labels.level \"restore\" }}Test restore{{ else }}Structure{{ end }} check failed on {{ $labels.repository }}"
           description: "The last {{ $labels.level }} check of repository {{ $labels.repository }} found problems or stopped. Open the report in Integrity checks."
+      - alert: LodestoreSnapshotQuarantined
+        expr: lodestore_alerts_active{type="snapshot_quarantined"} > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "A snapshot cannot be read and cleanup is stopped"
+          description: "Open the repository page in Lodestore, Free up space, and review the quarantined snapshots."
+      - alert: LodestoreRepositoryUnavailable
+        expr: lodestore_alerts_active{type="repository_unavailable"} > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "A repository is unavailable"
+          description: "The server does not open a repository whose configuration in storage does not match what it recorded. See Storage checks on the repository page."
   - name: lodestore-certificates
     rules:
       - alert: LodestoreCertificateExpiring

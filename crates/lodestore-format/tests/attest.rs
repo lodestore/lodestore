@@ -328,6 +328,12 @@ impl<S: BlobStore> BlobStore for Wrapped<S> {
     }
 
     async fn get_range(&self, key: &str, range: Range<u64>) -> Result<Bytes, BlobError> {
+        assert_eq!(self.inflate, 0, "an oversized object must not be fetched");
+        if self.deny_get {
+            return Err(BlobError::Denied {
+                message: "AccessDenied".into(),
+            });
+        }
         self.inner.get_range(key, range).await
     }
 

@@ -192,7 +192,7 @@ pub async fn probe(server: &Store, agent: AgentProbe<'_>) -> ProbeReport {
 /// Like [`probe`] but leaves the objects in place, so a caller that bounds the
 /// run in time can still clean up with [`remove_probe_objects`] afterwards.
 pub async fn probe_keep(server: &Store, agent: AgentProbe<'_>, keys: &ProbeKeys) -> ProbeReport {
-    let mut report = ProbeReport::new(server.get("config").await.is_ok());
+    let mut report = ProbeReport::new(server.get_range("config", 0..1).await.is_ok());
     let key = keys.server.clone();
     let agent_key = keys.agent.clone();
     let body = Bytes::from_static(PROBE_BODY);

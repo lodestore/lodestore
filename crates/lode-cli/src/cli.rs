@@ -473,6 +473,14 @@ pub struct RestoreFlags {
     /// Show what would be restored; create and change nothing, not even the target
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Restore a snapshot with a directory above the limits a backup keeps to
+    /// (2^23 entries or 1 GiB of tree data in one directory, 2^24 entries or
+    /// 2 GiB of tree data in the directories open at once), written before
+    /// backups refused such trees; each such directory is then held in memory
+    /// whole
+    #[arg(long)]
+    pub allow_large_directories: bool,
 }
 
 #[derive(Debug, Args)]

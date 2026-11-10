@@ -42,6 +42,10 @@ The server trusts the records of an attested shard when it applies `supersedes` 
 
 `format_version` stays 1. A new object kind under `locks/` does not change how any existing object is read, and readers that do not know the prefix skip it.
 
+### Shards above the size limit
+
+Readers do not load an index shard above 64 MiB ([ADR 0003](/docs/adr/0003-object-layout/)), but 0.1 wrote shards of any size, so an honest repository can hold an attested shard above that. Cleanup, the rebuild and a restore read an attested shard of up to 1 GiB, after its content has been checked against its name in parts of 64 MiB; an unattested shard above 64 MiB, and an attested one above 1 GiB, is skipped by all of them and `lode repo rebuild-index` replaces it. The first cleanup cycle after the update rewrites every attested shard from 64 MiB up to 1 GiB into shards under the limit, with the same trust as the shard it replaces: the new shards are attested in the same step, so the rewrite does not turn a signed shard into an unsigned one and does not sign anything that was not signed. That cycle goes through the full pause even when there is nothing to delete, because it replaces index shards. After it, no shard above 64 MiB is left unless an agent writes one, and the new writers do not.
+
 ### Why `locks/`
 
 The agent's bucket policy already lets it read under `locks/` (it reads the cleanup manifests before a backup) and does not let it write there, so an attestation is readable for the dedup filter and not forgeable by IAM. The 0.1 code opens only `locks/gc-` and `locks/writer-`, so it ignores the new names.

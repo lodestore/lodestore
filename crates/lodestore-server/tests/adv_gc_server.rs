@@ -7,114 +7,29 @@
 #[path = "../../lodestore-format/tests/adv_support/mod.rs"]
 mod adv_support;
 mod common;
+mod gc_support;
 
 use std::collections::BTreeMap;
-use std::fs::File;
-use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::path::Path;
 
 use adv_support::{attacker_keys, forge_offsets, open_all_shards, plant_shard_where};
-use common::{Api, Backend, TestServer, WAIT, backends, wait_until};
+use common::{Backend, TestServer, backends};
+use gc_support::{
+    LOW_KDF, PASSWORD, after_pause, age_packs, assert_stops_then_finishes, backup, enable, forget,
+    fresh_repo, kept_and_forgotten, noise, restores, steps,
+};
 use lodestore_format::config::config_hash;
 use lodestore_format::crypto::Entropy;
-use lodestore_format::index::{hex32, parse_hex32};
-use lodestore_format::keys::KdfCost;
+use lodestore_format::index::hex32;
 use lodestore_format::pb;
-use lodestore_format::reader::{Reader, RestoreOptions};
 use lodestore_format::repo::{InitOptions, PendingInit, Repository};
-use lodestore_format::snapshot::snapshot_object_key;
+use lodestore_format::snapshot::{seal_snapshot, snapshot_object_key};
 use lodestore_format::store::{BlobStore, LocalFsStore};
-use lodestore_format::writer::{BackupOptions, Writer};
 use lodestore_server::maintenance::gc::GcState;
-use lodestore_server::maintenance::gc::cycle::{StepOutcome, step};
+use lodestore_server::maintenance::gc::cycle::StepOutcome;
 use lodestore_server::repos::db::{NewRepository, RepoLocation, create_repository};
 use serde_json::{Value, json};
 use sqlx::Row;
-
-const PASSWORD: &[u8] = b"test-password";
-const LOW_KDF: KdfCost = KdfCost {
-    memory_kib: 64,
-    iterations: 1,
-    parallelism: 1,
-};
-
-fn noise(seed: u64, size: usize) -> Vec<u8> {
-    let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
-    (0..size)
-        .map(|_| {
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            (x >> 24) as u8
-        })
-        .collect()
-}
-
-struct Snapshot {
-    id: String,
-    dir: PathBuf,
-}
-
-async fn backup(
-    ts: &TestServer,
-    store: &LocalFsStore,
-    host: &str,
-    tag: &str,
-    files: &[(&str, u64, usize)],
-) -> Snapshot {
-    let repo = Repository::open(store, PASSWORD).await.unwrap();
-    let mut writer = Writer::new(store, attacker_keys(&repo), repo.config())
-        .await
-        .unwrap();
-    let dir = ts.dir.path().join(format!("data-{tag}"));
-    std::fs::create_dir_all(&dir).unwrap();
-    for (name, seed, size) in files {
-        std::fs::write(dir.join(name), noise(*seed, *size)).unwrap();
-    }
-    let outcome = writer
-        .backup(
-            std::slice::from_ref(&dir),
-            BackupOptions {
-                hostname: Some(host.as_bytes().to_vec()),
-                ..BackupOptions::default()
-            },
-            &|_| {},
-        )
-        .await
-        .expect("backup");
-    Snapshot {
-        id: hex32(&outcome.snapshot_id),
-        dir,
-    }
-}
-
-fn forget(root: &Path, snapshot: &Snapshot) {
-    let id = parse_hex32(&snapshot.id).unwrap();
-    std::fs::remove_file(root.join(snapshot_object_key(&id))).unwrap();
-}
-
-fn age_packs(root: &Path) {
-    let old = SystemTime::now() - Duration::from_secs(3 * 86_400);
-    let mut stack = vec![root.join("packs")];
-    while let Some(dir) = stack.pop() {
-        let Ok(read) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in read {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                stack.push(path);
-            } else {
-                File::options()
-                    .write(true)
-                    .open(&path)
-                    .unwrap()
-                    .set_modified(old)
-                    .unwrap();
-            }
-        }
-    }
-}
 
 /// The entries of `record` claimed to lie in the pack of `to`, one byte off.
 fn retarget(record: &pb::PackRecord, to: &pb::PackRecord) -> Option<pb::PackRecord> {
@@ -141,107 +56,6 @@ fn forge(records: &[pb::PackRecord]) -> Vec<pb::PackRecord> {
         .collect();
     forged.extend(records.iter().map(forge_offsets));
     forged
-}
-
-fn enabled_input() -> Value {
-    json!({
-        "enabled": true,
-        "cron": "0 3 * * 0",
-        "timezone": "UTC",
-        "pause": "24h",
-        "repack_below_pct": 50,
-        "max_repack": "10GiB",
-    })
-}
-
-async fn enable(ts: &TestServer, api: &Api, repo: &str) {
-    let response = reqwest::Client::new()
-        .put(format!(
-            "{}/api/v1/repositories/{repo}/gc/settings",
-            ts.rest_url()
-        ))
-        .header("cookie", api.cookie())
-        .header("x-csrf-token", &api.csrf)
-        .json(&enabled_input())
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 200, "{:?}", response.text().await);
-}
-
-async fn cycle_state(ts: &TestServer, id: &str) -> (String, Option<i64>, Option<String>) {
-    let row = sqlx::query("SELECT state, delete_after, error FROM gc_cycles WHERE id = $1")
-        .bind(id)
-        .fetch_one(&ts.state().db.pool)
-        .await
-        .unwrap();
-    (row.get("state"), row.get("delete_after"), row.get("error"))
-}
-
-async fn after_pause(ts: &TestServer, id: &str) -> i64 {
-    let reached = wait_until(WAIT, || async { cycle_state(ts, id).await.0 == "waiting" }).await;
-    let (state, delete_after, error) = cycle_state(ts, id).await;
-    assert!(
-        reached,
-        "the cycle never reached waiting: it is {state} ({error:?})"
-    );
-    assert!(
-        wait_until(WAIT, || async { ts.state().gc.claim(id).is_some() }).await,
-        "the cycle driver never stopped"
-    );
-    delete_after.unwrap() + 1_000
-}
-
-async fn steps(ts: &TestServer, id: &str, now_ms: i64) -> StepOutcome {
-    let _no_driver = loop {
-        match ts.state().gc.claim(id) {
-            Some(guard) => break guard,
-            None => tokio::time::sleep(Duration::from_millis(20)).await,
-        }
-    };
-    loop {
-        match step(ts.state(), id, now_ms).await.unwrap() {
-            StepOutcome::Advanced(_) => {}
-            other => return other,
-        }
-    }
-}
-
-async fn restores(store: &LocalFsStore, snapshot: &Snapshot) -> Result<(), String> {
-    let repo = Repository::open(store, PASSWORD)
-        .await
-        .map_err(|e| e.to_string())?;
-    let mut reader = Reader::open(store, repo.read_keys().duplicate(), repo.config())
-        .map_err(|e| e.to_string())?;
-    let target = tempfile::tempdir().unwrap();
-    let report = reader
-        .restore(
-            &parse_hex32(&snapshot.id).unwrap(),
-            target.path(),
-            &RestoreOptions::default(),
-            &|_| {},
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    if !report.errors.is_empty() {
-        return Err(format!("{:?}", report.errors));
-    }
-    let restored = target.path().join(
-        snapshot
-            .dir
-            .canonicalize()
-            .unwrap()
-            .strip_prefix("/")
-            .unwrap(),
-    );
-    for entry in std::fs::read_dir(&snapshot.dir).unwrap() {
-        let name = entry.unwrap().file_name();
-        let got = std::fs::read(restored.join(&name)).map_err(|e| format!("{name:?}: {e}"))?;
-        if got != std::fs::read(snapshot.dir.join(&name)).unwrap() {
-            return Err(format!("{name:?} differs"));
-        }
-    }
-    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -390,5 +204,66 @@ async fn adv_upgrade_signed_forged_shard_server_gc_keeps_every_snapshot() {
              shard was not signed by the upgrade: {e}"
         ),
     }
+    ts.stop().await;
+}
+
+/// A snapshot object the collector cannot open, named by its own hash so the
+/// name is not what gives it away.
+fn plant_unopenable(root: &Path) -> String {
+    let bytes = noise(99, 600);
+    let key = format!("snapshots/{}", hex32(&config_hash(&bytes)));
+    std::fs::write(root.join(&key), bytes).unwrap();
+    key
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adv_gc_quarantines_unopenable_snapshot_until_excluded() {
+    let backend: Backend = backends().remove(0);
+    let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+    let api = ts.api().await;
+    let (repo, store, root) = fresh_repo(&ts).await;
+    let kept = kept_and_forgotten(&ts, &store, &root).await;
+    let planted = plant_unopenable(&root);
+    enable(&ts, &api, &repo).await;
+    assert_stops_then_finishes(&ts, &api, &repo, &store, &kept, &planted).await;
+    ts.stop().await;
+}
+
+/// A snapshot sealed under the repository's own keys whose root tree is in no
+/// index shard.
+async fn plant_missing_tree(store: &LocalFsStore, root: &Path) -> String {
+    let repo = Repository::open(store, PASSWORD).await.unwrap();
+    let snapshot = pb::Snapshot {
+        time: Some(pb::Timestamp {
+            seconds: 1_700_000_000,
+            nanos: 0,
+        }),
+        hostname: b"host-x".to_vec(),
+        paths: vec![b"/".to_vec()],
+        root_tree: noise(77, 32),
+        ..Default::default()
+    };
+    let (id, bytes) = seal_snapshot(
+        &snapshot,
+        repo.read_keys().hpke_public_key(),
+        repo.read_keys().repo_id(),
+        &mut Entropy::os(),
+    )
+    .unwrap();
+    let key = snapshot_object_key(&id);
+    std::fs::write(root.join(&key), bytes).unwrap();
+    key
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adv_gc_quarantines_snapshot_with_missing_tree() {
+    let backend: Backend = backends().remove(0);
+    let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+    let api = ts.api().await;
+    let (repo, store, root) = fresh_repo(&ts).await;
+    let kept = kept_and_forgotten(&ts, &store, &root).await;
+    let planted = plant_missing_tree(&store, &root).await;
+    enable(&ts, &api, &repo).await;
+    assert_stops_then_finishes(&ts, &api, &repo, &store, &kept, &planted).await;
     ts.stop().await;
 }

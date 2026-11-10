@@ -177,13 +177,15 @@ fn smtp_port() -> u16 {
     587
 }
 
-const ALL_ALERT_TYPES: [AlertType; 6] = [
+const ALL_ALERT_TYPES: [AlertType; 8] = [
     AlertType::BackupFailed,
     AlertType::NoRecentBackup,
     AlertType::AgentOffline,
     AlertType::CheckFailed,
     AlertType::CertificateExpiring,
     AlertType::AgentUpdateFailed,
+    AlertType::SnapshotQuarantined,
+    AlertType::RepositoryUnavailable,
 ];
 
 fn nodename() -> String {
@@ -1006,6 +1008,8 @@ mod tests {
         assert_eq!((hook.name.as_str(), hook.enabled), ("ops-hook", true));
         assert_eq!(hook.alerts, ALL_ALERT_TYPES);
         assert_eq!(tg.alerts, ALL_ALERT_TYPES);
+        assert!(hook.alerts.contains(&AlertType::SnapshotQuarantined));
+        assert!(hook.alerts.contains(&AlertType::RepositoryUnavailable));
         let ChannelSpec::Webhook { url, secret } = &hook.kind else {
             panic!("webhook expected");
         };

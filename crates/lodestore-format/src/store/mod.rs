@@ -116,6 +116,37 @@ pub async fn put_named<S: BlobStore>(store: &S, key: &str, bytes: Vec<u8>) -> Re
     }
 }
 
+/// Reads an object of at most `max` bytes with one ranged read. With the size
+/// the listing showed it reads exactly that many bytes, so an object swapped
+/// for a larger one after the listing is never downloaded beyond it; without
+/// one it asks for a byte more than `max` to recognise an excess. The body is
+/// checked again, for a store that returned more than was asked.
+pub async fn read_bounded<S: BlobStore>(
+    store: &S,
+    key: &str,
+    listed: Option<u64>,
+    max: u64,
+    what: &str,
+) -> Result<Bytes> {
+    match listed {
+        Some(size) => {
+            crate::error::within_size(key, size, max, what)?;
+            // An empty range is answered without asking the store; one byte
+            // makes a vanished object a `NotFound`.
+            let bytes = store.get_range(key, 0..size.max(1)).await?;
+            if bytes.len() as u64 > size {
+                return Err(Error::corrupt(key, "longer than the listing"));
+            }
+            Ok(bytes)
+        }
+        None => {
+            let bytes = store.get_range(key, 0..max.saturating_add(1)).await?;
+            crate::error::within_size(key, bytes.len() as u64, max, what)?;
+            Ok(bytes)
+        }
+    }
+}
+
 impl<T: BlobStore> BlobStore for &T {
     fn put_if_absent(
         &self,
@@ -277,4 +308,124 @@ pub fn open_url(url: &str) -> Result<Store> {
     }
     let root = std::path::absolute(url)?;
     Ok(Store::Local(LocalFsStore::new(root)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Generous(Bytes);
+
+    impl BlobStore for Generous {
+        async fn put_if_absent(&self, _: &str, _: Bytes) -> std::result::Result<(), BlobError> {
+            Ok(())
+        }
+        async fn get(&self, _: &str) -> std::result::Result<Bytes, BlobError> {
+            Ok(self.0.clone())
+        }
+        async fn get_range(&self, _: &str, _: Range<u64>) -> std::result::Result<Bytes, BlobError> {
+            Ok(self.0.clone())
+        }
+        async fn list(&self, _: &str) -> std::result::Result<Vec<ListEntry>, BlobError> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// Answers an empty range without asking the store, as `get_range_op` does.
+    struct EmptyRangeUnasked(LocalFsStore);
+
+    impl BlobStore for EmptyRangeUnasked {
+        async fn put_if_absent(&self, k: &str, d: Bytes) -> std::result::Result<(), BlobError> {
+            self.0.put_if_absent(k, d).await
+        }
+        async fn get(&self, k: &str) -> std::result::Result<Bytes, BlobError> {
+            self.0.get(k).await
+        }
+        async fn get_range(&self, k: &str, r: Range<u64>) -> std::result::Result<Bytes, BlobError> {
+            if r.is_empty() {
+                return Ok(Bytes::new());
+            }
+            self.0.get_range(k, r).await
+        }
+        async fn list(&self, p: &str) -> std::result::Result<Vec<ListEntry>, BlobError> {
+            self.0.list(p).await
+        }
+    }
+
+    async fn local(body: &[u8]) -> (tempfile::TempDir, LocalFsStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalFsStore::new(dir.path().to_path_buf());
+        store
+            .put_if_absent("obj", Bytes::copy_from_slice(body))
+            .await
+            .unwrap();
+        (dir, store)
+    }
+
+    #[tokio::test]
+    async fn read_bounded_accepts_a_body_of_exactly_max() {
+        let (_d, store) = local(&[7; 16]).await;
+        assert_eq!(
+            read_bounded(&store, "obj", None, 16, "x")
+                .await
+                .unwrap()
+                .len(),
+            16
+        );
+        assert_eq!(
+            read_bounded(&store, "obj", Some(16), 16, "x")
+                .await
+                .unwrap()
+                .len(),
+            16
+        );
+    }
+
+    #[tokio::test]
+    async fn read_bounded_refuses_one_byte_over_without_a_listing() {
+        let (_d, store) = local(&[7; 17]).await;
+        assert!(matches!(
+            read_bounded(&store, "obj", None, 16, "x").await,
+            Err(Error::Corrupt { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn read_bounded_refuses_a_listing_over_max_and_a_longer_body() {
+        let (_d, store) = local(&[7; 8]).await;
+        assert!(matches!(
+            read_bounded(&store, "obj", Some(17), 16, "x").await,
+            Err(Error::Corrupt { .. })
+        ));
+        let greedy = Generous(Bytes::from_static(&[1; 32]));
+        assert!(matches!(
+            read_bounded(&greedy, "obj", Some(8), 16, "x").await,
+            Err(Error::Corrupt { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn read_bounded_reports_a_missing_object() {
+        let (_d, store) = local(&[]).await;
+        assert!(matches!(
+            read_bounded(&store, "absent", None, 16, "x").await,
+            Err(Error::Store(BlobError::NotFound))
+        ));
+        let store = EmptyRangeUnasked(store);
+        assert!(matches!(
+            read_bounded(&store, "absent", Some(0), 16, "x").await,
+            Err(Error::Store(BlobError::NotFound))
+        ));
+        assert!(
+            read_bounded(&store, "obj", Some(0), 16, "x")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let greedy = Generous(Bytes::from_static(&[1]));
+        assert!(matches!(
+            read_bounded(&greedy, "obj", Some(0), 16, "x").await,
+            Err(Error::Corrupt { .. })
+        ));
+    }
 }

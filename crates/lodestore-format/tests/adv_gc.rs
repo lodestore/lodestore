@@ -3,6 +3,8 @@
 
 mod adv_support;
 mod gc_support;
+#[path = "adv_support/planted.rs"]
+mod planted;
 
 use std::collections::BTreeSet;
 
@@ -10,9 +12,14 @@ use adv_support::{
     attacker_keys, forge_offsets, open_all_shards, plant_shard_where, put_junk_pack,
 };
 use gc_support::{Cycle, Fx, pack_ids};
-use lodestore_format::crypto::{BLOB_TYPE_DATA, BlobId};
+use lodestore_format::crypto::{BLOB_TYPE_DATA, BlobId, Entropy};
+use lodestore_format::gc::survey;
+use lodestore_format::index::rebuild_index;
+use lodestore_format::locks::{new_lock_id, read_writer_locks, writer_marker_key};
 use lodestore_format::pack::{ENTRY_LEN, PACK_PREFIX_LEN, pack_object_key};
 use lodestore_format::pb;
+use lodestore_format::store::ListEntry;
+use planted::PlantedListing;
 
 async fn full_cycle(fx: &Fx, repack_below_pct: u8) {
     let mut cycle = Cycle::new(fx);
@@ -262,4 +269,69 @@ async fn adv_malformed_shard_does_not_stop_gc() {
     drop(survey);
     full_cycle(&fx, 100).await;
     fx.assert_all_restore().await;
+}
+
+#[tokio::test]
+async fn adv_rebuild_skips_planted_oversized_pack() {
+    let fx = Fx::new().await;
+    fx.backup("host-a", &[("a", 1, 200 << 10)]).await;
+    fx.backup("host-b", &[("b", 2, 200 << 10)]).await;
+
+    let key = pack_object_key(&Entropy::os().bytes::<32>());
+    let planted = PlantedListing::new(
+        &fx.store,
+        vec![ListEntry {
+            key: key.clone(),
+            size: 5 << 30,
+            modified_ms: None,
+        }],
+    );
+
+    let report = rebuild_index(&planted, fx.repo.read_keys(), &|_, _| {})
+        .await
+        .unwrap();
+    assert!(report.packs_skipped.iter().any(|(k, _)| *k == key));
+
+    let after = survey(
+        &planted,
+        fx.repo.read_keys(),
+        fx.repo.config(),
+        &gc_support::plan_opts(0),
+        &|_| {},
+    )
+    .await
+    .unwrap();
+    assert!(after.plan.unindexed.iter().any(|(k, _)| *k == key));
+    assert!(
+        after
+            .plan
+            .delete
+            .iter()
+            .all(|p| pack_object_key(&p.pack_id) != key)
+    );
+    assert_eq!(planted.reads_of(&key), 0);
+}
+
+#[tokio::test]
+async fn adv_planted_oversized_writer_marker_is_not_read_and_holds_gc() {
+    let fx = Fx::new().await;
+    fx.backup("host-a", &[("a", 1, 200 << 10)]).await;
+    let key = writer_marker_key(&new_lock_id(&mut Entropy::os()));
+    let planted = PlantedListing::new(
+        &fx.store,
+        vec![ListEntry {
+            key: key.clone(),
+            size: 5 << 30,
+            modified_ms: None,
+        }],
+    );
+    let keys = attacker_keys(&fx.repo);
+
+    let locks = read_writer_locks(&planted, &keys.k_idx, &keys.repo_id)
+        .await
+        .unwrap();
+
+    let lock = locks.iter().find(|l| l.key == key).expect("listed lock");
+    assert!(lock.marker.is_none());
+    assert_eq!(planted.reads_of(&key), 0);
 }

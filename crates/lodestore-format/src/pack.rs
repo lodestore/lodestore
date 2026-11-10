@@ -11,7 +11,7 @@ use crate::crypto::{
     Key32, RepoId, SEALED_KEY_LEN, open_pack_header, open_pack_key, seal_frame, seal_pack_header,
     seal_pack_key,
 };
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, within_size};
 use crate::index::hex32;
 use crate::keys::ReadKeys;
 use crate::pb;
@@ -24,7 +24,7 @@ const _: () = assert!(PACK_PREFIX_LEN == 6 + 1 + HPKE_ENC_LEN + SEALED_KEY_LEN);
 
 pub const ENTRY_LEN: usize = 45;
 const TRAILER_LEN: usize = 4 + 6;
-const HEADER_OVERHEAD: usize = crate::crypto::NONCE_LEN + crate::crypto::TAG_LEN;
+pub(crate) const HEADER_OVERHEAD: usize = crate::crypto::NONCE_LEN + crate::crypto::TAG_LEN;
 
 pub const PACK_FIXED_LEN: usize = PACK_PREFIX_LEN + HEADER_OVERHEAD + TRAILER_LEN;
 
@@ -221,6 +221,7 @@ pub async fn read_pack_header<S: BlobStore>(
     size: u64,
     keys: &ReadKeys,
 ) -> Result<PackHeader> {
+    within_size(key, size, PACK_MAX_SIZE as u64, "pack")?;
     let min = (PACK_PREFIX_LEN + HEADER_OVERHEAD + TRAILER_LEN) as u64;
     if size < min {
         return Err(Error::corrupt("pack", "too short"));

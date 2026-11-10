@@ -14,6 +14,7 @@ use lodestore_format::check::sample::{
 };
 use lodestore_format::check::structure::{StructureReport, check_structure};
 use lodestore_format::check::{FindingKind, MAX_FINDINGS, NoteKind};
+use lodestore_format::config::MAX_CONFIG_SIZE;
 use lodestore_format::crypto::{BLOB_TYPE_DATA, BlobId, Entropy};
 use lodestore_format::index::parse_hex32;
 use lodestore_format::locks::{
@@ -46,6 +47,17 @@ async fn structure(fx: &Fx) -> StructureReport {
 
 fn kinds(report: &StructureReport) -> Vec<FindingKind> {
     report.findings.iter().map(|f| f.kind).collect()
+}
+
+/// The pack is reported missing; a pack of trees also fails the snapshots
+/// that read from it.
+fn assert_missing_pack(report: &StructureReport, pack: &str) {
+    assert_eq!(report.findings[0].kind, FindingKind::MissingPack);
+    assert_eq!(report.findings[0].key, pack);
+    for f in &report.findings[1..] {
+        assert_eq!(f.kind, FindingKind::UnreadableTree);
+        assert!(f.detail.contains("is missing from the bucket"), "{f:?}");
+    }
 }
 
 fn folder_bytes(dir: &Path) -> u64 {
@@ -87,8 +99,7 @@ async fn check_structure_missing_pack_found() {
     let pack = fx.packs().await.into_keys().next().unwrap();
     fs::remove_file(repo_dir(&fx).join(&pack)).unwrap();
     let report = structure(&fx).await;
-    assert_eq!(kinds(&report), [FindingKind::MissingPack]);
-    assert_eq!(report.findings[0].key, pack);
+    assert_missing_pack(&report, &pack);
     assert_eq!(report.missing_packs, 1);
 }
 
@@ -244,8 +255,7 @@ async fn check_structure_stale_gc_manifest_does_not_excuse_missing_pack() {
         .unwrap();
     fs::remove_file(repo_dir(&fx).join(&pack)).unwrap();
     let report = structure(&fx).await;
-    assert_eq!(kinds(&report), [FindingKind::MissingPack]);
-    assert_eq!(report.findings[0].key, pack);
+    assert_missing_pack(&report, &pack);
     assert!(
         report
             .notes
@@ -488,6 +498,11 @@ impl BlobStore for Refusing {
     }
 
     async fn get_range(&self, key: &str, range: std::ops::Range<u64>) -> Result<Bytes, BlobError> {
+        if key == self.key {
+            return Err(BlobError::Denied {
+                message: "no".into(),
+            });
+        }
         self.inner.get_range(key, range).await
     }
 
@@ -891,4 +906,28 @@ async fn check_sample_oversized_file_counts_as_skipped() {
     let run = sample(&fx, &[id], 5, 100 << 10, &|| false).await;
     assert!(run.report.skipped >= 1, "{:?}", run.report);
     assert!(run.report.stopped_at_limit);
+}
+
+#[tokio::test]
+async fn check_structure_oversized_config_is_a_finding() {
+    let fx = Fx::new().await;
+    fx.backup("a", A).await;
+    fs::OpenOptions::new()
+        .write(true)
+        .open(repo_dir(&fx).join("config"))
+        .unwrap()
+        .set_len(MAX_CONFIG_SIZE + 1)
+        .unwrap();
+
+    let report = structure(&fx).await;
+
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|f| f.key == "config" && f.kind == FindingKind::UnreadableConfig),
+        "{:?}",
+        report.findings
+    );
+    assert_eq!(report.snapshots_checked, 1);
 }

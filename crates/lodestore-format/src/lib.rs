@@ -1,4 +1,5 @@
 //! Lodestore repository format v1.
+#![forbid(unsafe_code)]
 
 pub mod attest;
 pub mod check;

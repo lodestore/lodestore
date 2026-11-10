@@ -247,6 +247,33 @@ async fn enroll_token_single_use() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn enroll_unavailable_repository_is_a_precondition() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        sqlx::query("UPDATE repositories SET open_error = 'differs from the configuration recorded' WHERE id = $1")
+            .bind(&repo)
+            .execute(&ts.state().db.pool)
+            .await
+            .unwrap();
+
+        let token = api.join_token(&repo, json!([])).await;
+        let status = raw_enroll(&ts, &token, csr_with(CertificateParams::default()))
+            .await
+            .expect_err("an unavailable repository hands out no storage key");
+        assert_eq!(
+            status.code(),
+            tonic::Code::FailedPrecondition,
+            "[{}]",
+            backend.name()
+        );
+        assert_eq!(count(&ts, "SELECT COUNT(*) AS n FROM agents").await, 0);
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn enroll_forces_cert_fields() {
     for backend in backends() {
         let ts = TestServer::start(&backend).await;

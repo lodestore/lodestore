@@ -122,7 +122,10 @@ async fn init(
         // The key is the only copy: keep it when `config` may be ours, as
         // after a PUT whose answer was lost.
         let config_unknown = !matches!(err, Error::AlreadyInitialized)
-            && !matches!(store.get("config").await, Err(BlobError::NotFound));
+            && !matches!(
+                store.get_range("config", 0..1).await,
+                Err(BlobError::NotFound)
+            );
         if let Some(path) = recovery_key_file.filter(|_| !config_unknown) {
             let _ = std::fs::remove_file(path);
         }

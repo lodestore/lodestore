@@ -10,7 +10,8 @@ use crate::attest::put_attestation;
 use crate::crypto::{BlobId, Entropy};
 use crate::error::{Error, Result};
 use crate::index::{
-    REBUILD_SHARD_PACKS, hex32, index_object_key, listed_packs, seal_shard, seal_shard_superseding,
+    SHARD_TARGET_SIZE, hex32, index_object_key, listed_packs, seal_shard, seal_shard_superseding,
+    split_records,
 };
 use crate::keys::ReadKeys;
 use crate::pb;
@@ -66,7 +67,8 @@ fn names_candidate(shard: &pb::IndexShard, candidates: &HashSet<BlobId>) -> bool
 /// Picks the shards to rewrite: every shard that names a candidate pack and
 /// every shard of fewer than [`SMALL_SHARD_PACKS`] packs. Large shards that
 /// name no candidate stay as they are. A single small clean shard is left
-/// alone too: rewriting it would only change its name. Shards without packs,
+/// alone too: rewriting it would only change its name. A shard larger than
+/// `MAX_SHARD_SIZE` is always rewritten, into shards under the limit. Shards without packs,
 /// such as the one that committed the last compaction, are always dropped.
 pub fn compact_plan(shards: &ShardSet, candidates: &HashSet<BlobId>) -> CompactPlan {
     let mut plan = CompactPlan::default();
@@ -80,10 +82,11 @@ pub fn compact_plan(shards: &ShardSet, candidates: &HashSet<BlobId>) -> CompactP
             continue;
         }
         let has_candidate = names_candidate(shard, candidates);
-        if !has_candidate && shard.packs.len() >= SMALL_SHARD_PACKS {
+        let oversized = shards.oversized.contains(id);
+        if !has_candidate && !oversized && shard.packs.len() >= SMALL_SHARD_PACKS {
             continue;
         }
-        dirty |= has_candidate;
+        dirty |= has_candidate || oversized;
         plan.rewrite.push(*id);
         let level = if shards.verified.contains(id) {
             0
@@ -144,8 +147,8 @@ pub async fn write_compacted<S: BlobStore>(
         (&plan.attested_records, &mut out.attested),
         (&plan.other_records, &mut out.other),
     ] {
-        for chunk in records.chunks(REBUILD_SHARD_PACKS) {
-            let (id, bytes) = seal_shard(keys.k_idx(), keys.repo_id(), chunk.to_vec(), entropy)?;
+        for group in split_records(records.clone(), SHARD_TARGET_SIZE) {
+            let (id, bytes) = seal_shard(keys.k_idx(), keys.repo_id(), group, entropy)?;
             put_named(store, &index_object_key(&id), bytes).await?;
             ids.push(id);
         }

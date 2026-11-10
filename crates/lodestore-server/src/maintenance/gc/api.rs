@@ -4,6 +4,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use std::time::Duration;
 
+use lodestore_format::index::parse_hex32;
 use lodestore_policy::{Schedule, format_duration, format_size, parse_duration};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
@@ -12,7 +13,7 @@ use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 use super::cycle::{event, take_down_marker, unlock_writers};
-use super::db::{self, CycleRow};
+use super::db::{self, CycleRow, Excluded};
 use super::preflight::{Preflight, PreflightProblem, run_preflight};
 use super::{
     GcOrigin, GcSettings, GcState, pause_floor, run_dry_run, start_cycle, start_real_cycle,
@@ -154,6 +155,28 @@ pub struct GcFullReport {
     pub ignored: Vec<GcObjectNote>,
     pub unindexed: Vec<GcObjectNote>,
     pub locked: Vec<GcLockedItem>,
+    /// Index shards the cleanup could not use and left alone.
+    #[serde(default)]
+    pub skipped_shards: Vec<GcObjectNote>,
+    /// Snapshots the cleanup could not read.
+    #[serde(default)]
+    pub quarantined: Vec<GcObjectNote>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct GcQuarantineDto {
+    /// The snapshot id, hex.
+    pub snapshot_id: String,
+    /// The snapshot object in the repository.
+    pub key: String,
+    /// Why the cleanup cannot read it.
+    pub reason: String,
+    /// False for a snapshot a backup job points at; it cannot be excluded.
+    pub confirmable: bool,
+    pub detected_at: i64,
+    /// When an administrator excluded it from cleanup.
+    pub confirmed_at: Option<i64>,
+    pub confirmed_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -189,6 +212,8 @@ pub struct GcStatus {
     pub last_failure: Option<GcFailureDto>,
     pub events: Vec<GcEventDto>,
     pub events_total: u64,
+    /// Snapshots the cleanup cannot read; it stops until each confirmable one is excluded.
+    pub quarantine: Vec<GcQuarantineDto>,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -363,6 +388,7 @@ pub(crate) async fn build_status(state: &AppState, repo: &RepoFull) -> Result<Gc
             .and_then(GcFailureDto::of),
         events,
         events_total,
+        quarantine: db::list_quarantine(state, &repo.id).await?,
     })
 }
 
@@ -518,6 +544,53 @@ pub async fn unlock(
     Ok(Json(GcUnlocked {
         unlocked: unlocked as u64,
     }))
+}
+
+#[utoipa::path(
+    post,
+    tag = "Cleanup",
+    summary = "Exclude a quarantined snapshot from cleanup",
+    description = "The cleanup stops while a snapshot it cannot read is in quarantine. Excluding \
+        it lets the next cleanup go on and may delete the data only that snapshot used. The \
+        snapshot object stays in storage; delete it separately.",
+    security(("session" = [], "csrf" = []), ("bearer" = ["snapshots:delete"])),
+    path = "/api/v1/repositories/{id}/gc/quarantine/{snapshot_id}/exclude",
+    params(
+        ("id" = String, Path, description = "Repository id"),
+        ("snapshot_id" = String, Path, description = "Snapshot id, hex"),
+    ),
+    responses(
+        (status = 200, description = "The snapshot is excluded", body = GcStatus),
+        (status = 404, description = "Unknown repository, or no such snapshot in quarantine", body = ErrorBody),
+        (status = 409, description = "The snapshot belongs to a backup job, or is already excluded", body = ErrorBody),
+    )
+)]
+pub async fn exclude(
+    State(state): State<AppState>,
+    auth: Scoped<SnapshotsDelete>,
+    Path((id, snapshot_id)): Path<(String, String)>,
+) -> Result<Json<GcStatus>, ApiError> {
+    let repo = repository(&state, &id).await?;
+    let missing = || ApiError::NotFound("There is no such snapshot in quarantine.".into());
+    let snapshot = parse_hex32(&snapshot_id).ok_or_else(missing)?;
+    let actor = auth.actor();
+    match db::exclude_from_gc(&state, &id, &snapshot, &actor, now_ms()).await? {
+        Excluded::Done => {}
+        Excluded::Missing => return Err(missing()),
+        Excluded::Bound => {
+            return Err(ApiError::Conflict(
+                "This snapshot belongs to a backup job; repair the repository or delete the snapshot."
+                    .into(),
+            ));
+        }
+        Excluded::Already => {
+            return Err(ApiError::Conflict(
+                "This snapshot is already excluded.".into(),
+            ));
+        }
+    }
+    tracing::info!(repository = %id, snapshot = %snapshot_id, %actor, "snapshot excluded from cleanup");
+    Ok(Json(build_status(&state, &repo).await?))
 }
 
 #[utoipa::path(
@@ -722,5 +795,6 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(start_run))
         .routes(routes!(abort))
         .routes(routes!(unlock))
+        .routes(routes!(exclude))
         .routes(routes!(get_report))
 }

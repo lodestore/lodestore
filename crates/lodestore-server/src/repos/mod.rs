@@ -120,6 +120,9 @@ pub struct RepositoryBase {
     pub agent_key_state: String,
     pub checked_at: Option<i64>,
     pub unlocked: Option<bool>,
+    /// Why the server refuses to open the repository, set when its config
+    /// does not match what was recorded.
+    pub unavailable_reason: Option<String>,
     pub cleanup: CleanupSummary,
 }
 
@@ -160,6 +163,7 @@ pub(crate) fn base_of(
         agent_key_state: row.agent_key_state.clone(),
         checked_at: row.checked_at,
         unlocked,
+        unavailable_reason: row.open_error.clone(),
         cleanup,
     }
 }

@@ -19,6 +19,7 @@ use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 use tonic::{Code, Request, Status};
 use x509_parser::extensions::GeneralName;
 
+use crate::catalog::RepositoryUnavailable;
 use crate::config::GrpcConfig;
 use crate::pki::AGENT_URI_PREFIX;
 use crate::state::AppState;
@@ -34,6 +35,13 @@ pub fn status_with(code: Code, message: &str, marker: &'static str) -> Status {
 pub fn internal(error: impl std::fmt::Display) -> Status {
     tracing::error!(%error, "gRPC handler failed");
     Status::internal("internal error")
+}
+
+pub fn internal_or_unavailable(error: anyhow::Error) -> Status {
+    match error.downcast_ref::<RepositoryUnavailable>() {
+        Some(_) => Status::failed_precondition("the repository is unavailable"),
+        None => internal(error),
+    }
 }
 
 pub fn select_version(versions: Option<&Versions>) -> Option<u32> {

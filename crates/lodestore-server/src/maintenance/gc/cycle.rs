@@ -12,14 +12,14 @@ use lodestore_format::attest::{consolidate_attestations, put_attestation, read_a
 use lodestore_format::check::is_data_error;
 use lodestore_format::crypto::{BlobId, Entropy};
 use lodestore_format::gc::compact::{compact_plan, write_compacted};
-use lodestore_format::gc::mark::ShardSet;
+use lodestore_format::gc::mark::{Quarantined, ShardSet};
 use lodestore_format::gc::plan::{MAX_CANDIDATES, PlanOptions};
 use lodestore_format::gc::repack::repack;
 use lodestore_format::gc::sweep::{
     SweepOutcome, confirm_unreferenced, purge_object, sweep_object, sweep_packs, sweep_shards,
 };
-use lodestore_format::gc::verify::verify;
-use lodestore_format::gc::{SurveyProgress, candidates, survey};
+use lodestore_format::gc::verify::verify_with;
+use lodestore_format::gc::{SurveyProgress, candidates, survey_with};
 use lodestore_format::index::{hex32, index_object_key, parse_hex32, rebuild_index};
 use lodestore_format::locks::{
     GcLock, LOCKS_PREFIX, WriterLock, close_writer_marker, gc_manifest_key, lock_id_hex,
@@ -37,6 +37,7 @@ use super::preflight::{old_agents, own_gc_ids};
 use super::{GcState, StoredProgress, backups_end, bucket_retention, build_report, held_until};
 use crate::catalog::{OpenRepository, open_repository};
 use crate::db::now_ms;
+use crate::grpc::registry::{CAP_GC, CAP_SHARD_LIMIT};
 use crate::jobs::ACTIVE_STATES;
 use crate::jobs::restore::RestoreRecord;
 use crate::maintenance::attest::verify::SWEEP;
@@ -331,7 +332,7 @@ pub async fn drive(state: AppState, cycle_id: String) {
 /// follow the cleanup protocol has joined the repository since it started:
 /// such an agent neither reads the marker nor keeps to a time limit.
 async fn refuse_old_agents(state: &AppState, repository_id: &str) -> anyhow::Result<()> {
-    let old = old_agents(state, repository_id).await?;
+    let old = old_agents(state, repository_id, CAP_GC).await?;
     if old.is_empty() {
         return Ok(());
     }
@@ -339,6 +340,33 @@ async fn refuse_old_agents(state: &AppState, repository_id: &str) -> anyhow::Res
     bail!(
         "Agents that don't support cleanup joined this repository ({}). Nothing was deleted. \
          Update or revoke them, then run cleanup again.",
+        hosts.join(", ")
+    )
+}
+
+/// Fails the cycle before any pack is deleted when a shard cleanup could not
+/// read may name a candidate and an agent that reads shards without the size
+/// limit is still in the repository: it reads such a shard whole and, once the
+/// marker is gone, deduplicates into the deleted pack.
+async fn refuse_old_shard_readers(
+    state: &AppState,
+    repository_id: &str,
+    candidates: &HashSet<BlobId>,
+    skipped: &[(String, String)],
+) -> anyhow::Result<()> {
+    if candidates.is_empty() || skipped.is_empty() {
+        return Ok(());
+    }
+    let old = old_agents(state, repository_id, CAP_SHARD_LIMIT).await?;
+    if old.is_empty() {
+        return Ok(());
+    }
+    let hosts: Vec<&str> = old.iter().map(|h| h.hostname.as_str()).collect();
+    bail!(
+        "{} index shard(s) could not be read by cleanup (see the skipped shards in the report), \
+         and agents that read shards without the size limit ({}) may still reuse the packs they \
+         name. No pack was deleted. Update or revoke those agents, then run cleanup again.",
+        skipped.len(),
         hosts.join(", ")
     )
 }
@@ -400,6 +428,24 @@ async fn vouch_rebuilt(
     Ok(())
 }
 
+fn quarantine_error(quarantined: &[Quarantined]) -> Option<String> {
+    let first = quarantined.first()?;
+    Some(if let Some(bound) = quarantined.iter().find(|q| q.bound) {
+        format!(
+            "Snapshot {} belongs to a backup job and cannot be read: {}. Nothing was deleted. \
+             Run a full check, then repair the repository or delete the snapshot.",
+            bound.key, bound.reason
+        )
+    } else {
+        format!(
+            "{} snapshot(s) cannot be read and are quarantined (first: {}); nothing was deleted. \
+             Review them under Free up space on the repository page.",
+            quarantined.len(),
+            first.key
+        )
+    })
+}
+
 async fn mark_and_repack(
     state: &AppState,
     cycle: &CycleRow,
@@ -442,25 +488,43 @@ async fn mark_and_repack(
             set(done, total);
         }
     };
+    let policy = db::load_mark_policy(state, &cycle.repository_id, &source).await?;
+    let survey_started = crate::db::now_ms();
     let surveyed = tracked(
         state,
         &cycle.id,
         &seen,
-        survey(
+        survey_with(
             &source.store,
             &source.keys,
             &source.config,
             &opts,
+            &policy,
             &progress,
         ),
     )
     .await?
     .context("surveying the repository")?;
+    let failing = db::failing_ids(&surveyed.quarantined, &surveyed.ignored);
+    db::replace_quarantine(
+        state,
+        &cycle.repository_id,
+        &surveyed.quarantined,
+        &failing,
+        now_ms,
+        survey_started,
+    )
+    .await?;
+    if let Some(error) = quarantine_error(&surveyed.quarantined) {
+        event(state, &cycle.id, "warning", "quarantined", &error).await;
+        bail!(error);
+    }
 
     let started = cycle.started_at.unwrap_or(now_ms);
     let report = build_report(cycle, &surveyed, now_ms, now_ms - started, None);
     let plan = &surveyed.plan;
-    if plan.delete.is_empty() && plan.repack.is_empty() {
+    let oversized = surveyed.shards.oversized.len();
+    if plan.delete.is_empty() && plan.repack.is_empty() && oversized == 0 {
         let older_than = now_ms.saturating_sub(cycle.settings.pause_ms);
         let swept = sweep_deleted(&source.store, older_than).await?;
         let mut report = report;
@@ -479,6 +543,12 @@ async fn mark_and_repack(
         return finished(state, &cycle.id).await;
     }
 
+    if oversized > 0 {
+        let message = format!(
+            "{oversized} index shard(s) written before the size limit are split by this cleanup."
+        );
+        event(state, &cycle.id, "info", "splitting_shards", &message).await;
+    }
     refuse_foreign_marker(state, cycle, &source).await?;
     db::transition(state, &cycle.id, GcState::Marking, GcState::Repacking).await?;
     let mut entropy = Entropy::os();
@@ -510,10 +580,10 @@ async fn mark_and_repack(
         );
         event(state, &cycle.id, "warning", "repack_skipped", &message).await;
     }
-    if let Some(shard) = repacked.shard {
-        record_verified(state, &cycle.repository_id, &[shard])
+    if !repacked.shards.is_empty() {
+        record_verified(state, &cycle.repository_id, &repacked.shards)
             .await
-            .context("recording the repacked shard as verified")?;
+            .context("recording the repacked shards as verified")?;
     }
 
     let marked = candidates(plan, &repacked);
@@ -703,15 +773,17 @@ async fn verifying(state: &AppState, cycle: &CycleRow) -> anyhow::Result<StepOut
         return Ok(StepOutcome::Postponed);
     }
 
+    let policy = db::load_mark_policy(state, &cycle.repository_id, &source).await?;
     let mut verified = tracked(
         state,
         &cycle.id,
         &seen,
-        verify(
+        verify_with(
             &source.store,
             &source.keys,
             &source.config,
             &marked,
+            &policy,
             &record(&seen),
         ),
     )
@@ -721,6 +793,13 @@ async fn verifying(state: &AppState, cycle: &CycleRow) -> anyhow::Result<StepOut
     if current.is_none_or(|c| c.state != GcState::Verifying) {
         return finished(state, &cycle.id).await;
     }
+    refuse_old_shard_readers(
+        state,
+        &cycle.repository_id,
+        &verified.candidates,
+        &verified.shards.skipped,
+    )
+    .await?;
 
     let revoked: HashSet<BlobId> = load_all_distrusted(state, &cycle.repository_id)
         .await
@@ -978,9 +1057,10 @@ async fn sweeping(state: &AppState, cycle: &CycleRow, now_ms: i64) -> anyhow::Re
         swept.merge(out);
         state.readers.invalidate(&cycle.repository_id);
 
-        confirm_unreferenced(store, &source.keys, &doomed)
+        let unchecked = confirm_unreferenced(store, &source.keys, &doomed)
             .await
             .context("checking that no index names a pack that is going")?;
+        refuse_old_shard_readers(state, &cycle.repository_id, &doomed, &unchecked).await?;
         let packs = pack_sizes(store, &doomed).await?;
         let out = sweep_packs(store, &packs).await;
         check(&out)?;

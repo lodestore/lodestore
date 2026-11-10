@@ -59,6 +59,7 @@ export const gcStatus = (over: Partial<GcStatus> = {}): GcStatus => ({
 	last_aborted_at: null,
 	events: [],
 	events_total: 0,
+	quarantine: [],
 	...over,
 });
 
@@ -87,8 +88,8 @@ export function openRepository(initial: GcStatus = gcStatus(), path = "") {
 			HttpResponse.json(current.status),
 		),
 	);
-	renderApp(`/settings/repositories/repo-1${path}`);
-	return current;
+	const { queryClient } = renderApp(`/settings/repositories/repo-1${path}`);
+	return Object.assign(current, { queryClient });
 }
 
 export const card = async () =>

@@ -169,7 +169,53 @@ pub fn evaluate(
             },
         });
     }
+    for q in &inputs.quarantines {
+        out.push(Candidate {
+            facts: AlertFacts {
+                findings: Some(q.count),
+                error: Some(format!("{}: {}", q.first_key, q.first_reason)),
+                ..AlertFacts::default()
+            },
+            ..for_repository(
+                &q.repository_id,
+                &q.repository,
+                AlertType::SnapshotQuarantined,
+                format!("snapshot_quarantined:{}", q.repository_id),
+            )
+        });
+    }
+    for r in &inputs.unavailable {
+        out.push(Candidate {
+            facts: AlertFacts {
+                error: Some(r.error.clone()),
+                ..AlertFacts::default()
+            },
+            ..for_repository(
+                &r.repository_id,
+                &r.repository,
+                AlertType::RepositoryUnavailable,
+                format!("repository_unavailable:{}", r.repository_id),
+            )
+        });
+    }
     out
+}
+
+fn for_repository(id: &str, name: &str, kind: AlertType, key: String) -> Candidate {
+    Candidate {
+        kind,
+        key,
+        severity: Severity::Critical,
+        host_id: None,
+        hostname: None,
+        agent_online: false,
+        repository_id: Some(id.into()),
+        repository_name: Some(name.into()),
+        policy: None,
+        check_level: None,
+        cert: None,
+        facts: AlertFacts::default(),
+    }
 }
 
 fn expiring(not_after_ms: i64, now_ms: i64, thresholds: &Thresholds) -> bool {

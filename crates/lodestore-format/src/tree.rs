@@ -17,6 +17,186 @@ use crate::store::BlobStore;
 /// Directories nested deeper than this make a snapshot unreadable.
 pub const MAX_DEPTH: usize = 4096;
 
+/// The most directory entries one walk of a snapshot may visit; a tree that
+/// shares one directory under many parents is counted at every visit.
+pub const MAX_WALK_NODES: u64 = 1 << 30;
+
+/// The most decoded directory bytes one walk of a snapshot may visit, counted
+/// like [`MAX_WALK_NODES`].
+pub const MAX_WALK_TREE_BYTES: u64 = 512 << 30;
+
+/// The most entries one directory may have.
+pub const MAX_DIR_ENTRIES: u64 = 1 << 23;
+
+/// The most entries one operation holds decoded at once, over all the
+/// directories it has open.
+pub const MAX_HELD_ENTRIES: u64 = 1 << 24;
+
+/// The most tree bytes one directory may have on the wire: the sum of the
+/// decoded lengths of the tree blobs it is made of. Writer, reader and check
+/// use the same number.
+pub const MAX_DIR_TREE_BYTES: u64 = 1 << 30;
+
+/// The most tree bytes one operation holds at once, summed over the
+/// directories it has open, counted like [`MAX_DIR_TREE_BYTES`].
+pub const MAX_HELD_TREE_BYTES: u64 = 2 << 30;
+
+/// What is left of the node and byte allowance of one operation on a snapshot.
+#[derive(Debug, Clone, Copy)]
+pub struct TreeBudget {
+    dir: u64,
+    held: u64,
+    dir_bytes: u64,
+    held_bytes: u64,
+    nodes: u64,
+    bytes: u64,
+    nodes_left: u64,
+    bytes_left: u64,
+}
+
+impl Default for TreeBudget {
+    fn default() -> Self {
+        Self::new(MAX_WALK_NODES, MAX_WALK_TREE_BYTES)
+    }
+}
+
+impl TreeBudget {
+    pub fn new(nodes: u64, bytes: u64) -> Self {
+        TreeBudget {
+            dir: MAX_DIR_ENTRIES,
+            held: MAX_HELD_ENTRIES,
+            dir_bytes: MAX_DIR_TREE_BYTES,
+            held_bytes: MAX_HELD_TREE_BYTES,
+            nodes,
+            bytes,
+            nodes_left: nodes,
+            bytes_left: bytes,
+        }
+    }
+
+    /// Replaces the per-directory and held-at-once limits.
+    pub fn with_dir_limits(mut self, dir: u64, held: u64) -> Self {
+        self.dir = dir;
+        self.held = held;
+        self
+    }
+
+    /// Replaces the per-directory and held-at-once limits on tree bytes.
+    pub fn with_dir_byte_limits(mut self, dir_bytes: u64, held_bytes: u64) -> Self {
+        self.dir_bytes = dir_bytes;
+        self.held_bytes = held_bytes;
+        self
+    }
+
+    /// Refuses a directory that would be `n` tree bytes.
+    pub fn check_dir_bytes(&self, n: u64) -> Result<()> {
+        if n > self.dir_bytes {
+            return Err(Error::WalkLimit {
+                what: "bytes in one directory",
+                limit: self.dir_bytes,
+            });
+        }
+        Ok(())
+    }
+
+    /// Refuses an operation that would hold `n` tree bytes at once.
+    pub fn check_held_bytes(&self, n: u64) -> Result<()> {
+        if n > self.held_bytes {
+            return Err(Error::WalkLimit {
+                what: "bytes held at once",
+                limit: self.held_bytes,
+            });
+        }
+        Ok(())
+    }
+
+    /// Refuses a walk that has visited `nodes` entries and `bytes` of
+    /// directory data, with the error [`TreeBudget::charge_nodes`] and
+    /// [`TreeBudget::charge_bytes`] give.
+    pub fn check_walk(&self, nodes: u64, bytes: u64) -> Result<()> {
+        if nodes > self.nodes {
+            return Err(Error::WalkLimit {
+                what: "entries",
+                limit: self.nodes,
+            });
+        }
+        if bytes > self.bytes {
+            return Err(Error::WalkLimit {
+                what: "bytes of directory data",
+                limit: self.bytes,
+            });
+        }
+        Ok(())
+    }
+
+    /// Refuses a directory that would have `n` entries.
+    pub fn check_dir(&self, n: u64) -> Result<()> {
+        if n > self.dir {
+            return Err(Error::WalkLimit {
+                what: "entries in one directory",
+                limit: self.dir,
+            });
+        }
+        Ok(())
+    }
+
+    /// Refuses an operation that would hold `n` entries at once.
+    pub fn check_held(&self, n: u64) -> Result<()> {
+        if n > self.held {
+            return Err(Error::WalkLimit {
+                what: "entries held at once",
+                limit: self.held,
+            });
+        }
+        Ok(())
+    }
+
+    /// Starts a new operation with the full allowance.
+    pub fn reset(&mut self) {
+        self.nodes_left = self.nodes;
+        self.bytes_left = self.bytes;
+    }
+
+    /// Charges `n` bytes; a charge that does not fit spends the rest, so the
+    /// bytes stay spent for an operation that goes on after the error.
+    pub fn charge_bytes(&mut self, n: u64) -> Result<()> {
+        let Some(left) = self.bytes_left.checked_sub(n) else {
+            self.bytes_left = 0;
+            return Err(self.bytes_spent());
+        };
+        self.bytes_left = left;
+        Ok(())
+    }
+
+    /// Charges `n` entries; a charge that does not fit spends the rest.
+    pub fn charge_nodes(&mut self, n: u64) -> Result<()> {
+        let Some(left) = self.nodes_left.checked_sub(n) else {
+            self.nodes_left = 0;
+            return Err(Error::WalkLimit {
+                what: "entries",
+                limit: self.nodes,
+            });
+        };
+        self.nodes_left = left;
+        Ok(())
+    }
+
+    /// Refuses work once the bytes are spent, before anything is read for it.
+    pub fn check_bytes_left(&self) -> Result<()> {
+        if self.bytes_left == 0 {
+            return Err(self.bytes_spent());
+        }
+        Ok(())
+    }
+
+    fn bytes_spent(&self) -> Error {
+        Error::WalkLimit {
+            what: "bytes of directory data",
+            limit: self.bytes,
+        }
+    }
+}
+
 /// Longest node name in bytes; above the `NAME_MAX` of common Linux
 /// filesystems, so snapshots from other systems stay readable.
 pub const MAX_NAME_LEN: usize = 1024;
@@ -70,6 +250,25 @@ fn check_ids(ids: &[Vec<u8>], what: &str) -> Result<()> {
     Ok(())
 }
 
+#[derive(Clone, PartialEq, prost::Message)]
+struct NodeCount {}
+
+/// `Tree` with its nodes left undecoded, for counting them.
+#[derive(Clone, PartialEq, prost::Message)]
+struct TreeCount {
+    #[prost(message, repeated, tag = "1")]
+    nodes: Vec<NodeCount>,
+}
+
+/// The number of nodes in a tree blob, counted before the blob becomes a
+/// `Vec<pb::Node>`, so a blob that would overrun a limit is never decoded.
+/// Fails like [`decode_tree`] on bytes that are not a tree.
+pub(crate) fn count_tree_nodes(bytes: &[u8]) -> Result<u64> {
+    let tree = TreeCount::decode(bytes)
+        .map_err(|e| Error::corrupt("tree", format!("undecodable: {e}")))?;
+    Ok(tree.nodes.len() as u64)
+}
+
 /// Decodes one tree blob and validates it. `previous` is the last name of the
 /// piece before this one in the same directory, so ordering is checked across
 /// the cut as well as inside it.
@@ -119,6 +318,13 @@ pub(crate) enum Step {
 
 struct Level {
     nodes: std::vec::IntoIter<pb::Node>,
+    /// Entries the directory was read with; its buffer holds them all until
+    /// the level is left, whatever has been handed out.
+    len: u64,
+    /// Tree bytes the directory was read with, held until the level is left.
+    /// A directory node kept on the walk's frames, with its `subtrees` list,
+    /// is an entry of the level above and counted through that level.
+    bytes: u64,
     /// Length of the cursor path before this level was entered.
     path_len: usize,
 }
@@ -135,9 +341,11 @@ pub(crate) struct TreeCursor {
 impl TreeCursor {
     /// `nodes` are the entries of the directory at `base` (an absolute path,
     /// empty for the top of the snapshot).
-    pub(crate) fn new(nodes: Vec<pb::Node>, base: Vec<u8>) -> Self {
+    pub(crate) fn new(nodes: Vec<pb::Node>, bytes: u64, base: Vec<u8>) -> Self {
         TreeCursor {
             levels: vec![Level {
+                len: nodes.len() as u64,
+                bytes,
                 nodes: nodes.into_iter(),
                 path_len: 0,
             }],
@@ -176,10 +384,18 @@ impl TreeCursor {
         if self.levels.len() > MAX_DEPTH {
             return Err(Error::corrupt("tree", "directories are nested too deeply"));
         }
-        let nodes = reader.load_tree(&dir.subtrees).await?;
+        let (above_entries, above_bytes) = self.levels.iter().fold((0u64, 0u64), |(e, b), l| {
+            (e.saturating_add(l.len), b.saturating_add(l.bytes))
+        });
+        let (nodes, bytes) = reader
+            .load_tree(&dir.subtrees, above_entries, above_bytes)
+            .await?;
+        let len = nodes.len() as u64;
         let path_len = self.path.len();
         self.path = self.path_of(&dir.name);
         self.levels.push(Level {
+            len,
+            bytes,
             nodes: nodes.into_iter(),
             path_len,
         });
@@ -372,9 +588,9 @@ impl<'s> SelectionWalk<'s> {
         snapshot_id: &BlobId,
         selection: &'s Selection,
     ) -> Result<Self> {
-        let (_, top) = reader.open_root(snapshot_id).await?;
+        let (_, top, bytes) = reader.open_root(snapshot_id).await?;
         Ok(SelectionWalk {
-            walk: SelectedWalk::new(TreeCursor::new(top, Vec::new()), selection),
+            walk: SelectedWalk::new(TreeCursor::new(top, bytes, Vec::new()), selection),
         })
     }
 
@@ -424,10 +640,11 @@ pub(crate) async fn check_node<S: BlobStore>(
 pub(crate) async fn validate_subtree<S: BlobStore>(
     reader: &mut Reader<S>,
     nodes: Vec<pb::Node>,
+    bytes: u64,
     base: Vec<u8>,
     matcher: Option<&PathMatcher>,
 ) -> Result<()> {
-    let mut walk = SelectedWalk::new(TreeCursor::new(nodes, base), matcher);
+    let mut walk = SelectedWalk::new(TreeCursor::new(nodes, bytes, base), matcher);
     let mut groups = HashMap::new();
     while let Some(action) = walk.next(reader).await? {
         let (Action::Enter { node, .. } | Action::Entry(node)) = action else {
@@ -466,6 +683,9 @@ pub(crate) async fn selection_totals<S: BlobStore>(
 
 #[cfg(test)]
 mod tests {
+    use rand_chacha::ChaCha20Rng;
+    use rand_chacha::rand_core::{Rng, SeedableRng};
+
     use super::*;
 
     fn node(name: &[u8]) -> pb::Node {
@@ -544,6 +764,74 @@ mod tests {
             assert!(bytes.len() < 2 * TREE_SPLIT_SIZE);
             let decoded = decode_tree(&bytes, previous.as_deref()).unwrap();
             previous = decoded.last().map(|n| n.name.clone());
+        }
+    }
+
+    fn generated_tree(rng: &mut ChaCha20Rng) -> Vec<pb::Node> {
+        let below = |rng: &mut ChaCha20Rng, n: u32| rng.next_u32() % n;
+        (0..below(rng, 50))
+            .map(|i| {
+                let mut node = node(format!("n{i:03}").as_bytes());
+                match below(rng, 3) {
+                    0 => {
+                        node.content = (0..below(rng, 5)).map(|_| vec![7u8; 32]).collect();
+                    }
+                    1 => {
+                        node.r#type = pb::NodeType::Dir as i32;
+                        node.subtrees = (0..below(rng, 3)).map(|_| vec![9u8; 32]).collect();
+                    }
+                    _ => {
+                        node.r#type = pb::NodeType::Symlink as i32;
+                        node.link_target = b"t".to_vec();
+                    }
+                }
+                node
+            })
+            .collect()
+    }
+
+    #[test]
+    fn count_tree_nodes_agrees_with_decode() {
+        let mut rng = ChaCha20Rng::from_seed([31; 32]);
+        for _ in 0..200 {
+            let bytes = encode_tree(generated_tree(&mut rng));
+            let decoded = decode_tree(&bytes, None).unwrap();
+            assert_eq!(count_tree_nodes(&bytes).unwrap(), decoded.len() as u64);
+        }
+    }
+
+    #[test]
+    fn count_tree_nodes_survives_hostile_bytes() {
+        let mut rng = ChaCha20Rng::from_seed([32; 32]);
+        for _ in 0..2000 {
+            let valid = encode_tree(generated_tree(&mut rng));
+            let mut hostile = valid.clone();
+            match rng.next_u32() % 4 {
+                0 if !hostile.is_empty() => {
+                    let at = rng.next_u64() as usize % hostile.len();
+                    hostile[at] ^= 1 << (rng.next_u32() % 8);
+                }
+                1 if !hostile.is_empty() => {
+                    hostile.truncate(rng.next_u64() as usize % hostile.len());
+                }
+                2 => {
+                    let mut extra = vec![0u8; 1 + rng.next_u32() as usize % 64];
+                    rng.fill_bytes(&mut extra);
+                    hostile.extend(extra);
+                }
+                _ => {
+                    hostile = vec![0u8; rng.next_u32() as usize % 300];
+                    rng.fill_bytes(&mut hostile);
+                }
+            }
+            match count_tree_nodes(&hostile) {
+                Ok(n) => {
+                    if let Ok(nodes) = decode_tree(&hostile, None) {
+                        assert_eq!(n, nodes.len() as u64);
+                    }
+                }
+                Err(e) => assert!(matches!(e, Error::Corrupt { .. }), "{e:?}"),
+            }
         }
     }
 }

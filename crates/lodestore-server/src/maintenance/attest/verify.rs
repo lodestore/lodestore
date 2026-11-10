@@ -10,11 +10,13 @@ use anyhow::Context;
 use lodestore_format::attest::{put_attestation, read_attestations, seal_provenance};
 use lodestore_format::check::is_data_error;
 use lodestore_format::crypto::{BlobId, Entropy};
-use lodestore_format::index::{hex32, index_object_key, open_shard, parse_hex32};
+use lodestore_format::index::{
+    MAX_SHARD_SIZE, fetch_shard_bytes, hex32, index_object_key, open_shard, parse_hex32,
+};
 use lodestore_format::keys::ReadKeys;
 use lodestore_format::pb;
-use lodestore_format::snapshot::{open_snapshot, snapshot_object_key};
-use lodestore_format::store::BlobStore;
+use lodestore_format::snapshot::{MAX_SNAPSHOT_SIZE, open_snapshot, snapshot_object_key};
+use lodestore_format::store::{BlobError, BlobStore, read_bounded};
 use lodestore_format::verify_snapshot::{
     check_snapshot_resolves, snapshot_index_refs, verify_shard,
 };
@@ -254,9 +256,10 @@ async fn verify_job(state: &AppState, job_id: &str, target: &Target) -> anyhow::
     let snapshot: BlobId = parse_hex32(&target.snapshot_id).context("malformed snapshot id")?;
     let (store, keys) = (&source.store, &source.keys);
 
-    let manifest = match store.get(&snapshot_object_key(&snapshot)).await {
+    let key = snapshot_object_key(&snapshot);
+    let manifest = match read_bounded(store, &key, None, MAX_SNAPSHOT_SIZE, "snapshot").await {
         Ok(bytes) => open_snapshot(keys.hpke_private_key(), keys.repo_id(), &snapshot, &bytes),
-        Err(error) => Err(error.into()),
+        Err(error) => Err(error),
     };
     match manifest {
         Ok(manifest) if manifest.agent_id == target.host_id.as_bytes() => {}
@@ -378,7 +381,9 @@ async fn supersedes_nothing<S: BlobStore>(
     keys: &ReadKeys,
     id: &BlobId,
 ) -> lodestore_format::Result<bool> {
-    let bytes = store.get(&index_object_key(id)).await?;
+    let bytes = fetch_shard_bytes(store, &index_object_key(id), None, MAX_SHARD_SIZE)
+        .await?
+        .ok_or(BlobError::NotFound)?;
     Ok(open_shard(keys.k_idx(), keys.repo_id(), id, &bytes)?
         .supersedes
         .is_empty())

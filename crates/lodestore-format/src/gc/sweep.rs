@@ -102,11 +102,14 @@ pub async fn sweep_shards<S: BlobDelete + BlobPurge>(store: &S, shards: &[BlobId
 /// Lists the index again and fails if any shard still in the bucket, even a
 /// superseded one that current readers ignore, names a pack of `candidates`.
 /// Agents that predate `supersedes` read it.
+/// Returns the `(key, reason)` of the shards it could not read. Writers that
+/// predate the shard limit read those whole and may still reuse a candidate,
+/// so the caller decides whether the packs may go.
 pub async fn confirm_unreferenced<S: BlobStore>(
     store: &S,
     keys: &ReadKeys,
     candidates: &HashSet<BlobId>,
-) -> Result<()> {
+) -> Result<Vec<(String, String)>> {
     let shards = load_shards(store, keys).await?;
     for (id, shard) in &shards.shards {
         let named = shard
@@ -120,7 +123,7 @@ pub async fn confirm_unreferenced<S: BlobStore>(
             ));
         }
     }
-    Ok(())
+    Ok(shards.skipped)
 }
 
 /// Deletes packs given with their sizes.

@@ -17,7 +17,7 @@ use crate::crypto::{
 use crate::error::{Error, Result, within_size};
 use crate::fs::now;
 use crate::pb;
-use crate::store::{BlobError, BlobStore, put_named};
+use crate::store::{BlobError, BlobStore, put_named, read_bounded};
 
 pub const LOCKS_PREFIX: &str = "locks/";
 pub const MIN_PAUSE: Duration = Duration::from_hours(24);
@@ -28,6 +28,8 @@ pub const UNMARKED_WRITER_LIMIT: Duration = Duration::from_hours(23);
 const GC_PREFIX: &str = "locks/gc-";
 /// Largest cleanup manifest read from a listing.
 pub const MAX_GC_MANIFEST_SIZE: u64 = 16 << 20;
+/// Largest writer marker a collector reads.
+pub const MAX_WRITER_MARKER_SIZE: u64 = 1 << 20;
 const WRITER_PREFIX: &str = "locks/writer-";
 const DONE_SUFFIX: &str = ".done";
 const VERSION: u32 = 1;
@@ -203,14 +205,22 @@ pub async fn read_gc_locks<S: BlobStore>(
             MAX_GC_MANIFEST_SIZE,
             "cleanup manifest",
         )?;
-        let bytes = match store.get(&entry.key).await {
+        let bytes = match read_bounded(
+            store,
+            &entry.key,
+            Some(entry.size),
+            MAX_GC_MANIFEST_SIZE,
+            "cleanup manifest",
+        )
+        .await
+        {
             Ok(bytes) => bytes,
-            Err(BlobError::NotFound) => continue,
-            Err(BlobError::Denied { .. }) => {
+            Err(Error::Store(BlobError::NotFound)) => continue,
+            Err(Error::Store(BlobError::Denied { .. })) => {
                 out.denied = true;
                 continue;
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(e),
         };
         let manifest = open_gc_manifest(k_idx, repo_id, &entry.key, &bytes)?;
         out.manifests.push(GcLock {
@@ -241,7 +251,8 @@ pub struct WriterLock {
     pub marker: Option<pb::WriterMarker>,
 }
 
-/// Lists the writer markers with their completion state. Unlike
+/// Lists the writer markers with their completion state. A marker larger than
+/// [`MAX_WRITER_MARKER_SIZE`] is not read and counts as open. Unlike
 /// [`read_gc_locks`] a refusal by the store is an error: the caller is the
 /// collector, which must not delete on a partial view.
 pub async fn read_writer_locks<S: BlobStore>(
@@ -268,10 +279,23 @@ pub async fn read_writer_locks<S: BlobStore>(
         else {
             continue;
         };
-        let marker = match store.get(&entry.key).await {
-            Ok(bytes) => open_writer_marker(k_idx, repo_id, &entry.key, &bytes).ok(),
-            Err(BlobError::NotFound) => continue,
-            Err(e) => return Err(e.into()),
+        let marker = if entry.size > MAX_WRITER_MARKER_SIZE {
+            None
+        } else {
+            match read_bounded(
+                store,
+                &entry.key,
+                Some(entry.size),
+                MAX_WRITER_MARKER_SIZE,
+                "writer marker",
+            )
+            .await
+            {
+                Ok(bytes) => open_writer_marker(k_idx, repo_id, &entry.key, &bytes).ok(),
+                Err(Error::Store(BlobError::NotFound)) => continue,
+                Err(Error::Corrupt { .. }) => None,
+                Err(e) => return Err(e),
+            }
         };
         out.push(WriterLock {
             id,

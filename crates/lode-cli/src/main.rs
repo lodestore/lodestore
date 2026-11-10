@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 mod cli;
 mod client;
 mod cmd;
@@ -69,7 +71,7 @@ fn exit_code_for(err: &anyhow::Error) -> u8 {
         match cause.downcast_ref::<Error>() {
             Some(Error::NotInitialized) => return EXIT_REPO_NOT_FOUND,
             Some(Error::AlreadyInitialized) => return EXIT_REPO_EXISTS,
-            Some(Error::WrongSecret) => return EXIT_UNLOCK,
+            Some(Error::WrongSecret | Error::KdfBudget { .. }) => return EXIT_UNLOCK,
             Some(Error::Interrupted) => return EXIT_INTERRUPTED,
             _ => {}
         }

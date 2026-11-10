@@ -9,17 +9,21 @@ use super::plan::PackStat;
 use crate::attest::put_attestation;
 use crate::crypto::{BLOB_TYPE_TREE, BlobId, Entropy, Key32};
 use crate::error::{Error, Result};
-use crate::index::{BlobLocation, hex32, index_object_key, seal_shard};
+use crate::index::{
+    BlobLocation, SHARD_TARGET_SIZE, hex32, index_object_key, seal_shard, split_records,
+};
 use crate::keys::ReadKeys;
-use crate::pack::{PACK_PREFIX_LEN, PACK_TARGET_SIZE, PackBuilder, pack_object_key, parse_prefix};
+use crate::pack::{
+    PACK_MAX_SIZE, PACK_PREFIX_LEN, PACK_TARGET_SIZE, PackBuilder, pack_object_key, parse_prefix,
+};
 use crate::pb;
 use crate::reader::open_chunk;
-use crate::store::{BlobError, BlobStore, put_named};
+use crate::store::{BlobError, BlobStore, put_named, read_bounded};
 
 #[derive(Debug, Clone, Default)]
 pub struct RepackOutcome {
-    /// The shard that describes `new_packs`; `None` when nothing was copied.
-    pub shard: Option<BlobId>,
+    /// The shards that describe `new_packs`; empty when nothing was copied.
+    pub shards: Vec<BlobId>,
     pub new_packs: Vec<BlobId>,
     pub replaced: Vec<BlobId>,
     /// Packs left in place, with the reason: a frame or prefix that does not
@@ -103,10 +107,12 @@ pub async fn repack<S: BlobStore>(
         seal_pack(store, builder, entropy, &mut out, &mut records).await?;
     }
     if !records.is_empty() {
-        let (shard_id, bytes) = seal_shard(keys.k_idx(), keys.repo_id(), records, entropy)?;
-        put_named(store, &index_object_key(&shard_id), bytes).await?;
-        put_attestation(store, keys, &[shard_id], &[], Vec::new(), entropy).await?;
-        out.shard = Some(shard_id);
+        for group in split_records(records, SHARD_TARGET_SIZE) {
+            let (shard_id, bytes) = seal_shard(keys.k_idx(), keys.repo_id(), group, entropy)?;
+            put_named(store, &index_object_key(&shard_id), bytes).await?;
+            out.shards.push(shard_id);
+        }
+        put_attestation(store, keys, &out.shards, &[], Vec::new(), entropy).await?;
     }
     progress(total, total);
     Ok(out)
@@ -120,10 +126,16 @@ async fn fetch_pack<S: BlobStore>(
     keys: &ReadKeys,
     stat: &PackStat,
 ) -> Result<std::result::Result<(Bytes, Key32), String>> {
-    let bytes = match store.get(&pack_object_key(&stat.pack_id)).await {
+    if stat.size > PACK_MAX_SIZE as u64 {
+        return Ok(Err("larger than a pack can be".into()));
+    }
+    let key = pack_object_key(&stat.pack_id);
+    let bytes = match read_bounded(store, &key, Some(stat.size), PACK_MAX_SIZE as u64, "pack").await
+    {
         Ok(bytes) => bytes,
-        Err(BlobError::NotFound) => return Ok(Err("missing from the store".into())),
-        Err(e) => return Err(e.into()),
+        Err(Error::Store(BlobError::NotFound)) => return Ok(Err("missing from the store".into())),
+        Err(e @ Error::Corrupt { .. }) => return Ok(Err(e.to_string())),
+        Err(e) => return Err(e),
     };
     if bytes.len() as u64 != stat.size {
         return Ok(Err("size differs from the listing".into()));

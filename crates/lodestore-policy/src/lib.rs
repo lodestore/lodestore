@@ -1,5 +1,6 @@
 //! The `BackupPolicy` object: one strict YAML document shared by the API,
 //! the UI and `lode apply`.
+#![forbid(unsafe_code)]
 
 use std::collections::BTreeMap;
 use std::time::Duration;

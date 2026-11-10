@@ -8,6 +8,11 @@ pub enum Error {
     Crypto,
     #[error("wrong password or recovery key")]
     WrongSecret,
+    #[error(
+        "wrong password or recovery key, or the key slot it opens was not tried: {untried} more key slots are beyond what one opening may try ({slots} slots, {budget} of key-derivation work); if the secret is right, remove the key slots that are not needed",
+        slots = crate::keys::MAX_KEY_SLOTS
+    )]
+    KdfBudget { untried: usize, budget: u64 },
     #[error("corrupt {object}: {reason}")]
     Corrupt { object: String, reason: String },
     #[error(
@@ -28,6 +33,8 @@ pub enum Error {
     Interrupted,
     #[error("the backup ran longer than its time limit of {limit_secs}s; no snapshot was written")]
     DeadlineExceeded { limit_secs: u64 },
+    #[error("the snapshot's directory tree has more than {limit} {what}; the walk was stopped")]
+    WalkLimit { what: &'static str, limit: u64 },
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }

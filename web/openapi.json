@@ -859,6 +859,16 @@
               }
             }
           },
+          "400": {
+            "description": "The directory tree is larger than one walk may visit (tree_too_large)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "404": {
             "description": "Unknown snapshot, gone from storage, or a selected path is missing",
             "content": {
@@ -881,6 +891,16 @@
           },
           "502": {
             "description": "The repository storage is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The repository does not match what this server recorded (repository_unavailable)",
             "content": {
               "application/json": {
                 "schema": {
@@ -979,6 +999,16 @@
           },
           "502": {
             "description": "The repository storage is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The repository does not match what this server recorded (repository_unavailable)",
             "content": {
               "application/json": {
                 "schema": {
@@ -3990,6 +4020,16 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "The repository does not match what this server recorded (repository_unavailable)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -4754,6 +4794,79 @@
           {
             "bearer": [
               "jobs:run"
+            ]
+          }
+        ]
+      }
+    },
+    "/api/v1/repositories/{id}/gc/quarantine/{snapshot_id}/exclude": {
+      "post": {
+        "tags": [
+          "Cleanup"
+        ],
+        "summary": "Exclude a quarantined snapshot from cleanup",
+        "description": "The cleanup stops while a snapshot it cannot read is in quarantine. Excluding it lets the next cleanup go on and may delete the data only that snapshot used. The snapshot object stays in storage; delete it separately.",
+        "operationId": "exclude",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Repository id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "snapshot_id",
+            "in": "path",
+            "description": "Snapshot id, hex",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The snapshot is excluded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GcStatus"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown repository, or no such snapshot in quarantine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The snapshot belongs to a backup job, or is already excluded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          },
+          {
+            "bearer": [
+              "snapshots:delete"
             ]
           }
         ]
@@ -5588,6 +5701,16 @@
               }
             }
           },
+          "400": {
+            "description": "The directory tree is larger than one walk may visit (tree_too_large)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "404": {
             "description": "Unknown snapshot, gone from storage, or no such directory",
             "content": {
@@ -5610,6 +5733,16 @@
           },
           "502": {
             "description": "The repository storage is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The repository does not match what this server recorded (repository_unavailable)",
             "content": {
               "application/json": {
                 "schema": {
@@ -5679,6 +5812,16 @@
               }
             }
           },
+          "400": {
+            "description": "The directory tree is larger than one walk may visit (tree_too_large)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "404": {
             "description": "Unknown snapshot, gone from storage, or no such directory",
             "content": {
@@ -5701,6 +5844,16 @@
           },
           "502": {
             "description": "The repository storage is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The repository does not match what this server recorded (repository_unavailable)",
             "content": {
               "application/json": {
                 "schema": {
@@ -5761,6 +5914,16 @@
               }
             }
           },
+          "400": {
+            "description": "The directory tree is larger than one walk may visit (tree_too_large)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "404": {
             "description": "Unknown snapshot, gone from storage, or a selected path is missing",
             "content": {
@@ -5783,6 +5946,16 @@
           },
           "502": {
             "description": "The repository storage is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The repository does not match what this server recorded (repository_unavailable)",
             "content": {
               "application/json": {
                 "schema": {
@@ -6460,7 +6633,9 @@
           "agent_offline",
           "check_failed",
           "certificate_expiring",
-          "agent_update_failed"
+          "agent_update_failed",
+          "snapshot_quarantined",
+          "repository_unavailable"
         ]
       },
       "Alerts": {
@@ -6954,7 +7129,7 @@
             "items": {
               "$ref": "#/components/schemas/AlertType"
             },
-            "description": "Left out means all five alert types."
+            "description": "Left out means every alert type."
           },
           "enabled": {
             "type": "boolean"
@@ -8500,7 +8675,8 @@
         "type": "string",
         "enum": [
           "limit",
-          "timeout"
+          "timeout",
+          "walk_limit"
         ]
       },
       "FindVersion": {
@@ -8993,11 +9169,25 @@
                   "$ref": "#/components/schemas/GcLockedItem"
                 }
               },
+              "quarantined": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/GcObjectNote"
+                },
+                "description": "Snapshots the cleanup could not read."
+              },
               "repack": {
                 "type": "array",
                 "items": {
                   "$ref": "#/components/schemas/GcPackItem"
                 }
+              },
+              "skipped_shards": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/GcObjectNote"
+                },
+                "description": "Index shards the cleanup could not use and left alone."
               },
               "unindexed": {
                 "type": "array",
@@ -9201,6 +9391,52 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          }
+        }
+      },
+      "GcQuarantineDto": {
+        "type": "object",
+        "required": [
+          "snapshot_id",
+          "key",
+          "reason",
+          "confirmable",
+          "detected_at"
+        ],
+        "properties": {
+          "confirmable": {
+            "type": "boolean",
+            "description": "False for a snapshot a backup job points at; it cannot be excluded."
+          },
+          "confirmed_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When an administrator excluded it from cleanup."
+          },
+          "confirmed_by": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "detected_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "key": {
+            "type": "string",
+            "description": "The snapshot object in the repository."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why the cleanup cannot read it."
+          },
+          "snapshot_id": {
+            "type": "string",
+            "description": "The snapshot id, hex."
           }
         }
       },
@@ -9414,7 +9650,8 @@
           "preflight",
           "has_object_lock",
           "events",
-          "events_total"
+          "events_total",
+          "quarantine"
         ],
         "properties": {
           "active_dry_run": {
@@ -9503,6 +9740,13 @@
           },
           "preflight": {
             "$ref": "#/components/schemas/Preflight"
+          },
+          "quarantine": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GcQuarantineDto"
+            },
+            "description": "Snapshots the cleanup cannot read; it stops until each confirmable one is excluded."
           },
           "repository_id": {
             "type": "string"
@@ -11548,6 +11792,13 @@
           },
           "name": {
             "type": "string"
+          },
+          "unavailable_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the server refuses to open the repository, set when its config\ndoes not match what was recorded."
           },
           "unlocked": {
             "type": [

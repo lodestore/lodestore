@@ -3,22 +3,26 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use bytes::Bytes;
 use lodestore_format::Error;
 use lodestore_format::attest::put_attestation;
 use lodestore_format::crypto::{BLOB_TYPE_DATA, BLOB_TYPE_TREE, BlobId, Entropy};
-use lodestore_format::gc::mark::{LiveSet, ShardSet, load_shards};
+use lodestore_format::gc::mark::{LiveSet, MarkPolicy, ShardSet, load_shards};
 use lodestore_format::gc::plan::{PackStat, PlanOptions, plan};
-use lodestore_format::gc::{Survey, survey};
+use lodestore_format::gc::verify::verify_with;
+use lodestore_format::gc::{Survey, survey, survey_with};
 use lodestore_format::index::hex32;
 use lodestore_format::keys::KdfCost;
 use lodestore_format::pack::{PACK_PREFIX_LEN, pack_object_key, parse_entries};
 use lodestore_format::pb;
 use lodestore_format::repo::{InitOptions, PendingInit, Repository};
 use lodestore_format::snapshot::snapshot_object_key;
-use lodestore_format::store::{BlobDelete, BlobStore, ListEntry, LocalFsStore};
+use lodestore_format::store::{BlobDelete, BlobError, BlobStore, ListEntry, LocalFsStore};
+use lodestore_format::tree::encode_tree;
 use lodestore_format::writer::{BackupOptions, BackupOutcome, Writer};
 use rand_chacha::ChaCha20Rng;
 use rand_chacha::rand_core::{Rng, SeedableRng};
@@ -104,6 +108,18 @@ impl Fx {
             self.repo.read_keys(),
             self.repo.config(),
             opts,
+            &|_| {},
+        )
+        .await
+    }
+
+    async fn survey_with(&self, policy: &MarkPolicy) -> Result<Survey, Error> {
+        survey_with(
+            &self.store,
+            self.repo.read_keys(),
+            self.repo.config(),
+            &opts(),
+            policy,
             &|_| {},
         )
         .await
@@ -226,6 +242,310 @@ async fn gc_mark_fail_closed_unopenable_snapshot() {
     let err = fx.survey(&opts()).await.err().unwrap();
     assert_eq!(corrupt_object(err), key);
     assert_eq!(fx.bucket(), before);
+}
+
+fn quarantining() -> MarkPolicy {
+    MarkPolicy {
+        quarantine: true,
+        ..MarkPolicy::default()
+    }
+}
+
+/// Junk under a valid snapshot name: it hashes to its name but does not open.
+async fn plant_junk(fx: &Fx) -> (BlobId, String) {
+    let junk = b"not a snapshot envelope".to_vec();
+    let id = *blake3::hash(&junk).as_bytes();
+    let key = snapshot_object_key(&id);
+    fx.put(&key, &junk).await;
+    (id, key)
+}
+
+#[tokio::test]
+async fn gc_mark_quarantine_unopenable_snapshot() {
+    let fx = Fx::new().await;
+    let good = fx.backup(1).await;
+    fx.backup(2).await;
+    fx.store
+        .delete(&snapshot_object_key(&good.snapshot_id))
+        .await
+        .unwrap();
+    let kept = fx.backup(3).await;
+    let (_, key) = plant_junk(&fx).await;
+
+    assert!(fx.survey(&opts()).await.is_err());
+    let s = fx.survey_with(&quarantining()).await.unwrap();
+    assert_eq!(s.quarantined.len(), 1);
+    assert_eq!(s.quarantined[0].key, key);
+    assert!(!s.quarantined[0].bound);
+    assert!(s.plan.delete.is_empty() && s.plan.repack.is_empty());
+    assert!(s.snapshots.contains(&kept.snapshot_id));
+    assert_eq!(s.snapshots.len(), 2);
+}
+
+#[tokio::test]
+async fn gc_mark_quarantine_excluded_snapshot_is_skipped() {
+    let fx = Fx::new().await;
+    let gone = fx.backup(1).await;
+    fx.backup(2).await;
+    fx.store
+        .delete(&snapshot_object_key(&gone.snapshot_id))
+        .await
+        .unwrap();
+    let (id, key) = plant_junk(&fx).await;
+    let policy = MarkPolicy {
+        excluded: [id].into(),
+        ..quarantining()
+    };
+
+    let s = fx.survey_with(&policy).await.unwrap();
+    assert!(s.quarantined.is_empty());
+    assert_eq!(s.ignored.len(), 1);
+    assert_eq!(s.ignored[0].0, key);
+    assert!(s.ignored[0].1.contains("excluded by an administrator"));
+    assert!(!s.plan.delete.is_empty());
+}
+
+#[tokio::test]
+async fn gc_mark_quarantine_bound_snapshot() {
+    let fx = Fx::new().await;
+    fx.backup(1).await;
+    let (id, key) = plant_junk(&fx).await;
+    let policy = MarkPolicy {
+        bound: [id].into(),
+        excluded: [id].into(),
+        ..quarantining()
+    };
+
+    let s = fx.survey_with(&policy).await.unwrap();
+    assert_eq!(s.quarantined.len(), 1);
+    assert_eq!(s.quarantined[0].key, key);
+    assert!(s.quarantined[0].bound);
+    assert!(s.ignored.is_empty());
+}
+
+fn file_node(name: &str, content: &[BlobId]) -> pb::Node {
+    pb::Node {
+        name: name.as_bytes().to_vec(),
+        r#type: pb::NodeType::File as i32,
+        mode: 0o644,
+        size: 1,
+        content: content.iter().map(|c| c.to_vec()).collect(),
+        ..Default::default()
+    }
+}
+
+impl Fx {
+    async fn raw_writer(&self) -> Writer<&LocalFsStore> {
+        let keys = self.repo.read_keys().write_keys(self.repo.config_hash());
+        Writer::new(&self.store, keys, self.repo.config())
+            .await
+            .unwrap()
+    }
+}
+
+#[tokio::test]
+async fn gc_mark_quarantine_unknown_root_tree() {
+    let fx = Fx::new().await;
+    let mut w = fx.raw_writer().await;
+    let id = w
+        .commit_snapshot_raw([9; 32], vec![b"/".to_vec()])
+        .await
+        .unwrap();
+    let s = fx.survey_with(&quarantining()).await.unwrap();
+    assert_eq!(s.quarantined.len(), 1);
+    assert_eq!(s.quarantined[0].id, id);
+    assert!(s.quarantined[0].reason.contains("no index shard describes"));
+}
+
+#[tokio::test]
+async fn gc_mark_quarantine_rollback_shared_subtree() {
+    let fx = Fx::new().await;
+    let mut w = fx.raw_writer().await;
+    let root = w
+        .put_tree_raw(&encode_tree(vec![file_node("f", &[[9; 32]])]))
+        .unwrap();
+    let paths = || vec![b"/".to_vec()];
+    let a = w.commit_snapshot_raw(root, paths()).await.unwrap();
+    let b = w.commit_snapshot_raw(root, paths()).await.unwrap();
+
+    let policy = MarkPolicy {
+        excluded: [a].into(),
+        ..quarantining()
+    };
+    let s = fx.survey_with(&policy).await.unwrap();
+    assert_eq!(s.quarantined.len(), 1);
+    assert_eq!(s.quarantined[0].id, b);
+    assert_eq!(s.ignored.len(), 1);
+    assert_eq!(s.ignored[0].0, snapshot_object_key(&a));
+    assert!(s.snapshots.is_empty());
+    assert!(!s.live.contains(&root, BLOB_TYPE_TREE));
+}
+
+#[tokio::test]
+async fn gc_mark_quarantine_missing_tree_pack() {
+    let fx = Fx::new().await;
+    let a = fx.backup(1).await;
+    let a_trees = fx.packs_of_type(BLOB_TYPE_TREE).await;
+    let b = fx.backup(2).await;
+    let all_trees = fx.packs_of_type(BLOB_TYPE_TREE).await;
+    assert!(!a_trees.is_empty() && all_trees.len() > a_trees.len());
+    for key in &a_trees {
+        fx.store.delete(key).await.unwrap();
+    }
+    let before = fx.bucket();
+
+    assert!(fx.survey(&opts()).await.is_err());
+    let s = fx.survey_with(&quarantining()).await.unwrap();
+    assert_eq!(s.quarantined.len(), 1);
+    assert_eq!(s.quarantined[0].id, a.snapshot_id);
+    assert!(
+        s.quarantined[0].reason.contains("its pack is missing"),
+        "{}",
+        s.quarantined[0].reason
+    );
+    assert!(s.snapshots.contains(&b.snapshot_id));
+    assert!(s.plan.delete.is_empty() && s.plan.repack.is_empty());
+
+    let policy = MarkPolicy {
+        excluded: [a.snapshot_id].into(),
+        ..quarantining()
+    };
+    let s = fx.survey_with(&policy).await.unwrap();
+    assert!(s.quarantined.is_empty());
+    assert_eq!(s.ignored.len(), 1);
+    assert_eq!(s.ignored[0].0, snapshot_object_key(&a.snapshot_id));
+    assert!(s.snapshots.contains(&b.snapshot_id));
+    assert_eq!(fx.bucket(), before);
+}
+
+struct FailingSnapshotRead<'a>(&'a LocalFsStore);
+
+impl BlobStore for FailingSnapshotRead<'_> {
+    async fn put_if_absent(&self, key: &str, data: Bytes) -> Result<(), BlobError> {
+        self.0.put_if_absent(key, data).await
+    }
+
+    async fn get(&self, key: &str) -> Result<Bytes, BlobError> {
+        self.0.get(key).await
+    }
+
+    async fn get_range(&self, key: &str, range: Range<u64>) -> Result<Bytes, BlobError> {
+        if key.starts_with("snapshots/") {
+            return Err(BlobError::backend("injected"));
+        }
+        self.0.get_range(key, range).await
+    }
+
+    async fn list(&self, prefix: &str) -> Result<Vec<ListEntry>, BlobError> {
+        self.0.list(prefix).await
+    }
+}
+
+#[tokio::test]
+async fn gc_mark_quarantine_store_error_stops_mark() {
+    let fx = Fx::new().await;
+    fx.backup(1).await;
+    let failing = FailingSnapshotRead(&fx.store);
+    let err = survey_with(
+        &failing,
+        fx.repo.read_keys(),
+        fx.repo.config(),
+        &opts(),
+        &quarantining(),
+        &|_| {},
+    )
+    .await
+    .err()
+    .unwrap();
+    assert!(matches!(err, Error::Store(_)), "{err:?}");
+}
+
+/// Serves snapshot bodies one byte shorter, or longer, than they are.
+struct MisSizedSnapshotRead<'a>(&'a LocalFsStore, bool);
+
+impl BlobStore for MisSizedSnapshotRead<'_> {
+    async fn put_if_absent(&self, key: &str, data: Bytes) -> Result<(), BlobError> {
+        self.0.put_if_absent(key, data).await
+    }
+
+    async fn get(&self, key: &str) -> Result<Bytes, BlobError> {
+        self.0.get(key).await
+    }
+
+    async fn get_range(&self, key: &str, range: Range<u64>) -> Result<Bytes, BlobError> {
+        let bytes = self.0.get_range(key, range).await?;
+        if !key.starts_with("snapshots/") {
+            return Ok(bytes);
+        }
+        let mut body = bytes.to_vec();
+        if self.1 {
+            body.push(0);
+        } else {
+            body.pop();
+        }
+        Ok(body.into())
+    }
+
+    async fn list(&self, prefix: &str) -> Result<Vec<ListEntry>, BlobError> {
+        self.0.list(prefix).await
+    }
+}
+
+#[tokio::test]
+async fn gc_mark_snapshot_body_not_of_listed_size_stops_mark() {
+    let fx = Fx::new().await;
+    fx.backup(1).await;
+    for longer in [false, true] {
+        let store = MisSizedSnapshotRead(&fx.store, longer);
+        for policy in [MarkPolicy::default(), quarantining()] {
+            let err = survey_with(
+                &store,
+                fx.repo.read_keys(),
+                fx.repo.config(),
+                &opts(),
+                &policy,
+                &|_| {},
+            )
+            .await
+            .err()
+            .unwrap();
+            assert!(matches!(err, Error::Store(_)), "{err:?}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn gc_verify_with_refuses_quarantined() {
+    let fx = Fx::new().await;
+    fx.backup(1).await;
+    let (id, key) = plant_junk(&fx).await;
+    let run = |policy: MarkPolicy| {
+        let fx = &fx;
+        async move {
+            verify_with(
+                &fx.store,
+                fx.repo.read_keys(),
+                fx.repo.config(),
+                &Default::default(),
+                &policy,
+                &|_, _| {},
+            )
+            .await
+        }
+    };
+    match run(quarantining()).await.err().unwrap() {
+        Error::Corrupt { object, reason } => {
+            assert_eq!(object, key);
+            assert!(reason.contains("nothing is deleted"), "{reason}");
+        }
+        e => panic!("expected Corrupt, got {e:?}"),
+    }
+    run(MarkPolicy {
+        excluded: [id].into(),
+        ..quarantining()
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test]

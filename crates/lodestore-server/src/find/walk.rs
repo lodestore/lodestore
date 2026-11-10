@@ -266,6 +266,16 @@ enum Outcome {
     Stopped,
 }
 
+/// A failure wins, then a user stop (unless the search stopped itself at the result limit), then any stop reason.
+fn final_state(outcome: &Outcome, stop: Option<FindStop>) -> FindState {
+    match outcome {
+        Outcome::Failed(_) => FindState::Failed,
+        Outcome::Stopped if stop != Some(FindStop::Limit) => FindState::Cancelled,
+        _ if stop.is_some() => FindState::Incomplete,
+        _ => FindState::Done,
+    }
+}
+
 pub async fn run(state: AppState, session: Arc<Session>) {
     let outcome = tokio::select! {
         () = session.cancel.cancelled() => Outcome::Stopped,
@@ -277,16 +287,11 @@ pub async fn run(state: AppState, session: Arc<Session>) {
     if matches!(outcome, Outcome::TimedOut) {
         s.stop_reason = Some(FindStop::Timeout);
     }
-    s.state = match outcome {
-        Outcome::Failed(error) => {
-            tracing::warn!(session = %session.id, %error, "find: search failed");
-            s.error = Some("the search failed; see the server log".into());
-            FindState::Failed
-        }
-        _ if s.stop_reason.is_some() => FindState::Incomplete,
-        Outcome::Stopped => FindState::Cancelled,
-        _ => FindState::Done,
-    };
+    if let Outcome::Failed(error) = &outcome {
+        tracing::warn!(session = %session.id, %error, "find: search failed");
+        s.error = Some("the search failed; see the server log".into());
+    }
+    s.state = final_state(&outcome, s.stop_reason);
     s.finished_at = Some(now_ms());
     s.revision += 1;
     let revision = s.revision;
@@ -403,8 +408,19 @@ async fn scan_snapshot(
         Err(error) => {
             tracing::warn!(snapshot = %snapshot.id, %error, "find: snapshot skipped");
             s.skipped += 1;
+            if let Some(stop) = stop_for(&error) {
+                s.stop_reason.get_or_insert(stop);
+            }
         }
     }
+}
+
+fn stop_for(error: &anyhow::Error) -> Option<FindStop> {
+    matches!(
+        error.downcast_ref::<FormatError>(),
+        Some(FormatError::WalkLimit { .. })
+    )
+    .then_some(FindStop::WalkLimit)
 }
 
 /// Adds one hit; false when it would be a new group past the limit, which is dropped.
@@ -496,6 +512,40 @@ mod tests {
         let over = collect(&mut entries, &mut budget, &cancel, b"/a/3", &file());
         assert!(matches!(over, Err(FormatError::InvalidInput(_))));
         assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn walk_limit_marks_the_search_stopped() {
+        let limit = anyhow::Error::from(FormatError::WalkLimit {
+            what: "entries",
+            limit: 7,
+        });
+        assert_eq!(stop_for(&limit), Some(FindStop::WalkLimit));
+        let corrupt = anyhow::Error::from(FormatError::corrupt("tree", "bad"));
+        assert_eq!(stop_for(&corrupt), None);
+    }
+
+    #[test]
+    fn cancel_wins_over_walk_limit() {
+        let state = |outcome, stop| final_state(&outcome, stop);
+        assert_eq!(
+            state(Outcome::Stopped, Some(FindStop::WalkLimit)),
+            FindState::Cancelled
+        );
+        assert_eq!(
+            state(Outcome::Stopped, Some(FindStop::Limit)),
+            FindState::Incomplete
+        );
+        assert_eq!(state(Outcome::Stopped, None), FindState::Cancelled);
+        assert_eq!(
+            state(Outcome::Complete, Some(FindStop::WalkLimit)),
+            FindState::Incomplete
+        );
+        assert_eq!(
+            state(Outcome::TimedOut, Some(FindStop::Timeout)),
+            FindState::Incomplete
+        );
+        assert_eq!(state(Outcome::Complete, None), FindState::Done);
     }
 
     #[test]

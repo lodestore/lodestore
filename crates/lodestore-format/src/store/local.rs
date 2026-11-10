@@ -199,7 +199,8 @@ impl BlobStore for LocalFsStore {
         let path = self.path_of(key)?;
         tokio::task::spawn_blocking(move || {
             let file = File::open(path)?;
-            let len = usize::try_from(range.end.saturating_sub(range.start))
+            let end = range.end.min(file.metadata()?.len());
+            let len = usize::try_from(end.saturating_sub(range.start))
                 .map_err(|_| std::io::Error::other("range too large"))?;
             let mut buf = vec![0u8; len];
             let mut filled = 0;

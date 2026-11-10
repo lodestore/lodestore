@@ -319,6 +319,27 @@ describe("overview states", () => {
 		).toBeNull();
 	});
 
+	it("shows repository alerts above the empty fleet", async () => {
+		useAlerts([
+			alertFixture("u1", {
+				type: "repository_unavailable",
+				host: null,
+				policy: null,
+				repository: { id: "repo-2", name: "offsite" },
+				detail: "The server does not open it: config hash mismatch.",
+				facts: { error: "config hash mismatch" },
+			}),
+		]);
+		renderApp("/overview");
+		expect(
+			await screen.findByRole("link", { name: "offsite" }),
+		).toHaveAttribute("href", "/settings/repositories/repo-2#checks");
+		expect(rows(STRIP).map(titleOf)).toContain(
+			"Repository offsite is unavailable",
+		);
+		expect(screen.getByText(copy.overview.empty.heading)).toBeInTheDocument();
+	});
+
 	it("shows the loading summary", async () => {
 		server.use(
 			http.get("/api/v1/fleet", async () => {
@@ -679,6 +700,40 @@ describe("active alerts", () => {
 				{ name: "web-1" },
 			)[0],
 		).toHaveAttribute("href", "/hosts/host-1");
+	});
+
+	it("links quarantine and unavailable alerts to the repository page", async () => {
+		await renderAlerts([
+			alertFixture("q1", {
+				type: "snapshot_quarantined",
+				host: null,
+				policy: null,
+				repository: { id: "repo-1", name: "main" },
+				detail: "Review them under Free up space.",
+				facts: { findings: 2, error: "snapshots/ab: decryption failed" },
+			}),
+			alertFixture("u1", {
+				type: "repository_unavailable",
+				host: null,
+				policy: null,
+				repository: { id: "repo-2", name: "offsite" },
+				detail: "The server does not open it: config hash mismatch.",
+				facts: { error: "config hash mismatch" },
+			}),
+		]);
+		const titles = rows(STRIP).map(titleOf);
+		expect(titles).toContain(
+			"2 snapshots in main cannot be read; cleanup is stopped",
+		);
+		expect(titles).toContain("Repository offsite is unavailable");
+		expect(screen.getByRole("link", { name: "main" })).toHaveAttribute(
+			"href",
+			"/settings/repositories/repo-1#free-up-space",
+		);
+		expect(screen.getByRole("link", { name: "offsite" })).toHaveAttribute(
+			"href",
+			"/settings/repositories/repo-2#checks",
+		);
 	});
 
 	it("silences and resumes a host", async () => {

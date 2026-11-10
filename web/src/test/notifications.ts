@@ -16,6 +16,8 @@ export const ALL_TYPES: ChannelDto["alert_types"] = [
 	"check_failed",
 	"certificate_expiring",
 	"agent_update_failed",
+	"snapshot_quarantined",
+	"repository_unavailable",
 ];
 
 export const channel = (

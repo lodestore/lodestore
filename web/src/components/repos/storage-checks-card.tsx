@@ -1,4 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
+import { TriangleAlert } from "lucide-react";
 import { useState } from "react";
 import {
 	getGetRepositoryQueryKey,
@@ -12,8 +13,9 @@ import {
 	type CheckRow,
 	toCheckRows,
 } from "@/components/capability-checklist";
+import { TextWithPaths } from "@/components/path-text";
 import { RelativeTime } from "@/components/relative-time";
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
 	Card,
@@ -32,12 +34,14 @@ export function StorageChecksCard({
 	checks,
 	agentKeyState,
 	checkedAt,
+	unavailableReason,
 }: {
 	repositoryId: string;
 	backend: string;
 	checks: CheckDto[];
 	agentKeyState: string;
 	checkedAt?: number | null;
+	unavailableReason?: string | null;
 }) {
 	const queryClient = useQueryClient();
 	const [error, setError] = useState<string>();
@@ -82,6 +86,15 @@ export function StorageChecksCard({
 				</CardDescription>
 			</CardHeader>
 			<CardContent className="flex flex-col gap-4">
+				{unavailableReason && (
+					<Alert variant="destructive">
+						<TriangleAlert aria-hidden />
+						<AlertTitle>{copy.repos.unavailableTitle}</AlertTitle>
+						<AlertDescription>
+							<TextWithPaths text={copy.repos.unavailable(unavailableReason)} />
+						</AlertDescription>
+					</Alert>
+				)}
 				{error && (
 					<Alert variant="destructive">
 						<AlertDescription>{error}</AlertDescription>

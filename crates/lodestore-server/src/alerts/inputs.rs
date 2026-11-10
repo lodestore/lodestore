@@ -18,6 +18,8 @@ pub struct Inputs {
     pub server_cert: Option<(i64, bool)>,
     pub check_failures: Vec<CheckFailure>,
     pub update_failures: Vec<UpdateFailure>,
+    pub quarantines: Vec<Quarantine>,
+    pub unavailable: Vec<UnavailableRepository>,
     pub unreadable_policies: Vec<String>,
 }
 
@@ -39,6 +41,24 @@ pub struct UpdateFailure {
     pub host_id: String,
     pub hostname: String,
     pub reason: String,
+}
+
+/// Snapshots of a repository that the cleanup cannot read and that nobody has confirmed yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Quarantine {
+    pub repository_id: String,
+    pub repository: String,
+    pub count: u64,
+    pub first_key: String,
+    pub first_reason: String,
+}
+
+/// A repository the server cannot open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnavailableRepository {
+    pub repository_id: String,
+    pub repository: String,
+    pub error: String,
 }
 
 struct Agent {
@@ -114,13 +134,62 @@ pub async fn gather(state: &AppState, now_ms: i64) -> anyhow::Result<Inputs> {
     };
     let check_failures = check_failures(state).await?;
     let update_failures = update_failures(state).await?;
+    let quarantines = quarantines(state).await?;
+    let unavailable = unavailable_repositories(state).await?;
     Ok(Inputs {
         hosts,
         server_cert,
         check_failures,
         update_failures,
+        quarantines,
+        unavailable,
         unreadable_policies,
     })
+}
+
+async fn quarantines(state: &AppState) -> anyhow::Result<Vec<Quarantine>> {
+    let rows = sqlx::query(
+        "SELECT q.repository_id, r.name AS repository, q.object_key, q.reason \
+         FROM gc_quarantine q JOIN repositories r ON r.id = q.repository_id \
+         WHERE q.confirmed_at IS NULL \
+         ORDER BY q.repository_id, q.detected_at, q.snapshot_id",
+    )
+    .fetch_all(&state.db.pool)
+    .await
+    .context("reading the snapshot quarantine")?;
+    let mut out: Vec<Quarantine> = Vec::new();
+    for row in &rows {
+        let repository_id: String = row.try_get("repository_id")?;
+        match out.last_mut() {
+            Some(last) if last.repository_id == repository_id => last.count += 1,
+            _ => out.push(Quarantine {
+                repository_id,
+                repository: row.try_get("repository")?,
+                count: 1,
+                first_key: row.try_get("object_key")?,
+                first_reason: row.try_get("reason")?,
+            }),
+        }
+    }
+    Ok(out)
+}
+
+async fn unavailable_repositories(state: &AppState) -> anyhow::Result<Vec<UnavailableRepository>> {
+    let rows = sqlx::query(
+        "SELECT id, name, open_error FROM repositories WHERE open_error IS NOT NULL ORDER BY name, id",
+    )
+    .fetch_all(&state.db.pool)
+    .await
+    .context("reading unavailable repositories")?;
+    rows.iter()
+        .map(|row| {
+            Ok(UnavailableRepository {
+                repository_id: row.try_get("id")?,
+                repository: row.try_get("name")?,
+                error: row.try_get("open_error")?,
+            })
+        })
+        .collect()
 }
 
 pub(crate) async fn update_failures(state: &AppState) -> anyhow::Result<Vec<UpdateFailure>> {

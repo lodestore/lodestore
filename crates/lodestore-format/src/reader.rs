@@ -20,20 +20,22 @@ use crate::error::{Error, Result};
 use crate::fs::filter::PathMatcher;
 use crate::fs::restore::{RestoreSettings, Restorer, check_extents};
 use crate::index::{
-    BlobLocation, INDEX_PREFIX, Index, SupersedesTrust, hex32, index_object_key, open_shard,
-    parse_hex32,
+    BlobLocation, INDEX_PREFIX, Index, MAX_SHARD_SIZE, SupersedesTrust, fetch_attested_shard_bytes,
+    fetch_shard_bytes, hex32, index_object_key, open_shard, parse_hex32,
 };
 use crate::keys::ReadKeys;
-use crate::pack::{PACK_PREFIX_LEN, decompress, open_prefix, pack_object_key};
+use crate::pack::{HEADER_OVERHEAD, PACK_PREFIX_LEN, decompress, open_prefix, pack_object_key};
 use crate::pb;
 use crate::provenance::{LatestPick, ProvenanceSet, pick_latest};
 use crate::selection::Selection;
 use crate::snapshot::{
-    SnapshotEntry, SnapshotList, TreeSource, list_snapshots, open_snapshot, snapshot_object_key,
+    MAX_SNAPSHOT_SIZE, SnapshotEntry, SnapshotList, TreeSource, list_snapshots, open_snapshot,
+    snapshot_object_key,
 };
-use crate::store::{BlobError, BlobStore};
+use crate::store::{BlobError, BlobStore, read_bounded};
 use crate::tree::{
-    Action, SelectedWalk, Step, TreeCursor, decode_tree, selection_totals, validate_subtree,
+    Action, SelectedWalk, Step, TreeBudget, TreeCursor, count_tree_nodes, decode_tree,
+    selection_totals, validate_subtree,
 };
 
 pub use crate::fs::restore::{Overwrite, RestoreFailure, Unapplied};
@@ -87,8 +89,11 @@ struct Located {
     node: Option<pb::Node>,
     /// Absolute path of `node`; empty for the top.
     path: Vec<u8>,
-    /// The top-level entries, set for the top only.
+    /// The entries of the directory `node` is in, or the top-level ones when
+    /// `node` is `None`.
     top: Vec<pb::Node>,
+    /// Tree bytes `top` was read with.
+    top_bytes: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -190,7 +195,7 @@ pub struct ReaderCache {
     repo_id: OnceLock<RepoId>,
     index: tokio::sync::RwLock<Index>,
     load: tokio::sync::Mutex<()>,
-    trust_set: tokio::sync::OnceCell<()>,
+    trust_set: tokio::sync::OnceCell<HashSet<BlobId>>,
     listed_at: Mutex<Option<Instant>>,
     pack_keys: Mutex<HashMap<BlobId, Key32>>,
     trees: Mutex<TreeBytes>,
@@ -221,12 +226,20 @@ impl ReaderCache {
 }
 
 impl<S: BlobStore> TreeSource for Reader<S> {
-    fn snapshot_root<'a>(&'a mut self, id: &'a BlobId) -> Fut<'a, (pb::Snapshot, Vec<pb::Node>)> {
-        Box::pin(self.open_root(id))
+    fn snapshot_root<'a>(
+        &'a mut self,
+        id: &'a BlobId,
+    ) -> Fut<'a, (pb::Snapshot, Vec<pb::Node>, u64)> {
+        Box::pin(async move { self.open_root(id).await })
     }
 
-    fn tree<'a>(&'a mut self, ids: &'a [Vec<u8>]) -> Fut<'a, Vec<pb::Node>> {
-        Box::pin(self.load_tree(ids))
+    fn tree<'a>(
+        &'a mut self,
+        ids: &'a [Vec<u8>],
+        above_entries: u64,
+        above_bytes: u64,
+    ) -> Fut<'a, (Vec<pb::Node>, u64)> {
+        Box::pin(async move { self.load_tree(ids, above_entries, above_bytes).await })
     }
 }
 
@@ -234,7 +247,19 @@ pub struct Reader<S: BlobStore> {
     store: S,
     keys: ReadKeys,
     cache: Arc<ReaderCache>,
+    walk: TreeBudget,
+    /// The size the chunks of a file hold, found by reading them, by the hash
+    /// of its list of chunk ids. Only files whose sizes in the index do not
+    /// add up are put here, so a file reached from many parents is read once.
+    file_lens: HashMap<[u8; 32], u64>,
+    file_lens_limit: usize,
+    /// Chunks of such files that did not read, with the error, so that an
+    /// operation that goes on after the error does not read them again.
+    unreadable: HashMap<BlobId, (String, String)>,
 }
+
+/// The most entries `Reader::file_lens` holds.
+const MAX_FILE_LENS: usize = 1 << 16;
 
 impl<S: BlobStore> Reader<S> {
     /// A reader with a cache of its own.
@@ -260,7 +285,54 @@ impl<S: BlobStore> Reader<S> {
                 "the cache belongs to a different repository".into(),
             ));
         }
-        Ok(Reader { store, keys, cache })
+        Ok(Reader {
+            store,
+            keys,
+            cache,
+            walk: TreeBudget::default(),
+            file_lens: HashMap::new(),
+            file_lens_limit: MAX_FILE_LENS,
+            unreadable: HashMap::new(),
+        })
+    }
+
+    /// Replaces the allowance of one operation; the next one starts with it.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn set_walk_limits(&mut self, nodes: u64, bytes: u64) {
+        self.walk = TreeBudget::new(nodes, bytes);
+    }
+
+    /// Replaces the number of files whose chunk lengths are remembered.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn set_file_lens_limit(&mut self, n: usize) {
+        self.file_lens_limit = n;
+    }
+
+    /// The budget the next operations of this reader are charged to, until it
+    /// is replaced; `open_root` and a restore start it again.
+    pub(crate) fn set_walk_budget(&mut self, walk: TreeBudget) {
+        self.walk = walk;
+    }
+
+    /// Replaces the limit on one directory and on the entries held at once.
+    pub fn set_dir_limits(&mut self, dir: u64, held: u64) {
+        self.walk = self.walk.with_dir_limits(dir, held);
+    }
+
+    /// Replaces the limit on the tree bytes of one directory and on the tree
+    /// bytes held at once.
+    pub fn set_dir_byte_limits(&mut self, dir: u64, held: u64) {
+        self.walk = self.walk.with_dir_byte_limits(dir, held);
+    }
+
+    /// Lifts the limits on one directory and on what is held at once, entries
+    /// and tree bytes alike, for a snapshot written before a backup refused
+    /// such a tree. Memory is then bounded only by the snapshot and the
+    /// whole-walk limits; a reader shared by many users, as the server's,
+    /// never calls this.
+    pub fn allow_large_directories(&mut self) {
+        self.set_dir_limits(u64::MAX, u64::MAX);
+        self.set_dir_byte_limits(u64::MAX, u64::MAX);
     }
 
     pub async fn list_snapshots(&self) -> Result<SnapshotList> {
@@ -324,11 +396,16 @@ impl<S: BlobStore> Reader<S> {
         &self.store
     }
 
-    // shortcut: shards and snapshots named directly are fetched without a size
-    // check; add a size probe to BlobStore if an unlisted path ever reads
-    // untrusted keys.
+    /// The snapshot `id`, read at most [`MAX_SNAPSHOT_SIZE`] bytes.
     pub async fn snapshot(&self, id: &BlobId) -> Result<pb::Snapshot> {
-        let bytes = self.store.get(&snapshot_object_key(id)).await?;
+        let bytes = read_bounded(
+            &self.store,
+            &snapshot_object_key(id),
+            None,
+            MAX_SNAPSHOT_SIZE,
+            "snapshot",
+        )
+        .await?;
         open_snapshot(
             self.keys.hpke_private_key(),
             self.keys.repo_id(),
@@ -356,7 +433,7 @@ impl<S: BlobStore> Reader<S> {
     /// store happens outside the index lock; only one shard is fetched at a
     /// time, and a shard another reader fetched meanwhile is not fetched again.
     /// `false` when the store does not have it.
-    async fn load_shard(&self, shard_id: BlobId) -> Result<bool> {
+    async fn load_shard(&self, shard_id: BlobId, listed: Option<u64>) -> Result<bool> {
         if self.cache.index.read().await.has_shard(&shard_id) {
             return Ok(true);
         }
@@ -364,34 +441,51 @@ impl<S: BlobStore> Reader<S> {
         if self.cache.index.read().await.has_shard(&shard_id) {
             return Ok(true);
         }
-        self.cache
+        let attested = match self
+            .cache
             .trust_set
-            .get_or_init(|| self.trust_attested())
-            .await;
-        match self.store.get(&index_object_key(&shard_id)).await {
-            Ok(bytes) => {
+            .get_or_try_init(|| self.trust_attested())
+            .await
+        {
+            Ok(set) => set.contains(&shard_id),
+            Err(this_call) => this_call.contains(&shard_id),
+        };
+        let key = index_object_key(&shard_id);
+        let fetched = if attested {
+            fetch_attested_shard_bytes(&self.store, &shard_id, listed).await?
+        } else {
+            fetch_shard_bytes(&self.store, &key, listed, MAX_SHARD_SIZE).await?
+        };
+        match fetched {
+            Some(bytes) => {
                 let shard = open_shard(self.keys.k_idx(), self.keys.repo_id(), &shard_id, &bytes)?;
                 self.cache.index.write().await.add_shard(shard_id, &shard)?;
                 Ok(true)
             }
-            Err(BlobError::NotFound) => Ok(false),
-            Err(e) => Err(e.into()),
+            None => Ok(false),
         }
     }
 
     /// Only shards the server attested may supersede others. When the
-    /// attestations cannot be read nothing is trusted: that only costs the
-    /// preference for a newer copy.
-    async fn trust_attested(&self) {
-        let attested = match read_attestations(&self.store, &self.keys).await {
-            Ok(set) => set.shards,
+    /// attestations cannot be read in full only what was read is trusted, for
+    /// this call alone (`Err`), and the next shard to load reads them again:
+    /// that costs the preference for a newer copy and the larger size a signed
+    /// shard may have until a read succeeds.
+    async fn trust_attested(&self) -> std::result::Result<HashSet<BlobId>, HashSet<BlobId>> {
+        let read = read_attestations(&self.store, &self.keys).await;
+        let attested = match &read {
+            Ok(set) => set.shards.clone(),
             Err(_) => HashSet::new(),
         };
         self.cache
             .index
             .write()
             .await
-            .set_supersedes_trust(SupersedesTrust::Only(attested));
+            .set_supersedes_trust(SupersedesTrust::Only(attested.clone()));
+        match read {
+            Ok(set) if !set.incomplete => Ok(attested),
+            _ => Err(attested),
+        }
     }
 
     /// Lists the shards in the store and loads those that open; one that does
@@ -401,7 +495,7 @@ impl<S: BlobStore> Reader<S> {
             let Some(shard_id) = entry.key.strip_prefix(INDEX_PREFIX).and_then(parse_hex32) else {
                 continue;
             };
-            match self.load_shard(shard_id).await {
+            match self.load_shard(shard_id, Some(entry.size)).await {
                 Ok(_) | Err(Error::Corrupt { .. }) => {}
                 Err(e) => return Err(e),
             }
@@ -432,7 +526,12 @@ impl<S: BlobStore> Reader<S> {
         Ok(self.locate_blob_all(id, blob_type).await?.remove(0))
     }
 
-    async fn read_at(&mut self, loc: &BlobLocation, id: &BlobId, blob_type: u8) -> Result<Vec<u8>> {
+    /// The pack key and the frame of one copy of a blob.
+    async fn fetch_frame(
+        &mut self,
+        loc: &BlobLocation,
+        id: &BlobId,
+    ) -> Result<(Key32, bytes::Bytes)> {
         let name = || format!("blob {}", hex32(id));
         let missing = |e: Error| match e {
             Error::Store(BlobError::NotFound) => {
@@ -456,15 +555,7 @@ impl<S: BlobStore> Reader<S> {
                 "pack is shorter than the index says",
             ));
         }
-        open_chunk(
-            &pack_key,
-            self.keys.repo_id(),
-            blob_type,
-            id,
-            &frame,
-            loc.ulen,
-            self.keys.k_id(),
-        )
+        Ok((pack_key, frame))
     }
 
     /// Reads, decrypts, decompresses and verifies one blob. A location that
@@ -474,30 +565,116 @@ impl<S: BlobStore> Reader<S> {
     /// since the real record may sit in one not loaded yet. Store errors
     /// other than a missing pack are returned at once.
     pub async fn read_blob(&mut self, id: &BlobId, blob_type: u8) -> Result<Vec<u8>> {
+        self.read_copies(id, blob_type, false).await
+    }
+
+    /// [`Reader::read_blob`], charging the walk budget as
+    /// [`Reader::read_frames`] says when `charge` is set.
+    async fn read_copies(&mut self, id: &BlobId, blob_type: u8, charge: bool) -> Result<Vec<u8>> {
         let locs = self.locate_blob_all(id, blob_type).await?;
-        let mut first_err = None;
-        for loc in &locs {
-            match self.read_at(loc, id, blob_type).await {
+        let first_err = match self.read_frames(&locs, id, blob_type, charge).await {
+            Ok(bytes) => return Ok(bytes),
+            Err(e) if is_data_error(&e) => e,
+            Err(e) => return Err(e),
+        };
+        if self.cache.may_list() {
+            self.load_all_shards().await?;
+            let fresh: Vec<BlobLocation> = (self.cache.index.read().await)
+                .locations(id, blob_type)
+                .into_iter()
+                .filter(|l| !locs.contains(l))
+                .collect();
+            match self.read_frames(&fresh, id, blob_type, charge).await {
                 Ok(bytes) => return Ok(bytes),
+                Err(e) if is_data_error(&e) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Err(first_err)
+    }
+
+    /// Tries the copies `locs` in order, fetching each frame once: copies at
+    /// one extent of a pack differ only in the length they declare, and are
+    /// tried one after another against the same bytes. Returns the first data
+    /// error when none opens. With `charge`, a frame is fetched only while
+    /// bytes of the walk budget are left, and what it fetched beyond the
+    /// decoded length its caller charges is charged: a frame none of whose
+    /// copies opens costs its length, and the pack prefix when the pack key
+    /// was not known before; the frame of the copy that opens costs its
+    /// length less the nonce, codec byte and tag, where that is more than the
+    /// decoded length. A blob whose first copy opens, as in an honest
+    /// repository, costs nothing here.
+    async fn read_frames(
+        &mut self,
+        locs: &[BlobLocation],
+        id: &BlobId,
+        blob_type: u8,
+        charge: bool,
+    ) -> Result<Vec<u8>> {
+        let mut groups: Vec<Vec<&BlobLocation>> = Vec::new();
+        let mut at: HashMap<(BlobId, u32, u32), usize> = HashMap::new();
+        for loc in locs {
+            let i = *at
+                .entry((loc.pack_id, loc.offset, loc.enc_len))
+                .or_insert_with(|| {
+                    groups.push(Vec::new());
+                    groups.len() - 1
+                });
+            if let Some(group) = groups.get_mut(i) {
+                group.push(loc);
+            }
+        }
+        let unreadable = || Error::corrupt(format!("blob {}", hex32(id)), "unreadable");
+        let mut first_err = None;
+        for group in &groups {
+            let Some(first) = group.first() else {
+                continue;
+            };
+            if charge {
+                self.walk.check_bytes_left()?;
+            }
+            let cold = !locked(&self.cache.pack_keys).contains_key(&first.pack_id);
+            let got = match self.fetch_frame(first, id).await {
+                Ok((key, frame)) => {
+                    let mut got = Err(unreadable());
+                    for (n, loc) in group.iter().enumerate() {
+                        let k_id = self.keys.k_id();
+                        let repo_id = self.keys.repo_id();
+                        match open_chunk(&key, repo_id, blob_type, id, &frame, loc.ulen, k_id) {
+                            Ok(bytes) => {
+                                got = Ok(bytes);
+                                break;
+                            }
+                            Err(e) if n == 0 => got = Err(e),
+                            Err(_) => {}
+                        }
+                    }
+                    got
+                }
+                Err(e) => Err(e),
+            };
+            let frame = u64::from(first.enc_len);
+            match got {
+                Ok(bytes) => {
+                    if charge {
+                        let framing = (HEADER_OVERHEAD + 1) as u64;
+                        let over = frame.saturating_sub(framing + bytes.len() as u64);
+                        self.walk.charge_bytes(over)?;
+                    }
+                    return Ok(bytes);
+                }
                 Err(e) if is_data_error(&e) => {
+                    if charge {
+                        let prefix = if cold { PACK_PREFIX_LEN as u64 } else { 0 };
+                        // Spent or not, the error is the read's.
+                        let _ = self.walk.charge_bytes(frame + prefix);
+                    }
                     first_err.get_or_insert(e);
                 }
                 Err(e) => return Err(e),
             }
         }
-        if self.cache.may_list() {
-            self.load_all_shards().await?;
-            let fresh = self.cache.index.read().await.locations(id, blob_type);
-            for loc in fresh.iter().filter(|l| !locs.contains(l)) {
-                match self.read_at(loc, id, blob_type).await {
-                    Ok(bytes) => return Ok(bytes),
-                    Err(e) if is_data_error(&e) => {}
-                    Err(e) => return Err(e),
-                }
-            }
-        }
-        Err(first_err
-            .unwrap_or_else(|| Error::corrupt(format!("blob {}", hex32(id)), "unreadable")))
+        Err(first_err.unwrap_or_else(unreadable))
     }
 
     /// Where the data chunks of a file are stored, in content order.
@@ -520,57 +697,95 @@ impl<S: BlobStore> Reader<S> {
         if let Some(bytes) = known {
             return Ok(bytes);
         }
-        let bytes = Arc::new(self.read_blob(id, BLOB_TYPE_TREE).await?);
+        let bytes = Arc::new(self.read_copies(id, BLOB_TYPE_TREE, false).await?);
         locked(&self.cache.trees).insert(*id, Arc::clone(&bytes));
         Ok(bytes)
     }
 
-    /// Loads one directory: its tree blobs read back as one ordered run.
-    pub(crate) async fn load_tree(&mut self, ids: &[Vec<u8>]) -> Result<Vec<pb::Node>> {
+    /// Loads one directory: its tree blobs read back as one ordered run, with
+    /// the tree bytes they came to. `above_entries` and `above_bytes` are what
+    /// the directories open above this one already hold; the limits on what is
+    /// held are checked before a blob is read or decoded.
+    pub(crate) async fn load_tree(
+        &mut self,
+        ids: &[Vec<u8>],
+        above_entries: u64,
+        above_bytes: u64,
+    ) -> Result<(Vec<pb::Node>, u64)> {
+        let ids = ids
+            .iter()
+            .map(|raw| {
+                BlobId::try_from(raw.as_slice())
+                    .map_err(|_| Error::corrupt("tree", "tree id must be 32 bytes"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let listed = {
+            let index = self.cache.index.read().await;
+            ids.iter().fold(0u64, |sum, id| {
+                sum.saturating_add(u64::from(
+                    index.smallest_ulen(id, BLOB_TYPE_TREE).unwrap_or(0),
+                ))
+            })
+        };
+        self.walk.check_dir_bytes(listed)?;
+        self.walk
+            .check_held_bytes(above_bytes.saturating_add(listed))?;
         let mut nodes = Vec::new();
+        let mut read = 0u64;
         let mut previous: Option<Vec<u8>> = None;
-        for raw in ids {
-            let id: BlobId = raw
-                .as_slice()
-                .try_into()
-                .map_err(|_| Error::corrupt("tree", "tree id must be 32 bytes"))?;
-            let bytes = self.tree_bytes(&id).await?;
+        for id in &ids {
+            let bytes = self.tree_bytes(id).await?;
+            self.walk.charge_bytes(bytes.len() as u64)?;
+            read = read.saturating_add(bytes.len() as u64);
+            self.walk.check_dir_bytes(read)?;
+            self.walk
+                .check_held_bytes(above_bytes.saturating_add(read))?;
+            let entries = (nodes.len() as u64).saturating_add(count_tree_nodes(&bytes)?);
+            self.walk.check_dir(entries)?;
+            self.walk
+                .check_held(above_entries.saturating_add(entries))?;
             let piece = decode_tree(&bytes, previous.as_deref())?;
+            self.walk.charge_nodes(piece.len() as u64)?;
             if let Some(last) = piece.last() {
                 previous = Some(last.name.clone());
             }
             nodes.extend(piece);
         }
-        Ok(nodes)
+        Ok((nodes, read))
     }
 
     /// Loads a snapshot and the index shards it names; returns it with its
     /// top-level nodes.
-    pub(crate) async fn open_root(&mut self, id: &BlobId) -> Result<(pb::Snapshot, Vec<pb::Node>)> {
+    pub(crate) async fn open_root(
+        &mut self,
+        id: &BlobId,
+    ) -> Result<(pb::Snapshot, Vec<pb::Node>, u64)> {
+        self.walk.reset();
         let snapshot = self.snapshot(id).await?;
         for raw in &snapshot.index_refs {
             let shard_id: BlobId = raw
                 .as_slice()
                 .try_into()
                 .map_err(|_| Error::corrupt("snapshot", "index reference must be 32 bytes"))?;
-            self.load_shard(shard_id).await?;
+            self.load_shard(shard_id, None).await?;
         }
-        let root = self
-            .load_tree(std::slice::from_ref(&snapshot.root_tree))
+        let (root, bytes) = self
+            .load_tree(std::slice::from_ref(&snapshot.root_tree), 0, 0)
             .await?;
-        Ok((snapshot, root))
+        Ok((snapshot, root, bytes))
     }
 
     /// Loads a snapshot and the index shards it names; returns its top-level nodes.
-    async fn open_tree(&mut self, snapshot_id: &BlobId) -> Result<Vec<pb::Node>> {
-        let (_, root) = self.open_root(snapshot_id).await?;
-        Ok(root)
+    async fn open_tree(&mut self, snapshot_id: &BlobId) -> Result<(Vec<pb::Node>, u64)> {
+        let (_, root, bytes) = self.open_root(snapshot_id).await?;
+        Ok((root, bytes))
     }
 
     /// Follows `path` from the top of the snapshot.
-    async fn locate(&mut self, top: Vec<pb::Node>, path: &[u8]) -> Result<Located> {
+    async fn locate(&mut self, top: Vec<pb::Node>, top_bytes: u64, path: &[u8]) -> Result<Located> {
         let parts = components(path)?;
         let mut nodes = top;
+        let mut bytes = top_bytes;
         let mut abs = Vec::new();
         let mut found = None;
         for (i, part) in parts.iter().enumerate() {
@@ -589,7 +804,7 @@ impl<S: BlobStore> Reader<S> {
             if i + 1 == parts.len() {
                 found = Some(node);
             } else if node.r#type == pb::NodeType::Dir as i32 {
-                nodes = self.load_tree(&node.subtrees).await?;
+                (nodes, bytes) = self.load_tree(&node.subtrees, 0, 0).await?;
             } else {
                 return Err(missing());
             }
@@ -598,6 +813,7 @@ impl<S: BlobStore> Reader<S> {
             node: found,
             path: abs,
             top: nodes,
+            top_bytes: bytes,
         })
     }
 
@@ -607,17 +823,18 @@ impl<S: BlobStore> Reader<S> {
         &mut self,
         snapshot_id: &BlobId,
         path: &[u8],
-    ) -> Result<(Vec<pb::Node>, Vec<u8>)> {
-        let top = self.open_tree(snapshot_id).await?;
-        let at = self.locate(top, path).await?;
+    ) -> Result<(Vec<pb::Node>, u64, Vec<u8>)> {
+        let (top, top_bytes) = self.open_tree(snapshot_id).await?;
+        let at = self.locate(top, top_bytes, path).await?;
         match at.node {
-            None => Ok((at.top, Vec::new())),
+            None => Ok((at.top, at.top_bytes, Vec::new())),
             Some(node) if node.r#type == pb::NodeType::Dir as i32 => {
-                Ok((self.load_tree(&node.subtrees).await?, at.path))
+                let (nodes, bytes) = self.load_tree(&node.subtrees, 0, 0).await?;
+                Ok((nodes, bytes, at.path))
             }
             Some(node) => {
                 let parent = at.path[..at.path.len() - node.name.len() - 1].to_vec();
-                Ok((vec![node], parent))
+                Ok((vec![node], at.top_bytes, parent))
             }
         }
     }
@@ -625,12 +842,12 @@ impl<S: BlobStore> Reader<S> {
     /// The entries of the directory at `path`; an empty path or `/` is the
     /// top of the snapshot.
     pub async fn list_dir(&mut self, snapshot_id: &BlobId, path: &[u8]) -> Result<Vec<pb::Node>> {
-        let top = self.open_tree(snapshot_id).await?;
-        let at = self.locate(top, path).await?;
+        let (top, top_bytes) = self.open_tree(snapshot_id).await?;
+        let at = self.locate(top, top_bytes, path).await?;
         match at.node {
             None => Ok(at.top),
             Some(node) if node.r#type == pb::NodeType::Dir as i32 => {
-                self.load_tree(&node.subtrees).await
+                Ok(self.load_tree(&node.subtrees, 0, 0).await?.0)
             }
             Some(_) => Err(Error::InvalidInput(format!(
                 "{:?} is not a directory",
@@ -658,19 +875,20 @@ impl<S: BlobStore> Reader<S> {
         path: &[u8],
         visit: &mut dyn FnMut(&[u8], &pb::Node) -> Result<()>,
     ) -> Result<()> {
-        let top = self.open_tree(snapshot_id).await?;
-        let at = self.locate(top, path).await?;
-        let (nodes, base) = match at.node {
-            None => (at.top, Vec::new()),
+        let (top, top_bytes) = self.open_tree(snapshot_id).await?;
+        let at = self.locate(top, top_bytes, path).await?;
+        let (nodes, bytes, base) = match at.node {
+            None => (at.top, at.top_bytes, Vec::new()),
             Some(node) => {
                 visit(&at.path, &node)?;
                 if node.r#type != pb::NodeType::Dir as i32 {
                     return Ok(());
                 }
-                (self.load_tree(&node.subtrees).await?, at.path)
+                let (nodes, bytes) = self.load_tree(&node.subtrees, 0, 0).await?;
+                (nodes, bytes, at.path)
             }
         };
-        let mut cursor = TreeCursor::new(nodes, base);
+        let mut cursor = TreeCursor::new(nodes, bytes, base);
         while let Some(step) = cursor.next() {
             let Step::Node(node) = step else { continue };
             visit(&cursor.path_of(&node.name), &node)?;
@@ -684,17 +902,54 @@ impl<S: BlobStore> Reader<S> {
     /// Checks that the chunks of a regular file add up to the size it claims.
     /// The sizes come from the index; when they do not add up, the chunks are
     /// read, since a shard from a write-key holder can list a copy with a
-    /// wrong size ahead of the real one.
-    pub(crate) async fn check_file(&mut self, node: &pb::Node) -> Result<Vec<(u64, u64)>> {
+    /// wrong size ahead of the real one. On every visit of such a file each
+    /// distinct chunk is read once, the bytes of every reference are charged
+    /// to the walk budget as they are read, and reading and charging stop
+    /// once the chunks hold more than the node says; the error then names no
+    /// sum. A length found in `file_lens` is charged the same; the cache only
+    /// saves the reading. Returns the extents and, when the sizes did not add
+    /// up, the length found.
+    pub(crate) async fn check_file(
+        &mut self,
+        node: &pb::Node,
+    ) -> Result<(Vec<(u64, u64)>, Option<u64>)> {
         let extents = check_extents(node)?;
         let expected = if extents.is_empty() {
             node.size
         } else {
             extents.iter().map(|e| e.1).sum()
         };
-        let mut total = self.content_len(node, false).await?;
+        let mut total = self.content_len(node).await?;
+        let mut found = None;
         if total != expected {
-            total = self.content_len(node, true).await?;
+            self.walk.charge_nodes(node.content.len() as u64)?;
+            // A sum cut short depends on `expected`, so it is part of the key.
+            let mut hasher = blake3::Hasher::new();
+            for raw in &node.content {
+                hasher.update(raw);
+            }
+            hasher.update(&expected.to_le_bytes());
+            let key = *hasher.finalize().as_bytes();
+            total = match self.file_lens.get(&key) {
+                Some(&known) => {
+                    self.walk.charge_bytes(known)?;
+                    known
+                }
+                None => {
+                    let read = self.read_len(node, expected).await?;
+                    if self.file_lens.len() < self.file_lens_limit {
+                        self.file_lens.insert(key, read);
+                    }
+                    read
+                }
+            };
+            found = Some(total);
+        }
+        if total > expected {
+            return Err(Error::corrupt(
+                String::from_utf8_lossy(&node.name),
+                format!("its chunks hold more than the {expected} bytes the node says"),
+            ));
         }
         if total != expected {
             return Err(Error::corrupt(
@@ -702,24 +957,69 @@ impl<S: BlobStore> Reader<S> {
                 format!("its chunks hold {total} bytes, the node says {expected}"),
             ));
         }
-        Ok(extents)
+        Ok((extents, found))
     }
 
-    /// The size of a file's chunks, from the index or, with `read`, from the
-    /// chunks themselves.
-    async fn content_len(&mut self, node: &pb::Node, read: bool) -> Result<u64> {
+    /// The size of a file's chunks, from the index.
+    async fn content_len(&mut self, node: &pb::Node) -> Result<u64> {
         let mut total = 0u64;
         for raw in &node.content {
             let id: BlobId = raw
                 .as_slice()
                 .try_into()
                 .map_err(|_| Error::corrupt("tree", "content id must be 32 bytes"))?;
-            let len = if read {
-                self.read_blob(&id, BLOB_TYPE_DATA).await?.len() as u64
-            } else {
-                u64::from(self.locate_blob(&id, BLOB_TYPE_DATA).await?.ulen)
-            };
+            let len = u64::from(self.locate_blob(&id, BLOB_TYPE_DATA).await?.ulen);
             total = total.saturating_add(len);
+        }
+        Ok(total)
+    }
+
+    /// The size of a file's chunks, read from the chunks themselves, each
+    /// distinct one once, charging the bytes of every reference as it goes.
+    /// Stops once the sum is over `expected`, so it may then be partial. Each
+    /// frame of a chunk is fetched only while bytes of the budget are left
+    /// and is charged as [`Reader::read_frames`] says, so a shard that lists
+    /// a chunk first at copies that do not open pays for them; a chunk none
+    /// of whose copies opens is remembered and not read again; and a charge
+    /// that fails spends what is left. A check that goes on after the error
+    /// therefore fetches at most one frame and one pack prefix past the
+    /// budget over its whole run. Below the budget, what is fetched and not
+    /// charged is the 41 bytes of framing of each chunk read and the prefix
+    /// of each pack the first time its key opens.
+    async fn read_len(&mut self, node: &pb::Node, expected: u64) -> Result<u64> {
+        let mut lens: HashMap<BlobId, u64> = HashMap::new();
+        let mut total = 0u64;
+        for raw in &node.content {
+            let id: BlobId = raw
+                .as_slice()
+                .try_into()
+                .map_err(|_| Error::corrupt("tree", "content id must be 32 bytes"))?;
+            let len = match lens.get(&id) {
+                Some(&len) => len,
+                None => {
+                    if let Some((object, reason)) = self.unreadable.get(&id) {
+                        return Err(Error::corrupt(object.clone(), reason.clone()));
+                    }
+                    let len = match self.read_copies(&id, BLOB_TYPE_DATA, true).await {
+                        Ok(bytes) => bytes.len() as u64,
+                        Err(e) => {
+                            if let Error::Corrupt { object, reason } = &e
+                                && self.unreadable.len() < self.file_lens_limit
+                            {
+                                self.unreadable.insert(id, (object.clone(), reason.clone()));
+                            }
+                            return Err(e);
+                        }
+                    };
+                    lens.insert(id, len);
+                    len
+                }
+            };
+            self.walk.charge_bytes(len)?;
+            total = total.saturating_add(len);
+            if total > expected {
+                break;
+            }
         }
         Ok(total)
     }
@@ -732,8 +1032,8 @@ impl<S: BlobStore> Reader<S> {
         path: &[u8],
         out: &mut dyn Write,
     ) -> Result<()> {
-        let top = self.open_tree(snapshot_id).await?;
-        let at = self.locate(top, path).await?;
+        let (top, top_bytes) = self.open_tree(snapshot_id).await?;
+        let at = self.locate(top, top_bytes, path).await?;
         let node = match at.node {
             Some(n) if n.r#type == pb::NodeType::File as i32 => n,
             _ => {
@@ -743,7 +1043,7 @@ impl<S: BlobStore> Reader<S> {
                 )));
             }
         };
-        let extents = self.check_file(&node).await?;
+        let (extents, _) = self.check_file(&node).await?;
         let (mut pos, mut extent, mut extent_pos) = (0u64, 0usize, 0u64);
         for raw in &node.content {
             let id: BlobId = raw.as_slice().try_into().expect("length checked");
@@ -793,9 +1093,16 @@ impl<S: BlobStore> Reader<S> {
         options: &RestoreOptions,
         progress: &dyn Fn(&RestoreProgress),
     ) -> Result<RestoreReport> {
-        let (nodes, base) = self.entries_at(snapshot_id, &options.path).await?;
+        let (nodes, bytes, base) = self.entries_at(snapshot_id, &options.path).await?;
         // Nothing is written until every tree that will be used has passed.
-        validate_subtree(self, nodes.clone(), base.clone(), options.include.as_ref()).await?;
+        validate_subtree(
+            self,
+            nodes.clone(),
+            bytes,
+            base.clone(),
+            options.include.as_ref(),
+        )
+        .await?;
         let settings = RestoreSettings {
             overwrite: options.overwrite,
             verify: options.verify && !options.dry_run,
@@ -805,8 +1112,12 @@ impl<S: BlobStore> Reader<S> {
             restore_owners: !options.skip_owners,
             keep_privileges: true,
         };
+        self.walk.reset();
         let mut restorer = Restorer::open(target, settings)?;
-        let mut walk = SelectedWalk::new(TreeCursor::new(nodes, base), options.include.as_ref());
+        let mut walk = SelectedWalk::new(
+            TreeCursor::new(nodes, bytes, base),
+            options.include.as_ref(),
+        );
         while let Some(action) = walk.next(self).await? {
             let node = match action {
                 Action::Enter { node, .. } => {

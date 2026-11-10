@@ -810,6 +810,99 @@ async fn agent_key_replace_pushes_to_online_agents() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agent_key_replace_withholds_key_while_unavailable() {
+    each_backend(|backend| async move {
+        let minio = MinioServer::start().await;
+        minio.create_bucket(BUCKET).await;
+        let server = minio.root_credentials();
+        let agent = agent_user(&minio, BUCKET).await;
+        let ts = TestServer::start(&backend).await;
+        let http = Http::login(&ts).await;
+        let created = create_s3(&http, &s3_draft(&minio, BUCKET, "cloud", &server, &agent)).await;
+        let id = created["id"].as_str().unwrap();
+        let online = enroll_agent(&ts, &http, id, "online").await;
+
+        let read = |p: std::path::PathBuf| std::fs::read_to_string(p).unwrap();
+        let (ca, cert, key) = (read(online.ca()), read(online.cert()), read(online.key()));
+        let channel = connect::channel(
+            &ts.grpc_address(),
+            "127.0.0.1",
+            tls::pinned_config(&ca, Some((&cert, &key))).unwrap(),
+            &NetOptions::default(),
+        )
+        .await
+        .unwrap();
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        tx.send(AgentMessage {
+            body: Some(AgentBody::Hello(Hello {
+                versions: Some(Versions {
+                    min: PROTOCOL_VERSION,
+                    max: PROTOCOL_VERSION,
+                }),
+                agent_version: "test".into(),
+                ..Default::default()
+            })),
+        })
+        .await
+        .unwrap();
+        let mut stream = AgentClient::new(channel)
+            .session(ReceiverStream::new(rx))
+            .await
+            .unwrap()
+            .into_inner();
+        for _ in 0..2 {
+            stream.message().await.unwrap().unwrap();
+        }
+
+        let good_hash = server_access(ts.state(), id)
+            .await
+            .unwrap()
+            .config_hash
+            .to_vec();
+        sqlx::query("UPDATE repositories SET config_hash = $1 WHERE id = $2")
+            .bind(vec![9u8; 32])
+            .bind(id)
+            .execute(&ts.state().db.pool)
+            .await
+            .unwrap();
+        let new_key = agent_user(&minio, BUCKET).await;
+        let replaced = http
+            .put(
+                &format!("/api/v1/repositories/{id}/agent-key"),
+                &creds(&new_key),
+            )
+            .await;
+        assert_eq!(replaced.status(), 200);
+        let replaced = body(replaced).await;
+        assert_eq!(replaced["online_notified"], 0);
+        assert_eq!(replaced["offline"], 1);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), stream.message())
+                .await
+                .is_err(),
+            "an agent of an unavailable repository gets no storage key"
+        );
+        let stored = server_access(ts.state(), id).await.unwrap();
+        assert_eq!(stored.agent_creds.unwrap().access_key_id, new_key.0);
+
+        sqlx::query("UPDATE repositories SET config_hash = $1 WHERE id = $2")
+            .bind(good_hash)
+            .bind(id)
+            .execute(&ts.state().db.pool)
+            .await
+            .unwrap();
+        let rechecked = http
+            .post(&format!("/api/v1/repositories/{id}/check"), &json!({}))
+            .await;
+        assert_eq!(rechecked.status(), 200);
+        let later = enroll_agent(&ts, &http, id, "later").await;
+        assert_eq!(delivered_key(&later), new_key.0);
+        ts.stop().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn repos_recheck_updates_state() {
     each_backend(|backend| async move {
         let minio = MinioServer::start().await;

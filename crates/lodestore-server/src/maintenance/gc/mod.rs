@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use lodestore_format::gc::plan::{MAX_CANDIDATES, PackStat, PlanOptions};
-use lodestore_format::gc::{Survey, SurveyProgress, survey};
+use lodestore_format::gc::{Survey, SurveyProgress, survey_with};
 use lodestore_format::index::hex32;
 use lodestore_format::locks::{DEFAULT_MAX_RUNTIME, RUNTIME_MARGIN};
 use lodestore_policy::jiff::Timestamp;
@@ -324,7 +324,16 @@ async fn dry_run(state: &AppState, cycle_id: &str, plan_now_ms: i64) -> anyhow::
             seen.total = total;
         }
     };
-    let surveying = survey(&source.store, &source.keys, &source.config, &opts, &record);
+    let policy = db::load_mark_policy(state, &cycle.repository_id, &source).await?;
+    let survey_started = now_ms();
+    let surveying = survey_with(
+        &source.store,
+        &source.keys,
+        &source.config,
+        &opts,
+        &policy,
+        &record,
+    );
     tokio::pin!(surveying);
     let mut tick = tokio::time::interval(PROGRESS_PERIOD);
     let surveyed = loop {
@@ -337,6 +346,16 @@ async fn dry_run(state: &AppState, cycle_id: &str, plan_now_ms: i64) -> anyhow::
         }
     };
     let surveyed = surveyed.context("surveying the repository")?;
+    let failing = db::failing_ids(&surveyed.quarantined, &surveyed.ignored);
+    db::replace_quarantine(
+        state,
+        &cycle.repository_id,
+        &surveyed.quarantined,
+        &failing,
+        now_ms(),
+        survey_started,
+    )
+    .await?;
 
     let finished = now_ms();
     let retention = bucket_retention(state, &cycle.repository_id).await;
@@ -442,6 +461,23 @@ pub(crate) fn build_report(
             })
             .collect(),
         locked: Vec::new(),
+        skipped_shards: surveyed
+            .shards
+            .skipped
+            .iter()
+            .map(|(key, reason)| GcObjectNote {
+                key: key.clone(),
+                reason: reason.clone(),
+            })
+            .collect(),
+        quarantined: surveyed
+            .quarantined
+            .iter()
+            .map(|q| GcObjectNote {
+                key: q.key.clone(),
+                reason: q.reason.clone(),
+            })
+            .collect(),
     }
 }
 

@@ -25,18 +25,24 @@ use crate::config;
 use crate::crypto::{BLOB_TYPE_DATA, BLOB_TYPE_TREE, BlobId, Entropy};
 use crate::error::{Error, Result};
 use crate::fs::scan::{self, ScanTotals};
+use prost::Message;
+
 use crate::fs::walk::{CACHEDIR_TAG, ExtentReader, WalkOptions, Walker, data_extents};
 use crate::fs::{conv, hostname, meta, now};
 use crate::index::{
-    INDEX_PREFIX, Index, SupersedesTrust, index_object_key, parse_hex32, seal_shard,
+    INDEX_PREFIX, Index, SHARD_TARGET_SIZE, SupersedesTrust, index_object_key, parse_hex32,
+    seal_shard, split_records,
 };
 use crate::keys::WriteKeys;
 use crate::locks;
 use crate::pack::{MAX_TREE_ULEN, PACK_TARGET_SIZE, PackBuilder, pack_object_key, parse_entries};
 use crate::pb;
 use crate::snapshot::{ParentTree, seal_snapshot, snapshot_object_key};
-use crate::store::{BlobError, BlobStore, put_named};
-use crate::tree::{encode_tree, split_nodes, validate_name};
+use crate::store::{BlobError, BlobStore, put_named, read_bounded};
+use crate::tree::{
+    MAX_DIR_ENTRIES, MAX_DIR_TREE_BYTES, MAX_HELD_ENTRIES, MAX_HELD_TREE_BYTES, encode_tree,
+    split_nodes, validate_name,
+};
 
 /// Recorded issues beyond this many are only counted.
 const MAX_ISSUES: usize = 1000;
@@ -253,6 +259,11 @@ pub struct Writer<S: BlobStore> {
     gc_locks_denied: bool,
     attested: HashSet<BlobId>,
     written: Vec<BlobId>,
+    shard_target: usize,
+    dir_limit: u64,
+    held_limit: u64,
+    dir_byte_limit: u64,
+    held_byte_limit: u64,
     /// Open packs of the conformance hooks, see [`Writer::put_blob_raw`].
     #[cfg(feature = "test-hooks")]
     raw: [Option<PackBuilder>; 2],
@@ -342,6 +353,11 @@ impl<S: BlobStore> Writer<S> {
             gc_locks_denied: gc_locks.denied,
             attested,
             written: Vec::new(),
+            shard_target: SHARD_TARGET_SIZE,
+            dir_limit: MAX_DIR_ENTRIES,
+            held_limit: MAX_HELD_ENTRIES,
+            dir_byte_limit: MAX_DIR_TREE_BYTES,
+            held_byte_limit: MAX_HELD_TREE_BYTES,
             #[cfg(feature = "test-hooks")]
             raw: [None, None],
         })
@@ -350,11 +366,12 @@ impl<S: BlobStore> Writer<S> {
     /// Opens the repository `store` holds with writer keys: reads `config`,
     /// checks that the keys were exported for exactly it, then [`Writer::new`].
     pub async fn connect(store: S, keys: WriteKeys) -> Result<Self> {
-        let config_bytes = match store.get("config").await {
-            Ok(bytes) => bytes,
-            Err(BlobError::NotFound) => return Err(Error::NotInitialized),
-            Err(e) => return Err(e.into()),
-        };
+        let config_bytes =
+            match read_bounded(&store, "config", None, config::MAX_CONFIG_SIZE, "config").await {
+                Ok(bytes) => bytes,
+                Err(Error::Store(BlobError::NotFound)) => return Err(Error::NotInitialized),
+                Err(e) => return Err(e),
+            };
         keys.verify_config(&config_bytes)?;
         let config = config::decode(&config_bytes)?;
         Self::new(store, keys, &config).await
@@ -372,11 +389,12 @@ impl<S: BlobStore> Writer<S> {
         own_shards: &HashSet<BlobId>,
         distrusted: &HashSet<BlobId>,
     ) -> Result<Self> {
-        let config_bytes = match store.get("config").await {
-            Ok(bytes) => bytes,
-            Err(BlobError::NotFound) => return Err(Error::NotInitialized),
-            Err(e) => return Err(e.into()),
-        };
+        let config_bytes =
+            match read_bounded(&store, "config", None, config::MAX_CONFIG_SIZE, "config").await {
+                Ok(bytes) => bytes,
+                Err(Error::Store(BlobError::NotFound)) => return Err(Error::NotInitialized),
+                Err(e) => return Err(e),
+            };
         keys.verify_config(&config_bytes)?;
         let config = config::decode(&config_bytes)?;
         Self::open(store, keys, &config, Dedup::Hinted(own_shards), distrusted).await
@@ -412,7 +430,34 @@ impl<S: BlobStore> Writer<S> {
         self.index.retain_listed_packs(&self.store).await
     }
 
+    /// Sets the size at which a shard is closed, to make small tests split.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn set_shard_target(&mut self, bytes: usize) {
+        self.shard_target = bytes;
+    }
+
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn set_dir_limit(&mut self, entries: u64) {
+        self.dir_limit = entries;
+    }
+
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn set_held_limit(&mut self, entries: u64) {
+        self.held_limit = entries;
+    }
+
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn set_dir_byte_limit(&mut self, bytes: u64) {
+        self.dir_byte_limit = bytes;
+    }
+
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn set_held_byte_limit(&mut self, bytes: u64) {
+        self.held_byte_limit = bytes;
+    }
+
     /// Replaces the randomness source, for deterministic tests.
+    #[cfg(any(test, feature = "test-hooks"))]
     pub fn with_entropy(mut self, entropy: Entropy) -> Self {
         self.entropy = entropy;
         self
@@ -872,6 +917,13 @@ struct Session<'a, 'p, S: BlobStore> {
     scan: Option<Arc<ScanTotals>>,
     /// Bytes read so far of the file being backed up.
     cur_read: u64,
+    /// Entries a restore holds on the deepest path below the nodes about to
+    /// be written, then through the directory [`Session::write_tree`] wrote.
+    held: u64,
+    /// Tree bytes a restore holds on the deepest path below the nodes about
+    /// to be written, then through the directory [`Session::write_tree`]
+    /// wrote, counted as the sum of the decoded tree blob lengths.
+    held_bytes: u64,
 }
 
 impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
@@ -904,6 +956,8 @@ impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
             tree_sink: None,
             scan: None,
             cur_read: 0,
+            held: 0,
+            held_bytes: 0,
         }
     }
 
@@ -1000,7 +1054,8 @@ impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
         }
         if full {
             self.flush(blob_type).await?;
-            if self.uploaded.len() >= self.flush_packs {
+            let uploaded_bytes: usize = self.uploaded.iter().map(Message::encoded_len).sum();
+            if self.uploaded.len() >= self.flush_packs || uploaded_bytes >= self.w.shard_target {
                 self.commit_shard().await?;
             }
         }
@@ -1033,27 +1088,29 @@ impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
             return Ok(());
         }
         let records = std::mem::take(&mut self.uploaded);
-        let (shard_id, bytes) = seal_shard(
-            &self.w.keys.k_idx,
-            &self.w.keys.repo_id,
-            records.clone(),
-            &mut self.w.entropy,
-        )?;
-        put_named(&self.w.store, &index_object_key(&shard_id), bytes).await?;
-        for record in &records {
-            for entry in parse_entries(&record.entries)? {
-                self.pending.remove(&(entry.blob_id, entry.blob_type));
+        for group in split_records(records, self.w.shard_target) {
+            let (shard_id, bytes) = seal_shard(
+                &self.w.keys.k_idx,
+                &self.w.keys.repo_id,
+                group.clone(),
+                &mut self.w.entropy,
+            )?;
+            put_named(&self.w.store, &index_object_key(&shard_id), bytes).await?;
+            for record in &group {
+                for entry in parse_entries(&record.entries)? {
+                    self.pending.remove(&(entry.blob_id, entry.blob_type));
+                }
             }
+            self.w.index.add_shard(
+                shard_id,
+                &pb::IndexShard {
+                    packs: group,
+                    supersedes: Vec::new(),
+                },
+            )?;
+            self.refs.insert(shard_id);
+            self.w.written.push(shard_id);
         }
-        self.w.index.add_shard(
-            shard_id,
-            &pb::IndexShard {
-                packs: records,
-                supersedes: Vec::new(),
-            },
-        )?;
-        self.refs.insert(shard_id);
-        self.w.written.push(shard_id);
         Ok(())
     }
 
@@ -1066,9 +1123,43 @@ impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
     /// Writes the nodes of one directory as one or more tree blobs and
     /// returns their ids in order.
     async fn write_tree(&mut self, nodes: Vec<pb::Node>) -> Result<Vec<Vec<u8>>> {
+        if nodes.len() as u64 > self.w.dir_limit {
+            return Err(Error::InvalidInput(format!(
+                "a directory has {} entries, more than the {} a restore reads; \
+                 the backup stops here",
+                nodes.len(),
+                self.w.dir_limit
+            )));
+        }
+        let held = (nodes.len() as u64).saturating_add(std::mem::take(&mut self.held));
+        if held > self.w.held_limit {
+            return Err(Error::InvalidInput(format!(
+                "a directory and the ones it is in hold {held} entries, more than the {} \
+                 a restore holds at once; the backup stops here",
+                self.w.held_limit
+            )));
+        }
+        let blobs: Vec<Vec<u8>> = split_nodes(nodes).into_iter().map(encode_tree).collect();
+        let dir_bytes: u64 = blobs.iter().map(|b| b.len() as u64).sum();
+        if dir_bytes > self.w.dir_byte_limit {
+            return Err(Error::InvalidInput(format!(
+                "a directory holds {dir_bytes} bytes of tree data, more than the {} \
+                 a restore reads; the backup stops here",
+                self.w.dir_byte_limit
+            )));
+        }
+        let held_bytes = dir_bytes.saturating_add(std::mem::take(&mut self.held_bytes));
+        if held_bytes > self.w.held_byte_limit {
+            return Err(Error::InvalidInput(format!(
+                "a directory and the ones it is in hold {held_bytes} bytes of tree data, \
+                 more than the {} a restore holds at once; the backup stops here",
+                self.w.held_byte_limit
+            )));
+        }
+        self.held = held;
+        self.held_bytes = held_bytes;
         let mut ids = Vec::new();
-        for piece in split_nodes(nodes) {
-            let bytes = encode_tree(piece);
+        for bytes in blobs {
             let id = blob_id(&self.w.keys.k_id, &bytes);
             self.sink_tree(&id, &bytes);
             self.add_blob(BLOB_TYPE_TREE, id, &bytes).await?;
@@ -1105,6 +1196,8 @@ impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
     ) -> Fut<'b, Vec<pb::Node>> {
         Box::pin(async move {
             let mut nodes = Vec::new();
+            let mut below = 0;
+            let mut below_bytes = 0;
             for (name, child) in &trie.children {
                 let full = join(path, name);
                 let st = Walker::stat(dirfd, name)
@@ -1117,6 +1210,8 @@ impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
                     if let Some(node) = self.backup_entry(dirfd, name, &st, &full).await? {
                         nodes.push(node);
                     }
+                    below = below.max(std::mem::take(&mut self.held));
+                    below_bytes = below_bytes.max(std::mem::take(&mut self.held_bytes));
                     continue;
                 }
                 if Walker::node_type(&st) != Some(pb::NodeType::Dir) {
@@ -1131,7 +1226,11 @@ impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
                 let mut node = Walker::node_of(name, &st, pb::NodeType::Dir, true);
                 node.subtrees = self.write_tree(children).await?;
                 nodes.push(node);
+                below = below.max(std::mem::take(&mut self.held));
+                below_bytes = below_bytes.max(std::mem::take(&mut self.held_bytes));
             }
+            self.held = below;
+            self.held_bytes = below_bytes;
             Ok(nodes)
         })
     }
@@ -1153,6 +1252,8 @@ impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
                 entries.retain(|e| e.name == CACHEDIR_TAG);
             }
             let mut nodes = Vec::new();
+            let mut below = 0;
+            let mut below_bytes = 0;
             for entry in entries {
                 let full = join(path, &entry.name);
                 let st = match entry.stat {
@@ -1168,7 +1269,11 @@ impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
                 if let Some(node) = self.backup_entry(dirfd, &entry.name, &st, &full).await? {
                     nodes.push(node);
                 }
+                below = below.max(std::mem::take(&mut self.held));
+                below_bytes = below_bytes.max(std::mem::take(&mut self.held_bytes));
             }
+            self.held = below;
+            self.held_bytes = below_bytes;
             Ok(nodes)
         })
     }

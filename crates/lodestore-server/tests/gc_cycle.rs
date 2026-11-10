@@ -6,21 +6,27 @@ use std::time::{Duration, Instant, SystemTime};
 
 use common::{Api, TestServer, WAIT, backends, bearer_client, wait_until};
 use lodestore_format::attest::{
-    MARKER_LEGACY_SHARDS, ensure_upgraded, put_attestation, read_attestations,
+    MARKER_LEGACY_SHARDS, ensure_upgraded, put_attestation, read_attestations, seal_provenance,
 };
 use lodestore_format::crypto::{BLOB_TYPE_DATA, BlobId, Entropy, HPKE_ENC_LEN, SEALED_KEY_LEN};
+use lodestore_format::gc::mark::{Quarantined, load_shards};
 use lodestore_format::index::{
-    hex32, index_object_key, open_shard, parse_hex32, seal_shard_superseding,
+    MAX_SHARD_SIZE, hex32, index_object_key, open_shard, parse_hex32, seal_shard,
+    seal_shard_superseding,
 };
 use lodestore_format::locks::{new_lock_id, publish_gc_manifest};
-use lodestore_format::pack::PACK_PREFIX_LEN;
+use lodestore_format::pack::{ENTRY_LEN, PACK_MAX_SIZE, PACK_PREFIX_LEN};
 use lodestore_format::pb;
 use lodestore_format::reader::{Reader, RestoreOptions};
 use lodestore_format::repo::Repository;
 use lodestore_format::snapshot::snapshot_object_key;
 use lodestore_format::store::{LocalFsStore, put_named};
 use lodestore_format::writer::{BackupOptions, Writer};
+use lodestore_server::catalog::open_repository;
+use lodestore_server::db::now_ms;
 use lodestore_server::maintenance::attest::record_distrusted;
+use lodestore_server::maintenance::gc;
+use lodestore_server::maintenance::gc::GcState;
 use lodestore_server::maintenance::gc::cycle::{StepOutcome, step};
 use serde_json::{Value, json};
 use sqlx::Row;
@@ -2182,6 +2188,785 @@ async fn gc_cycle_signs_rebuilt_index() {
             "[{}] the second cycle wrote index shards again",
             backend.name()
         );
+        ts.stop().await;
+    }
+}
+
+/// A shard as version 0.1 could write it: attested, above `MAX_SHARD_SIZE`,
+/// holding the records of `from` next to filler records of packs that don't
+/// exist. The files of `from` are removed when `take` is set.
+async fn plant_legacy_shard(
+    ts: &TestServer,
+    repo: &str,
+    name: &str,
+    from: &[BlobId],
+    take: bool,
+) -> (BlobId, Vec<String>) {
+    lodestore_server::maintenance::attest::ensure_upgraded(ts.state(), repo)
+        .await
+        .unwrap();
+    let store = LocalFsStore::new(ts.local_repo_root(name));
+    let repository = Repository::open(&store, PASSWORD).await.unwrap();
+    let keys = repository.read_keys();
+    let mut packs = Vec::new();
+    for id in from {
+        let path = ts.local_repo_root(name).join(index_object_key(id));
+        let shard = open_shard(
+            keys.k_idx(),
+            keys.repo_id(),
+            id,
+            &std::fs::read(&path).unwrap(),
+        )
+        .unwrap();
+        packs.extend(shard.packs);
+        if take {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+    let real: Vec<String> = packs.iter().map(|p| hex32(&pack_id_of(p))).collect();
+    let mut entropy = Entropy::os();
+    for _ in 0..66 {
+        let mut entries = vec![0u8; ENTRY_LEN * 23_000];
+        entropy.fill(&mut entries);
+        for e in entries.as_chunks_mut::<ENTRY_LEN>().0 {
+            e[32] = BLOB_TYPE_DATA;
+            e[33..37].copy_from_slice(&(PACK_PREFIX_LEN as u32).to_le_bytes());
+            e[37..41].copy_from_slice(&64u32.to_le_bytes());
+            e[41..45].copy_from_slice(&16u32.to_le_bytes());
+        }
+        packs.push(pb::PackRecord {
+            pack_id: entropy.bytes::<32>().to_vec(),
+            hpke_enc: vec![0; HPKE_ENC_LEN],
+            sealed_pack_key: vec![0; SEALED_KEY_LEN],
+            pack_size: PACK_MAX_SIZE as u64,
+            entries,
+        });
+    }
+    let (id, bytes) = seal_shard(keys.k_idx(), keys.repo_id(), packs, &mut entropy).unwrap();
+    assert!(bytes.len() as u64 > MAX_SHARD_SIZE);
+    put_named(&store, &index_object_key(&id), bytes)
+        .await
+        .unwrap();
+    attest_shards(ts, name, &[id]).await;
+    (id, real)
+}
+
+fn pack_id_of(record: &pb::PackRecord) -> BlobId {
+    record.pack_id.as_slice().try_into().unwrap()
+}
+
+fn largest_shard(ts: &TestServer, name: &str) -> u64 {
+    files_under(&ts.local_repo_root(name).join("index"))
+        .iter()
+        .map(|p| std::fs::metadata(p).unwrap().len())
+        .max()
+        .unwrap_or(0)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_cycle_splits_legacy_oversized_shard() {
+    for backend in backends() {
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let a = backup_files(&ts, "main", "a", 11).await;
+        enable(&ts, &api, &repo).await;
+        let from: Vec<BlobId> = index_ids(&ts, "main").into_iter().collect();
+        let (legacy, real) = plant_legacy_shard(&ts, &repo, "main", &from, false).await;
+        assert!(largest_shard(&ts, "main") > MAX_SHARD_SIZE);
+
+        let id = run_cycle(&api, &repo).await;
+        let later = after_pause(&ts, &id).await;
+        assert_eq!(
+            steps(&ts, &id, later).await,
+            StepOutcome::Finished(lodestore_server::maintenance::gc::GcState::Done),
+            "[{}] {:?}",
+            backend.name(),
+            cycle(&ts, &id).await.error
+        );
+        assert!(
+            largest_shard(&ts, "main") <= MAX_SHARD_SIZE,
+            "[{}]",
+            backend.name()
+        );
+        assert!(
+            !ts.local_repo_root("main")
+                .join(index_object_key(&legacy))
+                .exists(),
+            "[{}] the old shard is still there",
+            backend.name()
+        );
+        for hex in &real {
+            assert!(
+                pack_path(&ts, "main", hex).exists(),
+                "[{}] {hex}",
+                backend.name()
+            );
+        }
+        assert_restores(&ts, "main", &a).await;
+
+        let second = run_cycle(&api, &repo).await;
+        wait_state(&ts, &second, "done").await;
+        assert_eq!(report(&api, &repo, &second).await["bytes_freed"], 0);
+        assert_restores(&ts, "main", &a).await;
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_cycle_splits_legacy_shard_while_deleting() {
+    for backend in backends() {
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let a = backup_files(&ts, "main", "a", 11).await;
+        let first = index_ids(&ts, "main");
+        let b = backup_files(&ts, "main", "b", 12).await;
+        let c = backup_files(&ts, "main", "c", 13).await;
+        let live: Vec<BlobId> = index_ids(&ts, "main").difference(&first).copied().collect();
+        forget_snapshot(&ts, "main", &a.id);
+        age_packs(&ts, "main");
+        enable(&ts, &api, &repo).await;
+        let (legacy, real) = plant_legacy_shard(&ts, &repo, "main", &live, true).await;
+        assert!(!real.is_empty());
+        let before = packs_size(&ts, "main");
+
+        let id = run_cycle(&api, &repo).await;
+        let later = after_pause(&ts, &id).await;
+        assert_eq!(
+            steps(&ts, &id, later).await,
+            StepOutcome::Finished(lodestore_server::maintenance::gc::GcState::Done),
+            "[{}] {:?}",
+            backend.name(),
+            cycle(&ts, &id).await.error
+        );
+        assert!(
+            packs_size(&ts, "main") < before,
+            "[{}] nothing was deleted",
+            backend.name()
+        );
+        assert!(
+            largest_shard(&ts, "main") <= MAX_SHARD_SIZE,
+            "[{}]",
+            backend.name()
+        );
+        assert!(
+            !ts.local_repo_root("main")
+                .join(index_object_key(&legacy))
+                .exists()
+        );
+        for hex in &real {
+            assert!(
+                pack_path(&ts, "main", hex).exists(),
+                "[{}] {hex}",
+                backend.name()
+            );
+        }
+        assert_restores(&ts, "main", &b).await;
+        assert_restores(&ts, "main", &c).await;
+        ts.stop().await;
+    }
+}
+
+fn plant_unopenable(ts: &TestServer, name: &str) -> String {
+    let bytes = noise(99, 600);
+    let key = format!(
+        "snapshots/{}",
+        hex32(&lodestore_format::config::config_hash(&bytes))
+    );
+    std::fs::write(ts.local_repo_root(name).join(&key), bytes).unwrap();
+    key
+}
+
+async fn quarantine_rows(ts: &TestServer, repo: &str) -> Vec<(String, i64, bool)> {
+    sqlx::query(
+        "SELECT object_key, confirmable, confirmed_at FROM gc_quarantine \
+         WHERE repository_id = $1 ORDER BY object_key",
+    )
+    .bind(repo)
+    .fetch_all(&ts.state().db.pool)
+    .await
+    .unwrap()
+    .iter()
+    .map(|r| {
+        (
+            r.get("object_key"),
+            r.get("confirmable"),
+            r.get::<Option<i64>, _>("confirmed_at").is_some(),
+        )
+    })
+    .collect()
+}
+
+async fn exclude(api: &Api, repo: &str, key: &str) -> reqwest::Response {
+    let id = key.strip_prefix("snapshots/").unwrap();
+    api.post(
+        &format!("/api/v1/repositories/{repo}/gc/quarantine/{id}/exclude"),
+        &json!({}),
+    )
+    .await
+}
+
+async fn failed_cycle(ts: &TestServer, api: &Api, repo: &str) -> Cycle {
+    let id = run_cycle(api, repo).await;
+    wait_state(ts, &id, "failed").await;
+    let cycle = cycle(ts, &id).await;
+    assert!(!cycle.sweep_started);
+    cycle
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_cycle_bound_snapshot_stops_cleanup() {
+    for backend in backends() {
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let (b, _c) = forgotten_a(&ts, "main").await;
+        enable(&ts, &api, &repo).await;
+        seed_agent(&ts, &repo, "host-1", r#"["gc_v1"]"#).await;
+        sqlx::query(
+            "INSERT INTO snapshots (id, repository_id, host_id, hostname, time_ms, paths_json, \
+             tags_json, job_id, incomplete, errors_total, warnings_total, stats_json, \
+             discovered_at) VALUES ($1, $2, 'host-1', 'host-1', 1, '[]', '[]', 'job-1', 0, 0, 0, \
+             '{}', 1)",
+        )
+        .bind(&b.id)
+        .bind(&repo)
+        .execute(&ts.state().db.pool)
+        .await
+        .unwrap();
+        let key = format!("snapshots/{}", b.id);
+        std::fs::write(ts.local_repo_root("main").join(&key), noise(5, 400)).unwrap();
+        let before = packs_size(&ts, "main");
+
+        let failed = failed_cycle(&ts, &api, &repo).await;
+        let error = failed.error.unwrap();
+        assert!(error.contains("belongs to a backup job"), "{error}");
+        assert_eq!(packs_size(&ts, "main"), before);
+        assert_eq!(
+            quarantine_rows(&ts, &repo).await,
+            vec![(key, 0, false)],
+            "[{}]",
+            backend.name()
+        );
+        assert_eq!(
+            exclude(&api, &repo, &format!("snapshots/{}", b.id))
+                .await
+                .status(),
+            409
+        );
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_cycle_quarantine_returns_after_database_loss() {
+    for backend in backends() {
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let (b, c) = forgotten_a(&ts, "main").await;
+        enable(&ts, &api, &repo).await;
+        let key = plant_unopenable(&ts, "main");
+        let before = packs_size(&ts, "main");
+
+        let failed = failed_cycle(&ts, &api, &repo).await;
+        assert!(failed.error.unwrap().contains("quarantined"));
+        assert_eq!(exclude(&api, &repo, &key).await.status(), 200);
+        assert_eq!(
+            quarantine_rows(&ts, &repo).await,
+            vec![(key.clone(), 1, true)]
+        );
+
+        sqlx::query("DELETE FROM gc_quarantine")
+            .execute(&ts.state().db.pool)
+            .await
+            .unwrap();
+        failed_cycle(&ts, &api, &repo).await;
+        assert_eq!(
+            quarantine_rows(&ts, &repo).await,
+            vec![(key, 1, false)],
+            "[{}]",
+            backend.name()
+        );
+        assert_eq!(packs_size(&ts, "main"), before);
+        assert_restores(&ts, "main", &b).await;
+        assert_restores(&ts, "main", &c).await;
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_cycle_dry_run_reports_quarantine() {
+    for backend in backends() {
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        forgotten_a(&ts, "main").await;
+        let key = plant_unopenable(&ts, "main");
+        let oversized = format!("index/{}", hex32(&[7; 32]));
+        File::create(ts.local_repo_root("main").join(&oversized))
+            .unwrap()
+            .set_len(MAX_SHARD_SIZE + 1)
+            .unwrap();
+
+        let response = api
+            .post(
+                &format!("/api/v1/repositories/{repo}/gc/dry-run"),
+                &json!({}),
+            )
+            .await;
+        assert_eq!(response.status(), 202);
+        let id = response.json::<Value>().await.unwrap()["cycle_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        wait_state(&ts, &id, "done").await;
+
+        let full = report(&api, &repo, &id).await;
+        assert_eq!(
+            full["quarantined"][0]["key"],
+            key.as_str(),
+            "[{}]",
+            backend.name()
+        );
+        assert_eq!(full["skipped_shards"][0]["key"], oversized.as_str());
+        assert!(
+            full["skipped_shards"][0]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("more than a shard can be")
+        );
+        assert_eq!(quarantine_rows(&ts, &repo).await, vec![(key, 1, false)]);
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_cycle_excluded_snapshot_verify_step() {
+    for backend in backends() {
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let (b, c) = forgotten_a(&ts, "main").await;
+        enable(&ts, &api, &repo).await;
+
+        let id = run_cycle(&api, &repo).await;
+        let later = after_pause(&ts, &id).await;
+        let before = packs_size(&ts, "main");
+        let key = plant_unopenable(&ts, "main");
+        assert_eq!(
+            steps(&ts, &id, later).await,
+            StepOutcome::Finished(GcState::Failed)
+        );
+        let error = cycle(&ts, &id).await.error.unwrap();
+        assert!(error.contains("nothing is deleted"), "{error}");
+        assert_eq!(packs_size(&ts, "main"), before);
+
+        failed_cycle(&ts, &api, &repo).await;
+        assert_eq!(exclude(&api, &repo, &key).await.status(), 200);
+        let id = run_cycle(&api, &repo).await;
+        let later = after_pause(&ts, &id).await;
+        assert_eq!(
+            steps(&ts, &id, later).await,
+            StepOutcome::Finished(GcState::Done),
+            "[{}]",
+            backend.name()
+        );
+        assert!(packs_size(&ts, "main") < before);
+        assert_restores(&ts, "main", &b).await;
+        assert_restores(&ts, "main", &c).await;
+        ts.stop().await;
+    }
+}
+
+fn quarantined_as_walked(key: &str) -> Quarantined {
+    Quarantined {
+        key: key.to_string(),
+        id: parse_hex32(key.strip_prefix("snapshots/").unwrap()).unwrap(),
+        reason: "unreadable".to_string(),
+        bound: false,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_cycle_exclusion_during_walk_is_kept() {
+    for backend in backends() {
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let (b, c) = forgotten_a(&ts, "main").await;
+        enable(&ts, &api, &repo).await;
+        let key = plant_unopenable(&ts, "main");
+        failed_cycle(&ts, &api, &repo).await;
+        assert_eq!(
+            quarantine_rows(&ts, &repo).await,
+            vec![(key.clone(), 1, false)]
+        );
+
+        assert_eq!(exclude(&api, &repo, &key).await.status(), 200);
+        let walked = [quarantined_as_walked(&key)];
+        let failing = gc::db::failing_ids(&walked, &[]);
+        gc::db::replace_quarantine(ts.state(), &repo, &walked, &failing, now_ms(), now_ms())
+            .await
+            .unwrap();
+        assert_eq!(
+            quarantine_rows(&ts, &repo).await,
+            vec![(key.clone(), 1, true)],
+            "[{}]",
+            backend.name()
+        );
+
+        let id = run_cycle(&api, &repo).await;
+        let later = after_pause(&ts, &id).await;
+        assert_eq!(
+            steps(&ts, &id, later).await,
+            StepOutcome::Finished(GcState::Done)
+        );
+        assert_restores(&ts, "main", &b).await;
+        assert_restores(&ts, "main", &c).await;
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_cycle_confirmation_made_during_walk_is_not_lifted() {
+    for backend in backends() {
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        forgotten_a(&ts, "main").await;
+        enable(&ts, &api, &repo).await;
+        let key = plant_unopenable(&ts, "main");
+        failed_cycle(&ts, &api, &repo).await;
+        assert_eq!(exclude(&api, &repo, &key).await.status(), 200);
+        let confirmed_before = now_ms();
+
+        let nothing = std::collections::HashSet::new();
+        gc::db::replace_quarantine(ts.state(), &repo, &[], &nothing, now_ms(), 0)
+            .await
+            .unwrap();
+        assert_eq!(
+            quarantine_rows(&ts, &repo).await,
+            vec![(key.clone(), 1, true)],
+            "[{}] a walk that started before the confirmation must not lift it",
+            backend.name()
+        );
+
+        gc::db::replace_quarantine(
+            ts.state(),
+            &repo,
+            &[],
+            &nothing,
+            now_ms(),
+            confirmed_before + 1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            quarantine_rows(&ts, &repo).await,
+            vec![],
+            "[{}] a walk that started after it lifts it for a snapshot that reads again",
+            backend.name()
+        );
+        ts.stop().await;
+    }
+}
+
+async fn dry_run(ts: &TestServer, api: &Api, repo: &str) {
+    let response = api
+        .post(
+            &format!("/api/v1/repositories/{repo}/gc/dry-run"),
+            &json!({}),
+        )
+        .await;
+    assert_eq!(response.status(), 202);
+    let id = response.json::<Value>().await.unwrap()["cycle_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    wait_state(ts, &id, "done").await;
+}
+
+fn rows_of(rows: &[(String, i64, bool)], confirmed: bool) -> usize {
+    rows.iter().filter(|(_, _, c)| *c == confirmed).count()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_cycle_exclusion_lifted_when_snapshot_reads_again() {
+    for backend in backends() {
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        forgotten_a(&ts, "main").await;
+        enable(&ts, &api, &repo).await;
+        let packs = ts.local_repo_root("main").join("packs");
+        let away = ts.local_repo_root("main").join("packs.off");
+
+        std::fs::rename(&packs, &away).unwrap();
+        dry_run(&ts, &api, &repo).await;
+        let rows = quarantine_rows(&ts, &repo).await;
+        assert_eq!(rows.len(), 2, "[{}] {rows:?}", backend.name());
+        for (key, _, _) in &rows {
+            assert_eq!(exclude(&api, &repo, key).await.status(), 200);
+        }
+
+        dry_run(&ts, &api, &repo).await;
+        let rows = quarantine_rows(&ts, &repo).await;
+        assert_eq!(rows_of(&rows, true), 2, "[{}] {rows:?}", backend.name());
+
+        std::fs::rename(&away, &packs).unwrap();
+        dry_run(&ts, &api, &repo).await;
+        assert_eq!(
+            quarantine_rows(&ts, &repo).await,
+            vec![],
+            "[{}]",
+            backend.name()
+        );
+
+        std::fs::rename(&packs, &away).unwrap();
+        failed_cycle(&ts, &api, &repo).await;
+        let rows = quarantine_rows(&ts, &repo).await;
+        assert_eq!(rows_of(&rows, false), 2, "[{}] {rows:?}", backend.name());
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_cycle_exclusion_lifted_when_snapshot_is_gone() {
+    for backend in backends() {
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        forgotten_a(&ts, "main").await;
+        let key = plant_unopenable(&ts, "main");
+
+        dry_run(&ts, &api, &repo).await;
+        assert_eq!(exclude(&api, &repo, &key).await.status(), 200);
+        dry_run(&ts, &api, &repo).await;
+        assert_eq!(
+            quarantine_rows(&ts, &repo).await,
+            vec![(key.clone(), 1, true)]
+        );
+
+        std::fs::remove_file(ts.local_repo_root("main").join(&key)).unwrap();
+        dry_run(&ts, &api, &repo).await;
+        assert_eq!(
+            quarantine_rows(&ts, &repo).await,
+            vec![],
+            "[{}]",
+            backend.name()
+        );
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_cycle_forgotten_snapshot_can_be_excluded() {
+    for backend in backends() {
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let (b, _c) = forgotten_a(&ts, "main").await;
+        enable(&ts, &api, &repo).await;
+
+        let source = open_repository(ts.state(), &repo).await.unwrap();
+        let record = pb::ProvenanceRecord {
+            snapshot_id: parse_hex32(&b.id).unwrap().to_vec(),
+            host_id: "host-1".to_string(),
+            hostname: "host-1".to_string(),
+            job_id: "job-1".to_string(),
+            verified_at: Some(pb::Timestamp {
+                seconds: 1,
+                nanos: 0,
+            }),
+        };
+        let mut entropy = Entropy::os();
+        let sealed = seal_provenance(&source.keys, &record, &mut entropy).unwrap();
+        put_attestation(
+            &source.store,
+            &source.keys,
+            &[],
+            &[],
+            vec![sealed],
+            &mut entropy,
+        )
+        .await
+        .unwrap();
+        let key = format!("snapshots/{}", b.id);
+        let packs = ts.local_repo_root("main").join("packs");
+        std::fs::rename(&packs, ts.local_repo_root("main").join("packs.off")).unwrap();
+
+        dry_run(&ts, &api, &repo).await;
+        assert!(
+            quarantine_rows(&ts, &repo)
+                .await
+                .contains(&(key.clone(), 0, false)),
+            "[{}]",
+            backend.name()
+        );
+        sqlx::query(
+            "INSERT INTO snapshot_tombstones (id, repository_id, forgotten_at, reason) \
+             VALUES ($1, $2, 1, 'object lock')",
+        )
+        .bind(&b.id)
+        .bind(&repo)
+        .execute(&ts.state().db.pool)
+        .await
+        .unwrap();
+
+        dry_run(&ts, &api, &repo).await;
+        assert!(
+            quarantine_rows(&ts, &repo)
+                .await
+                .contains(&(key.clone(), 1, false)),
+            "[{}]",
+            backend.name()
+        );
+        assert_eq!(exclude(&api, &repo, &key).await.status(), 200);
+        assert!(
+            quarantine_rows(&ts, &repo)
+                .await
+                .contains(&(key.clone(), 1, true)),
+            "[{}]",
+            backend.name()
+        );
+
+        ts.stop().await;
+    }
+}
+
+/// A shard past the size limit that repeats the records of the marked packs:
+/// cleanup skips it, a writer that predates the limit would read it.
+async fn plant_skipped_copy(ts: &TestServer, name: &str, marked: &[String]) {
+    let store = LocalFsStore::new(ts.local_repo_root(name));
+    let repo = Repository::open(&store, PASSWORD).await.unwrap();
+    let records: Vec<pb::PackRecord> = load_shards(&store, repo.read_keys())
+        .await
+        .unwrap()
+        .shards
+        .into_iter()
+        .flat_map(|(_, shard)| shard.packs)
+        .filter(|p| marked.contains(&hex32(&pack_id_of(p))))
+        .collect();
+    assert!(!records.is_empty());
+    let id = put_shard(ts, name, records, vec![]).await;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(ts.local_repo_root(name).join(index_object_key(&id)))
+        .unwrap()
+        .set_len(MAX_SHARD_SIZE + 1)
+        .unwrap();
+}
+
+fn assert_kept(ts: &TestServer, marked: &[String]) {
+    for hex in marked {
+        assert!(pack_path(ts, "main", hex).exists(), "{hex} was deleted");
+    }
+}
+
+async fn allow_shard_limit(ts: &TestServer) {
+    sqlx::query("UPDATE agents SET capabilities_json = '[\"gc_v1\",\"shard_limit_v1\"]' WHERE id = 'old-host'")
+        .execute(&ts.state().db.pool)
+        .await
+        .unwrap();
+}
+
+/// An agent that reads shards without the size limit keeps the packs a shard
+/// cleanup cannot read names; once it is updated the cycle goes through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_cycle_old_agents_keep_packs_named_by_skipped_shard() {
+    for backend in backends() {
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let (b, c) = forgotten_a(&ts, "main").await;
+        enable(&ts, &api, &repo).await;
+
+        let id = run_cycle(&api, &repo).await;
+        let later = after_pause(&ts, &id).await;
+        let marked = marked_packs(&api, &repo, &id).await;
+        assert!(!marked.is_empty());
+        plant_skipped_copy(&ts, "main", &marked).await;
+        seed_agent(&ts, &repo, "old-host", "[\"gc_v1\"]").await;
+
+        assert_eq!(
+            steps(&ts, &id, later).await,
+            StepOutcome::Finished(GcState::Failed),
+            "[{}]",
+            backend.name()
+        );
+        let failed = cycle(&ts, &id).await;
+        assert!(failed.error.unwrap().contains("old-host"));
+        assert!(!failed.error_after_delete);
+        assert_kept(&ts, &marked);
+        assert!(lock_files(&ts, "main").is_empty(), "the marker must go");
+
+        allow_shard_limit(&ts).await;
+        let second = run_cycle(&api, &repo).await;
+        let later = after_pause(&ts, &second).await;
+        let marked = marked_packs(&api, &repo, &second).await;
+        assert!(!marked.is_empty());
+        assert_eq!(
+            steps(&ts, &second, later).await,
+            StepOutcome::Finished(GcState::Done),
+            "{:?}",
+            cycle(&ts, &second).await.error
+        );
+        for hex in &marked {
+            assert!(
+                !pack_path(&ts, "main", hex).exists(),
+                "{hex} is still there"
+            );
+        }
+        assert_restores(&ts, "main", &b).await;
+        assert_restores(&ts, "main", &c).await;
+        ts.stop().await;
+    }
+}
+
+/// A shard planted after verification is caught by the check before the
+/// packs go, and the next run continues the sweep.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_cycle_sweep_refuses_shard_skipped_after_verify() {
+    for backend in backends() {
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let (b, c) = forgotten_a(&ts, "main").await;
+        enable(&ts, &api, &repo).await;
+        seed_agent(&ts, &repo, "old-host", "[\"gc_v1\"]").await;
+
+        let id = run_cycle(&api, &repo).await;
+        let later = after_pause(&ts, &id).await;
+        let marked = marked_packs(&api, &repo, &id).await;
+        assert!(!marked.is_empty());
+        for _ in 0..2 {
+            step(ts.state(), &id, later).await.unwrap();
+        }
+        assert_eq!(cycle(&ts, &id).await.state, "sweeping");
+        plant_skipped_copy(&ts, "main", &marked).await;
+
+        assert_eq!(
+            steps(&ts, &id, later).await,
+            StepOutcome::Finished(GcState::Failed),
+            "[{}]",
+            backend.name()
+        );
+        assert!(cycle(&ts, &id).await.error.unwrap().contains("old-host"));
+        assert_kept(&ts, &marked);
+
+        allow_shard_limit(&ts).await;
+        assert_eq!(run_cycle(&api, &repo).await, id);
+        wait_state(&ts, &id, "done").await;
+        for hex in &marked {
+            assert!(
+                !pack_path(&ts, "main", hex).exists(),
+                "{hex} is still there"
+            );
+        }
+        assert_restores(&ts, "main", &b).await;
+        assert_restores(&ts, "main", &c).await;
         ts.stop().await;
     }
 }

@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use bytes::Bytes;
 use prost::Message;
 
 use crate::attest::{MARKER_LEGACY_SHARDS, read_attestations};
@@ -14,16 +15,28 @@ use crate::error::{Error, Result};
 use crate::keys::ReadKeys;
 use crate::locks::read_gc_locks;
 use crate::pack::{
-    ENTRY_LEN, PACK_PREFIX_LEN, frame_len_in_range, max_ulen, pack_object_key, parse_entries,
-    read_pack_header,
+    ENTRY_LEN, PACK_MAX_SIZE, PACK_PREFIX_LEN, frame_len_in_range, max_ulen, pack_object_key,
+    parse_entries, read_pack_header,
 };
 use crate::pb;
-use crate::store::{BlobError, BlobStore, put_named};
+use crate::store::{BlobError, BlobStore, put_named, read_bounded};
 
 pub(crate) const INDEX_PREFIX: &str = "index/";
 pub(crate) const PACKS_PREFIX: &str = "packs/";
 /// Pack records per shard written by a rebuild.
 pub(crate) const REBUILD_SHARD_PACKS: usize = 1024;
+/// Writers start a new index shard before it would grow past this size.
+pub const SHARD_TARGET_SIZE: usize = 32 << 20;
+/// Shortest frame an entry can have: a nonce, a codec byte and a tag.
+const MIN_FRAME_LEN: usize = crate::pack::HEADER_OVERHEAD + 1;
+/// Longest `entries` list a pack of at most `PACK_MAX_SIZE` can have.
+pub(crate) const MAX_RECORD_ENTRIES_LEN: usize =
+    (PACK_MAX_SIZE / (ENTRY_LEN + MIN_FRAME_LEN)) * ENTRY_LEN;
+/// Largest index shard a writer, the collector or the server check reads.
+pub const MAX_SHARD_SIZE: u64 = 64 << 20;
+/// Largest index shard the server attested that is still read: shards written
+/// before `MAX_SHARD_SIZE` may be larger, and compaction splits them.
+pub const MAX_ATTESTED_SHARD_SIZE: u64 = 1 << 30;
 
 pub fn hex32(id: &[u8; 32]) -> String {
     blake3::Hash::from_bytes(*id).to_hex().to_string()
@@ -45,6 +58,107 @@ pub struct BlobLocation {
     pub ulen: u32,
     pub blob_type: u8,
     pub shard: BlobId,
+}
+
+/// Reads an index shard of at most `max` bytes, `None` when it is gone. A
+/// shard is one AEAD frame, so it is held whole. With the size the listing
+/// showed (`listed`) it reads exactly that many bytes, so a shard swapped for
+/// a larger one after the listing is never downloaded beyond it; without one
+/// it asks for one byte more than `max`.
+pub async fn fetch_shard_bytes<S: BlobStore>(
+    store: &S,
+    key: &str,
+    listed: Option<u64>,
+    max: u64,
+) -> Result<Option<Bytes>> {
+    match read_bounded(store, key, listed, max, "shard").await {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(Error::Store(BlobError::NotFound)) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Reads an index shard the server attested, `None` when it is gone. The
+/// attestation names the content, not the size, and on a store without
+/// conditional writes an agent can overwrite the object under that name, so a
+/// shard over `MAX_SHARD_SIZE` is first hashed in pieces of that size, which
+/// holds one piece in memory. Only when the hash is the name is it read whole,
+/// by range of exactly the length found; `open_shard` checks the hash again.
+/// A shard over `MAX_ATTESTED_SHARD_SIZE` is refused, without a listing once
+/// that many bytes have been hashed.
+pub async fn fetch_attested_shard_bytes<S: BlobStore>(
+    store: &S,
+    shard_id: &BlobId,
+    listed: Option<u64>,
+) -> Result<Option<Bytes>> {
+    let key = index_object_key(shard_id);
+    if let Some(size) = listed {
+        crate::error::within_size(&key, size, MAX_ATTESTED_SHARD_SIZE, "signed shard")?;
+    }
+    if listed.is_none_or(|size| size <= MAX_SHARD_SIZE) {
+        match fetch_shard_bytes(store, &key, listed, MAX_SHARD_SIZE).await {
+            Err(Error::Corrupt { .. }) if listed.is_none() => {}
+            other => return other,
+        }
+    }
+    let mut hasher = blake3::Hasher::new();
+    let mut total = 0u64;
+    loop {
+        let limit = listed.unwrap_or(MAX_ATTESTED_SHARD_SIZE + 1);
+        let end = total.saturating_add(MAX_SHARD_SIZE).min(limit);
+        if end <= total {
+            break;
+        }
+        let piece = match store.get_range(&key, total..end).await {
+            Ok(piece) => piece,
+            Err(BlobError::NotFound) if total == 0 => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        let asked = end - total;
+        let len = piece.len() as u64;
+        if len > asked {
+            return Err(Error::corrupt(&key, "longer than the range asked for"));
+        }
+        hasher.update(&piece);
+        total += len;
+        if len < asked {
+            break;
+        }
+    }
+    crate::error::within_size(&key, total, MAX_ATTESTED_SHARD_SIZE, "signed shard")?;
+    if hasher.finalize().as_bytes() != shard_id {
+        return Err(Error::corrupt(
+            &key,
+            "object name does not match its content",
+        ));
+    }
+    match read_bounded(store, &key, Some(total), total, "shard").await {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(Error::Store(BlobError::NotFound)) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Splits pack records into groups that each make a shard of at most
+/// `target` bytes (one record may exceed it on its own) and at most
+/// `REBUILD_SHARD_PACKS` records. Keeps the order, makes no empty group.
+pub fn split_records(records: Vec<pb::PackRecord>, target: usize) -> Vec<Vec<pb::PackRecord>> {
+    let mut groups = Vec::new();
+    let mut group = Vec::new();
+    let mut bytes = 0usize;
+    for record in records {
+        let len = record.encoded_len();
+        if !group.is_empty() && (group.len() >= REBUILD_SHARD_PACKS || bytes + len > target) {
+            groups.push(std::mem::take(&mut group));
+            bytes = 0;
+        }
+        bytes += len;
+        group.push(record);
+    }
+    if !group.is_empty() {
+        groups.push(group);
+    }
+    groups
 }
 
 /// Seals a shard. Returns `(shard_id, bytes)`; the object is `index/<hex id>`.
@@ -132,6 +246,31 @@ impl Index {
     /// type is part of the key.
     pub fn get(&self, id: &BlobId, blob_type: u8) -> Option<&BlobLocation> {
         self.map.get(&(*id, blob_type))
+    }
+
+    /// The smallest decoded length any known copy of a blob claims. A copy
+    /// from a write-key holder can state a length that is too large or too
+    /// small, and the honest one is among them.
+    pub fn smallest_ulen(&self, id: &BlobId, blob_type: u8) -> Option<u32> {
+        let key = (*id, blob_type);
+        let chosen = self.map.get(&key)?;
+        let others = self.others.get(&key).map_or(&[][..], Vec::as_slice);
+        Some(others.iter().map(|l| l.ulen).fold(chosen.ulen, u32::min))
+    }
+
+    /// The blobs whose known copies do not all list the decoded length of the
+    /// chosen one. Only a shard from a write-key holder makes one.
+    pub(crate) fn ulen_conflicts(&self) -> HashSet<(BlobId, u8)> {
+        self.others
+            .iter()
+            .chain(&self.stale)
+            .filter(|(key, alts)| {
+                self.map
+                    .get(key)
+                    .is_some_and(|chosen| alts.iter().any(|l| l.ulen != chosen.ulen))
+            })
+            .map(|(key, _)| *key)
+            .collect()
     }
 
     /// Every known location of a blob, the chosen one first. Reading tries
@@ -379,19 +518,23 @@ impl Index {
         k_idx: &[u8; 32],
         repo_id: &RepoId,
         shard_id: BlobId,
+        listed: Option<u64>,
+        attested: bool,
     ) -> Result<bool> {
         if self.has_shard(&shard_id) {
             return Ok(true);
         }
-        match store.get(&index_object_key(&shard_id)).await {
-            Ok(bytes) => {
-                let shard = open_shard(k_idx, repo_id, &shard_id, &bytes)?;
-                self.add_shard(shard_id, &shard)?;
-                Ok(true)
-            }
-            Err(BlobError::NotFound) => Ok(false),
-            Err(e) => Err(e.into()),
-        }
+        let fetched = if attested {
+            fetch_attested_shard_bytes(store, &shard_id, listed).await?
+        } else {
+            fetch_shard_bytes(store, &index_object_key(&shard_id), listed, MAX_SHARD_SIZE).await?
+        };
+        let Some(bytes) = fetched else {
+            return Ok(false);
+        };
+        let shard = open_shard(k_idx, repo_id, &shard_id, &bytes)?;
+        self.add_shard(shard_id, &shard)?;
+        Ok(true)
     }
 
     /// Loads the shards a snapshot names by their exact keys. A shard that is
@@ -410,7 +553,10 @@ impl Index {
                 .as_slice()
                 .try_into()
                 .map_err(|_| Error::corrupt("snapshot", "index reference must be 32 bytes"))?;
-            match self.load_one(store, k_idx, repo_id, shard_id).await {
+            match self
+                .load_one(store, k_idx, repo_id, shard_id, None, false)
+                .await
+            {
                 Ok(_) => {}
                 Err(e) if is_data_error(&e) => {
                     self.skipped
@@ -435,7 +581,10 @@ impl Index {
             let Some(shard_id) = entry.key.strip_prefix(INDEX_PREFIX).and_then(parse_hex32) else {
                 continue;
             };
-            match self.load_one(store, k_idx, repo_id, shard_id).await {
+            match self
+                .load_one(store, k_idx, repo_id, shard_id, Some(entry.size), false)
+                .await
+            {
                 Ok(_) => {}
                 Err(e @ Error::Corrupt { .. }) => self.skipped.push((entry.key, e.to_string())),
                 Err(e) => return Err(e),
@@ -471,6 +620,12 @@ fn read_shard(
             .try_into()
             .map_err(|_| bad("pack id must be 32 bytes"))?;
         let kept = keep(&pack_id);
+        if pack.pack_size > PACK_MAX_SIZE as u64 {
+            return Err(bad("pack is larger than a pack can be"));
+        }
+        if pack.entries.len() > MAX_RECORD_ENTRIES_LEN {
+            return Err(bad("pack record lists more entries than a pack can hold"));
+        }
         if kept {
             pack_sizes.push((pack_id, pack.pack_size));
         }
@@ -578,7 +733,14 @@ pub async fn rebuild_index<S: BlobStore>(
             continue;
         };
         match index
-            .load_one(store, keys.k_idx(), keys.repo_id(), shard_id)
+            .load_one(
+                store,
+                keys.k_idx(),
+                keys.repo_id(),
+                shard_id,
+                Some(entry.size),
+                attested.shards.contains(&shard_id),
+            )
             .await
         {
             Ok(_) => {}
@@ -604,6 +766,7 @@ pub async fn rebuild_index<S: BlobStore>(
     };
     let mut entropy = Entropy::os();
     let mut records = Vec::new();
+    let mut records_bytes = 0usize;
     let total = todo.len() as u64;
     for (key, pack_id, size) in todo {
         report.packs_scanned += 1;
@@ -615,13 +778,15 @@ pub async fn rebuild_index<S: BlobStore>(
                 for e in &header.entries {
                     e.write(&mut entries);
                 }
-                records.push(pb::PackRecord {
+                let record = pb::PackRecord {
                     pack_id: pack_id.to_vec(),
                     hpke_enc: header.prefix.hpke_enc,
                     sealed_pack_key: header.prefix.sealed_pack_key,
                     pack_size: size,
                     entries,
-                });
+                };
+                records_bytes += record.encoded_len();
+                records.push(record);
                 report.packs_indexed += 1;
             }
             Err(e @ (Error::Corrupt { .. } | Error::UnsupportedVersion { .. })) => {
@@ -629,7 +794,8 @@ pub async fn rebuild_index<S: BlobStore>(
             }
             Err(e) => return Err(e),
         }
-        if records.len() >= REBUILD_SHARD_PACKS {
+        if records.len() >= REBUILD_SHARD_PACKS || records_bytes >= SHARD_TARGET_SIZE {
+            records_bytes = 0;
             write_rebuilt_shard(store, keys, &mut records, &mut entropy, &mut report).await?;
         }
     }
@@ -647,15 +813,12 @@ async fn write_rebuilt_shard<S: BlobStore>(
     if records.is_empty() {
         return Ok(());
     }
-    let (id, bytes) = seal_shard(
-        keys.k_idx(),
-        keys.repo_id(),
-        std::mem::take(records),
-        entropy,
-    )?;
-    put_named(store, &index_object_key(&id), bytes).await?;
-    report.shards_written += 1;
-    report.written.push(id);
+    for group in split_records(std::mem::take(records), SHARD_TARGET_SIZE) {
+        let (id, bytes) = seal_shard(keys.k_idx(), keys.repo_id(), group, entropy)?;
+        put_named(store, &index_object_key(&id), bytes).await?;
+        report.shards_written += 1;
+        report.written.push(id);
+    }
     Ok(())
 }
 
@@ -994,5 +1157,61 @@ mod tests {
 
         index.add_shard(legit, &legit_shard).unwrap();
         assert_eq!(index.locations(&[4; 32], 1).len(), 2);
+    }
+
+    #[test]
+    fn split_records_cuts_by_count_and_bytes() {
+        assert!(split_records(Vec::new(), SHARD_TARGET_SIZE).is_empty());
+
+        let small: Vec<_> = (0..3000).map(|i| record(i as u8, 1175, 5000)).collect();
+        let sizes: Vec<usize> = split_records(small, SHARD_TARGET_SIZE)
+            .iter()
+            .map(Vec::len)
+            .collect();
+        assert_eq!(sizes, [1024, 1024, 952]);
+
+        let exact: Vec<_> = (0..1024).map(|i| record(i as u8, 1175, 5000)).collect();
+        assert_eq!(split_records(exact, SHARD_TARGET_SIZE).len(), 1);
+
+        let big = |n: usize| {
+            let mut r = record(1, 1175, 5000);
+            r.entries = vec![0; n];
+            r
+        };
+        let groups = split_records((0..20).map(|_| big(5 << 20)).collect(), SHARD_TARGET_SIZE);
+        assert!(groups.len() > 1);
+        for g in &groups {
+            let bytes: usize = g.iter().map(Message::encoded_len).sum();
+            assert!(bytes <= SHARD_TARGET_SIZE);
+        }
+        assert_eq!(groups.iter().map(Vec::len).sum::<usize>(), 20);
+
+        let one = split_records(vec![big(33 << 20)], SHARD_TARGET_SIZE);
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].len(), 1);
+        let mixed = split_records(
+            vec![record(1, 1175, 5000), big(33 << 20)],
+            SHARD_TARGET_SIZE,
+        );
+        assert_eq!(mixed.len(), 2);
+    }
+
+    #[test]
+    fn record_entries_are_bounded_by_what_a_pack_holds() {
+        let shard_id = [3u8; 32];
+        let table = |len: usize| {
+            let mut r = record(1, 1175, PACK_MAX_SIZE as u64);
+            r.entries = record(1, 1175, 0).entries.repeat(len / ENTRY_LEN);
+            pb::IndexShard {
+                packs: vec![r],
+                supersedes: Vec::new(),
+            }
+        };
+        check_shard(shard_id, &table(MAX_RECORD_ENTRIES_LEN)).unwrap();
+        assert!(check_shard(shard_id, &table(MAX_RECORD_ENTRIES_LEN + ENTRY_LEN)).is_err());
+
+        let mut too_big = table(ENTRY_LEN);
+        too_big.packs[0].pack_size = PACK_MAX_SIZE as u64 + 1;
+        assert!(check_shard(shard_id, &too_big).is_err());
     }
 }

@@ -22,11 +22,11 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::Status;
 
 use crate::catalog;
-use crate::grpc::internal;
 use crate::grpc::registry::Registry;
+use crate::grpc::{internal, internal_or_unavailable};
 use crate::jobs::restore::RestoreRecord;
 use crate::repos::checks::open_store;
-use crate::repos::db::server_access;
+use crate::repos::db::server_access_checked;
 use crate::state::AppState;
 
 pub const PRESIGN_TTL: Duration = Duration::from_secs(3600);
@@ -49,6 +49,10 @@ fn read_error(error: lodestore_format::Error) -> Status {
         Error::Corrupt { .. } | Error::Store(BlobError::NotFound) => {
             tracing::warn!(%error, "a restore plan met damaged or missing data");
             Status::data_loss("the snapshot data is damaged or missing")
+        }
+        Error::WalkLimit { .. } => {
+            tracing::warn!(%error, "a restore plan hit the tree walk limit");
+            Status::resource_exhausted(error.to_string())
         }
         error => internal(error),
     }
@@ -77,9 +81,9 @@ async fn authorize(
 }
 
 async fn source_store(state: &AppState, repository_id: &str) -> Result<Store, Status> {
-    let access = server_access(state, repository_id)
+    let access = server_access_checked(state, repository_id)
         .await
-        .map_err(internal)?;
+        .map_err(internal_or_unavailable)?;
     open_store(&access.location, access.server_creds.as_ref()).map_err(internal)
 }
 
@@ -280,7 +284,7 @@ pub async fn restore_plan(
         parse_hex32(&record.snapshot_id).ok_or_else(|| internal("the stored snapshot id"))?;
     let source = catalog::open_repository(state, &record.source_repository_id)
         .await
-        .map_err(internal)?;
+        .map_err(internal_or_unavailable)?;
     let reader = Reader::open(source.store, source.keys, &source.config).map_err(read_error)?;
     let generation = state.registry.begin_plan(job_id);
     let (tx, rx) = mpsc::channel(STREAM_DEPTH);
@@ -393,6 +397,16 @@ pub async fn read_pack_range(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn walk_limit_fails_the_restore_plan() {
+        let status = read_error(lodestore_format::Error::WalkLimit {
+            what: "entries",
+            limit: 7,
+        });
+        assert_eq!(status.code(), tonic::Code::ResourceExhausted);
+        assert!(status.message().contains('7'));
+    }
 
     #[test]
     fn a_piece_is_cut_by_chunks_and_by_new_packs() {

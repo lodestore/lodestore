@@ -405,6 +405,7 @@ async fn connect_repository(
         FormatError::WrongSecret | FormatError::InvalidInput(_) => {
             ApiError::Validation(CONNECT_REFUSED.into())
         }
+        e @ FormatError::KdfBudget { .. } => ApiError::Validation(e.to_string()),
         other => storage_error(other),
     })?;
 

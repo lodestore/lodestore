@@ -59,6 +59,8 @@ To skip the link, set `LODESTORE_ADMIN_PASSWORD_FILE` to a file that holds the p
 
 To upgrade, remove the container and run the same command with the new version. The state stays in the volume.
 
+Back up the server database before you upgrade to 0.2: copy the volume while the container is stopped. The first start of 0.2 re-seals the stored secrets, and a 0.1 server cannot read them afterwards, so going back to 0.1 needs the copy.
+
 ## The unlock key
 
 Without `LODESTORE_UNLOCK_KEY_FILE` (or `LODESTORE_UNLOCK_KEY`) the server creates a key at `unlock.key` in its data directory and logs a warning. That works for a trial. A key that sits next to the database it protects is lost together with the volume, and a backup of the volume then holds both.
