@@ -150,7 +150,7 @@ Webhook, Slack and Telegram deliveries are requests from the server to an addres
 ## Limits against a flood
 
 - REST and the metrics port close a connection that does not send a complete request head within 10 seconds, the pause between two requests on one connection included. Bodies and responses are not timed, so a long download or the stream of a log is not cut.
-- gRPC: the TLS handshake of an agent has 10 seconds, a connection holds at most 32 streams at once, the server accepts at most 4096 connections, at most 256 of them from one client address (an IPv6 address counts by its /56), and drops the next ones at once, so one address cannot fill every slot with idle connections, and an agent that opens a session and sends no `Hello` within 10 seconds is disconnected.
+- gRPC: the TLS handshake of an agent has 10 seconds, a connection holds at most 32 streams at once, the server accepts at most 4096 connections, at most 1024 of them from one client address (an IPv6 address counts by its /56), and drops the next ones at once, so one address cannot fill every slot with idle connections, and an agent that opens a session and sends no `Hello` within 10 seconds is disconnected.
 - A host has at most 8 open CLI jobs, the jobs that the agent reports from its local socket. A job over the limit is refused and the agent is told to forget it; results of jobs that the agent finished while offline are always recorded. This keeps a local user, or a compromised agent, from filling the job table.
 
 ## Helm defaults

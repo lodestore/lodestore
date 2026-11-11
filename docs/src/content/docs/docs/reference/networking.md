@@ -42,7 +42,7 @@ The server sees the address of whoever opens the TCP connection. Behind a layer 
 ### Timeouts and limits
 
 - REST and the metrics port close a connection that has not sent a complete request head within 10 seconds, which includes a keep-alive connection that stays idle between two requests. Bodies and responses are not timed. A reverse proxy that keeps connections to the server open for reuse will find them closed after 10 idle seconds; set its upstream keep-alive timeout below that.
-- gRPC: the TLS handshake must finish within 10 seconds, a connection carries at most 32 streams at once, and the server accepts at most 4096 connections, at most 256 of them from one client address (an IPv6 address counts by its /56); the next ones are closed at once. Agents behind one NAT address share those 256. An agent that opens a session and sends no `Hello` within 10 seconds is disconnected.
+- gRPC: the TLS handshake must finish within 10 seconds, a connection carries at most 32 streams at once, and the server accepts at most 4096 connections, at most 1024 of them from one client address (an IPv6 address counts by its /56); the next ones are closed at once. Agents behind one NAT address share those 1024. An agent that opens a session and sends no `Hello` within 10 seconds is disconnected.
 
 ### Addresses and certificate names
 

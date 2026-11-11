@@ -118,7 +118,7 @@ const STOP_GRACE: Duration = Duration::from_secs(10);
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_CONCURRENT_STREAMS: u32 = 32;
 const MAX_GRPC_CONNECTIONS: usize = 4096;
-const MAX_GRPC_CONNECTIONS_PER_ADDR: usize = 256;
+const MAX_GRPC_CONNECTIONS_PER_ADDR: usize = 1024;
 
 fn current_material(state: &AppState) -> anyhow::Result<Material> {
     Ok(external_identity(&state.config.grpc)?.unwrap_or_else(|| state.pki.grpc_identity()))
