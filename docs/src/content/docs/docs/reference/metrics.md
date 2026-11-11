@@ -133,3 +133,4 @@ To alert on the age yourself: `time() - lodestore_backup_last_success_timestamp_
 | Metric | Labels | Meaning |
 |--------|--------|---------|
 | `lodestore_alerts_active` | `type`, `silenced` | Alerts firing now, by type (`backup_failed`, `no_recent_backup`, `agent_offline`, `check_failed`, `certificate_expiring`, `agent_update_failed`, `snapshot_quarantined`, `repository_unavailable`, `agent_session_conflict`, `agent_certificate_rejected`) and whether their host is silenced (`true` or `false`). All combinations are always present. |
+| `lodestore_unknown_agent_refusals` | none | Agent calls refused since the server started because the certificate belongs to no known agent, for example after the catalog was restored from an older backup. The agents ask for a re-enroll. |

@@ -12,5 +12,6 @@ pub const PROTOCOL_VERSION: u32 = 2;
 
 pub const ERROR_METADATA_KEY: &str = "lodestore-error";
 pub const ERROR_REVOKED: &str = "revoked";
+pub const ERROR_CERT_STALE: &str = "certificate_stale";
 pub const ERROR_TOKEN_INVALID: &str = "token_invalid";
 pub const ERROR_VERSION_UNSUPPORTED: &str = "version_unsupported";
