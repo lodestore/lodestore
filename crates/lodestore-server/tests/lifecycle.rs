@@ -13,7 +13,8 @@ use lodestore_proto::agent::v1::agent_client::AgentClient;
 use lodestore_proto::agent::v1::agent_message::Body;
 use lodestore_proto::agent::v1::enrollment_client::EnrollmentClient;
 use lodestore_proto::agent::v1::{
-    AgentMessage, EnrollRequest, GetTrustAnchorRequest, Hello, RenewRequest, Versions,
+    AgentMessage, EnrollRequest, GetTrustAnchorRequest, Hello, RenewRequest, RestorePlanRequest,
+    Versions,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -427,6 +428,15 @@ async fn prev_window(ts: &TestServer, id: &str) -> (Option<String>, Option<i64>)
     )
 }
 
+async fn set_prev_until(ts: &TestServer, id: &str, until: i64) {
+    sqlx::query("UPDATE agents SET prev_cert_until = $1 WHERE id = $2")
+        .bind(until)
+        .bind(id)
+        .execute(&ts.state().db.pool)
+        .await
+        .unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn adv_stale_certificate_after_renew_is_refused() {
     for backend in backends() {
@@ -476,11 +486,19 @@ async fn adv_stale_certificate_after_renew_is_refused() {
         open_session(channel_with(&ts, Some(third)).await)
             .await
             .expect("the newest certificate opens a session");
-        assert_eq!(
-            prev_window(&ts, &id).await,
-            (None, None),
-            "the first session with the new serial ends the window"
+        let (prev, shortened) = prev_window(&ts, &id).await;
+        assert_eq!(prev.as_deref(), Some(first.as_str()));
+        let shortened = shortened.unwrap();
+        let now = lodestore_server::db::now_ms();
+        assert!(
+            shortened <= now + 2 * 60 * 1000 && shortened < until,
+            "the first session with the new serial shortens the window to a drain period"
         );
+        assert!(shortened > now, "the drain period has not run out yet");
+        open_session(old.clone())
+            .await
+            .expect("an RPC that was already on its way with the old certificate");
+        set_prev_until(&ts, &id, now - 1).await;
 
         assert_stale(
             open_session(old.clone()).await,
@@ -505,6 +523,112 @@ async fn adv_stale_certificate_after_renew_is_refused() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adv_rpc_on_the_old_channel_after_the_new_session_is_not_a_rejection() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let (_, paths) = enroll_only(&ts, &api, &repo, "drain", json!([])).await;
+        let old = agent_channel(&ts, Some(&paths)).await;
+        let fresh = renew_over(old.clone()).await.expect("renew");
+        open_session(channel_with(&ts, Some(fresh)).await)
+            .await
+            .expect("the new certificate opens a session");
+
+        let status = AgentClient::new(old)
+            .restore_plan(RestorePlanRequest { job_id: "x".into() })
+            .await
+            .expect_err("there is no such job");
+        assert_ne!(
+            status
+                .metadata()
+                .get("lodestore-error")
+                .map(|v| v.as_bytes()),
+            Some(b"certificate_stale".as_slice()),
+            "[{}]",
+            backend.name()
+        );
+        assert!(
+            ts.state().registry.security_events().is_empty(),
+            "a drained RPC must not look like a rejected certificate [{}]",
+            backend.name()
+        );
+        assert!(
+            alerts_of(&ts, &api, "agent_certificate_rejected")
+                .await
+                .is_empty()
+        );
+        ts.stop().await;
+    }
+}
+
+fn heartbeat() -> AgentMessage {
+    AgentMessage {
+        body: Some(Body::Heartbeat(Default::default())),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adv_session_on_the_previous_certificate_ends_with_its_window() {
+    use lodestore_proto::agent::v1::server_message::Body as ServerBody;
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let (id, paths) = enroll_only(&ts, &api, &repo, "lingering", json!([])).await;
+        let old = agent_channel(&ts, Some(&paths)).await;
+        renew_over(old.clone()).await.expect("renew");
+
+        let (tx, rx) = mpsc::channel(8);
+        tx.send(hello()).await.unwrap();
+        let mut inbound = AgentClient::new(old)
+            .session(ReceiverStream::new(rx))
+            .await
+            .expect("the previous certificate opens a session inside the window")
+            .into_inner();
+        let ack = inbound.message().await.unwrap().and_then(|m| m.body);
+        assert!(matches!(ack, Some(ServerBody::HelloAck(_))));
+
+        tx.send(heartbeat()).await.unwrap();
+        let quiet = tokio::time::timeout(Duration::from_millis(500), async {
+            loop {
+                match inbound.message().await {
+                    Ok(Some(m)) if matches!(m.body, Some(ServerBody::Disconnect(_))) => {
+                        return true;
+                    }
+                    Ok(Some(_)) => {}
+                    _ => return false,
+                }
+            }
+        })
+        .await;
+        assert!(quiet.is_err(), "the session stays up inside the window");
+
+        set_prev_until(&ts, &id, lodestore_server::db::now_ms() - 1).await;
+        tx.send(heartbeat()).await.unwrap();
+        let closed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match inbound.message().await {
+                    Ok(Some(m)) if matches!(m.body, Some(ServerBody::Disconnect(_))) => {
+                        return true;
+                    }
+                    Ok(Some(_)) => {}
+                    _ => return false,
+                }
+            }
+        })
+        .await;
+        assert_eq!(
+            closed,
+            Ok(true),
+            "the session on the previous certificate must end with its window [{}]",
+            backend.name()
+        );
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn adv_previous_certificate_expires_after_grace() {
     for backend in backends() {
         let ts = TestServer::start(&backend).await;
@@ -515,12 +639,7 @@ async fn adv_previous_certificate_expires_after_grace() {
         renew_over(old.clone()).await.expect("renew");
         open_session(old.clone()).await.expect("inside the window");
 
-        sqlx::query("UPDATE agents SET prev_cert_until = $1 WHERE id = $2")
-            .bind(lodestore_server::db::now_ms() - 1)
-            .bind(&id)
-            .execute(&ts.state().db.pool)
-            .await
-            .unwrap();
+        set_prev_until(&ts, &id, lodestore_server::db::now_ms() - 1).await;
         assert_stale(
             open_session(old.clone()).await,
             "a session after the window",
@@ -533,18 +652,19 @@ async fn adv_previous_certificate_expires_after_grace() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn adv_stale_certificate_refused_on_every_rpc() {
     use lodestore_proto::agent::v1::{
-        FetchAgentUpdateRequest, ReadPackRangeRequest, RefreshPackAccessRequest, RestorePlanRequest,
+        FetchAgentUpdateRequest, ReadPackRangeRequest, RefreshPackAccessRequest,
     };
     for backend in backends() {
         let ts = TestServer::start(&backend).await;
         let api = ts.api().await;
         let repo = ts.create_local_repository("main").await;
-        let (_, paths) = enroll_only(&ts, &api, &repo, "every", json!([])).await;
+        let (id, paths) = enroll_only(&ts, &api, &repo, "every", json!([])).await;
         let old = agent_channel(&ts, Some(&paths)).await;
         let fresh = renew_over(old.clone()).await.expect("renew");
         open_session(channel_with(&ts, Some(fresh)).await)
             .await
             .expect("new certificate");
+        set_prev_until(&ts, &id, lodestore_server::db::now_ms() - 1).await;
 
         let mut client = AgentClient::new(old);
         assert_stale(

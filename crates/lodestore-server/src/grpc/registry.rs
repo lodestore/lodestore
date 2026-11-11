@@ -23,6 +23,7 @@ pub const CONFLICT_REPLACEMENTS: usize = 5;
 pub const SECURITY_EVENT_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const CHANNEL_DEPTH: usize = 16;
 const SERIAL_MAX_CHARS: usize = 64;
+const PACK_READ_SERIALS: usize = 4;
 const REJECT_LOG_EVERY: Duration = Duration::from_secs(10 * 60);
 
 struct Entry {
@@ -73,6 +74,7 @@ struct Inner {
     reject_logged: HashMap<String, Instant>,
     unknown_logged: Option<Instant>,
     unknown_refusals: u64,
+    pack_reads: HashMap<String, VecDeque<(String, u64)>>,
 }
 
 /// The same /56 rule as the login limits, so a host that moves within its prefix is not a conflict.
@@ -227,6 +229,28 @@ impl Registry {
         due
     }
 
+    /// Counts a served pack range per certificate serial, for the last few serials of each agent.
+    pub fn note_pack_read(&self, agent_id: &str, serial: &str) {
+        let mut inner = self.lock();
+        let reads = inner.pack_reads.entry(agent_id.to_string()).or_default();
+        if let Some((_, count)) = reads.iter_mut().find(|(s, _)| s == serial) {
+            *count += 1;
+            return;
+        }
+        if reads.len() == PACK_READ_SERIALS {
+            reads.pop_front();
+        }
+        reads.push_back((serial.chars().take(SERIAL_MAX_CHARS).collect(), 1));
+    }
+
+    pub fn pack_reads(&self, agent_id: &str) -> Vec<(String, u64)> {
+        self.lock()
+            .pack_reads
+            .get(agent_id)
+            .map(|r| r.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
     pub fn unknown_agent_refusals(&self) -> u64 {
         self.lock().unknown_refusals
     }
@@ -363,6 +387,18 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pack_reads_are_counted_per_serial_and_bounded() {
+        let registry = Registry::default();
+        for serial in ["a", "a", "b", "c", "d", "e"] {
+            registry.note_pack_read("h", serial);
+        }
+        let reads = registry.pack_reads("h");
+        assert_eq!(reads.len(), PACK_READ_SERIALS);
+        assert_eq!(reads[0], ("b".to_string(), 1));
+        assert!(registry.pack_reads("other").is_empty());
+    }
 
     fn ip(text: &str) -> Option<IpAddr> {
         Some(text.parse().unwrap())

@@ -729,10 +729,19 @@ async fn adv_restore_survives_certificate_renew() {
         fs::write(big.join("data.bin"), block.repeat(8)).unwrap();
         let snapshot = env.backup(&[&big]).await;
 
-        let mut overlapped = false;
-        for round in 0..6 {
+        let reads = |serial: &str| -> u64 {
+            ts.state()
+                .registry
+                .pack_reads(&env.host)
+                .into_iter()
+                .find(|(s, _)| s == serial)
+                .map_or(0, |(_, n)| n)
+        };
+        let mut straddled = false;
+        for round in 0..40 {
             let out = env.work.path().join(format!("out-{round}"));
             let before = host_serial(&ts, &env.host).await;
+            let reads_before = reads(&before);
             let id = queue(
                 &ts,
                 request(
@@ -750,15 +759,18 @@ async fn adv_restore_survives_certificate_renew() {
             let restored = fs::read(restored_at(&out, &big).join("data.bin")).unwrap();
             assert_eq!(restored.len(), FILE);
             fs::remove_dir_all(&out).unwrap();
-            if host_serial(&ts, &env.host).await != before {
-                overlapped = true;
+            let after = host_serial(&ts, &env.host).await;
+            // the job read packs through the server with the old serial first and the new one after the renew
+            if after != before && reads(&before) > reads_before && reads(&after) > 0 {
+                straddled = true;
                 break;
             }
         }
         assert!(
-            overlapped,
-            "[{}] no certificate renew happened during a restore",
-            backend.name()
+            straddled,
+            "[{}] no restore read packs with both the old and the new certificate: {:?}",
+            backend.name(),
+            ts.state().registry.pack_reads(&env.host)
         );
 
         lodestore_server::alerts::tick(ts.state(), lodestore_server::db::now_ms())
@@ -778,6 +790,15 @@ async fn adv_restore_survives_certificate_renew() {
             .filter(|a| a["type"] == "agent_certificate_rejected")
             .collect();
         assert!(rejected.is_empty(), "[{}] {rejected:?}", backend.name());
+        assert!(
+            ts.state()
+                .registry
+                .security_events()
+                .iter()
+                .all(|(_, e)| e.rejected.is_none()),
+            "[{}] a certificate was refused during the restore",
+            backend.name()
+        );
         env.stop().await;
         ts.stop().await;
     }
