@@ -3,8 +3,9 @@ use std::time::Duration;
 
 use lettre::message::{Mailbox, MultiPart};
 use lettre::transport::smtp::authentication::Credentials;
-use lettre::transport::smtp::client::{Tls, TlsParameters};
+use lettre::transport::smtp::client::{Certificate, CertificateStore, Tls, TlsParameters};
 use lettre::{AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
+use rustls_pki_types::CertificateDer;
 
 use super::channels::{Channel, ChannelSecrets, ChannelSettings, SmtpMode};
 use super::message::{Message, MessageKind, text};
@@ -97,16 +98,32 @@ fn smtp_error(error: &lettre::transport::smtp::Error, secrets: &ChannelSecrets) 
     DeliveryError::new(text)
 }
 
+fn tls_parameters(
+    host: &str,
+    roots: &[CertificateDer<'static>],
+) -> Result<TlsParameters, lettre::transport::smtp::Error> {
+    if roots.is_empty() {
+        return TlsParameters::new(host.to_string());
+    }
+    let mut builder =
+        TlsParameters::builder(host.to_string()).certificate_store(CertificateStore::None);
+    for root in roots {
+        builder = builder.add_root_certificate(Certificate::from_der(root.to_vec())?);
+    }
+    builder.build()
+}
+
 pub fn transport(
     settings: &ChannelSettings,
     secrets: &ChannelSecrets,
     addr: SocketAddr,
+    roots: &[CertificateDer<'static>],
 ) -> Result<AsyncSmtpTransport<Tokio1Executor>, DeliveryError> {
     let host = settings
         .smtp_host
         .as_deref()
         .ok_or_else(|| DeliveryError::new("The email channel has no SMTP server."))?;
-    let parameters = TlsParameters::new(host.to_string()).map_err(|e| smtp_error(&e, secrets))?;
+    let parameters = tls_parameters(host, roots).map_err(|e| smtp_error(&e, secrets))?;
     let tls = match settings.security.unwrap_or(SmtpMode::Starttls) {
         SmtpMode::Tls => Tls::Wrapper(parameters),
         SmtpMode::Starttls => Tls::Required(parameters),
@@ -162,7 +179,12 @@ pub async fn send(
         });
     let addr =
         net::resolve_allowed(host, port, state.config.notifications.allow_private_targets).await?;
-    let transport = transport(&channel.settings, &channel.secrets, addr)?;
+    let transport = transport(
+        &channel.settings,
+        &channel.secrets,
+        addr,
+        &state.config.notifications.smtp_roots,
+    )?;
     deliver(&transport, email, &channel.secrets).await
 }
 
@@ -346,7 +368,7 @@ mod tests {
         let mut channel = channel(Some(port), &["ops@example.test"]);
         channel.settings.smtp_host = Some("smtp.example.invalid".to_string());
         let addr: SocketAddr = ([127, 0, 0, 1], port).into();
-        let transport = transport(&channel.settings, &channel.secrets, addr).unwrap();
+        let transport = transport(&channel.settings, &channel.secrets, addr, &[]).unwrap();
         let message = build(
             &channel,
             &for_event(

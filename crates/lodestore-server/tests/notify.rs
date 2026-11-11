@@ -1,6 +1,6 @@
 mod common;
 
-use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
@@ -15,8 +15,13 @@ use lodestore_server::config::{
 };
 use lodestore_server::db::now_ms;
 use lodestore_server::notify;
+use rustls_pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use serde_json::{Value, json};
 use sqlx::{AnyPool, Row};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::net::{TcpListener, TcpStream};
+use tokio_rustls::TlsAcceptor;
+use tokio_rustls::rustls::ServerConfig;
 
 const MINUTE: i64 = 60_000;
 const HOUR: i64 = 60 * MINUTE;
@@ -145,9 +150,18 @@ struct Env {
 
 impl Env {
     async fn start(backend: &common::Backend, channels: Vec<ConfigChannel>) -> Env {
+        Env::start_with(backend, channels, |_| {}).await
+    }
+
+    async fn start_with(
+        backend: &common::Backend,
+        channels: Vec<ConfigChannel>,
+        tweak: impl FnOnce(&mut NotificationsConfig),
+    ) -> Env {
         let ts = TestServer::start_with(backend, |c| {
             c.schedule_tick_secs = 0;
             c.notifications.channels = channels;
+            tweak(&mut c.notifications);
         })
         .await;
         let repo = ts.create_local_repository("main").await;
@@ -956,6 +970,371 @@ async fn notify_reminder_text() {
             second.starts_with("STILL FIRING: Backup failed on web-1\n"),
             "{second}"
         );
+        env.stop().await;
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Kind {
+    Telegram,
+    Slack,
+    Email,
+    Webhook,
+}
+
+const SMTP_AUTH: &str = "AUTH PLAIN AGxvZGVzdG9yZQBTTVRQUEFTU1dPUkQ=";
+
+#[derive(Default)]
+struct SmtpState {
+    refuse: AtomicBool,
+    insecure: AtomicUsize,
+    auths: Mutex<Vec<String>>,
+    mails: Mutex<Vec<String>>,
+}
+
+#[derive(Clone)]
+struct SmtpStub {
+    port: u16,
+    root: CertificateDer<'static>,
+    state: Arc<SmtpState>,
+}
+
+impl SmtpStub {
+    async fn start() -> SmtpStub {
+        let ca_key = rcgen::KeyPair::generate().unwrap();
+        let mut ca_params = rcgen::CertificateParams::default();
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![rcgen::KeyUsagePurpose::KeyCertSign];
+        let root = ca_params.self_signed(&ca_key).unwrap().der().clone();
+        let issuer = rcgen::Issuer::new(ca_params, ca_key);
+        let leaf_key = rcgen::KeyPair::generate().unwrap();
+        let mut leaf_params = rcgen::CertificateParams::new(vec!["127.0.0.1".to_string()]).unwrap();
+        leaf_params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
+        let leaf = leaf_params.signed_by(&leaf_key, &issuer).unwrap();
+        let tls = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![leaf.der().clone()],
+                PrivatePkcs8KeyDer::from(leaf_key.serialize_der()).into(),
+            )
+            .unwrap();
+        let acceptor = TlsAcceptor::from(Arc::new(tls));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let state = Arc::new(SmtpState::default());
+        let shared = state.clone();
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                let (acceptor, state) = (acceptor.clone(), shared.clone());
+                tokio::spawn(async move {
+                    let _ = smtp_connection(socket, acceptor, &state).await;
+                });
+            }
+        });
+        SmtpStub { port, root, state }
+    }
+
+    fn mails(&self) -> Vec<String> {
+        self.state.mails.lock().unwrap().clone()
+    }
+}
+
+async fn smtp_connection(
+    socket: TcpStream,
+    acceptor: TlsAcceptor,
+    state: &SmtpState,
+) -> std::io::Result<()> {
+    let mut plain = BufReader::new(socket);
+    plain.write_all(b"220 localhost ESMTP\r\n").await?;
+    if let Next::Upgrade = smtp_session(&mut plain, false, state).await? {
+        let tls = acceptor.accept(plain.into_inner()).await?;
+        smtp_session(&mut BufReader::new(tls), true, state).await?;
+    }
+    Ok(())
+}
+
+enum Next {
+    Upgrade,
+    Done,
+}
+
+async fn smtp_session<S: AsyncRead + AsyncWrite + Unpin>(
+    io: &mut BufReader<S>,
+    secure: bool,
+    state: &SmtpState,
+) -> std::io::Result<Next> {
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if io.read_line(&mut line).await? == 0 {
+            return Ok(Next::Done);
+        }
+        let command = line.trim_end().to_string();
+        let upper = command.to_ascii_uppercase();
+        let reply: &[u8] = if upper.starts_with("EHLO") && secure {
+            b"250-localhost\r\n250 AUTH PLAIN LOGIN\r\n"
+        } else if upper.starts_with("EHLO") {
+            b"250-localhost\r\n250 STARTTLS\r\n"
+        } else if upper == "STARTTLS" && !secure {
+            io.write_all(b"220 ready\r\n").await?;
+            return Ok(Next::Upgrade);
+        } else if upper.starts_with("AUTH") || upper.starts_with("MAIL FROM:") {
+            if !secure {
+                state.insecure.fetch_add(1, Ordering::SeqCst);
+                b"530 STARTTLS first\r\n"
+            } else if upper.starts_with("AUTH") {
+                state.auths.lock().unwrap().push(command);
+                b"235 ok\r\n"
+            } else {
+                b"250 ok\r\n"
+            }
+        } else if upper.starts_with("RCPT TO:") {
+            b"250 ok\r\n"
+        } else if upper == "DATA" {
+            io.write_all(b"354 go ahead\r\n").await?;
+            let mut body = String::new();
+            loop {
+                line.clear();
+                if io.read_line(&mut line).await? == 0 {
+                    return Ok(Next::Done);
+                }
+                if line == ".\r\n" {
+                    break;
+                }
+                body.push_str(&line);
+            }
+            state.mails.lock().unwrap().push(body);
+            if state.refuse.load(Ordering::SeqCst) {
+                b"451 try later\r\n"
+            } else {
+                b"250 queued\r\n"
+            }
+        } else if upper == "QUIT" {
+            io.write_all(b"221 bye\r\n").await?;
+            return Ok(Next::Done);
+        } else {
+            b"250 ok\r\n"
+        };
+        io.write_all(reply).await?;
+    }
+}
+
+fn telegram(name: &str) -> ConfigChannel {
+    ConfigChannel {
+        name: name.to_string(),
+        enabled: true,
+        alerts: ALL_TYPES.to_vec(),
+        kind: ChannelSpec::Telegram {
+            bot_token: Secret::new("123:BOTTOKEN"),
+            chat_id: "-100".to_string(),
+        },
+    }
+}
+
+enum Stand {
+    Http(Stub),
+    Smtp(SmtpStub),
+}
+
+impl Stand {
+    fn attempts(&self) -> usize {
+        match self {
+            Stand::Http(stub) => stub.hits().len(),
+            Stand::Smtp(stub) => stub.mails().len(),
+        }
+    }
+
+    fn refuse(&self) {
+        match self {
+            Stand::Http(stub) => stub.respond(500, r#"{"ok":false,"description":"boom"}"#),
+            Stand::Smtp(stub) => stub.state.refuse.store(true, Ordering::SeqCst),
+        }
+    }
+
+    fn accept(&self) {
+        match self {
+            Stand::Http(stub) => stub.respond(200, r#"{"ok":true}"#),
+            Stand::Smtp(stub) => stub.state.refuse.store(false, Ordering::SeqCst),
+        }
+    }
+
+    fn last_message(&self, kind: Kind) -> String {
+        match (self, kind) {
+            (Stand::Smtp(stub), _) => stub.mails().pop().expect("a delivery attempt"),
+            (Stand::Http(stub), Kind::Webhook) => {
+                let hit = stub.hits().pop().expect("a delivery attempt");
+                hit.json()["status"].as_str().unwrap().to_string()
+            }
+            (Stand::Http(stub), _) => {
+                let hit = stub.hits().pop().expect("a delivery attempt");
+                hit.json()["text"].as_str().unwrap().to_string()
+            }
+        }
+    }
+}
+
+fn assert_message(kind: Kind, last: &str, label: &str) {
+    match kind {
+        Kind::Webhook => {
+            let status = if label == "RESOLVED" {
+                "resolved"
+            } else {
+                "firing"
+            };
+            assert_eq!(last, status);
+        }
+        Kind::Email => assert!(
+            last.contains(&format!(
+                "Subject: [Lodestore] {label}: Backup failed on web-1"
+            )),
+            "{label}: {last}"
+        ),
+        Kind::Telegram | Kind::Slack => assert!(
+            last.starts_with(&format!("{label}: Backup failed on web-1\n")),
+            "{label}: {last}"
+        ),
+    }
+}
+
+type Tweak = Box<dyn FnOnce(&mut NotificationsConfig)>;
+
+async fn alert_timeline(kind: Kind) {
+    for backend in backends() {
+        let name = backend.name();
+        let (stand, channel, tweak): (Stand, ConfigChannel, Tweak) = match kind {
+            Kind::Telegram => {
+                let stub = Stub::start().await;
+                let base = stub.base.clone();
+                (
+                    Stand::Http(stub),
+                    telegram("ops"),
+                    Box::new(move |n| n.telegram_api = Some(base)),
+                )
+            }
+            Kind::Slack => {
+                let stub = Stub::start().await;
+                let channel = slack("ops", &stub.url("/hook"));
+                (Stand::Http(stub), channel, Box::new(|_| {}))
+            }
+            Kind::Webhook => {
+                let stub = Stub::start().await;
+                let channel = webhook("ops", &stub.url("/hook"), None);
+                (Stand::Http(stub), channel, Box::new(|_| {}))
+            }
+            Kind::Email => {
+                let stub = SmtpStub::start().await;
+                let channel = email("ops", stub.port, &["ops@example.test"]);
+                let root = stub.root.clone();
+                (
+                    Stand::Smtp(stub),
+                    channel,
+                    Box::new(move |n| n.smtp_roots = vec![root]),
+                )
+            }
+        };
+        stand.refuse();
+        let env = Env::start_with(&backend, vec![channel], tweak).await;
+        env.failing_backup("disk full", now_ms() - HOUR).await;
+        let t = now_ms();
+
+        env.tick(t).await;
+        assert_eq!(stand.attempts(), 1, "[{name}]");
+        assert_message(kind, &stand.last_message(kind), "FIRING");
+        for (offset, attempts) in [
+            (30_000, 1),
+            (MINUTE, 2),
+            (5 * MINUTE, 2),
+            (6 * MINUTE, 3),
+            (35 * MINUTE, 3),
+            (36 * MINUTE, 4),
+        ] {
+            env.tick(t + offset).await;
+            assert_eq!(stand.attempts(), attempts, "[{name}] t+{offset}");
+        }
+        let deliveries = env.deliveries().await;
+        assert_eq!(deliveries.len(), 1, "[{name}]");
+        assert_eq!(deliveries[0].0, "failed");
+        assert_eq!(deliveries[0].1, 4);
+        let error = deliveries[0].2.as_deref().expect("a delivery error");
+        assert!(
+            !error.contains("SMTPPASSWORD") && !error.contains("BOTTOKEN"),
+            "{error}"
+        );
+
+        env.tick(t + 2 * HOUR).await;
+        assert_eq!(stand.attempts(), 4, "[{name}]");
+
+        stand.accept();
+        env.tick(t + DAY + MINUTE).await;
+        assert_eq!(stand.attempts(), 5, "[{name}]");
+        assert_message(kind, &stand.last_message(kind), "STILL FIRING");
+        let deliveries = env.deliveries().await;
+        assert_eq!(deliveries.len(), 2, "[{name}]");
+        assert_eq!(deliveries[1], ("sent".to_string(), 1, None));
+
+        env.snapshot("s1", "h1", "daily", t + DAY + 2 * MINUTE)
+            .await;
+        env.tick(t + DAY + 3 * MINUTE).await;
+        assert_eq!(stand.attempts(), 6, "[{name}]");
+        assert_message(kind, &stand.last_message(kind), "RESOLVED");
+        let deliveries = env.deliveries().await;
+        assert_eq!(deliveries.len(), 3, "[{name}]");
+        assert_eq!(deliveries[2], ("sent".to_string(), 1, None));
+
+        if let Stand::Smtp(stub) = &stand {
+            assert_eq!(stub.state.insecure.load(Ordering::SeqCst), 0);
+            let auths = stub.state.auths.lock().unwrap();
+            assert!(
+                !auths.is_empty() && auths.iter().all(|a| a == SMTP_AUTH),
+                "{auths:?}"
+            );
+        }
+        env.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn notify_timeline_telegram() {
+    alert_timeline(Kind::Telegram).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn notify_timeline_slack() {
+    alert_timeline(Kind::Slack).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn notify_timeline_email() {
+    alert_timeline(Kind::Email).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn notify_timeline_webhook() {
+    alert_timeline(Kind::Webhook).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn notify_email_untrusted_certificate_refused() {
+    for backend in backends() {
+        let stub = SmtpStub::start().await;
+        let env = Env::start(
+            &backend,
+            vec![email("ops", stub.port, &["ops@example.test"])],
+        )
+        .await;
+        env.failing_backup("disk full", now_ms() - HOUR).await;
+        env.tick(now_ms()).await;
+
+        let deliveries = env.deliveries().await;
+        assert_eq!(deliveries.len(), 1, "[{}]", backend.name());
+        let (state, attempts, error) = &deliveries[0];
+        assert_eq!((state.as_str(), *attempts), ("pending", 1));
+        let error = error.as_deref().unwrap();
+        assert!(error.starts_with("SMTP: "), "{error}");
+        assert!(!error.contains("SMTPPASSWORD"), "{error}");
+        assert!(stub.mails().is_empty());
+        assert!(stub.state.auths.lock().unwrap().is_empty());
         env.stop().await;
     }
 }
