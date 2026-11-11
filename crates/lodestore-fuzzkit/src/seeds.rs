@@ -305,6 +305,8 @@ pub fn try_seeds(fixtures: &Path) -> Result<Seeds, String> {
         let raw = fs::read(repo_dir.join(format!("snapshots/{}", name.to_string_lossy())))
             .map_err(|e| io("snapshot", e))?;
         out.push(("snapshot_resolves", [&[4u8][..], &raw].concat()));
+        out.push(("snapshot_open", snapshot.encode_to_vec()));
+        out.push(("snapshot_open", raw));
     }
     let mut seen = std::collections::HashSet::new();
     while let Some(id) = pending.pop() {
@@ -326,6 +328,33 @@ pub fn try_seeds(fixtures: &Path) -> Result<Seeds, String> {
             out.push((target, bytes.clone()));
         }
     }
+    for entry in fs::read_dir(repo_dir.join("keys")).map_err(|e| io("keys", e))? {
+        let slot = fs::read(entry.map_err(|e| io("keys", e))?.path()).map_err(|e| io("slot", e))?;
+        out.push(("key_slot", slot));
+    }
+    out.push((
+        "writer_keys",
+        fs::read(fixtures.join("writer-keys.txt")).map_err(|e| io("writer-keys.txt", e))?,
+    ));
+    out.push((
+        "recovery_key",
+        fs::read(fixtures.join("RECOVERY_KEY")).map_err(|e| io("RECOVERY_KEY", e))?,
+    ));
+    let signed =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../lodestore-agent/tests/fixtures/minisign");
+    for entry in fs::read_dir(&signed).map_err(|e| io("minisign fixtures", e))? {
+        let path = entry.map_err(|e| io("minisign fixtures", e))?.path();
+        if path.extension().is_some_and(|e| e != "bin") {
+            out.push((
+                "minisign_signature",
+                fs::read(&path).map_err(|e| io("minisign", e))?,
+            ));
+        }
+    }
+    out.push((
+        "minisign_signature",
+        b"lodestore-agent 1.2.3 x86_64".to_vec(),
+    ));
     out.extend(
         restore_plan_seeds()
             .into_iter()
