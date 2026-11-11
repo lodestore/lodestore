@@ -1554,6 +1554,7 @@ dependencies = [
 name = "lodestore-fuzzkit"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "lodestore-agent",
  "lodestore-format",
  "lodestore-proto",
