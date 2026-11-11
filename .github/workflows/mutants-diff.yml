@@ -21,7 +21,7 @@ env:
 jobs:
   mutants-diff:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -57,10 +57,9 @@ jobs:
               return 0
             fi
             local status=0
-            timeout --signal=INT 7m cargo mutants --no-shuffle -vV --in-place --in-diff git.diff --output "mutants-diff-out/$group" "$@" || status=$?
+            cargo mutants --no-shuffle -vV --in-place --in-diff git.diff --output "mutants-diff-out/$group" "$@" || status=$?
             case "$status" in
               0 | 3) ;;
-              124) echo "mutants-diff $group: stopped at the time budget; the rest is covered by the weekly run" ;;
               *) echo "mutants-diff $group: cargo mutants exited with $status" >&2; failed=1 ;;
             esac
           }

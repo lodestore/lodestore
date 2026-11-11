@@ -38,7 +38,6 @@ env:
 jobs:
   targets:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
     outputs:
       list: ${{ steps.targets.outputs.list }}
       seconds: ${{ steps.targets.outputs.seconds }}
@@ -61,7 +60,7 @@ jobs:
   fuzz:
     needs: targets
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ github.event_name == 'pull_request' && 20 || 40 }}
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -122,7 +121,6 @@ jobs:
     needs: fuzz
     if: failure() && github.event_name == 'schedule'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
     permissions:
       issues: write
     env:

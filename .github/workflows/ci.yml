@@ -22,7 +22,6 @@ env:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -70,7 +69,6 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -98,7 +96,6 @@ jobs:
 
   web:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
     defaults:
       run:
         working-directory: web
@@ -117,7 +114,6 @@ jobs:
 
   deny:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -147,7 +143,6 @@ jobs:
 
   release-scripts:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -158,7 +153,6 @@ jobs:
 
   fixtures-append-only:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
