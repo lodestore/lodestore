@@ -141,18 +141,15 @@ async fn account_password_rate_limited() {
         let ts = TestServer::start(&backend).await;
         let api = ts.api().await;
 
-        let mut last = 0;
-        for _ in 0..8 {
-            last = change_password(&ts, &api, "guess", NEW_PASSWORD)
-                .await
-                .status()
-                .as_u16();
-            if last == 429 {
-                break;
-            }
-            assert_eq!(last, 422, "[{}]", backend.name());
+        let second = ts.api().await;
+        for _ in 0..4 {
+            let wrong = change_password(&ts, &api, "guess", NEW_PASSWORD).await;
+            assert_eq!(wrong.status(), 422, "[{}]", backend.name());
         }
-        assert_eq!(last, 429, "[{}]", backend.name());
+        let wrong = change_password(&ts, &second, "guess", NEW_PASSWORD).await;
+        assert_eq!(wrong.status(), 422, "[{}]", backend.name());
+        let limited = change_password(&ts, &second, "guess", NEW_PASSWORD).await;
+        assert_eq!(limited.status(), 429, "[{}]", backend.name());
         ts.stop().await;
     }
 }
@@ -399,6 +396,42 @@ async fn change_password_keeps_tokens_by_default() {
         assert_eq!(hosts_status(&token, &ts).await, 200, "[{name}]");
         assert_eq!(live_join_tokens(&ts).await, 1, "[{name}]");
         assert_eq!(session_status(&other).await, 401, "[{name}]");
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn five_wrong_current_passwords_end_the_session() {
+    for backend in backends() {
+        let name = backend.name();
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        for attempt in 1..=5 {
+            let wrong = change_password(&ts, &api, "not the password", NEW_PASSWORD).await;
+            assert_eq!(wrong.status(), 422, "attempt {attempt} [{name}]");
+        }
+        assert_eq!(session_status(&api).await, 401, "[{name}]");
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_correct_current_password_resets_the_failure_count() {
+    for backend in backends() {
+        let name = backend.name();
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        for _ in 0..3 {
+            let wrong = change_password(&ts, &api, "not the password", NEW_PASSWORD).await;
+            assert_eq!(wrong.status(), 422, "[{name}]");
+        }
+        let changed = change_password(&ts, &api, ADMIN_PASSWORD, NEW_PASSWORD).await;
+        assert_eq!(changed.status(), 204, "[{name}]");
+        for _ in 0..2 {
+            let wrong = change_password(&ts, &api, "not the password", ADMIN_PASSWORD).await;
+            assert_eq!(wrong.status(), 422, "[{name}]");
+        }
+        assert_eq!(session_status(&api).await, 200, "[{name}]");
         ts.stop().await;
     }
 }

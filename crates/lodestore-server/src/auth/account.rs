@@ -17,7 +17,7 @@ use utoipa_axum::routes;
 use super::limits::{GuardError, client_ip};
 use super::{
     AuthUser, MAX_SUBMITTED_PASSWORD_BYTES, SESSION_COOKIE, check_password, hash_password,
-    session_hash, verify_password,
+    session_hash, session_password_failed, verify_password,
 };
 use crate::db::now_ms;
 use crate::error::{ApiError, ErrorBody};
@@ -233,17 +233,22 @@ async fn change_password(
             return Err(busy.into());
         }
     };
-    if !correct {
-        return Err(AccountFailure::Rejected("wrong_password", WRONG_PASSWORD));
-    }
-    state.auth.limits.login_succeeded(client, &user.username);
-
-    let new = input.new_password;
-    let new_hash = state.auth.argon.run(move || hash_password(&new)).await??;
-    let keep = jar
+    let session = jar
         .get(SESSION_COOKIE)
         .map(|cookie| session_hash(cookie.value()))
         .unwrap_or_default();
+    if !correct {
+        session_password_failed(&state, &session)
+            .await
+            .map_err(ApiError::from)?;
+        return Err(AccountFailure::Rejected("wrong_password", WRONG_PASSWORD));
+    }
+    state.auth.limits.login_succeeded(client, &user.username);
+    state.auth.limits.step_up_succeeded(&session);
+
+    let new = input.new_password;
+    let new_hash = state.auth.argon.run(move || hash_password(&new)).await??;
+    let keep = session;
     let mut tx = state.db.pool.begin().await.map_err(ApiError::from)?;
     sqlx::query("UPDATE admin_users SET password_hash = $1 WHERE id = $2")
         .bind(new_hash)
@@ -339,13 +344,9 @@ async fn step_up(
         }
     };
     if !correct {
-        if state.auth.limits.step_up_failed(&session) {
-            sqlx::query("DELETE FROM sessions WHERE id_hash = $1")
-                .bind(&session)
-                .execute(&state.db.pool)
-                .await
-                .map_err(ApiError::from)?;
-        }
+        session_password_failed(&state, &session)
+            .await
+            .map_err(ApiError::from)?;
         return Err(AccountFailure::Rejected("wrong_password", WRONG_PASSWORD));
     }
     state.auth.limits.login_succeeded(client, &user.username);
