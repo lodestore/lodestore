@@ -8,7 +8,9 @@ use utoipa::{IntoParams, ToSchema};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use super::restore::{RestoreRequest, enqueue_restore, require_roots_capability};
+use super::restore::{
+    RestoreRequest, agent_declares_roots, enqueue_restore, require_roots_capability,
+};
 use super::{
     ACTIVE_STATES, AGENT_UPDATE_COLUMNS, AGENT_UPDATE_FROM, ConflictPolicyDto, DOWNLOAD_COLUMNS,
     JOB_COLUMNS, JOB_FROM, JobDetail, JobKind, JobProgressDto, JobSource, JobState, JobSummary,
@@ -16,6 +18,7 @@ use super::{
     download_summary, enqueue, gc_select, gc_summary, job_spec, load_agent_update, load_download,
     load_job, summary_from_row,
 };
+use crate::auth::require_recent_password;
 use crate::auth::tokens::{JobsRead, JobsRun, Principal, RestoreWrite, Scope, Scoped};
 use crate::browse::AGENTLESS;
 use crate::browse::tree::decode_b64;
@@ -894,7 +897,7 @@ pub struct RestoreCreated {
     responses(
         (status = 201, description = "The restore job is queued", body = RestoreCreated),
         (status = 400, description = "`restore_destination_root`: a restore into a new folder names `/`; `restore_in_place_not_empty`: a restore in place with `stop_if_not_empty`; `restore_unverified_in_place`: nothing signed the snapshot, so it cannot be restored in place; `restore_unverified_not_confirmed`: nothing signed the snapshot and `accept_unverified` is not set; `restore_outside_roots`: the new folder is outside the folders the agent restores into; `restore_in_place_disabled`: the agent does not allow restores in place; `restore_agent_outdated`: a token cannot restore to an agent that does not check restore folders", body = ErrorBody),
-        (status = 403, description = "The token lacks `restore:host` for a new folder, or `restore:in-place` for a restore in place or with `restore_owners`", body = ErrorBody),
+        (status = 403, description = "The token lacks `restore:host` for a new folder, or `restore:in-place` for a restore in place or with `restore_owners`; or `step_up_required`: a session restores in place, with `restore_owners`, or to an agent that does not check restore folders, and the password was not entered in the last 15 minutes", body = ErrorBody),
         (status = 404, description = "Unknown snapshot or host, or a selected path is missing", body = ErrorBody),
         (status = 422, description = "The selection, destination or host is not valid", body = ErrorBody),
         (status = 502, description = "The repository storage is unavailable", body = ErrorBody),
@@ -905,6 +908,13 @@ pub async fn create_restore(
     auth: Scoped<RestoreWrite>,
     Json(body): Json<RestoreBody>,
 ) -> Result<(StatusCode, Json<RestoreCreated>), ApiError> {
+    if let Principal::Session(user) = auth.principal()
+        && (body.in_place
+            || body.restore_owners
+            || !agent_declares_roots(&state, &body.target_host_id).await?)
+    {
+        require_recent_password(user)?;
+    }
     let items = body
         .items
         .iter()

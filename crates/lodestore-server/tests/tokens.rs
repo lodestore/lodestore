@@ -542,3 +542,145 @@ async fn tokens_actor_recorded() {
         ts.stop().await;
     }
 }
+
+async fn age_sessions(ts: &TestServer, minutes: i64) {
+    sqlx::query("UPDATE sessions SET authenticated_at = $1")
+        .bind(lodestore_server::db::now_ms() - minutes * 60_000)
+        .execute(&ts.state().db.pool)
+        .await
+        .unwrap();
+}
+
+async fn token_rows(ts: &TestServer) -> i64 {
+    sqlx::query("SELECT COUNT(*) AS n FROM api_tokens")
+        .fetch_one(&ts.state().db.pool)
+        .await
+        .unwrap()
+        .try_get("n")
+        .unwrap()
+}
+
+fn new_token_body() -> Value {
+    json!({ "name": "ci", "scopes": ["hosts:read"], "expires_in_days": null })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn step_up_required_for_token_after_window() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        assert_eq!(
+            api.post("/api/v1/tokens", &new_token_body()).await.status(),
+            201
+        );
+        age_sessions(&ts, 16).await;
+        let before = token_rows(&ts).await;
+        let refused = api.post("/api/v1/tokens", &new_token_body()).await;
+        assert_eq!(refused.status(), 403, "[{}]", backend.name());
+        let body: Value = refused.json().await.unwrap();
+        assert_eq!(body["code"], "step_up_required");
+        assert_eq!(token_rows(&ts).await, before);
+        sqlx::query("UPDATE sessions SET authenticated_at = NULL")
+            .execute(&ts.state().db.pool)
+            .await
+            .unwrap();
+        let never = api.post("/api/v1/tokens", &new_token_body()).await;
+        assert_eq!(never.status(), 403, "[{}]", backend.name());
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn step_up_refreshes_the_window() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        age_sessions(&ts, 16).await;
+        let step = api
+            .post(
+                "/api/v1/auth/step-up",
+                &json!({ "password": common::ADMIN_PASSWORD }),
+            )
+            .await;
+        assert_eq!(step.status(), 204, "[{}]", backend.name());
+        assert_eq!(
+            api.post("/api/v1/tokens", &new_token_body()).await.status(),
+            201
+        );
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn step_up_rejects_wrong_password_and_needs_csrf() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let base = ts.rest_url();
+        let api = ts.api().await;
+        age_sessions(&ts, 16).await;
+        let wrong = api
+            .post(
+                "/api/v1/auth/step-up",
+                &json!({ "password": "not-the-one-123" }),
+            )
+            .await;
+        assert_eq!(wrong.status(), 422, "[{}]", backend.name());
+        let body: Value = wrong.json().await.unwrap();
+        assert_eq!(body["code"], "wrong_password");
+        let huge = api
+            .post(
+                "/api/v1/auth/step-up",
+                &json!({ "password": "a".repeat(4097) }),
+            )
+            .await;
+        assert_eq!(huge.status(), 422, "[{}]", backend.name());
+        let no_csrf = Client::new()
+            .post(format!("{base}/api/v1/auth/step-up"))
+            .header("cookie", api.cookie())
+            .json(&json!({ "password": common::ADMIN_PASSWORD }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(no_csrf.status(), 403, "[{}]", backend.name());
+        let body: Value = no_csrf.json().await.unwrap();
+        assert_eq!(body["code"], "csrf");
+        let token = bearer_client(&ts.issue_token(&ALL_SCOPES).await);
+        let by_token = token
+            .post(format!("{base}/api/v1/auth/step-up"))
+            .json(&json!({ "password": common::ADMIN_PASSWORD }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(by_token.status(), 401, "[{}]", backend.name());
+        assert_eq!(
+            api.post("/api/v1/tokens", &new_token_body()).await.status(),
+            403
+        );
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn five_wrong_step_ups_end_the_session() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        for attempt in 1..=5 {
+            let wrong = api
+                .post(
+                    "/api/v1/auth/step-up",
+                    &json!({ "password": "not-the-one-123" }),
+                )
+                .await;
+            assert_eq!(
+                wrong.status(),
+                422,
+                "attempt {attempt} [{}]",
+                backend.name()
+            );
+        }
+        let after = api.get("/api/v1/auth/session").await;
+        assert_eq!(after.status(), 401, "[{}]", backend.name());
+        ts.stop().await;
+    }
+}

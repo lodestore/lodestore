@@ -48,6 +48,7 @@ const SESSION_LIFETIME: Duration = Duration::from_secs(7 * 86_400);
 const SESSION_MAX_DAYS: i64 = 30;
 const DAY_MS: i64 = 86_400_000;
 const SESSION_TOUCH_MS: i64 = 3_600_000;
+pub const STEP_UP_WINDOW_MS: i64 = 15 * 60_000;
 
 #[derive(Clone, Default)]
 pub struct AuthState {
@@ -111,6 +112,23 @@ pub struct AuthUser {
     pub user_id: String,
     pub username: String,
     pub csrf_token: String,
+    /// When the password was last entered in this session; `None` for a
+    /// session that never saw it (demo, or one older than the column).
+    pub authenticated_at: Option<i64>,
+}
+
+/// Refuses a session whose password was not entered within the last 15
+/// minutes. It answers 403, not 401, so the client asks for the password
+/// instead of signing the user out. A time in the future (a clock that went
+/// back) counts as stale.
+pub fn require_recent_password(user: &AuthUser) -> Result<(), ApiError> {
+    recent_password(user.authenticated_at, now_ms())
+        .then_some(())
+        .ok_or(ApiError::StepUpRequired)
+}
+
+fn recent_password(authenticated_at: Option<i64>, now: i64) -> bool {
+    authenticated_at.is_some_and(|at| (0..=STEP_UP_WINDOW_MS).contains(&(now - at)))
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -261,7 +279,8 @@ impl FromRequestParts<AppState> for AuthUser {
         };
         let id_hash = session_hash(cookie.value());
         let row = sqlx::query(
-            "SELECT s.user_id, s.csrf_token, s.created_at, s.expires_at, s.last_seen_at, u.username \
+            "SELECT s.user_id, s.csrf_token, s.created_at, s.expires_at, s.last_seen_at, \
+             s.authenticated_at, u.username \
              FROM sessions s JOIN admin_users u ON u.id = s.user_id WHERE s.id_hash = $1",
         )
         .bind(&id_hash)
@@ -279,6 +298,7 @@ impl FromRequestParts<AppState> for AuthUser {
             user_id: row.try_get("user_id")?,
             username: row.try_get("username")?,
             csrf_token: row.try_get("csrf_token")?,
+            authenticated_at: row.try_get("authenticated_at")?,
         };
         if !matches!(parts.method, Method::GET | Method::HEAD | Method::OPTIONS) {
             check_csrf(parts, &user, &state.config.public_url)?;
@@ -354,7 +374,7 @@ pub async fn insert_session(
     user_id: &str,
     password_hash: &str,
 ) -> Result<Option<String>, ApiError> {
-    insert_session_for(state, user_id, password_hash, SESSION_LIFETIME).await
+    insert_session_for(state, user_id, password_hash, SESSION_LIFETIME, None).await
 }
 
 pub(crate) async fn insert_session_for(
@@ -362,12 +382,13 @@ pub(crate) async fn insert_session_for(
     user_id: &str,
     password_hash: &str,
     lifetime: Duration,
+    authenticated_at: Option<i64>,
 ) -> Result<Option<String>, ApiError> {
     let cookie_value = random_token();
     let now = now_ms();
     let inserted = sqlx::query(
-        "INSERT INTO sessions (id_hash, user_id, csrf_token, created_at, expires_at, last_seen_at) \
-         SELECT $1, $2, $3, $4, $5, $4 FROM admin_users WHERE id = $2 AND password_hash = $6",
+        "INSERT INTO sessions (id_hash, user_id, csrf_token, created_at, expires_at, last_seen_at, authenticated_at) \
+         SELECT $1, $2, $3, $4, $5, $4, $7 FROM admin_users WHERE id = $2 AND password_hash = $6",
     )
     .bind(session_hash(&cookie_value))
     .bind(user_id)
@@ -375,6 +396,7 @@ pub(crate) async fn insert_session_for(
     .bind(now)
     .bind(now + i64::try_from(lifetime.as_millis()).unwrap_or(i64::MAX / 2))
     .bind(password_hash)
+    .bind(authenticated_at)
     .execute(&state.db.pool)
     .await?;
     Ok((inserted.rows_affected() > 0).then_some(cookie_value))
@@ -386,7 +408,15 @@ pub(crate) async fn start_session(
     user_id: &str,
     password_hash: &str,
 ) -> Result<CookieJar, ApiError> {
-    start_session_for(state, jar, user_id, password_hash, SESSION_LIFETIME).await
+    start_session_for(
+        state,
+        jar,
+        user_id,
+        password_hash,
+        SESSION_LIFETIME,
+        Some(now_ms()),
+    )
+    .await
 }
 
 pub(crate) async fn start_session_for(
@@ -395,10 +425,12 @@ pub(crate) async fn start_session_for(
     user_id: &str,
     password_hash: &str,
     lifetime: Duration,
+    authenticated_at: Option<i64>,
 ) -> Result<CookieJar, ApiError> {
-    let cookie_value = insert_session_for(state, user_id, password_hash, lifetime)
-        .await?
-        .ok_or(ApiError::Unauthorized)?;
+    let cookie_value =
+        insert_session_for(state, user_id, password_hash, lifetime, authenticated_at)
+            .await?
+            .ok_or(ApiError::Unauthorized)?;
     let cookie = Cookie::build((SESSION_COOKIE, cookie_value))
         .http_only(true)
         .same_site(SameSite::Strict)
@@ -442,6 +474,7 @@ async fn has_live_session(
         (status = 401, description = "Wrong username or password", body = ErrorBody),
         (status = 409, description = "No administrator exists yet", body = ErrorBody),
         (status = 429, description = "Too many attempts", body = ErrorBody),
+        (status = 503, description = "`busy`: too many password checks at once; retry after the `Retry-After` seconds", body = ErrorBody),
     )
 )]
 async fn login(
@@ -623,6 +656,16 @@ mod tests {
             check_password(&"ж".repeat(11)),
             Err("At least 12 characters.")
         );
+    }
+
+    #[test]
+    fn step_up_window_is_closed_at_both_ends() {
+        let now = 10_000_000;
+        assert!(recent_password(Some(now), now));
+        assert!(recent_password(Some(now - STEP_UP_WINDOW_MS), now));
+        assert!(!recent_password(Some(now - STEP_UP_WINDOW_MS - 1), now));
+        assert!(!recent_password(Some(now + 1), now));
+        assert!(!recent_password(None, now));
     }
 
     use super::origin_allowed;

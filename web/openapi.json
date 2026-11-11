@@ -108,7 +108,7 @@
           "Account"
         ],
         "summary": "Change the administrator's password",
-        "description": "Every other session is signed out; the current one stays. A wrong current password answers 422, not 401, so the interface does not take it for an expired session.",
+        "description": "Every other session is signed out; the current one stays. With `revoke_tokens`, every API token is revoked and every unused join token expires. A wrong current password answers 422, not 401, so the interface does not take it for an expired session.",
         "operationId": "change_password",
         "requestBody": {
           "content": {
@@ -146,6 +146,16 @@
           },
           "429": {
             "description": "Too many attempts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`busy`: too many password checks at once; retry after the `Retry-After` seconds",
             "content": {
               "application/json": {
                 "schema": {
@@ -739,6 +749,16 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "`busy`: too many password checks at once; retry after the `Retry-After` seconds",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -805,6 +825,87 @@
             }
           }
         }
+      }
+    },
+    "/api/v1/auth/step-up": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Enter the password again",
+        "description": "Creating an API token or a join token, and a restore that writes in place or applies owners, ask a signed-in session for the password within the last 15 minutes. This opens that window. Five wrong passwords in a row end the session.",
+        "operationId": "step_up",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StepUp"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "The password was entered; the window is open"
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing or wrong CSRF token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`wrong_password`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many attempts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`busy`: too many password checks at once; retry after the `Retry-After` seconds",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
       }
     },
     "/api/v1/catalog": {
@@ -2398,6 +2499,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/JoinTokenResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`step_up_required`: the password was not entered in the last 15 minutes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -5302,7 +5413,7 @@
             }
           },
           "403": {
-            "description": "The token lacks `restore:host` for a new folder, or `restore:in-place` for a restore in place or with `restore_owners`",
+            "description": "The token lacks `restore:host` for a new folder, or `restore:in-place` for a restore in place or with `restore_owners`; or `step_up_required`: a session restores in place, with `restore_owners`, or to an agent that does not check restore folders, and the password was not entered in the last 15 minutes",
             "content": {
               "application/json": {
                 "schema": {
@@ -5468,6 +5579,16 @@
           },
           "429": {
             "description": "Too many attempts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`busy`: too many password checks at once; retry after the `Retry-After` seconds",
             "content": {
               "application/json": {
                 "schema": {
@@ -6137,6 +6258,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/CreatedToken"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`step_up_required`: the password was not entered in the last 15 minutes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -11277,6 +11408,10 @@
           },
           "new_password": {
             "type": "string"
+          },
+          "revoke_tokens": {
+            "type": "boolean",
+            "description": "Also revokes every API token and expires every unused join token.\nThe server has a single administrator, so tokens are not tied to a\nuser id and all of them go."
           }
         }
       },
@@ -13300,6 +13435,17 @@
               "null"
             ],
             "description": "Update every outdated host that can be updated."
+          }
+        }
+      },
+      "StepUp": {
+        "type": "object",
+        "required": [
+          "password"
+        ],
+        "properties": {
+          "password": {
+            "type": "string"
           }
         }
       },

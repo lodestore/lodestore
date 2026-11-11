@@ -171,6 +171,7 @@ async fn auth_demo(
         &admin.try_get::<String, _>("id")?,
         &admin.try_get::<String, _>("password_hash")?,
         SESSION_LIFETIME,
+        None,
     )
     .await?;
     Ok((jar, StatusCode::NO_CONTENT))

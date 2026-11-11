@@ -302,3 +302,103 @@ async fn change_password_rejects_new_password_over_1024_bytes() {
         ts.stop().await;
     }
 }
+
+async fn change_password_with(
+    ts: &TestServer,
+    api: &Api,
+    current: &str,
+    revoke_tokens: Option<bool>,
+) -> reqwest::Response {
+    let mut body = json!({ "current_password": current, "new_password": NEW_PASSWORD });
+    if let Some(revoke) = revoke_tokens {
+        body["revoke_tokens"] = json!(revoke);
+    }
+    reqwest::Client::new()
+        .post(account_url(ts, "/password"))
+        .header("cookie", api.cookie())
+        .header("x-csrf-token", &api.csrf)
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+}
+
+async fn hosts_status(client: &reqwest::Client, ts: &TestServer) -> u16 {
+    client
+        .get(format!("{}/api/v1/hosts", ts.rest_url()))
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16()
+}
+
+async fn live_join_tokens(ts: &TestServer) -> i64 {
+    sqlx::query("SELECT COUNT(*) AS n FROM join_tokens WHERE used_at IS NULL AND expires_at > $1")
+        .bind(lodestore_server::db::now_ms())
+        .fetch_one(&ts.state().db.pool)
+        .await
+        .unwrap()
+        .get("n")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn change_password_revokes_tokens_when_asked() {
+    for backend in backends() {
+        let name = backend.name();
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let other = ts.api().await;
+        let first = bearer_client(&ts.issue_token(&["hosts:read"]).await);
+        let second = bearer_client(&ts.issue_token(&["hosts:read"]).await);
+        let repo = ts.create_local_repository("main").await;
+        api.join_token(&repo, json!([])).await;
+        assert_eq!(live_join_tokens(&ts).await, 1, "[{name}]");
+        assert_eq!(hosts_status(&first, &ts).await, 200);
+
+        let wrong = change_password_with(&ts, &api, "not the password", Some(true)).await;
+        assert_eq!(wrong.status(), 422, "[{name}]");
+        assert_eq!(hosts_status(&first, &ts).await, 200, "[{name}]");
+        assert_eq!(live_join_tokens(&ts).await, 1, "[{name}]");
+
+        let ok = change_password_with(&ts, &api, ADMIN_PASSWORD, Some(true)).await;
+        assert_eq!(ok.status(), 204, "[{name}]");
+        assert_eq!(hosts_status(&first, &ts).await, 401, "[{name}]");
+        assert_eq!(hosts_status(&second, &ts).await, 401, "[{name}]");
+        assert_eq!(live_join_tokens(&ts).await, 0, "[{name}]");
+        assert_eq!(session_status(&other).await, 401, "[{name}]");
+        assert_eq!(session_status(&api).await, 200, "[{name}]");
+        let created = api
+            .post(
+                "/api/v1/tokens",
+                &json!({ "name": "n", "scopes": ["hosts:read"], "expires_in_days": null }),
+            )
+            .await;
+        assert_eq!(created.status(), 201, "[{name}]");
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn change_password_keeps_tokens_by_default() {
+    for backend in backends() {
+        let name = backend.name();
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let other = ts.api().await;
+        let token = bearer_client(&ts.issue_token(&["hosts:read"]).await);
+        let repo = ts.create_local_repository("main").await;
+        api.join_token(&repo, json!([])).await;
+
+        let ok = change_password_with(&ts, &api, ADMIN_PASSWORD, None).await;
+        assert_eq!(ok.status(), 204, "[{name}]");
+        assert_eq!(hosts_status(&token, &ts).await, 200, "[{name}]");
+        assert_eq!(live_join_tokens(&ts).await, 1, "[{name}]");
+        let again = change_password_with(&ts, &api, NEW_PASSWORD, Some(false)).await;
+        assert_eq!(again.status(), 204, "[{name}]");
+        assert_eq!(hosts_status(&token, &ts).await, 200, "[{name}]");
+        assert_eq!(live_join_tokens(&ts).await, 1, "[{name}]");
+        assert_eq!(session_status(&other).await, 401, "[{name}]");
+        ts.stop().await;
+    }
+}

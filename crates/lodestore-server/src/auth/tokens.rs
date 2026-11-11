@@ -338,6 +338,7 @@ async fn list_tokens(
     request_body = NewToken,
     responses(
         (status = 201, description = "The token; its secret is shown only in this response", body = CreatedToken),
+        (status = 403, description = "`step_up_required`: the password was not entered in the last 15 minutes", body = ErrorBody),
         (status = 422, description = "Invalid name, scopes or expiry", body = ErrorBody),
     )
 )]
@@ -346,6 +347,7 @@ async fn create_token(
     user: AuthUser,
     Json(input): Json<NewToken>,
 ) -> Result<(StatusCode, Json<CreatedToken>), ApiError> {
+    super::require_recent_password(&user)?;
     let name = input.name.trim().to_owned();
     if name.is_empty() || name.chars().count() > MAX_NAME_CHARS {
         return Err(ApiError::Validation("Enter a name for the token.".into()));

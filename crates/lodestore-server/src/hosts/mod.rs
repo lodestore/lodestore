@@ -70,13 +70,14 @@ pub struct Host {
     request_body = CreateJoinToken,
     responses(
         (status = 201, description = "A one-time join token and the install command", body = JoinTokenResponse),
+        (status = 403, description = "`step_up_required`: the password was not entered in the last 15 minutes", body = ErrorBody),
         (status = 404, description = "Unknown repository", body = ErrorBody),
         (status = 422, description = "Invalid labels", body = ErrorBody),
     )
 )]
 async fn create_join_token(
     State(state): State<AppState>,
-    _user: AuthUser,
+    user: AuthUser,
     Json(req): Json<CreateJoinToken>,
 ) -> Result<
     (
@@ -86,6 +87,7 @@ async fn create_join_token(
     ),
     ApiError,
 > {
+    crate::auth::require_recent_password(&user)?;
     labels::validate(&req.labels)?;
     get_repository(&state, &req.repository_id)
         .await?

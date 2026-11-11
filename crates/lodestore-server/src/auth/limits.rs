@@ -23,6 +23,7 @@ const WINDOW: Duration = Duration::from_secs(60);
 const LOGIN_PER_NAME_PER_HOUR: u32 = 60;
 const NAME_WINDOW: Duration = Duration::from_secs(3600);
 const KNOWN_BUCKETS_PER_NAME: usize = 16;
+const STEP_UP_FAILURES_PER_SESSION: u32 = 5;
 const PRUNE_ABOVE: usize = 4096;
 const MAX_KEY_USERNAME_CHARS: usize = 64;
 
@@ -76,6 +77,7 @@ pub struct Limits {
     login_client: Arc<Attempts<IpAddr>>,
     login_name: Arc<Attempts<String>>,
     known: Arc<Mutex<HashMap<String, VecDeque<IpAddr>>>>,
+    step_up_failures: Arc<Mutex<HashMap<Vec<u8>, u32>>>,
     setup: Arc<Attempts<IpAddr>>,
     demo: Arc<Attempts<IpAddr>>,
     enroll: Arc<DefaultKeyedRateLimiter<IpAddr>>,
@@ -88,6 +90,7 @@ impl Default for Limits {
             login_client: Arc::new(Attempts::new(LOGIN_PER_CLIENT_PER_MINUTE, WINDOW)),
             login_name: Arc::new(Attempts::new(LOGIN_PER_NAME_PER_HOUR, NAME_WINDOW)),
             known: Arc::default(),
+            step_up_failures: Arc::default(),
             setup: Arc::new(Attempts::new(SETUP_PER_MINUTE, WINDOW)),
             demo: Arc::new(Attempts::new(DEMO_PER_MINUTE, WINDOW)),
             enroll: Arc::new(RateLimiter::keyed(Quota::per_minute(
@@ -185,6 +188,35 @@ impl Limits {
             }
             buckets.push_back(bucket);
         }
+    }
+
+    /// Counts a wrong password at step-up against the session. Returns true on
+    /// the fifth in a row: the caller ends the session, so a stolen cookie
+    /// cannot keep guessing the password through step-up. Memory only; a
+    /// restart forgets the count.
+    pub fn step_up_failed(&self, session: &[u8]) -> bool {
+        let mut failures = self
+            .step_up_failures
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if failures.len() > PRUNE_ABOVE {
+            failures.clear();
+        }
+        let count = failures.entry(session.to_vec()).or_insert(0);
+        *count += 1;
+        if *count < STEP_UP_FAILURES_PER_SESSION {
+            return false;
+        }
+        failures.remove(session);
+        true
+    }
+
+    pub fn step_up_succeeded(&self, session: &[u8]) {
+        let mut failures = self
+            .step_up_failures
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        failures.remove(session);
     }
 
     pub fn check_setup(&self, ip: IpAddr) -> Result<(), GuardError> {

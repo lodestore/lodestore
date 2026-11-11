@@ -17,6 +17,8 @@ pub enum ApiError {
     MissingScope(&'static str),
     #[error("The token needs the {0} scope to {1}.")]
     MissingScopeFor(&'static str, Cow<'static, str>),
+    #[error("Enter your password again to continue.")]
+    StepUpRequired,
     #[error("CSRF check failed")]
     Csrf,
     #[error("setup required")]
@@ -60,6 +62,7 @@ impl ApiError {
             ApiError::MissingScope(_) | ApiError::MissingScopeFor(..) => {
                 (StatusCode::FORBIDDEN, "forbidden")
             }
+            ApiError::StepUpRequired => (StatusCode::FORBIDDEN, "step_up_required"),
             ApiError::Csrf => (StatusCode::FORBIDDEN, "csrf"),
             ApiError::SetupRequired => (StatusCode::CONFLICT, "setup_required"),
             ApiError::DemoMode => (StatusCode::FORBIDDEN, "demo_mode"),
