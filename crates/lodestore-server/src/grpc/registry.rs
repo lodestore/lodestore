@@ -436,4 +436,15 @@ mod tests {
         assert_eq!(rejected.serial.len(), SERIAL_MAX_CHARS);
         assert_eq!(rejected.ip, ip("10.0.0.7"));
     }
+
+    #[test]
+    fn refusals_are_logged_once_per_agent_and_window() {
+        let registry = Registry::default();
+        assert!(registry.note_cert_rejected("a1", "x", None));
+        assert!(!registry.note_cert_rejected("a1", "x", None));
+        assert!(registry.note_cert_rejected("a2", "x", None));
+        assert!(registry.note_unknown_agent());
+        assert!(!registry.note_unknown_agent());
+        assert_eq!(registry.unknown_agent_refusals(), 2);
+    }
 }
