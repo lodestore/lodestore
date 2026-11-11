@@ -157,6 +157,7 @@ test("setup, add host, policy, backup and restore through the UI", async ({
 			.getByRole("button", { name: copy.policies.run.confirm(1) })
 			.click();
 		await page.getByRole("button", { name: copy.jobs.viewJob }).click();
+		await expect(page.locator("[data-sonner-toast]")).toHaveCount(0);
 		await a11y(page, page.getByRole("heading", { level: 1 }));
 		await expect(
 			page.getByText(copy.jobs.status.succeeded, { exact: true }).first(),

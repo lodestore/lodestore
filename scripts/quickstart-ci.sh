@@ -343,6 +343,7 @@ EOF
   } >"$workdir/install-agent"
   chmod 0755 "$workdir/install-agent"
   token=$(setup_token)
+  cd "$root/web"
   E2E_BASE_URL=$base \
     E2E_SETUP_TOKEN=$token \
     E2E_S3_ENDPOINT=http://$LODESTORE_HOST:9000 \
@@ -354,7 +355,7 @@ EOF
     E2E_INSTALL_AGENT=$workdir/install-agent \
     E2E_DATA=$data_dir/data \
     E2E_RESTORE_TO=$e2e_restore_to \
-    pnpm --dir "$root/web" e2e
+    pnpm e2e
 }
 
 e2e_verify() {
