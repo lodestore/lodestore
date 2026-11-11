@@ -4,6 +4,7 @@
 //! any input; equality assertions exist only where they are written down.
 
 pub mod seeds;
+pub mod stores;
 
 use std::collections::HashSet;
 use std::sync::OnceLock;
@@ -90,7 +91,7 @@ fn keys() -> &'static ReadKeys {
     KEYS.get_or_init(|| ReadKeys::derive(MasterKey::from_bytes([1u8; 32]), [2u8; 16]))
 }
 
-fn entropy() -> Entropy {
+pub(crate) fn entropy() -> Entropy {
     Entropy::from_rng(ChaCha20Rng::from_seed([7u8; 32]))
 }
 
@@ -253,6 +254,8 @@ pub fn provenance_open(data: &[u8]) {
     let _ = open_provenance(keys, data);
 }
 
+pub use stores::{snapshot_resolves, verify_shard};
+
 pub type Target = fn(&[u8]);
 
 pub const TARGETS: &[(&str, Target)] = &[
@@ -268,4 +271,5 @@ pub const TARGETS: &[(&str, Target)] = &[
     ("writer_marker", writer_marker),
     ("attest_open", attest_open),
     ("provenance_open", provenance_open),
+    ("verify_shard", verify_shard),
 ];

@@ -13,11 +13,15 @@ use lodestore_format::store::LocalFsStore;
 use lodestore_format::tree::decode_tree;
 use prost::Message;
 
+use crate::stores;
+
 type Seeds = Vec<(&'static str, Vec<u8>)>;
+
+const MAX_SEED_LEN: usize = 1 << 20;
 
 const TRAILER_LEN: usize = 4 + PACK_MAGIC.len();
 
-fn unhex(text: &str) -> Option<Vec<u8>> {
+pub(crate) fn unhex(text: &str) -> Option<Vec<u8>> {
     if !text.len().is_multiple_of(2) {
         return None;
     }
@@ -116,7 +120,24 @@ pub fn try_seeds(fixtures: &Path) -> Result<Seeds, String> {
             &bytes,
         )
         .map_err(|e| format!("open a fixture shard: {e}"))?;
-        out.push(("index_shard", shard.encode_to_vec()));
+        let plain = shard.encode_to_vec();
+        out.push(("verify_shard", [&[1u8][..], &plain].concat()));
+        out.push(("snapshot_resolves", [&[1u8, 0][..], &plain].concat()));
+        out.push(("snapshot_resolves", [&[2u8, 0][..], &plain].concat()));
+        out.push(("index_shard", plain));
+    }
+    for (at, key) in stores::shard_keys().iter().enumerate() {
+        let bytes = fs::read(repo_dir.join(key)).map_err(|e| io("shard", e))?;
+        out.push(("verify_shard", [&[2u8, at as u8][..], &bytes].concat()));
+    }
+    for (at, key) in stores::pack_keys().iter().enumerate() {
+        let bytes = fs::read(repo_dir.join(key)).map_err(|e| io("pack", e))?;
+        if bytes.len() > MAX_SEED_LEN {
+            continue;
+        }
+        for target in ["verify_shard", "snapshot_resolves"] {
+            out.push((target, [&[0u8, at as u8][..], &bytes].concat()));
+        }
     }
     for plain in hex_fields(&vectors(fixtures, "index-vectors.json")?, "plaintext")? {
         out.push(("index_shard", plain));
@@ -156,6 +177,13 @@ pub fn try_seeds(fixtures: &Path) -> Result<Seeds, String> {
             .block_on(reader.snapshot(&id))
             .map_err(|e| format!("read a fixture snapshot: {e}"))?;
         pending.extend(BlobId::try_from(snapshot.root_tree.as_slice()).ok());
+        out.push((
+            "snapshot_resolves",
+            [&[3u8][..], &snapshot.encode_to_vec()].concat(),
+        ));
+        let raw = fs::read(repo_dir.join(format!("snapshots/{}", name.to_string_lossy())))
+            .map_err(|e| io("snapshot", e))?;
+        out.push(("snapshot_resolves", [&[4u8][..], &raw].concat()));
     }
     let mut seen = std::collections::HashSet::new();
     while let Some(id) = pending.pop() {

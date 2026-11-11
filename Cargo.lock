@@ -2312,6 +2312,7 @@ name = "lodestore-fuzzkit"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "bytes",
  "lodestore-agent",
  "lodestore-format",
  "lodestore-fuzzkit",
