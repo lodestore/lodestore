@@ -636,3 +636,35 @@ impl AgentEnv {
             .to_string()
     }
 }
+
+pub async fn seed_agent(ts: &TestServer, repo: &str, id: &str, capabilities: &str) {
+    sqlx::query(
+        "INSERT INTO agents (id, hostname, repository_id, labels_json, os, arch, version, status, \
+         enrolled_at, cert_serial, cert_issued_at, cert_not_after, capabilities_json) \
+         VALUES ($1, $1, $2, '{}', 'linux', 'x86_64', 'test', 'active', 0, $1, 0, 0, $3)",
+    )
+    .bind(id)
+    .bind(repo)
+    .bind(capabilities)
+    .execute(&ts.state().db.pool)
+    .await
+    .unwrap();
+}
+
+pub async fn seed_backup_job(ts: &TestServer, host: &str, began_ms: i64, max_runtime_s: u64) {
+    use prost::Message;
+    let spec = lodestore_proto::agent::v1::JobSpec {
+        max_runtime_s,
+        ..Default::default()
+    };
+    sqlx::query(
+        "INSERT INTO jobs (id, host_id, source, state, spec, queued_at, assigned_at, started_at, kind) \
+         VALUES ($1, $1, 'manual', 'running', $2, $3, $3, $3, 'backup')",
+    )
+    .bind(host)
+    .bind(spec.encode_to_vec())
+    .bind(began_ms)
+    .execute(&ts.state().db.pool)
+    .await
+    .unwrap();
+}

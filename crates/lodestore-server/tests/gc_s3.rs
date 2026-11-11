@@ -4,10 +4,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
-use common::{TestServer, backends};
+use common::{TestServer, backends, seed_agent, seed_backup_job};
 use lodestore_format::crypto::Entropy;
 use lodestore_format::index::{hex32, parse_hex32};
 use lodestore_format::keys::{KdfCost, MasterKey};
+use lodestore_format::locks::read_gc_locks;
+use lodestore_format::pack::pack_object_key;
 use lodestore_format::reader::{Reader, RestoreOptions};
 use lodestore_format::repo::{InitOptions, PendingInit, Repository};
 use lodestore_format::snapshot::snapshot_object_key;
@@ -30,6 +32,7 @@ use serde_json::Value;
 const PASSWORD: &[u8] = b"test-password";
 const BUCKET: &str = "repo";
 const DAY_MS: i64 = 86_400_000;
+const HOUR_MS: i64 = 3_600_000;
 const MINUTE_MS: i64 = 60_000;
 const SHARED_SIZE: usize = 64 * 1024;
 const UNIQUE_SIZE: usize = 600 * 1024;
@@ -149,14 +152,22 @@ impl Cloud {
         repo
     }
 
-    async fn backup(&self, tag: &str, unique_seed: u64) -> Backed {
+    async fn open_writer(&self) -> Writer<&Store> {
         let repo = Repository::open(&self.server_store, PASSWORD)
             .await
             .unwrap();
         let keys = repo.read_keys().write_keys(repo.config_hash());
-        let mut writer = Writer::new(&self.agent_store, keys, repo.config())
+        Writer::new(&self.agent_store, keys, repo.config())
             .await
-            .unwrap();
+            .unwrap()
+    }
+
+    async fn backup(&self, tag: &str, unique_seed: u64) -> Backed {
+        let writer = self.open_writer().await;
+        self.commit(writer, tag, unique_seed).await
+    }
+
+    async fn commit(&self, mut writer: Writer<&Store>, tag: &str, unique_seed: u64) -> Backed {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("shared.bin"), noise(1, SHARED_SIZE)).unwrap();
         std::fs::write(
@@ -604,4 +615,121 @@ async fn gc_s3_server_clock_ahead_waits() {
         assert!(probes.is_empty(), "{probes:?}");
     })
     .await;
+}
+
+/// A backup that opened before the cleanup marker and commits at the very end
+/// of its week-long limit keeps the data it deduplicated against. The agent
+/// writes no writer marker, so the job's time limit is the only thing that
+/// holds the deletion.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_s3_week_long_backup_keeps_its_data() {
+    on_each_backend(Bucket::Versioned, async |cloud, ts, repo| {
+        let t0 = wall_clock_ms();
+        let a = cloud.backup("a", 11).await;
+        let a_packs: BTreeSet<String> = pack_keys(&cloud.listing().await);
+        let b = cloud.backup("b", 12).await;
+        let c = cloud.backup("c", 13).await;
+        let before = pack_keys(&cloud.listing().await);
+        cloud.forget(&a).await;
+        seed_agent(ts, repo, "host-1", r#"["gc_v1"]"#).await;
+        seed_backup_job(ts, "host-1", t0, 7 * 86_400).await;
+        let writer = cloud.open_writer().await;
+
+        let id = real_cycle(ts, repo).await;
+        let StepOutcome::Waiting { until_ms } = settle(ts, &id, t0 + 3 * DAY_MS).await else {
+            panic!("the cycle must wait for the week-long backup");
+        };
+        let limit = t0 + 7 * DAY_MS + HOUR_MS;
+        let published = pack_keys(&cloud.listing().await);
+
+        let opened = Repository::open(&cloud.server_store, PASSWORD)
+            .await
+            .unwrap();
+        let locks = read_gc_locks(
+            &cloud.server_store,
+            opened.read_keys().k_idx(),
+            opened.read_keys().repo_id(),
+        )
+        .await
+        .unwrap();
+        let candidates: BTreeSet<String> = locks
+            .candidate_packs()
+            .iter()
+            .map(pack_object_key)
+            .collect();
+        assert!(
+            a_packs.iter().any(|key| candidates.contains(key)),
+            "the packs of A are not candidates of the marker: the scenario would be empty"
+        );
+
+        let mut waits = vec![(
+            t0 + 3 * DAY_MS,
+            StepOutcome::Waiting { until_ms },
+            published.clone(),
+        )];
+        for t in [
+            t0 + 4 * DAY_MS + HOUR_MS,
+            t0 + 5 * DAY_MS,
+            t0 + 6 * DAY_MS,
+            limit - MINUTE_MS,
+        ] {
+            let outcome = settle(ts, &id, t).await;
+            waits.push((t, outcome, pack_keys(&cloud.listing().await)));
+        }
+
+        let week = cloud.commit(writer, "week", 11).await;
+        let mut added_bytes = 0;
+        for key in pack_keys(&cloud.listing().await).difference(&published) {
+            added_bytes += cloud.server_store.get(key).await.unwrap().len();
+        }
+        assert!(
+            added_bytes < UNIQUE_SIZE / 2,
+            "the week's backup wrote {added_bytes} new bytes: it did not deduplicate against A"
+        );
+
+        sqlx::query(
+            "UPDATE jobs SET state = 'succeeded', finished_at = $1 WHERE host_id = 'host-1'",
+        )
+        .bind(limit)
+        .execute(&ts.state().db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            finish(ts, &id, limit + HOUR_MS).await,
+            GcState::Done,
+            "{:?}",
+            failure(ts, &id).await
+        );
+        cloud.assert_restores(&week).await;
+        cloud.assert_restores(&b).await;
+        cloud.assert_restores(&c).await;
+
+        for (t, outcome, seen) in waits {
+            let StepOutcome::Waiting { until_ms } = outcome else {
+                panic!("at {t} the cycle must wait, not {outcome:?}");
+            };
+            assert!(until_ms >= limit, "at {t} the pause ends at {until_ms}");
+            assert_eq!(seen, published, "packs changed while waiting at {t}");
+            assert!(before.is_subset(&seen), "a pack was deleted at {t}");
+        }
+    })
+    .await;
+}
+
+fn pack_keys(listing: &BTreeMap<String, Option<i64>>) -> BTreeSet<String> {
+    listing
+        .keys()
+        .filter(|key| key.starts_with("packs/"))
+        .cloned()
+        .collect()
+}
+
+/// Steps while the cycle advances and returns the first outcome that is not an advance.
+async fn settle(ts: &TestServer, id: &str, now: i64) -> StepOutcome {
+    loop {
+        match step(ts.state(), id, now).await.unwrap() {
+            StepOutcome::Advanced(_) => {}
+            other => return other,
+        }
+    }
 }
