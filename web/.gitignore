@@ -3,3 +3,5 @@ dist/
 src/routeTree.gen.ts
 src/api/gen/
 *.tsbuildinfo
+playwright-report/
+test-results/
