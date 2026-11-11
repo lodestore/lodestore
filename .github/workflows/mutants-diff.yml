@@ -47,6 +47,7 @@ jobs:
         run: |
           git diff "origin/$BASE_REF...HEAD" > git.diff
           git diff --name-only "origin/$BASE_REF...HEAD" > changed.txt
+          mkdir -p mutants-diff-out
           failed=0
           run_group() {
             local group=$1 pattern=$2
