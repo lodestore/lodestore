@@ -55,8 +55,13 @@ jobs:
               echo "mutants-diff $group: no changed files"
               return 0
             fi
-            local status=0
-            cargo mutants --no-shuffle -vV --in-place --in-diff git.diff --output "mutants-diff-out/$group" "$@" || status=$?
+            local status=0 attempt
+            for attempt in 1 2; do
+              status=0
+              cargo mutants --no-shuffle -vV --in-place --in-diff git.diff --output "mutants-diff-out/$group" "$@" || status=$?
+              [ "$status" -eq 4 ] || break
+              echo "mutants-diff $group: the unmutated baseline failed on attempt $attempt" >&2
+            done
             case "$status" in
               0 | 3) ;;
               *) echo "mutants-diff $group: cargo mutants exited with $status" >&2; failed=1 ;;
