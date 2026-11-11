@@ -2,15 +2,20 @@ mod adv_support;
 mod gc_support;
 
 use std::cell::Cell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ops::Range;
 use std::sync::Mutex;
 
 use adv_support::{attacker_keys, forge_offsets, open_all_shards, plant_shard, plant_shard_where};
 use bytes::Bytes;
 use gc_support::{Cycle, Fx};
-use lodestore_format::crypto::BlobId;
-use lodestore_format::pack::pack_object_key;
+use lodestore_format::crypto::{
+    BLOB_TYPE_DATA, BLOB_TYPE_TREE, BlobId, HPKE_ENC_LEN, SEALED_KEY_LEN,
+};
+use lodestore_format::gc::compact::compact_plan;
+use lodestore_format::gc::mark::{LiveSet, ShardSet};
+use lodestore_format::gc::plan::{PlanOptions, plan};
+use lodestore_format::pack::{PACK_PREFIX_LEN, pack_object_key, parse_entries};
 use lodestore_format::pb;
 use lodestore_format::store::{
     BlobDelete, BlobError, BlobPurge, BlobStore, ListEntry, LocalFsStore, PurgeOutcome,
@@ -533,4 +538,268 @@ async fn gc_survey_places_blobs_in_packs_that_exist() {
     cycle.sweep_packs(usize::MAX).await;
     cycle.finish().await;
     fx.assert_all_restore().await;
+}
+
+const PACKS: u8 = 4;
+const BLOBS: u8 = 5;
+const PACK_SIZE: u64 = 8192;
+const OFFSETS: [u32; 3] = [PACK_PREFIX_LEN as u32, 1300, 1500];
+const ENC_LENS: [u32; 2] = [60, 100];
+const NOW_MS: i64 = 1_000_000;
+
+#[derive(Debug, Clone)]
+struct RecSpec {
+    pack: u8,
+    /// Blob, tree or data, offset, length.
+    entries: Vec<(u8, bool, u8, u8)>,
+}
+
+#[derive(Debug, Clone)]
+struct ShardSpec {
+    records: Vec<RecSpec>,
+    supersedes: Vec<u8>,
+    attested: bool,
+}
+
+fn shards_strategy() -> impl Strategy<Value = Vec<ShardSpec>> {
+    let entry = (0..BLOBS, any::<bool>(), 0..3u8, 0..2u8);
+    let record = (0..PACKS, prop::collection::vec(entry, 0..4))
+        .prop_map(|(pack, entries)| RecSpec { pack, entries });
+    let shard = (
+        prop::collection::vec(record, 0..3),
+        prop::collection::vec(any::<u8>(), 0..3),
+        any::<bool>(),
+    )
+        .prop_map(|(records, supersedes, attested)| ShardSpec {
+            records,
+            supersedes,
+            attested,
+        });
+    prop::collection::vec(shard, 1..5)
+}
+
+fn shard_id(i: usize) -> BlobId {
+    [u8::try_from(i).unwrap() + 1; 32]
+}
+
+fn pack_id_of(pack: u8) -> BlobId {
+    [pack + 50; 32]
+}
+
+fn blob_id_of(blob: u8) -> BlobId {
+    [blob + 100; 32]
+}
+
+fn shard_set(specs: &[ShardSpec]) -> ShardSet {
+    let n = specs.len();
+    let shards = specs
+        .iter()
+        .enumerate()
+        .map(|(i, spec)| {
+            let packs = spec
+                .records
+                .iter()
+                .map(|r| {
+                    let mut entries = Vec::new();
+                    for (blob, tree, offset, len) in &r.entries {
+                        let enc_len = ENC_LENS[usize::from(*len)];
+                        entries.extend_from_slice(&blob_id_of(*blob));
+                        entries.push(if *tree {
+                            BLOB_TYPE_TREE
+                        } else {
+                            BLOB_TYPE_DATA
+                        });
+                        entries.extend_from_slice(&OFFSETS[usize::from(*offset)].to_le_bytes());
+                        entries.extend_from_slice(&enc_len.to_le_bytes());
+                        entries.extend_from_slice(&(enc_len - 41).to_le_bytes());
+                    }
+                    pb::PackRecord {
+                        pack_id: pack_id_of(r.pack).to_vec(),
+                        hpke_enc: vec![0; HPKE_ENC_LEN],
+                        sealed_pack_key: vec![0; SEALED_KEY_LEN],
+                        pack_size: PACK_SIZE,
+                        entries,
+                    }
+                })
+                .collect();
+            let supersedes = spec
+                .supersedes
+                .iter()
+                .map(|v| match usize::from(*v) % (n + 1) {
+                    k if k < n => shard_id(k).to_vec(),
+                    _ => vec![200; 32],
+                })
+                .collect();
+            (shard_id(i), pb::IndexShard { packs, supersedes })
+        })
+        .collect();
+    ShardSet {
+        shards,
+        attested: specs
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.attested)
+            .map(|(i, _)| shard_id(i))
+            .collect(),
+        ..ShardSet::default()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PlanCase {
+    shards: Vec<ShardSpec>,
+    live: Vec<bool>,
+    /// Age of each listed pack: old, young, or not reported.
+    ages: Vec<u8>,
+    unindexed: u8,
+    pct: u8,
+    max_candidates: usize,
+    budget: Option<u64>,
+    order: u64,
+}
+
+fn plan_case() -> impl Strategy<Value = PlanCase> {
+    (
+        shards_strategy(),
+        prop::collection::vec(any::<bool>(), 1..32),
+        prop::collection::vec(0..3u8, 1..8),
+        0..3u8,
+        0..=100u8,
+        1..8usize,
+        prop::option::of(0..40_000u64),
+        any::<u64>(),
+    )
+        .prop_map(
+            |(shards, live, ages, unindexed, pct, max_candidates, budget, order)| PlanCase {
+                shards,
+                live,
+                ages,
+                unindexed,
+                pct,
+                max_candidates,
+                budget,
+                order,
+            },
+        )
+}
+
+struct Planned {
+    delete: Vec<BlobId>,
+    repack: Vec<BlobId>,
+    /// The pack the index places each live blob in.
+    live_in: Vec<BlobId>,
+}
+
+fn run_plan(case: &PlanCase, order: Option<u64>) -> Planned {
+    let shards = shard_set(&case.shards);
+    let index = shards.index(&HashSet::new()).unwrap();
+    let mut live = LiveSet::default();
+    let blobs: BTreeSet<(BlobId, u8)> = shards
+        .shards
+        .iter()
+        .flat_map(|(_, s)| s.packs.iter())
+        .flat_map(|r| parse_entries(&r.entries).unwrap())
+        .map(|e| (e.blob_id, e.blob_type))
+        .collect();
+    for (i, (id, blob_type)) in blobs.iter().enumerate() {
+        if case.live[i % case.live.len()] {
+            live.insert(*id, *blob_type);
+        }
+    }
+    let indexed: BTreeSet<BlobId> = shards
+        .shards
+        .iter()
+        .flat_map(|(_, s)| s.packs.iter())
+        .map(|r| r.pack_id.as_slice().try_into().unwrap())
+        .collect();
+    let extra = (0..case.unindexed).map(|n| pack_id_of(PACKS + n));
+    let mut listing: Vec<ListEntry> = indexed
+        .iter()
+        .copied()
+        .chain(extra)
+        .enumerate()
+        .map(|(i, id)| ListEntry {
+            key: pack_object_key(&id),
+            size: PACK_SIZE + 2000 * (i as u64 % 2),
+            modified_ms: match case.ages[i % case.ages.len()] {
+                0 => Some(0),
+                1 => Some(NOW_MS - 10),
+                _ => None,
+            },
+        })
+        .collect();
+    if let Some(seed) = order {
+        shuffle(&mut listing, seed);
+    }
+    let opts = PlanOptions {
+        now_ms: NOW_MS,
+        min_age_ms: 500,
+        repack_below_pct: case.pct,
+        max_repack_bytes: case.budget.unwrap_or(u64::MAX),
+        max_candidates: case.max_candidates,
+    };
+    let out = plan(&shards, &index, &live, &listing, &opts).unwrap();
+    let ids = |v: &[lodestore_format::gc::plan::PackStat]| v.iter().map(|p| p.pack_id).collect();
+    Planned {
+        delete: ids(&out.delete),
+        repack: ids(&out.repack),
+        live_in: live
+            .iter()
+            .map(|(id, t)| index.get(id, *t).unwrap().pack_id)
+            .collect(),
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    #[test]
+    fn gc_plan_never_deletes_live(case in plan_case()) {
+        let planned = run_plan(&case, None);
+        for pack in &planned.delete {
+            prop_assert!(!planned.live_in.contains(pack), "a pack with a live blob is to be deleted");
+            prop_assert!(!planned.repack.contains(pack), "a pack is to be deleted and repacked");
+        }
+    }
+
+    #[test]
+    fn gc_plan_ignores_listing_order(case in plan_case()) {
+        let (a, b) = (run_plan(&case, None), run_plan(&case, Some(case.order)));
+        let set = |v: &[BlobId]| v.iter().copied().collect::<BTreeSet<_>>();
+        prop_assert_eq!(set(&a.delete), set(&b.delete));
+        prop_assert_eq!(set(&a.repack), set(&b.repack));
+    }
+
+    #[test]
+    fn gc_compact_keeps_every_location(
+        specs in shards_strategy(),
+        chosen in prop::collection::vec(any::<bool>(), PACKS as usize),
+    ) {
+        let shards = shard_set(&specs);
+        let candidates: HashSet<BlobId> = (0..PACKS)
+            .filter(|p| chosen[usize::from(*p)])
+            .map(pack_id_of)
+            .collect();
+        let out = compact_plan(&shards, &candidates);
+        let kept: BTreeSet<_> = [&out.verified_records, &out.attested_records, &out.other_records]
+            .into_iter()
+            .flatten()
+            .flat_map(|r| {
+                let pack = r.pack_id.clone();
+                parse_entries(&r.entries).unwrap().into_iter().map(move |e| (pack.clone(), e.blob_id, e.blob_type, e.offset, e.enc_len, e.ulen))
+            })
+            .collect();
+        for (id, shard) in &shards.shards {
+            if !out.rewrite.contains(id) {
+                continue;
+            }
+            for record in &shard.packs {
+                let pack: BlobId = record.pack_id.as_slice().try_into().unwrap();
+                for e in parse_entries(&record.entries).unwrap() {
+                    let place = (record.pack_id.clone(), e.blob_id, e.blob_type, e.offset, e.enc_len, e.ulen);
+                    prop_assert_eq!(kept.contains(&place), !candidates.contains(&pack));
+                }
+            }
+        }
+    }
 }
