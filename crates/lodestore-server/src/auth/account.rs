@@ -292,9 +292,17 @@ async fn change_password(
     tag = "Auth",
     operation_id = "step_up",
     summary = "Enter the password again",
-    description = "Creating an API token or a join token, and a restore that writes in place or \
-        applies owners, ask a signed-in session for the password within the last 15 minutes. \
-        This opens that window. Five wrong passwords in a row end the session.",
+    description = "A signed-in session must have entered its password within the last 15 \
+        minutes to create an API token or a join token; to start a restore that writes in \
+        place, restores owners or targets an agent without `restore_roots_v1`; to create, \
+        update or apply policies so that hooks or retention change or retention runs more \
+        often, or to change host labels so that a policy with hooks reaches the host; to \
+        delete a snapshot, mark it suspicious or clear the mark; to start a cleanup, close \
+        its backup markers, exclude a quarantined snapshot or save the cleanup settings; \
+        and to start or resume an agent update. Otherwise those requests answer `403` \
+        `step_up_required`. A cleanup dry run or abort, and pausing, cancelling or \
+        dismissing an agent update, do not need it. This opens that window. Five wrong \
+        passwords in a row end the session.",
     security(("session" = [], "csrf" = [])),
     path = "/api/v1/auth/step-up",
     request_body = StepUp,
