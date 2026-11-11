@@ -20,6 +20,7 @@ fn always_blocked(ip: IpAddr) -> bool {
                 || v4.octets()[0] == 0
                 || v4.octets()[0] >= 240
                 || v4 == Ipv4Addr::new(100, 100, 100, 200)
+                || v4 == Ipv4Addr::new(192, 0, 0, 192)
         }
         IpAddr::V6(v6) => {
             v6.is_unicast_link_local()
@@ -62,6 +63,12 @@ fn embedded_v4(v6: Ipv6Addr) -> Vec<Ipv4Addr> {
         found.push(low);
     }
     if s[0] == 0x64 && s[1] == 0xff9b && s[2..6].iter().all(|&x| x == 0) {
+        found.push(low);
+    }
+    if s[0] == 0x64 && s[1] == 0xff9b && s[2] == 1 {
+        found.push(low);
+    }
+    if s[..4].iter().all(|&x| x == 0) && s[4] == 0xffff && s[5] == 0 {
         found.push(low);
     }
     if s[0] == 0x2002 {
@@ -249,6 +256,7 @@ mod tests {
             ("198.20.0.1", false, false),
             ("240.0.0.1", true, true),
             ("100.100.100.200", true, true),
+            ("192.0.0.192", true, true),
             ("100.64.0.1", true, false),
             ("8.8.8.8", false, false),
             ("127.0.0.1", true, false),
@@ -259,7 +267,14 @@ mod tests {
             ("::", true, true),
             ("64:ff9b::a9fe:a9fe", true, true),
             ("64:ff9b::808:808", false, false),
-            ("64:ff9b:1::1", true, false),
+            ("64:ff9b:1::1", true, true),
+            ("64:ff9b:1::a9fe:a9fe", true, true),
+            ("64:ff9b:1::7f00:1", true, false),
+            ("64:ff9b:1::808:808", true, false),
+            ("::ffff:0:169.254.169.254", true, true),
+            ("::ffff:0:127.0.0.1", true, false),
+            ("::ffff:0:8.8.8.8", false, false),
+            ("::ffff:0:192.0.0.192", true, true),
             ("2002:7f00:1::", true, false),
             ("2002:808:808::", false, false),
             ("fec0::1", true, false),
