@@ -58,7 +58,7 @@ impl GcPlan {
     }
 }
 
-fn pack_missing(pack_id: &BlobId) -> Error {
+pub(crate) fn pack_missing(pack_id: &BlobId) -> Error {
     Error::corrupt(
         pack_object_key(pack_id),
         "is named by the index but missing from the store",
