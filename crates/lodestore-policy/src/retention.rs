@@ -125,9 +125,7 @@ pub fn evaluate(rules: &Retention, tz: &TimeZone, candidates: &[Candidate]) -> V
 }
 
 fn count(value: Option<i64>) -> Option<usize> {
-    value
-        .filter(|&n| n > 0)
-        .and_then(|n| usize::try_from(n).ok())
+    value.and_then(|n| usize::try_from(n).ok())
 }
 
 fn bucket_rule<K: Hash + Eq>(
@@ -143,7 +141,7 @@ fn bucket_rule<K: Hash + Eq>(
     let mut seen = HashSet::new();
     for &i in good {
         let ts = Timestamp::from_millisecond(order[i].received_at_ms).unwrap_or(
-            if order[i].received_at_ms < 0 {
+            if order[i].received_at_ms.is_negative() {
                 Timestamp::MIN
             } else {
                 Timestamp::MAX
