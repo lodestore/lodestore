@@ -28,6 +28,7 @@ const MAX_CAPABILITIES: usize = 16;
 const MAX_CAPABILITY_LEN: usize = 32;
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 const PREV_CERT_GRACE_MS: i64 = 24 * 60 * 60 * 1000;
+const PREV_CERT_DRAIN_MS: i64 = 2 * 60 * 1000;
 
 pub struct AgentService {
     pub state: AppState,
@@ -71,7 +72,7 @@ struct Peer {
 }
 
 /// Every RPC of an agent passes here. The certificate must be the one the server issued last, or the one before it
-/// until the first session with the newer one (at most 24 h): a renew whose answer was lost must not lock the agent out.
+/// until two minutes after the first session with the newer one (at most 24 h): a renew whose answer was lost must not lock the agent out.
 async fn check_peer<T>(state: &AppState, request: &Request<T>) -> Result<Peer, Status> {
     let agent_id = peer_agent_id(request)?;
     let serial = peer_cert_serial(request);
@@ -259,13 +260,15 @@ impl Agent for AgentService {
         })?;
 
         if fresh {
-            // the first session with the new certificate ends the previous one's grace window
+            // The first session with the new certificate shortens the previous one's window to a drain period,
+            // not to zero: an RPC that picked up the old channel just before the agent replaced it is still on its way.
             sqlx::query(
-                "UPDATE agents SET prev_cert_serial = NULL, prev_cert_until = NULL \
-                 WHERE id = $1 AND cert_serial = $2 AND prev_cert_serial IS NOT NULL",
+                "UPDATE agents SET prev_cert_until = $3 \
+                 WHERE id = $1 AND cert_serial = $2 AND prev_cert_serial IS NOT NULL AND prev_cert_until > $3",
             )
             .bind(&agent_id)
             .bind(&cert_serial)
+            .bind(now_ms() + PREV_CERT_DRAIN_MS)
             .execute(&state.db.pool)
             .await
             .map_err(internal)?;
