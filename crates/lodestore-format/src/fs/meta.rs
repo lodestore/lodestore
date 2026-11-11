@@ -9,7 +9,8 @@ use std::sync::OnceLock;
 
 use rustix::fs::{
     AtFlags, Gid, Mode, Timestamps, UTIME_OMIT, Uid, XattrFlags, chmodat, chownat, fchmod, fchown,
-    fgetxattr, flistxattr, fsetxattr, futimens, lgetxattr, llistxattr, lsetxattr, utimensat,
+    fgetxattr, fgetxattr_query, flistxattr, flistxattr_query, fsetxattr, futimens, lgetxattr,
+    lgetxattr_query, llistxattr, llistxattr_query, lsetxattr, utimensat,
 };
 use rustix::io::Errno;
 
@@ -17,9 +18,12 @@ use super::conv;
 use super::restore::Unapplied;
 use crate::pb;
 
-fn grow(mut f: impl FnMut(&mut [u8]) -> rustix::io::Result<usize>) -> rustix::io::Result<Vec<u8>> {
+fn grow(
+    mut query: impl FnMut() -> rustix::io::Result<usize>,
+    mut f: impl FnMut(&mut [u8]) -> rustix::io::Result<usize>,
+) -> rustix::io::Result<Vec<u8>> {
     loop {
-        let need = f(&mut [])?;
+        let need = query()?;
         if need == 0 {
             return Ok(Vec::new());
         }
@@ -37,10 +41,12 @@ fn grow(mut f: impl FnMut(&mut [u8]) -> rustix::io::Result<usize>) -> rustix::io
 }
 
 fn collect(
+    list_query: impl FnMut() -> rustix::io::Result<usize>,
     list: impl FnMut(&mut [u8]) -> rustix::io::Result<usize>,
+    mut get_query: impl FnMut(&CString) -> rustix::io::Result<usize>,
     mut get: impl FnMut(&CString, &mut [u8]) -> rustix::io::Result<usize>,
 ) -> rustix::io::Result<Vec<pb::Xattr>> {
-    let names = match grow(list) {
+    let names = match grow(list_query, list) {
         Ok(n) => n,
         Err(Errno::NOTSUP) => return Ok(Vec::new()),
         Err(e) => return Err(e),
@@ -48,7 +54,7 @@ fn collect(
     let mut out = Vec::new();
     for name in names.split(|b| *b == 0).filter(|n| !n.is_empty()) {
         let cname = CString::new(name).expect("split at NUL");
-        match grow(|b| get(&cname, b)) {
+        match grow(|| get_query(&cname), |b| get(&cname, b)) {
             Ok(value) => out.push(pb::Xattr {
                 name: name.to_vec(),
                 value,
@@ -66,7 +72,9 @@ fn collect(
 /// yields none.
 pub fn capture_xattrs(fd: &impl AsFd) -> rustix::io::Result<Vec<pb::Xattr>> {
     collect(
+        || flistxattr_query(fd),
         |b| flistxattr(fd, b),
+        |name| fgetxattr_query(fd, name.as_c_str()),
         |name, b| fgetxattr(fd, name.as_c_str(), b),
     )
 }
@@ -86,7 +94,9 @@ pub fn capture_xattrs_at(dir: &impl AsFd, name: &[u8]) -> rustix::io::Result<Vec
     }
     let path = entry_path(dir.as_fd(), name);
     collect(
+        || llistxattr_query(path.as_slice()),
         |b| llistxattr(path.as_slice(), b),
+        |n| lgetxattr_query(path.as_slice(), n.as_c_str()),
         |n, b| lgetxattr(path.as_slice(), n.as_c_str(), b),
     )
 }

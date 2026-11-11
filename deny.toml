@@ -23,6 +23,7 @@ deny = [
 [advisories]
 ignore = [
     { id = "RUSTSEC-2023-0071", reason = "rsa is pulled in by the azblob client for request signing and never runs a private key supplied by a user" },
+    { id = "RUSTSEC-2026-0459", reason = "sqlx-sqlite 0.9 caps libsqlite3-sys below 0.38, and the server opens only SQLite files it created in its own data directory" },
 ]
 
 [sources]
