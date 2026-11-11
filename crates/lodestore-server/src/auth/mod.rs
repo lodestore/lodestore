@@ -443,23 +443,37 @@ pub(crate) async fn start_session_for(
     Ok(jar.add(cookie))
 }
 
-async fn has_live_session(
+async fn live_session(
     state: &AppState,
     jar: &CookieJar,
     user_id: &str,
-) -> Result<bool, sqlx::Error> {
+) -> Result<Option<Vec<u8>>, sqlx::Error> {
     let Some(cookie) = jar.get(SESSION_COOKIE) else {
-        return Ok(false);
+        return Ok(None);
     };
-    Ok(sqlx::query(
+    let id_hash = session_hash(cookie.value());
+    let live = sqlx::query(
         "SELECT 1 FROM sessions WHERE id_hash = $1 AND user_id = $2 AND expires_at > $3",
     )
-    .bind(session_hash(cookie.value()))
+    .bind(&id_hash)
     .bind(user_id)
     .bind(now_ms())
     .fetch_optional(&state.db.pool)
     .await?
-    .is_some())
+    .is_some();
+    Ok(live.then_some(id_hash))
+}
+
+/// Counts a wrong password typed under a live session and ends that session
+/// on the fifth in a row, so a stolen cookie cannot keep guessing.
+async fn session_password_failed(state: &AppState, session: &[u8]) -> Result<(), sqlx::Error> {
+    if state.auth.limits.step_up_failed(session) {
+        sqlx::query("DELETE FROM sessions WHERE id_hash = $1")
+            .bind(session)
+            .execute(&state.db.pool)
+            .await?;
+    }
+    Ok(())
 }
 
 #[utoipa::path(
@@ -504,12 +518,13 @@ async fn login(
         None => (None, None),
     };
     let mut name_counted = false;
+    let mut session = None;
     if let Some(id) = &user_id {
-        let has_session = has_live_session(&state, &jar, id).await?;
+        session = live_session(&state, &jar, id).await?;
         name_counted = state
             .auth
             .limits
-            .check_login_name(client, id, has_session)?;
+            .check_login_name(client, id, session.is_some())?;
     }
     let password = req.password;
     let verified = stored.clone();
@@ -533,8 +548,16 @@ async fn login(
     };
     let (user_id, hash) = match (ok, user_id, stored) {
         (true, Some(id), Some(hash)) => (id, hash),
-        _ => return Err(ApiError::Unauthorized.into()),
+        _ => {
+            if let Some(session) = &session {
+                session_password_failed(&state, session).await?;
+            }
+            return Err(ApiError::Unauthorized.into());
+        }
     };
+    if let Some(session) = &session {
+        state.auth.limits.step_up_succeeded(session);
+    }
     state.auth.limits.login_succeeded(client, &req.username);
     state
         .auth

@@ -1017,3 +1017,53 @@ async fn busy_login_returns_503_and_does_not_spend_the_attempt() {
         ts.stop().await;
     }
 }
+
+async fn login_with_cookie(client: &Client, base: &str, cookie: &str, password: &str) -> Response {
+    client
+        .post(format!("{base}/api/v1/auth/login"))
+        .header("cookie", cookie)
+        .json(&json!({ "username": "admin", "password": password }))
+        .send()
+        .await
+        .expect("login request")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn five_failed_logins_carrying_a_session_end_it() {
+    for backend in backends() {
+        let name = backend.name();
+        let ts = TestServer::start(&backend).await;
+        let (client, base) = (Client::new(), ts.rest_url());
+        let (cookie, _) = sign_in(&client, &base).await;
+        for attempt in 1..=5 {
+            let wrong = login_with_cookie(&client, &base, &cookie, "wrong password").await;
+            assert_eq!(wrong.status(), 401, "attempt {attempt} [{name}]");
+        }
+        let after = get(&client, &base, "/api/v1/auth/session", Some(&cookie)).await;
+        assert_eq!(after.status(), 401, "[{name}]");
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_correct_login_carrying_a_session_resets_its_failure_count() {
+    for backend in backends() {
+        let name = backend.name();
+        let ts = TestServer::start(&backend).await;
+        let (client, base) = (Client::new(), ts.rest_url());
+        let (cookie, _) = sign_in(&client, &base).await;
+        for _ in 0..3 {
+            let wrong = login_with_cookie(&client, &base, &cookie, "wrong password").await;
+            assert_eq!(wrong.status(), 401, "[{name}]");
+        }
+        let ok = login_with_cookie(&client, &base, &cookie, common::ADMIN_PASSWORD).await;
+        assert_eq!(ok.status(), 204, "[{name}]");
+        for _ in 0..2 {
+            let wrong = login_with_cookie(&client, &base, &cookie, "wrong password").await;
+            assert_eq!(wrong.status(), 401, "[{name}]");
+        }
+        let after = get(&client, &base, "/api/v1/auth/session", Some(&cookie)).await;
+        assert_eq!(after.status(), 200, "[{name}]");
+        ts.stop().await;
+    }
+}
