@@ -89,8 +89,12 @@ jobs:
           if [ -n "$FILTER" ]; then
             cmd+=(-- -E "$FILTER")
           fi
-          status=0
-          "${cmd[@]}" || status=$?
+          for attempt in 1 2; do
+            status=0
+            "${cmd[@]}" || status=$?
+            [ "$status" -eq 4 ] || break
+            echo "the unmutated baseline failed on attempt $attempt" >&2
+          done
           case "$status" in
             0 | 2 | 3) ;;
             *) echo "cargo mutants exited with $status" >&2; exit "$status" ;;
