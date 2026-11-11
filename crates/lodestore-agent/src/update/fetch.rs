@@ -7,10 +7,10 @@ use lodestore_proto::agent::v1::{FetchAgentUpdateRequest, UpdateAssign, UpdateCh
 use tokio::io::AsyncWriteExt;
 use tokio_stream::{Stream, StreamExt};
 use tonic::Status;
-use tonic::transport::Channel;
 
 use super::MAX_UPDATE_BYTES;
 use super::apply::temp_path;
+use crate::shared_channel::SharedChannel;
 
 pub const MAX_SIGNATURE_BYTES: usize = 4096;
 
@@ -77,14 +77,17 @@ pub async fn read_signature(
 }
 
 async fn open(
-    client: &mut AgentClient<Channel>,
+    channel: &SharedChannel,
     update_id: &str,
     file: UpdateFile,
 ) -> Result<tonic::Streaming<UpdateChunk>, String> {
-    client
-        .fetch_agent_update(FetchAgentUpdateRequest {
-            update_id: update_id.to_string(),
-            file: file as i32,
+    channel
+        .call(|channel| {
+            let request = FetchAgentUpdateRequest {
+                update_id: update_id.to_string(),
+                file: file as i32,
+            };
+            async move { AgentClient::new(channel).fetch_agent_update(request).await }
         })
         .await
         .map(tonic::Response::into_inner)
@@ -93,15 +96,14 @@ async fn open(
 
 /// Fetches the signature, then the binary into a new file next to `exe`.
 pub async fn download(
-    channel: Channel,
+    channel: &SharedChannel,
     assign: &UpdateAssign,
     exe: &Path,
 ) -> Result<(PathBuf, Vec<u8>), String> {
-    let mut client = AgentClient::new(channel);
     let signature =
-        read_signature(open(&mut client, &assign.update_id, UpdateFile::Signature).await?).await?;
+        read_signature(open(channel, &assign.update_id, UpdateFile::Signature).await?).await?;
     let dest = temp_path(exe).map_err(|e| format!("Could not save the download: {e}"))?;
-    let binary = open(&mut client, &assign.update_id, UpdateFile::Binary).await?;
+    let binary = open(channel, &assign.update_id, UpdateFile::Binary).await?;
     save_binary(binary, &dest, download_limit(assign.size)).await?;
     Ok((dest, signature))
 }

@@ -20,6 +20,7 @@ use lodestore_proto::agent::v1::{
 };
 use tokio::sync::Notify;
 
+use crate::shared_channel::SharedChannel;
 use crate::socket::StdinHeader;
 use crate::{AgentError, NetOptions, Paths};
 
@@ -117,6 +118,7 @@ pub struct JobHub {
     stopping: AtomicBool,
     tick: Duration,
     net: Mutex<NetOptions>,
+    channel: Arc<SharedChannel>,
     stdin_max_runtime_s: AtomicU64,
 }
 
@@ -144,6 +146,10 @@ impl JobCtx {
 
     /// Proxy settings the session was started with, for connections a job
     /// opens itself.
+    pub fn channel(&self) -> Arc<SharedChannel> {
+        self.hub.channel()
+    }
+
     pub fn net(&self) -> NetOptions {
         self.hub
             .net
@@ -286,6 +292,7 @@ impl JobHub {
             stopping: AtomicBool::new(false),
             tick,
             net: Mutex::new(NetOptions::default()),
+            channel: Arc::new(SharedChannel::new(paths)),
             stdin_max_runtime_s: AtomicU64::new(0),
         }))
     }
@@ -299,7 +306,13 @@ impl JobHub {
             .store(limit.as_secs(), Ordering::Relaxed);
     }
 
+    /// The server channel jobs and update downloads share; the session loop keeps it current.
+    pub fn channel(&self) -> Arc<SharedChannel> {
+        Arc::clone(&self.channel)
+    }
+
     pub fn set_net(&self, net: NetOptions) {
+        self.channel.set_net(net.clone());
         *self.net.lock().unwrap_or_else(|e| e.into_inner()) = net;
     }
 

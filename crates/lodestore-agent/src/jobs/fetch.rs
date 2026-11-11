@@ -4,16 +4,17 @@
 
 use std::fmt;
 use std::ops::Range;
+use std::sync::Arc;
 use std::time::Duration;
 
 use lodestore_format::crypto::Key32;
 use lodestore_proto::agent::v1 as pb;
 use lodestore_proto::agent::v1::agent_client::AgentClient;
-use tonic::transport::Channel;
 use tonic::{Code, Status};
 use zeroize::Zeroizing;
 
 use crate::NetOptions;
+use crate::shared_channel::SharedChannel;
 
 pub const MAX_RANGE: u64 = 8 << 20;
 pub const MAX_GAP: u64 = 64 << 10;
@@ -280,12 +281,12 @@ fn status_error(status: &Status) -> Attempt {
 
 /// Asks the server for the bytes; used when the bucket cannot sign links.
 pub struct GrpcFetcher {
-    channel: Channel,
+    channel: Arc<SharedChannel>,
     job_id: String,
 }
 
 impl GrpcFetcher {
-    pub fn new(channel: Channel, job_id: &str) -> Self {
+    pub fn new(channel: Arc<SharedChannel>, job_id: &str) -> Self {
         GrpcFetcher {
             channel,
             job_id: job_id.to_string(),
@@ -295,12 +296,16 @@ impl GrpcFetcher {
     async fn once(&self, pack: u32, offset: u64, len: u64) -> Result<Vec<u8>, Attempt> {
         let length = u32::try_from(len)
             .map_err(|_| Attempt::Stop(FetchError::Failed("range is too long".into())))?;
-        let mut stream = AgentClient::new(self.channel.clone())
-            .read_pack_range(pb::ReadPackRangeRequest {
-                job_id: self.job_id.clone(),
-                pack,
-                offset,
-                length,
+        let mut stream = self
+            .channel
+            .call(|channel| {
+                let request = pb::ReadPackRangeRequest {
+                    job_id: self.job_id.clone(),
+                    pack,
+                    offset,
+                    length,
+                };
+                async move { AgentClient::new(channel).read_pack_range(request).await }
             })
             .await
             .map_err(|s| status_error(&s))?
@@ -336,11 +341,19 @@ impl PackFetcher for GrpcFetcher {
     }
 
     async fn refresh(&self, packs: &[u32]) -> Result<Vec<PackAccess>, FetchError> {
-        let response = AgentClient::new(self.channel.clone())
-            .max_decoding_message_size(super::restore::MAX_PLAN_MESSAGE)
-            .refresh_pack_access(pb::RefreshPackAccessRequest {
-                job_id: self.job_id.clone(),
-                packs: packs.to_vec(),
+        let response = self
+            .channel
+            .call(|channel| {
+                let request = pb::RefreshPackAccessRequest {
+                    job_id: self.job_id.clone(),
+                    packs: packs.to_vec(),
+                };
+                async move {
+                    AgentClient::new(channel)
+                        .max_decoding_message_size(super::restore::MAX_PLAN_MESSAGE)
+                        .refresh_pack_access(request)
+                        .await
+                }
             })
             .await
             .map_err(|s| match status_error(&s) {
@@ -363,7 +376,11 @@ pub struct Fetchers {
 }
 
 impl Fetchers {
-    pub fn new(channel: Channel, job_id: &str, net: &NetOptions) -> Result<Self, FetchError> {
+    pub fn new(
+        channel: Arc<SharedChannel>,
+        job_id: &str,
+        net: &NetOptions,
+    ) -> Result<Self, FetchError> {
         Ok(Fetchers {
             http: HttpFetcher::new(net)?,
             grpc: GrpcFetcher::new(channel, job_id),
