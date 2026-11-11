@@ -4,7 +4,9 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
-use common::{Api, TestServer, WAIT, backends, bearer_client, wait_until};
+use common::{
+    Api, TestServer, WAIT, backends, bearer_client, seed_agent, seed_backup_job, wait_until,
+};
 use lodestore_format::attest::{
     MARKER_LEGACY_SHARDS, ensure_upgraded, put_attestation, read_attestations, seal_provenance,
 };
@@ -1414,38 +1416,6 @@ async fn gc_cycle_pause_counts_from_publication() {
         assert!(cycle(&ts, &id).await.delete_after.unwrap() >= before + DAY_MS);
         ts.stop().await;
     }
-}
-
-async fn seed_agent(ts: &TestServer, repo: &str, id: &str, capabilities: &str) {
-    sqlx::query(
-        "INSERT INTO agents (id, hostname, repository_id, labels_json, os, arch, version, status, \
-         enrolled_at, cert_serial, cert_issued_at, cert_not_after, capabilities_json) \
-         VALUES ($1, $1, $2, '{}', 'linux', 'x86_64', 'test', 'active', 0, $1, 0, 0, $3)",
-    )
-    .bind(id)
-    .bind(repo)
-    .bind(capabilities)
-    .execute(&ts.state().db.pool)
-    .await
-    .unwrap();
-}
-
-async fn seed_backup_job(ts: &TestServer, host: &str, began_ms: i64, max_runtime_s: u64) {
-    use prost::Message;
-    let spec = lodestore_proto::agent::v1::JobSpec {
-        max_runtime_s,
-        ..Default::default()
-    };
-    sqlx::query(
-        "INSERT INTO jobs (id, host_id, source, state, spec, queued_at, assigned_at, started_at, kind) \
-         VALUES ($1, $1, 'manual', 'running', $2, $3, $3, $3, 'backup')",
-    )
-    .bind(host)
-    .bind(spec.encode_to_vec())
-    .bind(began_ms)
-    .execute(&ts.state().db.pool)
-    .await
-    .unwrap();
 }
 
 /// A running backup keeps the limit it was queued with, even when its
