@@ -719,3 +719,375 @@ async fn roundtrip_tampered_pack_rejected() {
             .starts_with(".lode-restore-")
     }));
 }
+
+use std::collections::BTreeSet;
+use std::os::unix::fs::{MetadataExt, symlink};
+
+use lodestore_format::snapshot::ParentTree;
+use proptest::prelude::{Just, ProptestConfig, Strategy, any, prop, prop_oneof, proptest};
+
+#[derive(Debug, Clone)]
+enum GenKind {
+    File { len: usize, seed: u64 },
+    Sparse { len: usize, at: usize },
+    Dir,
+    Symlink { target: u8 },
+    Hardlink { of: usize },
+}
+
+#[derive(Debug, Clone)]
+struct GenEntry {
+    parent: usize,
+    kind: GenKind,
+    mode: u8,
+    mtime: (u64, u32),
+    xattr: Option<(u8, Vec<u8>)>,
+}
+
+#[derive(Debug, Clone)]
+struct GenEdit {
+    pick: usize,
+    op: u8,
+    seed: u64,
+    len: usize,
+}
+
+const GEN_FILE_MODES: [u32; 6] = [0o644, 0o600, 0o640, 0o755, 0o400, 0o444];
+const GEN_DIR_MODES: [u32; 4] = [0o755, 0o700, 0o750, 0o775];
+const GEN_LINK_TARGETS: [&str; 5] = ["/etc/hosts", "e0", "no/such/place", "../up", "."];
+
+fn gen_entry() -> impl Strategy<Value = GenEntry> {
+    let len = prop_oneof![
+        1 => Just(0usize),
+        4 => 1..300usize,
+        3 => 300..8192usize,
+        1 => 8192..262_145usize,
+    ];
+    let kind = prop_oneof![
+        5 => (len, any::<u64>()).prop_map(|(len, seed)| GenKind::File { len, seed }),
+        1 => (65_536..262_144usize, any::<usize>())
+            .prop_map(|(len, at)| GenKind::Sparse { len, at: at % (len - 100) }),
+        3 => Just(GenKind::Dir),
+        2 => (0..5u8).prop_map(|target| GenKind::Symlink { target }),
+        2 => any::<usize>().prop_map(|of| GenKind::Hardlink { of }),
+    ];
+    (
+        any::<usize>(),
+        kind,
+        any::<u8>(),
+        (1_500_000_000..1_600_000_000u64, 0..1_000_000_000u32),
+        prop::option::of((0..3u8, prop::collection::vec(any::<u8>(), 0..64))),
+    )
+        .prop_map(|(parent, kind, mode, mtime, xattr)| GenEntry {
+            parent,
+            kind,
+            mode,
+            mtime,
+            xattr,
+        })
+}
+
+fn gen_edit() -> impl Strategy<Value = GenEdit> {
+    (any::<usize>(), 0..3u8, any::<u64>(), 0..4096usize).prop_map(|(pick, op, seed, len)| GenEdit {
+        pick,
+        op,
+        seed,
+        len,
+    })
+}
+
+fn gen_content(seed: u64, len: usize) -> Vec<u8> {
+    if seed % 2 == 1 {
+        return vec![(seed >> 8) as u8; len];
+    }
+    let mut key = [0u8; 32];
+    key[..8].copy_from_slice(&seed.to_le_bytes());
+    let mut out = vec![0u8; len];
+    ChaCha20Rng::from_seed(key).fill_bytes(&mut out);
+    out
+}
+
+#[cfg(target_os = "linux")]
+fn gen_xattr_name(index: u8) -> String {
+    format!("user.lode.k{index}")
+}
+
+#[cfg(target_os = "linux")]
+fn gen_set_xattr(path: &Path, index: u8, value: &[u8]) {
+    let _ = rustix::fs::lsetxattr(
+        path,
+        gen_xattr_name(index),
+        value,
+        rustix::fs::XattrFlags::empty(),
+    );
+}
+
+#[cfg(not(target_os = "linux"))]
+fn gen_set_xattr(_path: &Path, _index: u8, _value: &[u8]) {}
+
+#[cfg(target_os = "linux")]
+fn gen_xattrs(path: &Path) -> Vec<Option<Vec<u8>>> {
+    (0..3u8)
+        .map(|index| {
+            let mut buf = vec![0u8; 4096];
+            rustix::fs::lgetxattr(path, gen_xattr_name(index), &mut buf[..])
+                .ok()
+                .map(|n| buf[..n].to_vec())
+        })
+        .collect()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn gen_xattrs(_path: &Path) -> Vec<Option<Vec<u8>>> {
+    Vec::new()
+}
+
+fn gen_write_sparse(path: &Path, len: usize, at: usize) {
+    let f = fs::File::create(path).unwrap();
+    f.set_len(len as u64).unwrap();
+    std::os::unix::fs::FileExt::write_all_at(&f, &[0xA5; 100], at as u64).unwrap();
+}
+
+fn gen_build(root: &Path, entries: &[GenEntry]) {
+    let mut dirs = vec![root.to_path_buf()];
+    let mut files: Vec<PathBuf> = Vec::new();
+    let mut stamps: Vec<(PathBuf, u64, u32)> = Vec::new();
+    for (i, e) in entries.iter().enumerate() {
+        let path = dirs[e.parent % dirs.len()].join(format!("e{i}"));
+        let file_mode = GEN_FILE_MODES[e.mode as usize % GEN_FILE_MODES.len()];
+        let mut own_inode = true;
+        match &e.kind {
+            GenKind::File { len, seed } => {
+                fs::write(&path, gen_content(*seed, *len)).unwrap();
+                fs::set_permissions(&path, fs::Permissions::from_mode(file_mode)).unwrap();
+                files.push(path.clone());
+            }
+            GenKind::Sparse { len, at } => {
+                gen_write_sparse(&path, *len, *at);
+                fs::set_permissions(&path, fs::Permissions::from_mode(file_mode)).unwrap();
+                files.push(path.clone());
+            }
+            GenKind::Dir => {
+                fs::create_dir(&path).unwrap();
+                let mode = GEN_DIR_MODES[e.mode as usize % GEN_DIR_MODES.len()];
+                fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+                dirs.push(path.clone());
+            }
+            GenKind::Symlink { target } => {
+                symlink(
+                    GEN_LINK_TARGETS[*target as usize % GEN_LINK_TARGETS.len()],
+                    &path,
+                )
+                .unwrap();
+                continue;
+            }
+            GenKind::Hardlink { of } => {
+                if files.is_empty() {
+                    fs::write(&path, b"").unwrap();
+                    files.push(path.clone());
+                } else {
+                    fs::hard_link(&files[of % files.len()], &path).unwrap();
+                    own_inode = false;
+                }
+            }
+        }
+        if own_inode {
+            if let Some((index, value)) = &e.xattr {
+                gen_set_xattr(&path, *index, value);
+            }
+            stamps.push((path, e.mtime.0, e.mtime.1));
+        }
+    }
+    for (path, secs, nanos) in stamps.iter().rev() {
+        set_mtime(path, *secs, *nanos);
+    }
+    set_mtime(root, 1_550_000_000, 424_242_424);
+}
+
+fn gen_walk(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                stack.push(entry.path());
+            }
+            out.push(entry.path());
+        }
+    }
+    out.sort();
+    out
+}
+
+fn gen_apply_edits(root: &Path, edits: &[GenEdit]) {
+    for (i, edit) in edits.iter().enumerate() {
+        let all = gen_walk(root);
+        let is_dir = |p: &PathBuf| fs::symlink_metadata(p).unwrap().is_dir();
+        let is_file = |p: &PathBuf| fs::symlink_metadata(p).unwrap().is_file();
+        match edit.op {
+            0 => {
+                let files: Vec<&PathBuf> = all.iter().filter(|p| is_file(p)).collect();
+                if let Some(path) = files.get(edit.pick % files.len().max(1)) {
+                    fs::remove_file(path).unwrap();
+                    fs::write(path, gen_content(edit.seed, edit.len)).unwrap();
+                    set_mtime(path, 1_600_000_000 + 1000 + i as u64, 5);
+                }
+            }
+            1 => {
+                if let Some(path) = all.get(edit.pick % all.len().max(1)) {
+                    if is_dir(path) {
+                        fs::remove_dir_all(path).unwrap();
+                    } else {
+                        fs::remove_file(path).unwrap();
+                    }
+                }
+            }
+            _ => {
+                let mut dirs: Vec<PathBuf> = all.iter().filter(|p| is_dir(p)).cloned().collect();
+                dirs.push(root.to_path_buf());
+                let dir = &dirs[edit.pick % dirs.len()];
+                let path = dir.join(format!("new{i}"));
+                fs::write(&path, gen_content(edit.seed, edit.len)).unwrap();
+                set_mtime(&path, 1_600_000_000 + 2000 + i as u64, 7);
+            }
+        }
+    }
+}
+
+type GenTree = (Vec<String>, BTreeSet<BTreeSet<PathBuf>>);
+
+fn gen_describe(root: &Path) -> GenTree {
+    let mut lines = Vec::new();
+    let mut inodes: BTreeMap<u64, BTreeSet<PathBuf>> = BTreeMap::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        let meta = fs::symlink_metadata(&path).unwrap();
+        let rel = path.strip_prefix(root).unwrap().to_path_buf();
+        let kind = if meta.is_symlink() {
+            format!("symlink -> {:?}", fs::read_link(&path).unwrap())
+        } else if meta.is_dir() {
+            for entry in fs::read_dir(&path).unwrap() {
+                stack.push(entry.unwrap().path());
+            }
+            format!("dir {:o}", meta.mode() & 0o7777)
+        } else {
+            let data = fs::read(&path).unwrap();
+            if meta.nlink() > 1 {
+                inodes.entry(meta.ino()).or_default().insert(rel.clone());
+            }
+            format!(
+                "file {:o} len={} blake3={}",
+                meta.mode() & 0o7777,
+                data.len(),
+                blake3::hash(&data).to_hex()
+            )
+        };
+        let xattrs = if meta.is_symlink() {
+            Vec::new()
+        } else {
+            gen_xattrs(&path)
+        };
+        lines.push(format!(
+            "{rel:?} {kind} mtime={}.{:09} xattrs={xattrs:?}",
+            meta.mtime(),
+            meta.mtime_nsec()
+        ));
+    }
+    lines.sort();
+    (lines, inodes.into_values().collect())
+}
+
+async fn gen_round(entries: Vec<GenEntry>, edits: Vec<GenEdit>) {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo_dir, src) = (tmp.path().join("repo"), tmp.path().join("src"));
+    fs::create_dir(&repo_dir).unwrap();
+    fs::create_dir(&src).unwrap();
+    gen_build(&src, &entries);
+    let store = init_repo(&repo_dir).await;
+
+    let first = writer(&store)
+        .await
+        .backup(
+            std::slice::from_ref(&src),
+            BackupOptions::default(),
+            &|_| {},
+        )
+        .await
+        .unwrap();
+    assert!(!first.incomplete);
+    let expected = gen_describe(&src);
+    gen_restore_and_compare(
+        &store,
+        &first.snapshot_id,
+        &tmp.path().join("out1"),
+        &src,
+        expected,
+    )
+    .await;
+
+    gen_apply_edits(&src, &edits);
+    let parent = ParentTree::open(reader(&store).await, first.snapshot_id)
+        .await
+        .unwrap();
+    let second = writer(&store)
+        .await
+        .backup(
+            std::slice::from_ref(&src),
+            BackupOptions {
+                parent: Some(parent),
+                ..Default::default()
+            },
+            &|_| {},
+        )
+        .await
+        .unwrap();
+    assert!(!second.incomplete);
+    let expected = gen_describe(&src);
+    gen_restore_and_compare(
+        &store,
+        &second.snapshot_id,
+        &tmp.path().join("out2"),
+        &src,
+        expected,
+    )
+    .await;
+}
+
+async fn gen_restore_and_compare(
+    store: &LocalFsStore,
+    id: &[u8; 32],
+    target: &Path,
+    src: &Path,
+    expected: GenTree,
+) {
+    let report = reader(store)
+        .await
+        .restore(id, target, &RestoreOptions::default(), &|_| {})
+        .await
+        .unwrap();
+    assert!(
+        report.unapplied.iter().all(|u| u.what == "owner"),
+        "{:?}",
+        report.unapplied
+    );
+    let restored = gen_describe(&restored_path(target, src));
+    assert_eq!(restored.0, expected.0, "restored tree differs");
+    assert_eq!(restored.1, expected.1, "hardlink groups differ");
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(16))]
+
+    #[test]
+    fn roundtrip_generated_tree_restores_identically(
+        entries in prop::collection::vec(gen_entry(), 0..14),
+        edits in prop::collection::vec(gen_edit(), 1..5),
+    ) {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(gen_round(entries, edits));
+    }
+}
