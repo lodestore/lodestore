@@ -2258,6 +2258,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "lodestore-fuzzkit"
+version = "0.1.0"
+dependencies = [
+ "lodestore-agent",
+ "lodestore-format",
+ "lodestore-fuzzkit",
+ "lodestore-proto",
+ "prost",
+ "rand_chacha 0.10.0",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "lodestore-policy"
 version = "0.1.0"
 dependencies = [
