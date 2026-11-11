@@ -101,7 +101,7 @@ impl Default for Limits {
 }
 
 /// IPv6 clients are keyed by their /56, the block providers commonly hand a customer.
-fn bucket(ip: IpAddr) -> IpAddr {
+pub(crate) fn bucket(ip: IpAddr) -> IpAddr {
     match ip.to_canonical() {
         IpAddr::V6(v6) => IpAddr::V6(Ipv6Addr::from(u128::from(v6) & (u128::MAX << 72))),
         v4 => v4,

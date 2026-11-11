@@ -118,6 +118,7 @@ const STOP_GRACE: Duration = Duration::from_secs(10);
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_CONCURRENT_STREAMS: u32 = 32;
 const MAX_GRPC_CONNECTIONS: usize = 4096;
+const MAX_GRPC_CONNECTIONS_PER_ADDR: usize = 256;
 
 fn current_material(state: &AppState) -> anyhow::Result<Material> {
     Ok(external_identity(&state.config.grpc)?.unwrap_or_else(|| state.pki.grpc_identity()))
@@ -176,9 +177,14 @@ pub async fn serve(
     let mut material = current_material(&state)?;
     let mut router = build(&state, &material)?;
     let slots = Arc::new(Semaphore::new(MAX_GRPC_CONNECTIONS));
+    let per_addr = capped::PerAddr::new(MAX_GRPC_CONNECTIONS_PER_ADDR);
     loop {
         let round = shutdown.child_token();
-        let incoming = capped::incoming(TcpListener::from_std(socket.try_clone()?)?, slots.clone());
+        let incoming = capped::incoming(
+            TcpListener::from_std(socket.try_clone()?)?,
+            slots.clone(),
+            per_addr.clone(),
+        );
         let mut task = tokio::spawn(
             router.serve_with_incoming_shutdown(incoming, round.clone().cancelled_owned()),
         );
