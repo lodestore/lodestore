@@ -141,6 +141,8 @@ pub struct NotificationsConfig {
     pub channels: Vec<ConfigChannel>,
     pub allow_private_targets: bool,
     pub proxy: Option<Secret>,
+    /// Base URL of the Telegram Bot API. Set only by tests through code, never read from the configuration file.
+    pub telegram_api: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1039,6 +1041,16 @@ mod tests {
             panic!("telegram expected");
         };
         assert_eq!((bot_token.expose(), chat_id.as_str()), ("123:abc", "-100"));
+    }
+
+    #[test]
+    fn notify_test_seams_not_in_file_config() {
+        for key in ["telegram_api: http://127.0.0.1:1", "smtp_roots: []"] {
+            let text = chain(load(&format!("notifications:\n  {key}"), &[]));
+            assert!(text.contains("unknown field"), "{key}: {text}");
+        }
+        let c = load("", &[]).unwrap();
+        assert!(c.notifications.telegram_api.is_none());
     }
 
     #[test]

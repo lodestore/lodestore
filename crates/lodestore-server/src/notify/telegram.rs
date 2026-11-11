@@ -68,9 +68,13 @@ pub async fn send(
         .chat_id
         .as_deref()
         .ok_or_else(|| DeliveryError::new("The Telegram channel has no chat ID."))?;
+    let notifications = &state.config.notifications;
     send_to(
-        &state.config.notifications,
-        TELEGRAM_API,
+        notifications,
+        notifications
+            .telegram_api
+            .as_deref()
+            .unwrap_or(TELEGRAM_API),
         token.expose(),
         chat_id,
         &text(message),

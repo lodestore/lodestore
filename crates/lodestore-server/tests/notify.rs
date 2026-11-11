@@ -145,9 +145,18 @@ struct Env {
 
 impl Env {
     async fn start(backend: &common::Backend, channels: Vec<ConfigChannel>) -> Env {
+        Env::start_with(backend, channels, |_| {}).await
+    }
+
+    async fn start_with(
+        backend: &common::Backend,
+        channels: Vec<ConfigChannel>,
+        tweak: impl FnOnce(&mut NotificationsConfig),
+    ) -> Env {
         let ts = TestServer::start_with(backend, |c| {
             c.schedule_tick_secs = 0;
             c.notifications.channels = channels;
+            tweak(&mut c.notifications);
         })
         .await;
         let repo = ts.create_local_repository("main").await;
@@ -958,4 +967,110 @@ async fn notify_reminder_text() {
         );
         env.stop().await;
     }
+}
+
+#[derive(Clone, Copy)]
+enum Kind {
+    Telegram,
+    Slack,
+    Webhook,
+}
+
+fn telegram(name: &str) -> ConfigChannel {
+    ConfigChannel {
+        name: name.to_string(),
+        enabled: true,
+        alerts: ALL_TYPES.to_vec(),
+        kind: ChannelSpec::Telegram {
+            bot_token: Secret::new("123:BOTTOKEN"),
+            chat_id: "-100".to_string(),
+        },
+    }
+}
+
+fn assert_message(kind: Kind, last: &str, label: &str) {
+    match kind {
+        Kind::Webhook => {
+            let status = if label == "RESOLVED" {
+                "resolved"
+            } else {
+                "firing"
+            };
+            assert_eq!(last, status);
+        }
+        Kind::Telegram | Kind::Slack => assert!(
+            last.starts_with(&format!("{label}: Backup failed on web-1\n")),
+            "{label}: {last}"
+        ),
+    }
+}
+
+fn last_message(kind: Kind, stub: &Stub) -> String {
+    let hit = stub.hits().pop().expect("a delivery attempt");
+    match kind {
+        Kind::Webhook => hit.json()["status"].as_str().unwrap().to_string(),
+        Kind::Telegram | Kind::Slack => hit.json()["text"].as_str().unwrap().to_string(),
+    }
+}
+
+async fn alert_timeline(kind: Kind) {
+    for backend in backends() {
+        let name = backend.name();
+        let stub = Stub::start().await;
+        let (channel, seam) = match kind {
+            Kind::Telegram => (telegram("ops"), Some(stub.base.clone())),
+            Kind::Slack => (slack("ops", &stub.url("/hook")), None),
+            Kind::Webhook => (webhook("ops", &stub.url("/hook"), None), None),
+        };
+        stub.respond(500, r#"{"ok":false,"description":"boom"}"#);
+        let env = Env::start_with(&backend, vec![channel], |n| n.telegram_api = seam).await;
+        env.failing_backup("disk full", now_ms() - HOUR).await;
+        let t = now_ms();
+
+        env.tick(t).await;
+        assert_eq!(stub.hits().len(), 1, "[{name}]");
+        assert_message(kind, &last_message(kind, &stub), "FIRING");
+        for (offset, hits) in [
+            (30_000, 1),
+            (MINUTE, 2),
+            (5 * MINUTE, 2),
+            (6 * MINUTE, 3),
+            (35 * MINUTE, 3),
+            (36 * MINUTE, 4),
+        ] {
+            env.tick(t + offset).await;
+            assert_eq!(stub.hits().len(), hits, "[{name}] t+{offset}");
+        }
+        let deliveries = env.deliveries().await;
+        assert_eq!(deliveries.len(), 1, "[{name}]");
+        assert_eq!(deliveries[0].0, "failed");
+        assert_eq!(deliveries[0].1, 4);
+        assert!(deliveries[0].2.is_some());
+
+        env.tick(t + 2 * HOUR).await;
+        assert_eq!(stub.hits().len(), 4, "[{name}]");
+
+        stub.respond(200, r#"{"ok":true}"#);
+        env.tick(t + DAY + MINUTE).await;
+        assert_eq!(stub.hits().len(), 5, "[{name}]");
+        assert_message(kind, &last_message(kind, &stub), "STILL FIRING");
+        let deliveries = env.deliveries().await;
+        assert_eq!(deliveries.len(), 2, "[{name}]");
+        assert_eq!(deliveries[1], ("sent".to_string(), 1, None));
+
+        env.snapshot("s1", "h1", "daily", t + DAY + 2 * MINUTE)
+            .await;
+        env.tick(t + DAY + 3 * MINUTE).await;
+        assert_eq!(stub.hits().len(), 6, "[{name}]");
+        assert_message(kind, &last_message(kind, &stub), "RESOLVED");
+        let deliveries = env.deliveries().await;
+        assert_eq!(deliveries.len(), 3, "[{name}]");
+        assert_eq!(deliveries[2], ("sent".to_string(), 1, None));
+        env.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn notify_timeline_telegram() {
+    alert_timeline(Kind::Telegram).await;
 }
