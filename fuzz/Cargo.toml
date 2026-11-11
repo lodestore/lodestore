@@ -38,3 +38,66 @@ path = "fuzz_targets/pack_entries.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "tree_decode"
+path = "fuzz_targets/tree_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tree_count"
+path = "fuzz_targets/tree_count.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tree_cursor"
+path = "fuzz_targets/tree_cursor.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "attest_peek"
+path = "fuzz_targets/attest_peek.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "index_shard"
+path = "fuzz_targets/index_shard.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "gc_manifest"
+path = "fuzz_targets/gc_manifest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "writer_marker"
+path = "fuzz_targets/writer_marker.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "attest_open"
+path = "fuzz_targets/attest_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "provenance_open"
+path = "fuzz_targets/provenance_open.rs"
+test = false
+doc = false
+bench = false
