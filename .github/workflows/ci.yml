@@ -49,6 +49,14 @@ jobs:
             echo "$out" >&2
             exit 1
           done
+      - name: Keep test hooks out of release builds
+        run: |
+          out=$(cargo tree --workspace -e features,no-dev -i lodestore-format)
+          if printf '%s\n' "$out" | grep -q 'feature "test-hooks"'; then
+            echo "lodestore-format feature test-hooks is enabled outside dev-dependencies:" >&2
+            echo "$out" >&2
+            exit 1
+          fi
 
   test:
     runs-on: ubuntu-latest

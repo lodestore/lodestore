@@ -1,0 +1,28 @@
+[package]
+name = "lodestore-fuzzkit"
+description = "Fuzz harnesses shared by cargo-fuzz targets and stable regression tests"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+version.workspace = true
+publish = false
+
+[features]
+test-hooks = ["lodestore-format/test-hooks"]
+
+[dependencies]
+lodestore-format = { path = "../lodestore-format" }
+lodestore-agent = { path = "../lodestore-agent" }
+lodestore-proto = { path = "../lodestore-proto" }
+prost = "0.14.4"
+tokio = { version = "1.53.2", features = ["rt", "time"] }
+tempfile = "3.27.0"
+rand_chacha = "0.10.0"
+
+[dev-dependencies]
+lodestore-fuzzkit = { path = ".", features = ["test-hooks"] }
+
+[[bin]]
+name = "seed-corpus"
+path = "src/bin/seed-corpus.rs"
+required-features = ["test-hooks"]
