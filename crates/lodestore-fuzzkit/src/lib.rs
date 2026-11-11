@@ -3,30 +3,38 @@
 //! Every function here is the body of one fuzz target. None of them panics on
 //! any input; equality assertions exist only where they are written down.
 
+pub mod restore_plan;
 pub mod seeds;
+pub mod stores;
 
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
+use lodestore_agent::update::minisign::{PublicKey, Signature, TrustedRelease};
 use lodestore_format::attest::{
     ATTEST_FRAME_V1, MAX_ATTEST_SIZE, attest_key, open_attestation, open_provenance,
     peek_attestation,
 };
 use lodestore_format::crypto::{
-    self, Entropy, RepoId, attest_mac, open_gc_manifest_body, open_index_shard,
+    self, Entropy, NONCE_LEN, RepoId, attest_mac, open_gc_manifest_body, open_index_shard,
     open_provenance_body, open_writer_marker_body, seal_gc_manifest_body, seal_index_shard,
-    seal_provenance_body, seal_writer_marker_body,
+    seal_provenance_body, seal_snapshot_body, seal_snapshot_key, seal_writer_marker_body,
 };
 use lodestore_format::error::Result;
 use lodestore_format::index::{Index, SupersedesTrust, open_shard};
-use lodestore_format::keys::{MasterKey, ReadKeys};
+use lodestore_format::keys::{
+    MAX_SLOT_SIZE, MasterKey, ReadKeys, RecoveryKey, WriteKeys, looks_like_recovery_key,
+    open_password_slot, open_recovery_slot, slot_kdf_work,
+};
 use lodestore_format::locks::{
     LockId, MAX_GC_MANIFEST_SIZE, MAX_WRITER_MARKER_SIZE, gc_manifest_key, open_gc_manifest,
     open_writer_marker, writer_marker_key,
 };
 use lodestore_format::pack::{PACK_PREFIX_LEN, parse_entries, parse_prefix, parse_trailer};
 use lodestore_format::pb;
+use lodestore_format::snapshot::{ENVELOPE_VERSION, open_snapshot};
 use lodestore_format::tree::{decode_tree, hooks};
+use prost::Message;
 use rand_chacha::ChaCha20Rng;
 use rand_chacha::rand_core::SeedableRng;
 
@@ -90,7 +98,7 @@ fn keys() -> &'static ReadKeys {
     KEYS.get_or_init(|| ReadKeys::derive(MasterKey::from_bytes([1u8; 32]), [2u8; 16]))
 }
 
-fn entropy() -> Entropy {
+pub(crate) fn entropy() -> Entropy {
     Entropy::from_rng(ChaCha20Rng::from_seed([7u8; 32]))
 }
 
@@ -253,6 +261,82 @@ pub fn provenance_open(data: &[u8]) {
     let _ = open_provenance(keys, data);
 }
 
+const PASSWORD_WORK_BUDGET: u64 = 1 << 10;
+
+fn fixed_recovery_key() -> &'static RecoveryKey {
+    static KEY: OnceLock<RecoveryKey> = OnceLock::new();
+    KEY.get_or_init(|| {
+        let text = include_str!("../../lodestore-format/tests/fixtures/v1/RECOVERY_KEY");
+        RecoveryKey::parse(text.trim()).expect("the fixture recovery key parses")
+    })
+}
+
+pub fn key_slot(data: &[u8]) {
+    if data.len() as u64 > MAX_SLOT_SIZE {
+        return;
+    }
+    let repo_id = keys().repo_id();
+    let _ = slot_kdf_work(data, pb::SlotKind::Recovery);
+    let _ = open_recovery_slot(data, repo_id, fixed_recovery_key());
+    if slot_kdf_work(data, pb::SlotKind::Password).is_some_and(|work| work <= PASSWORD_WORK_BUDGET)
+    {
+        let _ = open_password_slot(data, repo_id, b"fuzz");
+    }
+}
+
+pub fn writer_keys(data: &[u8]) {
+    if let Ok(text) = std::str::from_utf8(data) {
+        let _ = WriteKeys::from_file_text(text);
+    }
+}
+
+pub fn recovery_key(data: &[u8]) {
+    if let Ok(text) = std::str::from_utf8(data) {
+        let _ = RecoveryKey::parse(text);
+        let _ = looks_like_recovery_key(text);
+    }
+}
+
+pub fn minisign_signature(data: &[u8]) {
+    if let Ok(text) = std::str::from_utf8(data) {
+        let _ = Signature::parse(text);
+        let _ = PublicKey::parse(text);
+        let _ = TrustedRelease::parse(text);
+    }
+}
+
+pub fn snapshot_open(data: &[u8]) {
+    let keys = keys();
+    let (repo_id, private_key) = (keys.repo_id(), keys.hpke_private_key());
+    let mut entropy = entropy();
+    let snapshot_key = entropy.key32();
+    if let Ok((hpke_enc, sealed_key)) =
+        seal_snapshot_key(keys.hpke_public_key(), repo_id, &snapshot_key, &mut entropy)
+        && let Ok(sealed) = seal_snapshot_body(&snapshot_key, repo_id, data, &mut entropy)
+        && sealed.len() >= NONCE_LEN
+    {
+        let (nonce, ciphertext) = sealed.split_at(NONCE_LEN);
+        let bytes = pb::SnapshotEnvelope {
+            version: ENVELOPE_VERSION,
+            hpke_enc,
+            sealed_key,
+            nonce: nonce.to_vec(),
+            ciphertext: ciphertext.to_vec(),
+        }
+        .encode_to_vec();
+        let id = *blake3::hash(&bytes).as_bytes();
+        assert_eq!(
+            open_snapshot(private_key, repo_id, &id, &bytes).ok(),
+            pb::Snapshot::decode(data).ok(),
+            "a sealed snapshot must open to what it was sealed from"
+        );
+    }
+    let _ = open_snapshot(private_key, repo_id, blake3::hash(data).as_bytes(), data);
+}
+
+pub use restore_plan::restore_plan;
+pub use stores::{snapshot_resolves, verify_shard};
+
 pub type Target = fn(&[u8]);
 
 pub const TARGETS: &[(&str, Target)] = &[
@@ -268,4 +352,12 @@ pub const TARGETS: &[(&str, Target)] = &[
     ("writer_marker", writer_marker),
     ("attest_open", attest_open),
     ("provenance_open", provenance_open),
+    ("verify_shard", verify_shard),
+    ("snapshot_resolves", snapshot_resolves),
+    ("restore_plan", restore_plan),
+    ("key_slot", key_slot),
+    ("writer_keys", writer_keys),
+    ("recovery_key", recovery_key),
+    ("minisign_signature", minisign_signature),
+    ("snapshot_open", snapshot_open),
 ];

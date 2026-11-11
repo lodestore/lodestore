@@ -7,17 +7,27 @@ use std::path::Path;
 use lodestore_format::crypto::{BLOB_TYPE_TREE, BlobId};
 use lodestore_format::index::open_shard;
 use lodestore_format::pack::{ENTRY_LEN, PACK_MAGIC, PACK_PREFIX_LEN, read_pack_header};
+use lodestore_format::pb::{Node, NodeType};
 use lodestore_format::reader::Reader;
 use lodestore_format::repo::Repository;
 use lodestore_format::store::LocalFsStore;
 use lodestore_format::tree::decode_tree;
+use lodestore_proto::agent::v1::plan_item::Kind;
+use lodestore_proto::agent::v1::{
+    ChunkLoc, PackAccess, PlanChunks, PlanEnter, PlanEntry, PlanItem, PlanLeave, RestorePlanBatch,
+    RestoreTotals,
+};
 use prost::Message;
+
+use crate::stores;
 
 type Seeds = Vec<(&'static str, Vec<u8>)>;
 
+const MAX_SEED_LEN: usize = 1 << 20;
+
 const TRAILER_LEN: usize = 4 + PACK_MAGIC.len();
 
-fn unhex(text: &str) -> Option<Vec<u8>> {
+pub(crate) fn unhex(text: &str) -> Option<Vec<u8>> {
     if !text.len().is_multiple_of(2) {
         return None;
     }
@@ -43,6 +53,121 @@ fn hex_fields(text: &str, field: &str) -> Result<Vec<Vec<u8>>, String> {
 
 fn vectors(fixtures: &Path, name: &str) -> Result<String, String> {
     fs::read_to_string(fixtures.join(name)).map_err(|e| format!("{name}: {e}"))
+}
+
+fn plan_node(name: &[u8], kind: NodeType, size: u64, link: &[u8]) -> Vec<u8> {
+    Node {
+        name: name.to_vec(),
+        r#type: kind as i32,
+        mode: 0o640,
+        size,
+        link_target: link.to_vec(),
+        ..Default::default()
+    }
+    .encode_to_vec()
+}
+
+fn item(kind: Kind) -> PlanItem {
+    PlanItem { kind: Some(kind) }
+}
+
+fn enter(name: &[u8], ancestor: bool) -> PlanItem {
+    item(Kind::Enter(PlanEnter {
+        node: plan_node(name, NodeType::Dir, 0, b""),
+        ancestor,
+    }))
+}
+
+fn entry(name: &[u8], kind: NodeType, size: u64, chunks: Vec<ChunkLoc>, more: bool) -> PlanItem {
+    item(Kind::Entry(PlanEntry {
+        node: plan_node(name, kind, size, b"f"),
+        chunks,
+        more,
+    }))
+}
+
+fn chunk(offset: u32) -> ChunkLoc {
+    ChunkLoc {
+        pack: 0,
+        offset,
+        enc_len: 64,
+        ulen: 3,
+        id: vec![9; 32],
+    }
+}
+
+fn plan_input(flags: u8, batches: &[RestorePlanBatch]) -> Vec<u8> {
+    let mut out = vec![flags];
+    for batch in batches {
+        let body = batch.encode_to_vec();
+        out.extend_from_slice(&(body.len() as u16).to_le_bytes());
+        out.extend_from_slice(&body);
+    }
+    out
+}
+
+fn restore_plan_seeds() -> Vec<Vec<u8>> {
+    let leave = || item(Kind::Leave(PlanLeave {}));
+    let access = PackAccess {
+        pack: 0,
+        pack_id: vec![1; 32],
+        key: vec![2; 32],
+        url: String::new(),
+        expires_at_ms: 0,
+    };
+    let tree = RestorePlanBatch {
+        totals: Some(RestoreTotals { files: 1, bytes: 3 }),
+        packs: vec![access.clone()],
+        items: vec![
+            enter(b"a", false),
+            entry(b"f", NodeType::File, 3, vec![chunk(0)], false),
+            entry(b"l", NodeType::Symlink, 0, Vec::new(), false),
+            entry(b"p", NodeType::Fifo, 0, Vec::new(), false),
+            leave(),
+        ],
+        last: true,
+    };
+    let unsafe_names = RestorePlanBatch {
+        items: vec![
+            enter(b"..", false),
+            leave(),
+            enter(b"x", true),
+            entry(b"../../outside", NodeType::Fifo, 0, Vec::new(), false),
+            entry(b"..", NodeType::Symlink, 0, Vec::new(), false),
+            entry(b"", NodeType::File, 0, Vec::new(), false),
+            leave(),
+        ],
+        last: true,
+        ..Default::default()
+    };
+    let split = [
+        RestorePlanBatch {
+            totals: Some(RestoreTotals { files: 1, bytes: 9 }),
+            packs: vec![access],
+            items: vec![
+                enter(b"d", true),
+                entry(b"g", NodeType::File, 9, vec![chunk(0)], true),
+            ],
+            ..Default::default()
+        },
+        RestorePlanBatch {
+            items: vec![
+                item(Kind::Chunks(PlanChunks {
+                    chunks: vec![chunk(64), chunk(128)],
+                    more: false,
+                })),
+                leave(),
+            ],
+            last: true,
+            ..Default::default()
+        },
+    ];
+    vec![
+        plan_input(0b01001, std::slice::from_ref(&tree)),
+        plan_input(0b11001, std::slice::from_ref(&tree)),
+        plan_input(0, &[unsafe_names]),
+        plan_input(0b01001, &split),
+    ]
 }
 
 pub fn seeds(fixtures: &Path) -> Seeds {
@@ -116,7 +241,24 @@ pub fn try_seeds(fixtures: &Path) -> Result<Seeds, String> {
             &bytes,
         )
         .map_err(|e| format!("open a fixture shard: {e}"))?;
-        out.push(("index_shard", shard.encode_to_vec()));
+        let plain = shard.encode_to_vec();
+        out.push(("verify_shard", [&[1u8][..], &plain].concat()));
+        out.push(("snapshot_resolves", [&[1u8, 0][..], &plain].concat()));
+        out.push(("snapshot_resolves", [&[2u8, 0][..], &plain].concat()));
+        out.push(("index_shard", plain));
+    }
+    for (at, key) in stores::shard_keys().iter().enumerate() {
+        let bytes = fs::read(repo_dir.join(key)).map_err(|e| io("shard", e))?;
+        out.push(("verify_shard", [&[2u8, at as u8][..], &bytes].concat()));
+    }
+    for (at, key) in stores::pack_keys().iter().enumerate() {
+        let bytes = fs::read(repo_dir.join(key)).map_err(|e| io("pack", e))?;
+        if bytes.len() > MAX_SEED_LEN {
+            continue;
+        }
+        for target in ["verify_shard", "snapshot_resolves"] {
+            out.push((target, [&[0u8, at as u8][..], &bytes].concat()));
+        }
     }
     for plain in hex_fields(&vectors(fixtures, "index-vectors.json")?, "plaintext")? {
         out.push(("index_shard", plain));
@@ -156,6 +298,15 @@ pub fn try_seeds(fixtures: &Path) -> Result<Seeds, String> {
             .block_on(reader.snapshot(&id))
             .map_err(|e| format!("read a fixture snapshot: {e}"))?;
         pending.extend(BlobId::try_from(snapshot.root_tree.as_slice()).ok());
+        out.push((
+            "snapshot_resolves",
+            [&[3u8][..], &snapshot.encode_to_vec()].concat(),
+        ));
+        let raw = fs::read(repo_dir.join(format!("snapshots/{}", name.to_string_lossy())))
+            .map_err(|e| io("snapshot", e))?;
+        out.push(("snapshot_resolves", [&[4u8][..], &raw].concat()));
+        out.push(("snapshot_open", snapshot.encode_to_vec()));
+        out.push(("snapshot_open", raw));
     }
     let mut seen = std::collections::HashSet::new();
     while let Some(id) = pending.pop() {
@@ -177,5 +328,37 @@ pub fn try_seeds(fixtures: &Path) -> Result<Seeds, String> {
             out.push((target, bytes.clone()));
         }
     }
+    for entry in fs::read_dir(repo_dir.join("keys")).map_err(|e| io("keys", e))? {
+        let slot = fs::read(entry.map_err(|e| io("keys", e))?.path()).map_err(|e| io("slot", e))?;
+        out.push(("key_slot", slot));
+    }
+    out.push((
+        "writer_keys",
+        fs::read(fixtures.join("writer-keys.txt")).map_err(|e| io("writer-keys.txt", e))?,
+    ));
+    out.push((
+        "recovery_key",
+        fs::read(fixtures.join("RECOVERY_KEY")).map_err(|e| io("RECOVERY_KEY", e))?,
+    ));
+    let signed =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../lodestore-agent/tests/fixtures/minisign");
+    for entry in fs::read_dir(&signed).map_err(|e| io("minisign fixtures", e))? {
+        let path = entry.map_err(|e| io("minisign fixtures", e))?.path();
+        if path.extension().is_some_and(|e| e != "bin") {
+            out.push((
+                "minisign_signature",
+                fs::read(&path).map_err(|e| io("minisign", e))?,
+            ));
+        }
+    }
+    out.push((
+        "minisign_signature",
+        b"lodestore-agent 1.2.3 x86_64".to_vec(),
+    ));
+    out.extend(
+        restore_plan_seeds()
+            .into_iter()
+            .map(|seed| ("restore_plan", seed)),
+    );
     Ok(out)
 }
