@@ -1,0 +1,74 @@
+name: mutants-diff
+
+on:
+  pull_request:
+    paths:
+      - crates/lodestore-format/src/**
+      - crates/lodestore-server/src/maintenance/gc/**
+      - crates/lodestore-policy/src/retention.rs
+
+concurrency:
+  group: mutants-diff-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: "0"
+
+jobs:
+  mutants-diff:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8
+        with:
+          tool: nextest@0.9.148,cargo-mutants@27.1.0
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: target/test-bin
+          key: test-bin-minio-RELEASE.2025-09-07T16-13-09Z-mc-RELEASE.2025-08-13T08-35-41Z
+      - name: Mutate the lines this pull request changes
+        shell: bash
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git diff "origin/$BASE_REF...HEAD" > git.diff
+          git diff --name-only "origin/$BASE_REF...HEAD" > changed.txt
+          failed=0
+          run_group() {
+            local group=$1 pattern=$2
+            shift 2
+            if ! grep -Eq "$pattern" changed.txt; then
+              echo "mutants-diff $group: no changed files"
+              return 0
+            fi
+            local status=0
+            cargo mutants --no-shuffle -vV --in-place --in-diff git.diff --output "mutants-diff-out/$group" "$@" || status=$?
+            case "$status" in
+              0 | 3) ;;
+              *) echo "mutants-diff $group: cargo mutants exited with $status" >&2; failed=1 ;;
+            esac
+          }
+          run_group format '^crates/lodestore-format/src/' -p lodestore-format
+          run_group gc '^crates/lodestore-server/src/maintenance/gc/' -p lodestore-server --file 'crates/lodestore-server/src/maintenance/gc/*.rs' -- -E 'binary(/^(adv_)?gc_/)'
+          run_group retention '^crates/lodestore-policy/src/retention\.rs$' -p lodestore-policy --file crates/lodestore-policy/src/retention.rs
+          exit "$failed"
+      - name: Keep the mutation output
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: mutants-diff-out
+          path: mutants-diff-out
