@@ -114,9 +114,7 @@ async fn check_serial(
     let previous: Option<String> = row.try_get("prev_cert_serial").map_err(internal)?;
     let until: Option<i64> = row.try_get("prev_cert_until").map_err(internal)?;
     let fresh = serial == current;
-    let in_window =
-        previous.as_deref() == Some(serial.as_str()) && until.is_some_and(|t| now_ms() < t);
-    if !fresh && !in_window {
+    if !fresh && !in_previous_window(previous.as_deref(), until, &serial) {
         if state.registry.note_cert_rejected(&agent_id, &serial, ip) {
             tracing::warn!(
                 agent_id,
@@ -134,6 +132,37 @@ async fn check_serial(
         ip,
         fresh,
     })
+}
+
+fn in_previous_window(previous: Option<&str>, until: Option<i64>, serial: &str) -> bool {
+    previous == Some(serial) && until.is_some_and(|t| now_ms() < t)
+}
+
+/// Whether a session opened with the previous certificate may go on. A failed lookup keeps it: the next heartbeat asks again.
+async fn session_certificate_valid(state: &AppState, agent_id: &str, serial: &str) -> bool {
+    let row = sqlx::query(
+        "SELECT cert_serial, prev_cert_serial, prev_cert_until FROM agents \
+         WHERE id = $1 AND status <> 'revoked'",
+    )
+    .bind(agent_id)
+    .fetch_optional(&state.db.pool)
+    .await;
+    let row = match row {
+        Ok(Some(row)) => row,
+        Ok(None) => return false,
+        Err(error) => {
+            tracing::warn!(%error, agent_id, "could not re-check the certificate of a live session");
+            return true;
+        }
+    };
+    let (Ok(current), Ok(previous), Ok(until)) = (
+        row.try_get::<String, _>("cert_serial"),
+        row.try_get::<Option<String>, _>("prev_cert_serial"),
+        row.try_get::<Option<i64>, _>("prev_cert_until"),
+    ) else {
+        return true;
+    };
+    current == serial || in_previous_window(previous.as_deref(), until, serial)
 }
 
 const MAX_MOUNTS: usize = 64;
@@ -362,6 +391,18 @@ impl Agent for AgentService {
                         }
                         Ok(Some(AgentMessage { body: Some(AgentBody::Heartbeat(hb)) })) => {
                             state.registry.touch(&agent_id);
+                            if !fresh
+                                && !session_certificate_valid(&state, &agent_id, &cert_serial).await
+                                && !cancel.is_cancelled()
+                            {
+                                tracing::info!(agent_id = %agent_id, "the previous certificate's window ended; closing the session");
+                                state.registry.send(&agent_id, ServerMessage {
+                                    body: Some(ServerBody::Disconnect(Disconnect {
+                                        reason: DisconnectReason::Unspecified as i32,
+                                    })),
+                                });
+                                break;
+                            }
                             if last_write.is_none_or(|t| t.elapsed() >= SEEN_WRITE_INTERVAL) {
                                 write_seen(&state, &agent_id, Some(&hb)).await;
                                 last_write = Some(Instant::now());
