@@ -105,6 +105,10 @@ function SetupPage() {
 						setError(copy.login.rateLimited(e.retryAfter ?? 60));
 						return;
 					}
+					if (e instanceof ApiError && e.status === 503) {
+						setError(copy.login.busy(e.retryAfter ?? 5));
+						return;
+					}
 					setError(copy.errors.submit("create the administrator", e.message));
 				},
 			},
@@ -130,7 +134,12 @@ function SetupPage() {
 					<AlertDescription>
 						{check.error instanceof ApiError && check.error.status === 429
 							? copy.login.rateLimited(check.error.retryAfter ?? 60)
-							: copy.errors.submit("check the setup link", check.error.message)}
+							: check.error instanceof ApiError && check.error.status === 503
+								? copy.login.busy(check.error.retryAfter ?? 5)
+								: copy.errors.submit(
+										"check the setup link",
+										check.error.message,
+									)}
 					</AlertDescription>
 				</Alert>
 			) : check.isPending ? (

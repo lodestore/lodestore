@@ -24,5 +24,6 @@ export const user = {
 		mismatch: "The passwords don't match.",
 		wrongCurrent: "Current password is wrong.",
 		action: "change the password",
+		revokeTokens: (n: number) => `Revoke all API tokens (${n})`,
 	},
 } as const;
