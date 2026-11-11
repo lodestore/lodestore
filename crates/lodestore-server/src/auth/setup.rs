@@ -115,6 +115,7 @@ async fn verify(
         (status = 409, description = "An administrator already exists", body = ErrorBody),
         (status = 422, description = "Invalid username or password", body = ErrorBody),
         (status = 429, description = "Too many attempts", body = ErrorBody),
+        (status = 503, description = "`busy`: too many password checks at once; retry after the `Retry-After` seconds", body = ErrorBody),
     )
 )]
 async fn create_admin(
