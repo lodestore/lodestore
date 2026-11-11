@@ -27,7 +27,7 @@ use lodestore_format::pack::pack_object_key;
 use lodestore_format::reader::{Reader, RestoreOptions};
 use lodestore_format::repo::{InitOptions, PendingInit, Repository};
 use lodestore_format::snapshot::snapshot_object_key;
-use lodestore_format::store::{BlobDelete, BlobStore, LocalFsStore};
+use lodestore_format::store::{BlobDelete, BlobPurge, BlobStore, LocalFsStore};
 use lodestore_format::writer::{BackupOptions, BackupOutcome, Writer};
 use rand_chacha::ChaCha20Rng;
 use rand_chacha::rand_core::{Rng, SeedableRng};
@@ -61,19 +61,31 @@ pub fn plan_opts(repack_below_pct: u8) -> PlanOptions {
 /// `(file name, seed, size)`; equal seed and size give equal content.
 pub type Files<'a> = &'a [(&'a str, u8, usize)];
 
-pub struct Fx {
+pub struct Fx<S = LocalFsStore> {
     pub tmp: tempfile::TempDir,
-    pub store: LocalFsStore,
+    pub store: S,
     pub repo: Repository,
     /// Every backup made through [`Fx::make_src`], by snapshot id.
     pub sources: RefCell<BTreeMap<BlobId, PathBuf>>,
+    seeds: Option<RefCell<ChaCha20Rng>>,
 }
 
 impl Fx {
     pub async fn new() -> Fx {
+        Fx::init(Entropy::os(), None).await
+    }
+
+    /// Keys, writers and collection cycles all draw from a generator seeded
+    /// with `seed`, so a run repeats.
+    pub async fn seeded(seed: u64) -> Fx {
+        let mut seeds = ChaCha20Rng::seed_from_u64(seed);
+        let entropy = Entropy::from_rng(ChaCha20Rng::seed_from_u64(seeds.next_u64()));
+        Fx::init(entropy, Some(RefCell::new(seeds))).await
+    }
+
+    async fn init(mut entropy: Entropy, seeds: Option<RefCell<ChaCha20Rng>>) -> Fx {
         let tmp = tempfile::tempdir().unwrap();
         let store = LocalFsStore::new(tmp.path().join("repo"));
-        let mut entropy = Entropy::os();
         let options = InitOptions {
             kdf: LOW_KDF,
             ..Default::default()
@@ -89,6 +101,7 @@ impl Fx {
             store,
             repo,
             sources: RefCell::new(BTreeMap::new()),
+            seeds,
         }
     }
 
@@ -105,6 +118,31 @@ impl Fx {
             store,
             repo,
             sources: RefCell::new(sources),
+            seeds: self.seeds.clone(),
+        }
+    }
+
+    /// The same repository behind another view of its store.
+    pub fn wrap<T: BlobStore>(self, f: impl FnOnce(LocalFsStore) -> T) -> Fx<T> {
+        Fx {
+            tmp: self.tmp,
+            store: f(self.store),
+            repo: self.repo,
+            sources: self.sources,
+            seeds: self.seeds,
+        }
+    }
+}
+
+impl<S: BlobStore> Fx<S> {
+    /// The source of randomness for the next writer or cycle.
+    pub fn entropy(&self) -> Entropy {
+        match &self.seeds {
+            None => Entropy::os(),
+            Some(seeds) => {
+                let next = seeds.borrow_mut().next_u64();
+                Entropy::from_rng(ChaCha20Rng::seed_from_u64(next))
+            }
         }
     }
 
@@ -115,14 +153,15 @@ impl Fx {
         src
     }
 
-    pub async fn open_writer(&self) -> Writer<&LocalFsStore> {
+    pub async fn open_writer(&self) -> Writer<&S> {
         let keys = self.repo.read_keys().write_keys(self.repo.config_hash());
         Writer::new(&self.store, keys, self.repo.config())
             .await
             .unwrap()
+            .with_entropy(self.entropy())
     }
 
-    pub async fn commit(&self, w: &mut Writer<&LocalFsStore>, src: PathBuf) -> BackupOutcome {
+    pub async fn commit(&self, w: &mut Writer<&S>, src: PathBuf) -> BackupOutcome {
         let out = w
             .backup(
                 std::slice::from_ref(&src),
@@ -142,7 +181,10 @@ impl Fx {
     }
 
     /// Removes the snapshot object, as retention does.
-    pub async fn forget(&self, id: &BlobId) {
+    pub async fn forget(&self, id: &BlobId)
+    where
+        S: BlobDelete,
+    {
         self.store.delete(&snapshot_object_key(id)).await.unwrap();
         self.sources.borrow_mut().remove(id);
     }
@@ -194,22 +236,28 @@ impl Fx {
     pub async fn assert_all_restore(&self) {
         let sources = self.sources.borrow().clone();
         for (id, src) in &sources {
-            let mut reader = Reader::open(
-                &self.store,
-                self.repo.read_keys().duplicate(),
-                self.repo.config(),
-            )
-            .unwrap();
-            let target = tempfile::tempdir_in(self.tmp.path()).unwrap();
-            let report = reader
-                .restore(id, target.path(), &RestoreOptions::default(), &|_| {})
-                .await
-                .unwrap();
-            assert!(report.errors.is_empty(), "{:?}", report.errors);
-            let canonical = src.canonicalize().unwrap();
-            let restored = target.path().join(canonical.strip_prefix("/").unwrap());
-            assert_same_files(src, &restored);
+            self.restore_one(id, src).await;
         }
+    }
+
+    /// Restores one snapshot with a reader that has seen nothing before and
+    /// compares the files byte for byte with `src`.
+    pub async fn restore_one(&self, id: &BlobId, src: &Path) {
+        let mut reader = Reader::open(
+            &self.store,
+            self.repo.read_keys().duplicate(),
+            self.repo.config(),
+        )
+        .unwrap();
+        let target = tempfile::tempdir_in(self.tmp.path()).unwrap();
+        let report = reader
+            .restore(id, target.path(), &RestoreOptions::default(), &|_| {})
+            .await
+            .unwrap();
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        let canonical = src.canonicalize().unwrap();
+        let restored = target.path().join(canonical.strip_prefix("/").unwrap());
+        assert_same_files(src, &restored);
     }
 
     pub fn bucket(&self) -> BTreeMap<PathBuf, Vec<u8>> {
@@ -275,8 +323,8 @@ pub fn assert_same_files(a: &Path, b: &Path) {
 }
 
 /// One collection, step by step.
-pub struct Cycle<'a> {
-    pub fx: &'a Fx,
+pub struct Cycle<'a, S = LocalFsStore> {
+    pub fx: &'a Fx<S>,
     pub gc_id: LockId,
     pub survey: Option<Survey>,
     pub repack: RepackOutcome,
@@ -289,9 +337,9 @@ pub struct Cycle<'a> {
     pub entropy: Entropy,
 }
 
-impl<'a> Cycle<'a> {
-    pub fn new(fx: &'a Fx) -> Self {
-        let mut entropy = Entropy::os();
+impl<'a, S: BlobStore + BlobDelete + BlobPurge> Cycle<'a, S> {
+    pub fn new(fx: &'a Fx<S>) -> Self {
+        let mut entropy = fx.entropy();
         Cycle {
             fx,
             gc_id: new_lock_id(&mut entropy),
@@ -307,7 +355,7 @@ impl<'a> Cycle<'a> {
 
     /// Picks the work up again from the manifest in the bucket, as a restarted
     /// server would.
-    pub async fn resume(fx: &'a Fx) -> Self {
+    pub async fn resume(fx: &'a Fx<S>) -> Self {
         let mut c = Cycle::new(fx);
         let keys = fx.repo.read_keys();
         let locks = read_gc_locks(&fx.store, keys.k_idx(), keys.repo_id())
