@@ -19,6 +19,7 @@ use crate::config::AgentSettings;
 use crate::connect::channel;
 use crate::identity::{AgentConfig, Identity, Paths, load_pair, replace_pair, write_json_file};
 use crate::jobs::JobHub;
+use crate::shared_channel::SharedChannel;
 use crate::update::control::{
     Action, SWITCHING_WAIT, UpdateControl, deliver, send_switching, status,
 };
@@ -192,6 +193,12 @@ async fn run_sessions(
                 }
                 tracing::info!("session closed; reconnecting");
             }
+            Err(AgentError::CertificateStale) => {
+                tracing::error!(
+                    "the server does not accept this agent's certificate; if this host is legitimate, re-enroll it: run install.sh with --force and a new join token"
+                );
+                backoff = BACKOFF_MAX;
+            }
             Err(AgentError::Revoked) => {
                 tracing::error!(
                     "this agent was revoked by the server; reinstall with --force and a new join token to use this host again"
@@ -276,7 +283,7 @@ fn update_message(status: UpdateStatus) -> AgentMessage {
 
 fn spawn_update(
     args: &RunArgs,
-    channel: Channel,
+    channel: Arc<SharedChannel>,
     runtime: &UpdateRuntime,
     hub: &Arc<JobHub>,
     assign: UpdateAssign,
@@ -285,7 +292,7 @@ fn spawn_update(
     let (paths, update, hub) = (args.paths.clone(), runtime.clone(), Arc::clone(hub));
     let shutdown = args.shutdown.clone();
     let handle = tokio::spawn(async move {
-        let downloaded = fetch::download(channel, &assign, &update.exe).await;
+        let downloaded = fetch::download(&channel, &assign, &update.exe).await;
         if !update.flight.finish_download() {
             if let Ok((binary, _)) = downloaded {
                 let _ = tokio::fs::remove_file(&binary).await;
@@ -318,6 +325,7 @@ async fn session_once(
 ) -> Result<Outcome, AgentError> {
     let paths = &args.paths;
     let channel = channel_for(paths, config, &args.net).await?;
+    hub.channel().replace(channel.clone());
 
     let (tx, rx) = mpsc::channel::<AgentMessage>(8);
     let jobs = hub.session_reset();
@@ -469,7 +477,7 @@ async fn session_once(
                             }
                             Action::Start => {
                                 _update_task = Some(spawn_update(
-                                    args, channel.clone(), runtime, hub, assign, done_tx.clone(),
+                                    args, hub.channel(), runtime, hub, assign, done_tx.clone(),
                                 ));
                             }
                         }

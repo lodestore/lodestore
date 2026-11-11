@@ -113,6 +113,16 @@ fn snapshot(paths: &Paths) -> BTreeMap<String, Vec<u8>> {
 }
 
 async fn agent_channel(ts: &TestServer, paths: Option<&Paths>) -> Channel {
+    let identity = paths.map(|p| {
+        (
+            std::fs::read_to_string(p.cert()).unwrap(),
+            std::fs::read_to_string(p.key()).unwrap(),
+        )
+    });
+    channel_with(ts, identity).await
+}
+
+async fn channel_with(ts: &TestServer, identity: Option<(String, String)>) -> Channel {
     let address = ts.grpc_address();
     let bootstrap = connect::channel(
         &address,
@@ -128,12 +138,6 @@ async fn agent_channel(ts: &TestServer, paths: Option<&Paths>) -> Channel {
         .expect("trust anchor")
         .into_inner()
         .ca_pem;
-    let identity = paths.map(|p| {
-        (
-            std::fs::read_to_string(p.cert()).unwrap(),
-            std::fs::read_to_string(p.key()).unwrap(),
-        )
-    });
     connect::channel(
         &address,
         "127.0.0.1",
@@ -284,6 +288,10 @@ fn read_identity(paths: &Paths) -> Value {
 }
 
 async fn conflict_alerts(ts: &TestServer, api: &Api) -> Vec<Value> {
+    alerts_of(ts, api, "agent_session_conflict").await
+}
+
+async fn alerts_of(ts: &TestServer, api: &Api, kind: &str) -> Vec<Value> {
     lodestore_server::alerts::tick(ts.state(), lodestore_server::db::now_ms())
         .await
         .unwrap();
@@ -297,7 +305,7 @@ async fn conflict_alerts(ts: &TestServer, api: &Api) -> Vec<Value> {
         .as_array()
         .unwrap()
         .iter()
-        .filter(|a| a["type"] == "agent_session_conflict")
+        .filter(|a| a["type"] == kind)
         .cloned()
         .collect()
 }
@@ -357,6 +365,274 @@ async fn adv_two_live_sessions_raise_conflict_alert() {
         assert_eq!(alerts[0]["facts"]["ip"], "127.0.0.1");
         assert_eq!(alerts[0]["facts"]["previous_ip"], "127.0.0.1");
         drop(held);
+        ts.stop().await;
+    }
+}
+
+type Identity = (String, String);
+
+async fn renew_over(channel: Channel) -> Result<Identity, tonic::Status> {
+    let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+    let csr = rcgen::CertificateParams::default()
+        .serialize_request(&key)
+        .unwrap();
+    let response = AgentClient::new(channel)
+        .renew(RenewRequest {
+            csr_der: csr.der().to_vec(),
+        })
+        .await?
+        .into_inner();
+    Ok((response.leaf_pem, key.serialize_pem()))
+}
+
+fn hello() -> AgentMessage {
+    AgentMessage {
+        body: Some(Body::Hello(Hello {
+            versions: Some(Versions {
+                min: PROTOCOL_VERSION,
+                max: PROTOCOL_VERSION,
+            }),
+            agent_version: "test".to_string(),
+            ..Default::default()
+        })),
+    }
+}
+
+async fn open_session(channel: Channel) -> Result<(), tonic::Status> {
+    AgentClient::new(channel)
+        .session(tokio_stream::iter(vec![hello()]))
+        .await
+        .map(|_| ())
+}
+
+fn assert_stale(result: Result<impl std::fmt::Debug, tonic::Status>, what: &str) {
+    let status = result.expect_err(what);
+    assert_eq!(status.code(), tonic::Code::PermissionDenied, "{what}");
+    assert_eq!(
+        status.metadata().get("lodestore-error").unwrap(),
+        "certificate_stale",
+        "{what}"
+    );
+}
+
+async fn prev_window(ts: &TestServer, id: &str) -> (Option<String>, Option<i64>) {
+    let row = sqlx::query("SELECT prev_cert_serial, prev_cert_until FROM agents WHERE id = $1")
+        .bind(id)
+        .fetch_one(&ts.state().db.pool)
+        .await
+        .unwrap();
+    (
+        row.try_get("prev_cert_serial").unwrap(),
+        row.try_get("prev_cert_until").unwrap(),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adv_stale_certificate_after_renew_is_refused() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let (id, paths) = enroll_only(&ts, &api, &repo, "stale", json!([])).await;
+        let first = cert_serial(&ts, &id).await;
+        let old = agent_channel(&ts, Some(&paths)).await;
+        open_session(old.clone())
+            .await
+            .expect("the current certificate opens a session");
+
+        let second = renew_over(old.clone()).await.expect("renew");
+        let after_renew = cert_serial(&ts, &id).await;
+        assert_ne!(after_renew, first);
+        let (prev, until) = prev_window(&ts, &id).await;
+        assert_eq!(
+            prev.as_deref(),
+            Some(first.as_str()),
+            "the peer's serial, not the stored one"
+        );
+        let until = until.unwrap();
+        assert!(until > lodestore_server::db::now_ms());
+
+        open_session(old.clone())
+            .await
+            .expect("the previous certificate works inside the window");
+        // the answer to the first renew was lost: the same old certificate renews again
+        let third = renew_over(old.clone())
+            .await
+            .expect("a repeated renew with the old certificate");
+        assert_ne!(cert_serial(&ts, &id).await, after_renew);
+        let (prev, still) = prev_window(&ts, &id).await;
+        assert_eq!(prev.as_deref(), Some(first.as_str()));
+        assert_eq!(
+            still,
+            Some(until),
+            "a renew from the previous certificate does not stretch the window"
+        );
+
+        let lost = channel_with(&ts, Some(second)).await;
+        assert_stale(
+            open_session(lost).await,
+            "a certificate whose answer was lost",
+        );
+        open_session(channel_with(&ts, Some(third)).await)
+            .await
+            .expect("the newest certificate opens a session");
+        assert_eq!(
+            prev_window(&ts, &id).await,
+            (None, None),
+            "the first session with the new serial ends the window"
+        );
+
+        assert_stale(
+            open_session(old.clone()).await,
+            "the old certificate after the window ended",
+        );
+        assert_stale(
+            renew_over(old.clone()).await,
+            "the old certificate cannot renew",
+        );
+
+        let alerts = alerts_of(&ts, &api, "agent_certificate_rejected").await;
+        assert_eq!(alerts.len(), 1, "[{}]", backend.name());
+        assert_eq!(alerts[0]["host"]["id"], id.as_str());
+        assert_eq!(alerts[0]["facts"]["serial"], first.as_str());
+
+        api.post(&format!("/api/v1/hosts/{id}/revoke"), &json!({}))
+            .await;
+        let status = open_session(old).await.expect_err("revoked");
+        assert_eq!(status.metadata().get("lodestore-error").unwrap(), "revoked");
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adv_previous_certificate_expires_after_grace() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let (id, paths) = enroll_only(&ts, &api, &repo, "grace", json!([])).await;
+        let old = agent_channel(&ts, Some(&paths)).await;
+        renew_over(old.clone()).await.expect("renew");
+        open_session(old.clone()).await.expect("inside the window");
+
+        sqlx::query("UPDATE agents SET prev_cert_until = $1 WHERE id = $2")
+            .bind(lodestore_server::db::now_ms() - 1)
+            .bind(&id)
+            .execute(&ts.state().db.pool)
+            .await
+            .unwrap();
+        assert_stale(
+            open_session(old.clone()).await,
+            "a session after the window",
+        );
+        assert_stale(renew_over(old).await, "a renew after the window");
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adv_stale_certificate_refused_on_every_rpc() {
+    use lodestore_proto::agent::v1::{
+        FetchAgentUpdateRequest, ReadPackRangeRequest, RefreshPackAccessRequest, RestorePlanRequest,
+    };
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let (_, paths) = enroll_only(&ts, &api, &repo, "every", json!([])).await;
+        let old = agent_channel(&ts, Some(&paths)).await;
+        let fresh = renew_over(old.clone()).await.expect("renew");
+        open_session(channel_with(&ts, Some(fresh)).await)
+            .await
+            .expect("new certificate");
+
+        let mut client = AgentClient::new(old);
+        assert_stale(
+            client
+                .restore_plan(RestorePlanRequest { job_id: "x".into() })
+                .await,
+            "restore_plan",
+        );
+        assert_stale(
+            client
+                .refresh_pack_access(RefreshPackAccessRequest {
+                    job_id: "x".into(),
+                    packs: vec![1],
+                })
+                .await,
+            "refresh_pack_access",
+        );
+        assert_stale(
+            client
+                .read_pack_range(ReadPackRangeRequest {
+                    job_id: "x".into(),
+                    pack: 1,
+                    offset: 0,
+                    length: 1,
+                })
+                .await,
+            "read_pack_range",
+        );
+        assert_stale(
+            client
+                .fetch_agent_update(FetchAgentUpdateRequest {
+                    update_id: "x".into(),
+                    file: 0,
+                })
+                .await,
+            "fetch_agent_update",
+        );
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adv_unknown_agent_gets_the_re_enroll_error_without_an_alert() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let (id, paths) = enroll_only(&ts, &api, &repo, "gone", json!([])).await;
+        let channel = agent_channel(&ts, Some(&paths)).await;
+        sqlx::query("DELETE FROM agents WHERE id = $1")
+            .bind(&id)
+            .execute(&ts.state().db.pool)
+            .await
+            .unwrap();
+        assert_stale(
+            open_session(channel.clone()).await,
+            "a certificate of an unknown agent",
+        );
+        assert_stale(renew_over(channel).await, "renew of an unknown agent");
+        assert_eq!(ts.state().registry.unknown_agent_refusals(), 2);
+        assert!(
+            alerts_of(&ts, &api, "agent_certificate_rejected")
+                .await
+                .is_empty()
+        );
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn session_without_hello_times_out() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let (_, paths) = enroll_only(&ts, &api, &repo, "silent", json!([])).await;
+        let channel = agent_channel(&ts, Some(&paths)).await;
+        let started = std::time::Instant::now();
+        let status = AgentClient::new(channel)
+            .session(tokio_stream::pending::<AgentMessage>())
+            .await
+            .expect_err("a silent stream is closed");
+        assert_eq!(status.code(), tonic::Code::DeadlineExceeded);
+        assert!(
+            started.elapsed() < Duration::from_secs(13),
+            "{:?}",
+            started.elapsed()
+        );
         ts.stop().await;
     }
 }

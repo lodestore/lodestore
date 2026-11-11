@@ -27,14 +27,13 @@ use lodestore_proto::agent::v1::{
     RestorePlanBatch, RestorePlanRequest, RestoreSpec,
 };
 use prost::Message;
-use tonic::transport::Channel;
 use tonic::{Code, Streaming};
 use zeroize::{Zeroize, Zeroizing};
 
 use super::fetch::{FetchError, Fetchers, PackAccess, PackFetcher, Span, coalesce};
 use super::{JobCtx, ProgressCell, failed, now_ms};
 use crate::config::AgentSettings;
-use crate::session::agent_channel;
+use crate::shared_channel::SharedChannel;
 
 const CANCEL_POLL: Duration = Duration::from_millis(50);
 pub(super) const MAX_PLAN_MESSAGE: usize = 8 << 20;
@@ -63,13 +62,13 @@ pub trait PlanSource {
 }
 
 pub struct GrpcPlan {
-    channel: Channel,
+    channel: Arc<SharedChannel>,
     job_id: String,
     stream: Option<Streaming<RestorePlanBatch>>,
 }
 
 impl GrpcPlan {
-    pub fn new(channel: Channel, job_id: &str) -> Self {
+    pub fn new(channel: Arc<SharedChannel>, job_id: &str) -> Self {
         GrpcPlan {
             channel,
             job_id: job_id.to_string(),
@@ -79,10 +78,18 @@ impl GrpcPlan {
 
     async fn open(&mut self) -> Result<&mut Streaming<RestorePlanBatch>, PlanError> {
         if self.stream.is_none() {
-            let stream = AgentClient::new(self.channel.clone())
-                .max_decoding_message_size(MAX_PLAN_MESSAGE)
-                .restore_plan(RestorePlanRequest {
-                    job_id: self.job_id.clone(),
+            let stream = self
+                .channel
+                .call(|channel| {
+                    let request = RestorePlanRequest {
+                        job_id: self.job_id.clone(),
+                    };
+                    async move {
+                        AgentClient::new(channel)
+                            .max_decoding_message_size(MAX_PLAN_MESSAGE)
+                            .restore_plan(request)
+                            .await
+                    }
                 })
                 .await
                 .map_err(plan_error)?
@@ -907,13 +914,11 @@ pub fn run_restore_job(ctx: JobCtx, mut spec: RestoreSpec) {
     {
         Ok(rt) => rt.block_on(async {
             let net = ctx.net();
-            let channel = match agent_channel(ctx.paths(), &net).await {
-                Ok(c) => c,
-                Err(e) => {
-                    return failed("restore_failed", &format!("cannot reach the server: {e}"));
-                }
-            };
-            let fetch = match Fetchers::new(channel.clone(), ctx.job_id(), &net) {
+            let channel = ctx.channel();
+            if let Err(e) = channel.get().await {
+                return failed("restore_failed", &format!("cannot reach the server: {e}"));
+            }
+            let fetch = match Fetchers::new(Arc::clone(&channel), ctx.job_id(), &net) {
                 Ok(f) => f,
                 Err(e) => return failed("restore_failed", &e.to_string()),
             };

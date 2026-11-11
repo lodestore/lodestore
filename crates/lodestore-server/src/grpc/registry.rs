@@ -23,6 +23,7 @@ pub const CONFLICT_REPLACEMENTS: usize = 5;
 pub const SECURITY_EVENT_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const CHANNEL_DEPTH: usize = 16;
 const SERIAL_MAX_CHARS: usize = 64;
+const REJECT_LOG_EVERY: Duration = Duration::from_secs(10 * 60);
 
 struct Entry {
     generation: u64,
@@ -69,6 +70,9 @@ struct Inner {
     issued: HashMap<String, Issued>,
     replacements: HashMap<String, VecDeque<Instant>>,
     security: HashMap<String, SecurityEvents>,
+    reject_logged: HashMap<String, Instant>,
+    unknown_logged: Option<Instant>,
+    unknown_refusals: u64,
 }
 
 /// The same /56 rule as the login limits, so a host that moves within its prefix is not a conflict.
@@ -184,9 +188,11 @@ impl Registry {
         }
     }
 
-    /// The caller records only agents that exist in the catalog, so the map is bounded by the number of agents.
-    pub fn note_cert_rejected(&self, agent_id: &str, serial: &str, ip: Option<IpAddr>) {
-        self.lock()
+    /// The caller records only agents that exist in the catalog, so the maps are bounded by the number of agents.
+    /// Returns whether this refusal should be logged: at most once per agent every ten minutes.
+    pub fn note_cert_rejected(&self, agent_id: &str, serial: &str, ip: Option<IpAddr>) -> bool {
+        let mut inner = self.lock();
+        inner
             .security
             .entry(agent_id.to_string())
             .or_default()
@@ -195,6 +201,34 @@ impl Registry {
             serial: serial.chars().take(SERIAL_MAX_CHARS).collect(),
             ip,
         });
+        let due = inner
+            .reject_logged
+            .get(agent_id)
+            .is_none_or(|at| at.elapsed() >= REJECT_LOG_EVERY);
+        if due {
+            inner
+                .reject_logged
+                .insert(agent_id.to_string(), Instant::now());
+        }
+        due
+    }
+
+    /// A certificate of no known agent (the catalog was restored from an older backup, or the host was removed).
+    /// There is no host to alert on, so this is a counter and a rate-limited log line, not a security event.
+    pub fn note_unknown_agent(&self) -> bool {
+        let mut inner = self.lock();
+        inner.unknown_refusals += 1;
+        let due = inner
+            .unknown_logged
+            .is_none_or(|at| at.elapsed() >= REJECT_LOG_EVERY);
+        if due {
+            inner.unknown_logged = Some(Instant::now());
+        }
+        due
+    }
+
+    pub fn unknown_agent_refusals(&self) -> u64 {
+        self.lock().unknown_refusals
     }
 
     /// A copy of the recent security events per agent; older ones are dropped here.
@@ -401,5 +435,16 @@ mod tests {
         let rejected = events[0].1.rejected.clone().unwrap();
         assert_eq!(rejected.serial.len(), SERIAL_MAX_CHARS);
         assert_eq!(rejected.ip, ip("10.0.0.7"));
+    }
+
+    #[test]
+    fn refusals_are_logged_once_per_agent_and_window() {
+        let registry = Registry::default();
+        assert!(registry.note_cert_rejected("a1", "x", None));
+        assert!(!registry.note_cert_rejected("a1", "x", None));
+        assert!(registry.note_cert_rejected("a2", "x", None));
+        assert!(registry.note_unknown_agent());
+        assert!(!registry.note_unknown_agent());
+        assert_eq!(registry.unknown_agent_refusals(), 2);
     }
 }

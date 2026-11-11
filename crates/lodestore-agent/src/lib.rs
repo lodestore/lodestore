@@ -9,6 +9,7 @@ pub mod hooks;
 pub mod identity;
 pub mod jobs;
 pub mod session;
+pub mod shared_channel;
 pub mod socket;
 pub mod tls;
 pub mod token;
@@ -35,6 +36,10 @@ pub enum AgentError {
     MissingPin,
     #[error("this agent was revoked by the server")]
     Revoked,
+    #[error(
+        "the server does not accept this agent's certificate; re-enroll the host with a new join token"
+    )]
+    CertificateStale,
     #[error("not registered: {0}")]
     NotEnrolled(String),
     #[error("the server refused the request: {0}")]
@@ -63,6 +68,8 @@ impl AgentError {
             .and_then(|v| v.to_str().ok());
         if marker == Some(lodestore_proto::ERROR_REVOKED) {
             AgentError::Revoked
+        } else if marker == Some(lodestore_proto::ERROR_CERT_STALE) {
+            AgentError::CertificateStale
         } else {
             AgentError::Rejected(status.message().to_string())
         }
@@ -86,5 +93,22 @@ impl NetOptions {
             no_proxy: first(["NO_PROXY", "no_proxy"]),
             ca_bundle: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_status_maps_certificate_stale() {
+        let mut status = tonic::Status::permission_denied("stale");
+        status.metadata_mut().insert(
+            lodestore_proto::ERROR_METADATA_KEY,
+            lodestore_proto::ERROR_CERT_STALE.parse().unwrap(),
+        );
+        let error = AgentError::from_status(&status);
+        assert!(matches!(error, AgentError::CertificateStale));
+        assert_eq!(error.exit_code(), 1);
     }
 }
