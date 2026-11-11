@@ -1,5 +1,6 @@
 ---
 title: "Agent updates"
+description: "Update the Lodestore agent across your hosts in waves. The agent installs only a binary signed with a key it trusts and checks its version and architecture."
 ---
 The server can replace the agent binary on your hosts. Nothing updates by itself: you start an update in **Hosts** (or with the `agents:update` API scope), pick one host, several, or all outdated ones, and watch it in **Jobs**. The agent runs as root, so it accepts only a binary that carries a valid signature from a key it trusts.
 

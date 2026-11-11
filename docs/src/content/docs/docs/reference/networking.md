@@ -1,5 +1,6 @@
 ---
 title: "Networking and reverse proxies"
+description: "Run the Lodestore server behind a reverse proxy: an HTTPS proxy for the web interface and API, a TCP or TLS passthrough forward for agent gRPC with mTLS."
 ---
 The server listens on two ports with different rules:
 

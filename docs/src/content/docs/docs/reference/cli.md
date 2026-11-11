@@ -1,5 +1,6 @@
 ---
 title: "Command line"
+description: "The lode command line: manage a Lodestore server from a terminal or CI with an API token, and back up, restore and check repositories directly."
 ---
 ## Managing a server
 

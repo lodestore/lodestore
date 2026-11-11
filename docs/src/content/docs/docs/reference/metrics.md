@@ -1,5 +1,6 @@
 ---
 title: "Metrics, dashboard and alert rules"
+description: "Lodestore Prometheus metrics, a ready Grafana dashboard and alert rules, served with a scoped token or on a separate address without credentials."
 ---
 The server exposes the state of the fleet in the Prometheus text format. The repository ships a Grafana dashboard and a set of Prometheus alert rules that work on these metrics without changes.
 

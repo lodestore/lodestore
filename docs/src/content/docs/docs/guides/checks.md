@@ -1,5 +1,6 @@
 ---
 title: "Integrity checks: knowing a restore will work"
+description: "Lodestore integrity checks read the repository the way a restore would and alert you early, from the server or with lode check and no server at all."
 ---
 A backup that cannot be restored is worth nothing, and the failure usually shows up on the worst day. Integrity checks read the repository the way a restore would and tell you early when something is wrong. A failed check raises the alert **Check failed**, see [Alerts and notifications](/docs/guides/alerts/).
 

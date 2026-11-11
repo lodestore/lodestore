@@ -1,5 +1,6 @@
 ---
 title: "ADR 0003: Object layout, pack format and index"
+description: "How a Lodestore repository lays out packs, index shards and snapshots so agents write with create-only credentials and restores avoid listing the bucket."
 ---
 Status: Accepted
 Date: 2026-10-13

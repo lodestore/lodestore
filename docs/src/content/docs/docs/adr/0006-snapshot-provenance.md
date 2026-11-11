@@ -1,5 +1,6 @@
 ---
 title: "ADR 0006: Snapshot provenance and latest"
+description: "How Lodestore records snapshot provenance so a compromised host cannot plant a snapshot that becomes latest and gets restored after an incident."
 ---
 Status: Accepted
 Date: 2026-11-05
