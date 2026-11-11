@@ -143,6 +143,8 @@ pub struct NotificationsConfig {
     pub proxy: Option<Secret>,
     /// Base URL of the Telegram Bot API. Set only by tests through code, never read from the configuration file.
     pub telegram_api: Option<String>,
+    /// Extra trust roots for SMTP TLS. Set only by tests through code, never read from the configuration file.
+    pub smtp_roots: Vec<rustls_pki_types::CertificateDer<'static>>,
 }
 
 #[derive(Debug, Clone)]
