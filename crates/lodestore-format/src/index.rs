@@ -374,7 +374,7 @@ impl Index {
                 if current && !self.is_current(&held) {
                     self.push_stale(key, held);
                     self.map.insert(key, loc);
-                } else if current && !same_extent(&held, &loc) {
+                } else if current && (!same_extent(&held, &loc) || held.shard != loc.shard) {
                     self.push_other(key, loc);
                 } else if !current && !same_extent(&held, &loc) {
                     self.push_stale(key, loc);
@@ -1070,6 +1070,41 @@ mod tests {
         index.add_shard(legit, &legit_shard).unwrap();
         index.add_shard(planted, &planted_shard).unwrap();
         assert_eq!(index.get(&[4; 32], 1).unwrap().pack_id, [12; 32]);
+    }
+
+    #[test]
+    fn index_same_extent_in_two_current_shards_survives_one_superseded() {
+        let (a, b, c, d) = ([1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32]);
+        let shards = [
+            (a, shard_of(10, 4, &[])),
+            (b, shard_of(10, 4, &[])),
+            (c, shard_of(11, 4, &[])),
+            (d, shard_of(12, 5, &[a, c])),
+        ];
+        let mut order = [0usize, 1, 2, 3];
+        let mut seen = 0;
+        permute(&mut order, 0, &mut |order| {
+            let mut index = Index::default();
+            for &i in order {
+                index.add_shard(shards[i].0, &shards[i].1).unwrap();
+            }
+            let chosen = index.get(&[4; 32], 1).unwrap();
+            assert_eq!((chosen.pack_id, chosen.shard), ([10; 32], b), "{order:?}");
+            seen += 1;
+        });
+        assert_eq!(seen, 24);
+    }
+
+    fn permute(items: &mut [usize; 4], k: usize, visit: &mut impl FnMut(&[usize; 4])) {
+        if k == items.len() {
+            visit(items);
+            return;
+        }
+        for i in k..items.len() {
+            items.swap(k, i);
+            permute(items, k + 1, visit);
+            items.swap(k, i);
+        }
     }
 
     #[test]
