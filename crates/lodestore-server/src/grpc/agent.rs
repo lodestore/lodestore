@@ -453,7 +453,11 @@ impl Agent for AgentService {
         &self,
         request: Request<ReadPackRangeRequest>,
     ) -> Result<Response<Self::ReadPackRangeStream>, Status> {
-        let agent_id = check_peer(&self.state, &request).await?.agent_id;
+        let peer = check_peer(&self.state, &request).await?;
+        self.state
+            .registry
+            .note_pack_read(&peer.agent_id, &peer.serial);
+        let agent_id = peer.agent_id;
         let stream = restore::read_pack_range(&self.state, &agent_id, request.into_inner()).await?;
         Ok(Response::new(Box::pin(stream)))
     }
