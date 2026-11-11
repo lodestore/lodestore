@@ -18,6 +18,8 @@ export const notifications = {
 		agent_update_failed: "Agent update failed",
 		snapshot_quarantined: "Snapshot quarantined",
 		repository_unavailable: "Repository unavailable",
+		agent_session_conflict: "Agent session conflict",
+		agent_certificate_rejected: "Agent certificate rejected",
 	},
 	kinds: {
 		telegram: "Telegram",

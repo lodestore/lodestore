@@ -3,6 +3,7 @@ use serde_json::{Value, json};
 use super::channels::Channel;
 use super::message::{Message, text};
 use super::{DeliveryError, net};
+use crate::config::NotificationsConfig;
 use crate::state::AppState;
 
 pub const TELEGRAM_API: &str = "https://api.telegram.org";
@@ -38,7 +39,7 @@ pub fn parse_response(status: u16, body: &str) -> Result<(), DeliveryError> {
 }
 
 pub async fn send_to(
-    allow_private: bool,
+    config: &NotificationsConfig,
     base: &str,
     token: &str,
     chat_id: &str,
@@ -46,7 +47,7 @@ pub async fn send_to(
 ) -> Result<(), DeliveryError> {
     let (url, payload) = request_at(base, token, chat_id, body);
     let payload = serde_json::to_vec(&payload).map_err(|e| DeliveryError::new(e.to_string()))?;
-    let response = net::post_json(allow_private, &url, payload, None).await?;
+    let response = net::post_json(config, &url, payload, None).await?;
     let status = response.status().as_u16();
     let reply = response.text().await.map_err(net::transport_error)?;
     parse_response(status, &reply)
@@ -68,7 +69,7 @@ pub async fn send(
         .as_deref()
         .ok_or_else(|| DeliveryError::new("The Telegram channel has no chat ID."))?;
     send_to(
-        state.config.notifications.allow_private_targets,
+        &state.config.notifications,
         TELEGRAM_API,
         token.expose(),
         chat_id,

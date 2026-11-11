@@ -736,6 +736,35 @@ describe("active alerts", () => {
 		);
 	});
 
+	it("shows agent security alerts on the host", async () => {
+		await openHostAlerts([
+			alertFixture("s1", {
+				type: "agent_session_conflict",
+				severity: "warning",
+				policy: null,
+				detail:
+					"Two live sessions of this agent from 203.0.113.9 and 198.51.100.4.",
+				facts: { ip: "203.0.113.9", previous_ip: "198.51.100.4" },
+			}),
+			alertFixture("s2", {
+				type: "agent_certificate_rejected",
+				policy: null,
+				detail: "The server refused the agent certificate with serial abc.",
+				facts: { serial: "abc", ip: "203.0.113.9" },
+			}),
+		]);
+		await screen.findByRole("list", { name: HOST_ALERTS });
+		const titles = rows(HOST_ALERTS).map(titleOf);
+		expect(titles).toContain("Two live agent sessions for web-1");
+		expect(titles).toContain("Agent certificate refused for web-1");
+		expect(
+			within(screen.getByRole("list", { name: HOST_ALERTS })).getAllByRole(
+				"link",
+				{ name: "web-1" },
+			)[0],
+		).toHaveAttribute("href", "/hosts/host-1");
+	});
+
 	it("silences and resumes a host", async () => {
 		const user = userEvent.setup();
 		let body: unknown;

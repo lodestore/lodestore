@@ -2,6 +2,7 @@ mod common;
 
 use common::{Api, TestServer, backends, bearer_client};
 use serde_json::{Value, json};
+use sqlx::Row;
 
 const NEEDS_WRITE: &str = "The token needs the restore:host or restore:in-place scope.";
 const NEEDS_IN_PLACE: &str = "The token needs the restore:in-place scope to restore in place.";
@@ -250,4 +251,104 @@ async fn restore_scopes_session_ignores_capability() {
         assert_ne!(code, "restore_agent_outdated", "[{}]", backend.name());
         ts.stop().await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn step_up_required_for_join_token_and_in_place_restore() {
+    for backend in backends() {
+        let name = backend.name();
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let host = enrolled_host(&ts, &api, CAPS_V01).await;
+        let repo = ts.create_local_repository("second").await;
+        let in_place_token = token(&api, &["restore:in-place"]).await;
+
+        sqlx::query("UPDATE sessions SET authenticated_at = $1")
+            .bind(lodestore_server::db::now_ms() - 16 * 60_000)
+            .execute(&ts.state().db.pool)
+            .await
+            .unwrap();
+
+        let join = api
+            .post(
+                "/api/v1/join-tokens",
+                &json!({ "repository_id": repo, "labels": [] }),
+            )
+            .await;
+        assert_eq!(join.status(), 403, "[{name}]");
+        let body: Value = join.json().await.unwrap();
+        assert_eq!(body["code"], "step_up_required");
+        let issued: i64 = sqlx::query("SELECT COUNT(*) AS n FROM join_tokens")
+            .fetch_one(&ts.state().db.pool)
+            .await
+            .unwrap()
+            .get("n");
+        assert_eq!(issued, 1, "[{name}] only the enrolment token exists");
+
+        let jobs_before = job_rows(&ts).await;
+        let mut old_agent = restore_body(false, false);
+        old_agent["target_host_id"] = json!(host);
+        let unknown_host = restore_body(false, false);
+        let mut in_place = restore_body(true, false);
+        in_place["target_host_id"] = json!(host);
+        for (what, body) in [
+            ("in place", in_place.clone()),
+            ("owners", restore_body(false, true)),
+            ("agent without restore roots", old_agent.clone()),
+        ] {
+            let (status, code, _) = code_and_message(None, &ts, &api, body).await;
+            assert_eq!(status, 403, "{what} [{name}]");
+            assert_eq!(code, "step_up_required", "{what} [{name}]");
+        }
+        assert_eq!(job_rows(&ts).await, jobs_before, "[{name}]");
+        let (status, code, _) = code_and_message(None, &ts, &api, unknown_host.clone()).await;
+        assert_ne!(code, "step_up_required", "new folder [{name}]");
+        assert_ne!(status, 403, "new folder [{name}]");
+
+        set_capabilities(&ts, &host, CAPS_ROOTS).await;
+        let (_, code, _) = code_and_message(None, &ts, &api, old_agent.clone()).await;
+        assert_ne!(
+            code, "step_up_required",
+            "agent with restore roots [{name}]"
+        );
+
+        let (status, _, _) =
+            code_and_message(Some(&in_place_token), &ts, &api, in_place.clone()).await;
+        assert!(
+            status != 401 && status != 403,
+            "token in place: {status} [{name}]"
+        );
+
+        let step = api
+            .post(
+                "/api/v1/auth/step-up",
+                &json!({ "password": common::ADMIN_PASSWORD }),
+            )
+            .await;
+        assert_eq!(step.status(), 204, "[{name}]");
+        let join = api
+            .post(
+                "/api/v1/join-tokens",
+                &json!({ "repository_id": repo, "labels": [] }),
+            )
+            .await;
+        assert_eq!(join.status(), 201, "[{name}]");
+        for (what, body) in [
+            ("in place", in_place),
+            ("owners", restore_body(false, true)),
+        ] {
+            let (status, code, _) = code_and_message(None, &ts, &api, body).await;
+            assert_ne!(code, "step_up_required", "{what} [{name}]");
+            assert_ne!(status, 403, "{what} [{name}]");
+        }
+        ts.stop().await;
+    }
+}
+
+async fn job_rows(ts: &TestServer) -> i64 {
+    sqlx::query("SELECT COUNT(*) AS n FROM jobs")
+        .fetch_one(&ts.state().db.pool)
+        .await
+        .unwrap()
+        .get("n")
 }

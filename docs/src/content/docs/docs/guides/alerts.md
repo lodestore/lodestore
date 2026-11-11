@@ -15,10 +15,18 @@ Lodestore watches the fleet and raises an alert when something needs a person. A
 | Agent update failed | critical | The latest finished agent self-update of a host was rolled back and the host still runs another version than the target. The alert shows the reason. | The host runs the target version (a later update succeeded or the agent was reinstalled). A revoked host raises none. |
 | Snapshot quarantined | critical | Cleanup could not read a snapshot of a repository and set it aside, and nobody has confirmed its exclusion from cleanup yet. One alert per repository, counting its waiting snapshots. | Every quarantined snapshot of the repository is confirmed, or a later cleanup no longer finds an unreadable one. |
 | Repository unavailable | critical | The server does not open a repository because the configuration stored in the bucket does not match what the server recorded. One alert per repository. | The configuration matches again and the repository opens. |
+| Agent session conflict | warning | Two live sessions of one agent from different addresses (for IPv6, different /56 prefixes), or five live sessions of one agent replaced within ten minutes. The alert shows both addresses. | No such conflict for 24 hours. A revoked host raises none. |
+| Agent certificate rejected | critical | The server refused a certificate of an agent because it is not the one the server issued last. The alert shows the serial and the address of the caller. | No such refusal for 24 hours. A revoked host raises none. |
 
 `snapshot_quarantined` means cleanup is stopped for that repository until you deal with the snapshot: open the repository page and use the **Free up space** card to review the quarantined snapshots. See [Freeing up space](/docs/guides/gc/).
 
 `repository_unavailable` means the server does not open the repository until its configuration in the bucket matches what the server recorded. Open the repository page and read the **Storage checks** card to see which setting differs. After you fix the configuration, **Check storage again** on the repository page opens the repository again and clears the alert; the server checks it again by itself at its next open as well. This alert covers a configuration mismatch only; a bucket that cannot be reached because of a network error does not raise it, and shows as failing jobs and failing storage checks instead.
+
+`agent_session_conflict` usually means that a host was cloned (a disk image, a restored virtual machine) and both copies run the same agent. Keep the host that should stay and enrol the other one again with `install.sh --force` and a new join token; or revoke the host if neither should. The server decides by the address of the connection: behind a load balancer that replaces it, only the count of five replacements in ten minutes can fire the alert, and an agent whose traffic leaves through a pool of addresses can raise it without a clone (see [Networking](/docs/reference/networking/#grpc-layer-4-or-tls-passthrough)).
+
+`agent_certificate_rejected` means a certificate that the server replaced, or never issued, was used: the host came back from an old image or snapshot, a copy of an old certificate is in use, or the server database was restored from a backup older than the host's last renewal. The agent logs the error and keeps retrying. If the host is legitimate, enrol it again with `install.sh --force` and a new join token; there is no way to trust the old serial. See [Agent credentials](/docs/security/threat-model/#agent-credentials).
+
+Both alerts are built from events that the server keeps in memory for 24 hours. After a restart an alert that was open stays open until 24 hours after it first opened, and an event that had not raised an alert yet is forgotten; the alert appears again at the next attempt of the agent.
 
 An alert is one object per cause, not per evaluation: it fires once, may remind, and resolves once. Resolved alerts stay in the history.
 
@@ -62,7 +70,7 @@ The durations are `hour`, `day`, `week` and `forever`. The token needs `alerts:w
 
 ## Channels
 
-A channel is a place alerts are sent to. Add them under Settings, Notifications, or define them in the server configuration. Every channel has a list of alert types it receives (all eight by default) and an on/off switch. There is no routing by host, label or policy: an alert goes to every enabled channel that has its type checked.
+A channel is a place alerts are sent to. Add them under Settings, Notifications, or define them in the server configuration. Every channel has a list of alert types it receives (all ten by default) and an on/off switch. There is no routing by host, label or policy: an alert goes to every enabled channel that has its type checked.
 
 | Type | What it needs |
 |------|---------------|
@@ -71,7 +79,7 @@ A channel is a place alerts are sent to. Add them under Settings, Notifications,
 | Email | SMTP host, port, security (`starttls` or `tls`), optional user name and password, a `from` address and the recipients. Without recipients the message goes to the administrator's email (Settings, User). Plain SMTP without TLS is not supported. |
 | Webhook | A URL and an optional secret. See [the webhook payload](#the-webhook-payload). |
 
-A channel created in the web interface before 0.2 with every alert type checked also receives `snapshot_quarantined` and `repository_unavailable` after the update. A channel with a chosen list is left as it is; check the new types yourself if you want them.
+A channel created in the web interface before 0.2 with every alert type checked also receives `snapshot_quarantined`, `repository_unavailable`, `agent_session_conflict` and `agent_certificate_rejected` after the update. A channel with a chosen list is left as it is; check the new types yourself if you want them.
 
 Use **Send test message** on a channel to check it end to end. The result of the last delivery is shown in the channel list. Secrets entered in the web interface are encrypted in the server database and are never shown again; leaving a secret field empty on edit keeps the saved one.
 
@@ -107,14 +115,14 @@ notifications:
       secret_file: /etc/lodestore/channels/hook-secret
 ```
 
-`allow_private_targets` sits next to `channels` and is `false` by default; see [Delivery and retries](#delivery-and-retries).
+`allow_private_targets` sits next to `channels` and is `false` by default; see [Delivery and retries](#delivery-and-retries). `proxy` sits there too and is not set by default; see [Sending through a proxy](#sending-through-a-proxy).
 
 | Field | Meaning |
 |-------|---------|
 | `name` | Required, unique. |
 | `type` | `telegram`, `slack`, `email` or `webhook`. |
 | `enabled` | `true` by default. |
-| `alerts` | List of `backup_failed`, `no_recent_backup`, `agent_offline`, `check_failed`, `certificate_expiring`, `agent_update_failed`, `snapshot_quarantined`, `repository_unavailable`. All when left out; an empty list is an error. |
+| `alerts` | List of `backup_failed`, `no_recent_backup`, `agent_offline`, `check_failed`, `certificate_expiring`, `agent_update_failed`, `snapshot_quarantined`, `repository_unavailable`, `agent_session_conflict`, `agent_certificate_rejected`. All when left out; an empty list is an error. |
 | `bot_token_file`, `chat_id` | Telegram. |
 | `webhook_url_file` | Slack. |
 | `smtp_host`, `port`, `security`, `username`, `password_file`, `from`, `to` | Email. `port` is `587` by default, `security` is `starttls` by default (`tls` for a connection that is encrypted from the start, usually port 465). |
@@ -171,7 +179,7 @@ The webhook sends the format of the Alertmanager webhook receiver, version 4, so
 
 - `status` is `firing` for a new alert and for a reminder, and `resolved` when the cause is gone. A resolved message has the real `endsAt`.
 - `receiver` is the name of the channel. `fingerprint` and `groupKey` stay the same for the whole life of an alert, so a receiver can match a resolved message to the alert it closes.
-- `labels.alertname` is `LodestoreBackupFailed`, `LodestoreNoRecentBackup`, `LodestoreAgentOffline`, `LodestoreCheckFailed`, `LodestoreCertificateExpiring`, `LodestoreAgentUpdateFailed`, `LodestoreSnapshotQuarantined` or `LodestoreRepositoryUnavailable`, the same names as in the [Prometheus rules](/docs/reference/metrics/#importing-the-dashboard-and-the-rules). `severity` is `critical` or `warning`.
+- `labels.alertname` is `LodestoreBackupFailed`, `LodestoreNoRecentBackup`, `LodestoreAgentOffline`, `LodestoreCheckFailed`, `LodestoreCertificateExpiring`, `LodestoreAgentUpdateFailed`, `LodestoreSnapshotQuarantined`, `LodestoreRepositoryUnavailable`, `LodestoreAgentSessionConflict` or `LodestoreAgentCertificateRejected`, the same names as in the [Prometheus rules](/docs/reference/metrics/#importing-the-dashboard-and-the-rules). `severity` is `critical` or `warning`.
 - Other labels depend on the type and are present only when they apply: `host` and `host_id`, `policy`, `repository` and `level` (a check), `cert` (`agent` or `grpc`).
 - `annotations.summary` is the title shown in the web interface and `annotations.description` its detail line.
 - A test message has `alertname` `LodestoreTest` and severity `info`.
@@ -182,7 +190,18 @@ The target is a receiver that accepts this body, not the API of Alertmanager its
 
 Notifications go through a queue, so a slow or broken channel never delays alert evaluation. A delivery that fails is tried again 1 minute, 5 minutes and 30 minutes later. After the fourth failed attempt it is marked failed and shown with its error in the channel list; the alert itself is not sent again before its next reminder. Sent deliveries are kept for 30 days; resolved alerts with their events, and failed deliveries, for 90 days.
 
-Webhook, Slack and Telegram requests time out after 10 seconds and do not follow redirects. Webhook, Slack, Telegram and email refuse loopback, private, link-local and similar addresses, so a receiver on your own network needs `allow_private_targets: true` under `notifications:` in `server.yaml`; link-local, unspecified and multicast addresses stay refused. The error of a failed webhook or Slack request holds the HTTP status, never the body of the answer. Error messages never contain a secret.
+Webhook, Slack and Telegram requests time out after 10 seconds and do not follow redirects. Webhook, Slack, Telegram and email refuse loopback, private, link-local and similar addresses, so a receiver on your own network needs `allow_private_targets: true` under `notifications:` in `server.yaml`. Some addresses stay refused with it: link-local (`169.254.0.0/16` and `fe80::/10`, which holds the metadata service of the clouds), the metadata addresses `100.100.100.200`, `192.0.0.192` and `fd00:ec2::254`, unspecified, multicast and broadcast addresses, `0.0.0.0/8` and `240.0.0.0/4`. An IPv6 address that carries an IPv4 address (mapped, SIIT, NAT64, 6to4 or Teredo) is judged by the IPv4 address in it. The server resolves the name itself and refuses an answer in these ranges; email connects to the address it checked. The error of a failed webhook or Slack request holds the HTTP status, never the body of the answer. Error messages never contain a secret.
+
+### Sending through a proxy
+
+The server ignores `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` for notifications, because a proxy would resolve names and bypass the address filter above. To send webhook, Slack and Telegram requests through a proxy, set one under `notifications:` in `server.yaml`:
+
+```yaml
+notifications:
+  proxy: http://user:password@proxy.example.com:3128
+```
+
+The value is an `http://` or `https://` URL; the server refuses to start with anything else. The proxy then resolves the name of the target, so the server checks only the addresses written as numbers in a channel URL, and keeping the proxy from reaching private addresses is the proxy's job. Email does not go through the proxy and connects to the SMTP host directly. Restart the server after you change the value.
 
 ## Without any channel
 

@@ -704,3 +704,102 @@ async fn restore_e2e_cancel_leaves_no_temp_files() {
         env.stop().await;
     }
 }
+
+async fn host_serial(ts: &TestServer, host: &str) -> String {
+    sqlx::query("SELECT cert_serial FROM agents WHERE id = $1")
+        .bind(host)
+        .fetch_one(&ts.state().db.pool)
+        .await
+        .unwrap()
+        .try_get("cert_serial")
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adv_restore_survives_certificate_renew() {
+    const FILE: usize = 8 * 8 * MIB;
+    for backend in backends() {
+        let ts = TestServer::start_with(&backend, |c| c.agent_cert_lifetime_secs = 9).await;
+        let repo = ts.create_local_repository("main").await;
+        let env = AgentEnv::start_on(&ts, &repo, "main", "host-renew").await;
+        let big = env.work.path().join("big");
+        fs::create_dir_all(&big).unwrap();
+        let big = big.canonicalize().unwrap();
+        let block = noise(8 * MIB, 11);
+        fs::write(big.join("data.bin"), block.repeat(8)).unwrap();
+        let snapshot = env.backup(&[&big]).await;
+
+        let reads = |serial: &str| -> u64 {
+            ts.state()
+                .registry
+                .pack_reads(&env.host)
+                .into_iter()
+                .find(|(s, _)| s == serial)
+                .map_or(0, |(_, n)| n)
+        };
+        let mut straddled = false;
+        for round in 0..40 {
+            let out = env.work.path().join(format!("out-{round}"));
+            let before = host_serial(&ts, &env.host).await;
+            let reads_before = reads(&before);
+            let id = queue(
+                &ts,
+                request(
+                    &env.host,
+                    &snapshot,
+                    vec![big.to_string_lossy().into_owned().into_bytes()],
+                    &out,
+                    ConflictPolicy::OverwriteChanged,
+                    false,
+                ),
+            )
+            .await;
+            let job = env.wait_job(&id).await;
+            assert_eq!(job["state"], "succeeded", "[{}] {job}", backend.name());
+            let restored = fs::read(restored_at(&out, &big).join("data.bin")).unwrap();
+            assert_eq!(restored.len(), FILE);
+            fs::remove_dir_all(&out).unwrap();
+            let after = host_serial(&ts, &env.host).await;
+            // the job read packs through the server with the old serial first and the new one after the renew
+            if after != before && reads(&before) > reads_before && reads(&after) > 0 {
+                straddled = true;
+                break;
+            }
+        }
+        assert!(
+            straddled,
+            "[{}] no restore read packs with both the old and the new certificate: {:?}",
+            backend.name(),
+            ts.state().registry.pack_reads(&env.host)
+        );
+
+        lodestore_server::alerts::tick(ts.state(), lodestore_server::db::now_ms())
+            .await
+            .unwrap();
+        let body: Value = env
+            .api
+            .get("/api/v1/alerts?state=active")
+            .await
+            .json()
+            .await
+            .unwrap();
+        let rejected: Vec<_> = body["alerts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|a| a["type"] == "agent_certificate_rejected")
+            .collect();
+        assert!(rejected.is_empty(), "[{}] {rejected:?}", backend.name());
+        assert!(
+            ts.state()
+                .registry
+                .security_events()
+                .iter()
+                .all(|(_, e)| e.rejected.is_none()),
+            "[{}] a certificate was refused during the restore",
+            backend.name()
+        );
+        env.stop().await;
+        ts.stop().await;
+    }
+}

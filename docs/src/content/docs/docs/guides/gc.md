@@ -131,6 +131,8 @@ The exclusion is kept in the server database only. After a lost database the sna
 
 ## Lost server database
 
+A server database restored from a backup (on Docker or Helm) remembers the certificate serial of every agent as of the backup. An agent that renewed its certificate later is refused with `certificate_stale` and raises the alert `agent_certificate_rejected`, and an agent enrolled after the backup is refused as unknown. They keep retrying; enrol those hosts again with `install.sh --force` and a new join token. See [Agent credentials](/docs/security/threat-model/#agent-credentials).
+
 The server remembers which cycle it started. If its database is lost or replaced and a cycle was marked at that time, the bucket still holds the `locks/gc-<id>` object, and the new server sees a cleanup it did not start and refuses to run (**Another cleanup**). Delete the object `locks/gc-<id>` in the bucket by hand to continue, but only after you have made sure that no other Lodestore server cleans up this bucket: that server would be using the list.
 
 The server also keeps in the bucket the fact that it has signed the repository. A new database therefore does not sign the shards of the repository again, and does not treat a shard that appeared since then as vouched for. What the server verified is kept in the database: after a loss, the server downloads and checks once more the data that new backups depend on, which costs bandwidth, not data.

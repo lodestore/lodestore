@@ -163,6 +163,11 @@ pub async fn render(state: &AppState, now_ms: i64) -> anyhow::Result<String> {
             .map(|(not_after_ms, _)| (vec![("cert", "grpc")], secs(not_after_ms))),
     );
     alert_series(&mut x, state, now_ms).await?;
+    x.family(
+        "lodestore_unknown_agent_refusals",
+        "Agent calls refused because the certificate belongs to no known agent, since the server started.",
+        [(vec![], state.registry.unknown_agent_refusals() as f64)],
+    );
     Ok(x.finish())
 }
 
@@ -780,7 +785,7 @@ async fn check_series(x: &mut Exposition, state: &AppState) -> anyhow::Result<()
     Ok(())
 }
 
-const ALERT_TYPES: [AlertType; 8] = [
+const ALERT_TYPES: [AlertType; 10] = [
     AlertType::BackupFailed,
     AlertType::NoRecentBackup,
     AlertType::AgentOffline,
@@ -789,6 +794,8 @@ const ALERT_TYPES: [AlertType; 8] = [
     AlertType::AgentUpdateFailed,
     AlertType::SnapshotQuarantined,
     AlertType::RepositoryUnavailable,
+    AlertType::AgentSessionConflict,
+    AlertType::AgentCertificateRejected,
 ];
 
 async fn alert_series(x: &mut Exposition, state: &AppState, now_ms: i64) -> anyhow::Result<()> {

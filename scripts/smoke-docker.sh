@@ -46,6 +46,7 @@ wait_for() {
 
 docker volume create "$volume" >/dev/null
 docker run -d --name "$name" \
+  --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges \
   -e LODESTORE_ADMIN_PASSWORD=smoke-test-password \
   -e LODESTORE_PUBLIC_URL=http://127.0.0.1:18080 \
   -e LODESTORE_GRPC_PUBLIC_ADDRESS=127.0.0.1:18443 \
@@ -75,8 +76,8 @@ healthy() {
 wait_for "healthcheck status healthy" healthy
 
 docker logs "$name" >"$workdir/container.log" 2>&1
-if grep -qi 'permission denied' "$workdir/container.log"; then
-  fail "container logs contain permission denied"
+if grep -qiE 'permission denied|read-only file system' "$workdir/container.log"; then
+  fail "container logs contain permission denied or read-only file system"
 fi
 
 docker cp "$name:/usr/share/lodestore/agents" "$workdir/agents"

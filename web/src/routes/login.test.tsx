@@ -79,6 +79,26 @@ describe("login", () => {
 		expect(screen.getByRole("button", { name: "Sign in" })).toBeDisabled();
 	});
 
+	it("says the server is busy instead of a wrong password", async () => {
+		useSignedOut();
+		server.use(
+			http.post("/api/v1/auth/login", () =>
+				HttpResponse.json(
+					{ code: "busy", message: "busy" },
+					{ status: 503, headers: { "Retry-After": "3" } },
+				),
+			),
+		);
+		renderApp("/login");
+		await fillAndSubmit();
+
+		expect(
+			await screen.findByText("The server is busy. Try again in 3 seconds."),
+		).toBeInTheDocument();
+		expect(screen.queryByText("Incorrect username or password.")).toBeNull();
+		expect(screen.getByRole("button", { name: "Sign in" })).toBeDisabled();
+	});
+
 	it("tells the visitor when no administrator exists yet", async () => {
 		useSignedOut(true);
 		renderApp("/login");

@@ -187,9 +187,19 @@ export const copy = {
 		button: "Sign in",
 		error: "Incorrect username or password.",
 		rateLimited: (n: number) => `Too many attempts. Try again in ${n} seconds.`,
+		busy: (n: number) => `The server is busy. Try again in ${n} seconds.`,
 		noAdmin:
 			'No administrator exists yet. Open the setup link printed in the server log (look for "/setup?token=").',
 		sessionExpired: "Your session expired. Sign in again to continue.",
+	},
+	stepUp: {
+		title: "Confirm your password",
+		body: "This action needs your password again.",
+		password: "Password",
+		confirm: "Confirm",
+		cancel: "Cancel",
+		wrong: "Password is wrong.",
+		action: "confirm the password",
 	},
 	setup: {
 		title: "Create the administrator",

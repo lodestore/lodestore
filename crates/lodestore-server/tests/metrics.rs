@@ -768,7 +768,10 @@ async fn serve_direct(
             ..GrpcConfig::default()
         },
         grpc_public_address_defaulted: false,
-        database_url: format!("sqlite://{}/lodestore.db?mode=rwc", data_dir.display()),
+        database_url: lodestore_server::config::Secret::new(format!(
+            "sqlite://{}/lodestore.db?mode=rwc",
+            data_dir.display()
+        )),
         data_dir,
         unlock_key: Some(Secret::new(data_encoding::HEXLOWER.encode(&[7u8; 32]))),
         admin_password: Some(Secret::new(common::ADMIN_PASSWORD)),

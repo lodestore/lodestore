@@ -533,7 +533,7 @@ fn spec_json(policy: &BackupPolicy) -> Result<String, ApiError> {
     request_body = ApplyRequest,
     responses(
         (status = 200, description = "The plan; applied unless dry_run is set", body = ApplyResponse),
-        (status = 403, description = "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention or a more frequent cron", body = ErrorBody),
+        (status = 403, description = "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention or a more frequent cron. A session needs the password entered in the last 15 minutes for those changes (code step_up_required)", body = ErrorBody),
         (status = 409, description = "A policy to delete has jobs in progress, or policies changed while applying", body = ErrorBody),
         (status = 422, description = "Invalid input; nothing is applied", body = ApplyErrorBody),
     )
@@ -571,13 +571,13 @@ pub async fn apply_policies(
         hooks_policies,
     } = plan(&req, &manager, inputs, all_policies(&state).await?)?;
     if retention_changed {
-        auth.require_also(Scope::SnapshotsDelete, RETENTION_PURPOSE)?;
+        auth.require_also_or_step_up(Scope::SnapshotsDelete, RETENTION_PURPOSE)?;
     }
     if schedule_faster {
-        auth.require_also(Scope::SnapshotsDelete, SCHEDULE_PURPOSE)?;
+        auth.require_also_or_step_up(Scope::SnapshotsDelete, SCHEDULE_PURPOSE)?;
     }
     if !hooks_policies.is_empty() {
-        auth.require_also(Scope::HooksWrite, hooks_purpose(&hooks_policies))?;
+        auth.require_also_or_step_up(Scope::HooksWrite, hooks_purpose(&hooks_policies))?;
     }
     if !req.dry_run && !steps.is_empty() {
         execute(&state, &manager, steps).await?;

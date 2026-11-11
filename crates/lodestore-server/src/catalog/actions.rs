@@ -87,7 +87,7 @@ pub struct SetSuspiciousRequest {
     request_body = SetSuspiciousRequest,
     responses(
         (status = 200, description = "The snapshot with its new mark", body = SnapshotItem),
-        (status = 403, description = "The token needs the snapshots:delete scope", body = ErrorBody),
+        (status = 403, description = "The token needs the snapshots:delete scope; a session needs its password entered in the last 15 minutes (code step_up_required)", body = ErrorBody),
         (status = 404, description = "Unknown snapshot", body = ErrorBody),
         (status = 422, description = "The reason is empty or too long", body = ErrorBody),
     )
@@ -98,6 +98,7 @@ pub async fn set_suspicious(
     Path(id): Path<String>,
     Json(req): Json<SetSuspiciousRequest>,
 ) -> Result<Json<SnapshotItem>, ApiError> {
+    auth.require_step_up()?;
     let unknown = || ApiError::NotFound("snapshot not found".into());
     let reason = req.reason.trim();
     if reason.is_empty() || reason.chars().count() > REASON_MAX_CHARS {

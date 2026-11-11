@@ -16,3 +16,8 @@ The unlock key lives in the Secret {{ include "lodestore.secretName" . }}. Save 
   kubectl --namespace {{ .Release.Namespace }} get secret {{ include "lodestore.secretName" . }} -o jsonpath='{.data.unlock-key}' | base64 -d
 
 Without it the repository master secrets stored in the database cannot be opened.
+{{- if gt (int .Values.metrics.port) 0 }}
+
+Metrics are served by the Service {{ include "lodestore.fullname" . }}-metrics. With the network policy enabled, only the sources
+listed in networkPolicy.metricsFrom can reach that port.
+{{- end }}

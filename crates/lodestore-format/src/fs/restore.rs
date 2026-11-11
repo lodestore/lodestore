@@ -46,7 +46,8 @@ pub struct RestoreSettings {
     pub k_id: Key32,
     pub seed: u64,
     /// Give restored entries the owner of the snapshot. Off, the owner is
-    /// whoever creates them and nothing is reported about it.
+    /// whoever creates them and nothing is reported about it; ACLs and
+    /// `security.*`/`trusted.*` xattrs are skipped too.
     pub restore_owners: bool,
     /// With `restore_owners`, also keep setuid, setgid and file capabilities.
     /// Off, the owner is restored and those privileges are dropped.

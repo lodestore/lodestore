@@ -703,6 +703,95 @@ async fn gc_api_settings_scope() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_api_step_up_for_run_unlock_exclude_and_settings() {
+    for backend in backends() {
+        let what = backend.name();
+        let ts = server(&backend).await;
+        let repo = ts.create_local_repository("main").await;
+        let api = ts.api().await;
+        let strong = bearer_client(&ts.issue_token(&["snapshots:delete"]).await);
+        let base = format!("{}/api/v1/repositories/{repo}/gc", ts.rest_url());
+        let calls = [
+            ("POST", "/run".to_string()),
+            ("POST", "/unlock".to_string()),
+            ("POST", format!("/quarantine/{OPEN_ID}/exclude")),
+            ("PUT", "/settings".to_string()),
+        ];
+        let body_of = |path: &str| {
+            if path == "/settings" {
+                input(false)
+            } else {
+                json!({})
+            }
+        };
+        sqlx::query("UPDATE sessions SET authenticated_at = $1")
+            .bind(lodestore_server::db::now_ms() - 16 * 60_000)
+            .execute(&ts.state().db.pool)
+            .await
+            .unwrap();
+        let before = status(&api, &repo).await["settings"].clone();
+
+        for (method, path) in &calls {
+            let response = reqwest::Client::new()
+                .request(method.parse().unwrap(), format!("{base}{path}"))
+                .header("cookie", api.cookie())
+                .header("x-csrf-token", &api.csrf)
+                .json(&body_of(path))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 403, "{path} [{what}]");
+            let body: Value = response.json().await.unwrap();
+            assert_eq!(body["code"], "step_up_required", "{path} [{what}]");
+        }
+        assert_eq!(
+            status(&api, &repo).await["settings"],
+            before,
+            "[{what}] nothing changed"
+        );
+        let dry = api
+            .post(
+                &format!("/api/v1/repositories/{repo}/gc/dry-run"),
+                &json!({}),
+            )
+            .await;
+        assert_ne!(dry.status(), 403, "a dry run needs no step-up [{what}]");
+
+        for (method, path) in &calls {
+            let response = strong
+                .request(method.parse().unwrap(), format!("{base}{path}"))
+                .json(&body_of(path))
+                .send()
+                .await
+                .unwrap();
+            assert_ne!(response.status(), 403, "token {path} [{what}]");
+        }
+
+        let step = api
+            .post(
+                "/api/v1/auth/step-up",
+                &json!({ "password": common::ADMIN_PASSWORD }),
+            )
+            .await;
+        assert_eq!(step.status(), 204, "[{what}]");
+        let saved = put_settings(&ts, &api, &repo, &input(false)).await;
+        assert_eq!(saved.status(), 200, "[{what}]");
+        for (method, path) in &calls[..3] {
+            let response = reqwest::Client::new()
+                .request(method.parse().unwrap(), format!("{base}{path}"))
+                .header("cookie", api.cookie())
+                .header("x-csrf-token", &api.csrf)
+                .json(&json!({}))
+                .send()
+                .await
+                .unwrap();
+            assert_ne!(response.status(), 403, "after step-up {path} [{what}]");
+        }
+        ts.stop().await;
+    }
+}
+
 const SUMMARY: &str = r#"{"cycle_id":"c","dry_run":true,"finished_at":5,"duration_ms":10,"bytes_freed":4096,"packs_deleted":2,"packs_repacked":0,"repack_transfer_bytes":0,"locked_bytes":100,"locked_until":null,"locked_until_unknown":false}"#;
 
 async fn jobs(api: &Api, query: &str) -> Value {

@@ -6,7 +6,7 @@ use lodestore_policy::jiff::Timestamp;
 use serde_json::Value;
 use sqlx::Row;
 
-use super::model::{HostFacts, PairFacts, SnapshotFacts, overdue_limit};
+use super::model::{AlertFacts, AlertType, HostFacts, PairFacts, SnapshotFacts, overdue_limit};
 use crate::agent_update::reached;
 use crate::maintenance::check::CheckLevel;
 use crate::policies::matching::AgentRow;
@@ -20,6 +20,7 @@ pub struct Inputs {
     pub update_failures: Vec<UpdateFailure>,
     pub quarantines: Vec<Quarantine>,
     pub unavailable: Vec<UnavailableRepository>,
+    pub security: Vec<SecurityAlert>,
     pub unreadable_policies: Vec<String>,
 }
 
@@ -59,6 +60,15 @@ pub struct UnavailableRepository {
     pub repository_id: String,
     pub repository: String,
     pub error: String,
+}
+
+/// A recent security event of an agent session; `at_ms` is when it happened (or, after a restart, when its alert opened).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SecurityAlert {
+    pub host_id: String,
+    pub kind: AlertType,
+    pub at_ms: i64,
+    pub facts: AlertFacts,
 }
 
 struct Agent {
@@ -136,6 +146,7 @@ pub async fn gather(state: &AppState, now_ms: i64) -> anyhow::Result<Inputs> {
     let update_failures = update_failures(state).await?;
     let quarantines = quarantines(state).await?;
     let unavailable = unavailable_repositories(state).await?;
+    let security = security_alerts(state).await?;
     Ok(Inputs {
         hosts,
         server_cert,
@@ -143,8 +154,67 @@ pub async fn gather(state: &AppState, now_ms: i64) -> anyhow::Result<Inputs> {
         update_failures,
         quarantines,
         unavailable,
+        security,
         unreadable_policies,
     })
+}
+
+/// Events live in memory; the still-open alert rows keep a security alert across a restart until their own 24 hours are over.
+async fn security_alerts(state: &AppState) -> anyhow::Result<Vec<SecurityAlert>> {
+    let mut out = Vec::new();
+    for (host_id, events) in state.registry.security_events() {
+        if let Some(c) = events.conflict {
+            out.push(SecurityAlert {
+                host_id: host_id.clone(),
+                kind: AlertType::AgentSessionConflict,
+                at_ms: c.at_ms,
+                facts: AlertFacts {
+                    ip: c.ip.map(|ip| ip.to_string()),
+                    previous_ip: c.previous_ip.map(|ip| ip.to_string()),
+                    ..AlertFacts::default()
+                },
+            });
+        }
+        if let Some(r) = events.rejected {
+            out.push(SecurityAlert {
+                host_id,
+                kind: AlertType::AgentCertificateRejected,
+                at_ms: r.at_ms,
+                facts: AlertFacts {
+                    serial: Some(r.serial),
+                    ip: r.ip.map(|ip| ip.to_string()),
+                    ..AlertFacts::default()
+                },
+            });
+        }
+    }
+    let rows = sqlx::query(
+        "SELECT type, host_id, facts_json, started_at FROM alerts \
+         WHERE state = 'firing' AND host_id IS NOT NULL AND type IN ($1, $2)",
+    )
+    .bind(AlertType::AgentSessionConflict.as_str())
+    .bind(AlertType::AgentCertificateRejected.as_str())
+    .fetch_all(&state.db.pool)
+    .await
+    .context("reading the open security alerts")?;
+    for row in &rows {
+        let kind: String = row.try_get("type")?;
+        let host_id: String = row.try_get("host_id")?;
+        let Some(kind) = AlertType::parse(&kind) else {
+            continue;
+        };
+        if out.iter().any(|s| s.host_id == host_id && s.kind == kind) {
+            continue;
+        }
+        let facts: String = row.try_get("facts_json")?;
+        out.push(SecurityAlert {
+            host_id,
+            kind,
+            at_ms: row.try_get("started_at")?,
+            facts: serde_json::from_str(&facts).unwrap_or_default(),
+        });
+    }
+    Ok(out)
 }
 
 async fn quarantines(state: &AppState) -> anyhow::Result<Vec<Quarantine>> {

@@ -27,6 +27,7 @@ pub mod policies;
 pub mod repos;
 pub mod schedule;
 pub mod secrets;
+pub mod serve;
 pub mod state;
 pub mod system;
 
@@ -83,7 +84,7 @@ impl ServerHandle {
 
 pub async fn serve(config: Config, listeners: Listeners) -> anyhow::Result<ServerHandle> {
     std::fs::create_dir_all(&config.data_dir)?;
-    let db = Db::connect(&config.database_url).await?;
+    let db = Db::connect(config.database_url.expose()).await?;
     let sealer = Sealer::load(&db, &config).await?;
     let pki = Arc::new(Pki::load_or_create(&db, &sealer, &config).await?);
     if config.grpc_public_address_defaulted {
@@ -148,15 +149,7 @@ pub async fn serve(config: Config, listeners: Listeners) -> anyhow::Result<Serve
         router.merge(metrics::router(state.clone()))
     };
     let rest_stop = stop.clone();
-    let rest = tokio::spawn(async move {
-        axum::serve(
-            listeners.rest,
-            router.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(rest_stop.cancelled_owned())
-        .await?;
-        Ok(())
-    });
+    let rest = tokio::spawn(serve::serve_http(listeners.rest, router, rest_stop));
     let grpc = tokio::spawn(grpc::serve(state.clone(), listeners.grpc, stop.clone()));
     let janitor = tokio::spawn(auth::session_janitor(state.clone(), stop.clone()));
     let catalog = tokio::spawn(catalog::sync_loop(state.clone(), stop.clone()));
@@ -184,12 +177,11 @@ pub async fn serve(config: Config, listeners: Listeners) -> anyhow::Result<Serve
     if let Some(listener) = metrics_listener {
         let router = metrics::open_router(state.clone());
         let metrics_stop = stop.clone();
-        tasks.push(tokio::spawn(async move {
-            axum::serve(listener, router)
-                .with_graceful_shutdown(metrics_stop.cancelled_owned())
-                .await?;
-            Ok(())
-        }));
+        tasks.push(tokio::spawn(serve::serve_http(
+            listener,
+            router,
+            metrics_stop,
+        )));
     }
 
     tracing::info!(%rest_addr, %grpc_addr, ?metrics_addr, "lodestore server started");

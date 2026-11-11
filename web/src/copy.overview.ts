@@ -154,6 +154,10 @@ export const overview = {
 				`${plural(count, "snapshot")} in ${repository} cannot be read; cleanup is stopped`,
 			repositoryUnavailable: (repository: string) =>
 				`Repository ${repository} is unavailable`,
+			agentSessionConflict: (host: string) =>
+				`Two live agent sessions for ${host}`,
+			agentCertificateRejected: (host: string) =>
+				`Agent certificate refused for ${host}`,
 			expiresIn: (name: string, days: number) =>
 				`${name} expires in ${plural(days, "day")}`,
 			expired: (name: string) => `${name} has expired`,

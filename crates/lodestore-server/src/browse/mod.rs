@@ -391,7 +391,7 @@ pub struct DeletedSnapshot {
     params(("id" = String, Path, description = "Snapshot id")),
     responses(
         (status = 200, description = "The snapshot left the catalog; storage_kept tells whether the manifest is still in the bucket", body = DeletedSnapshot),
-        (status = 403, description = "The token needs the snapshots:delete scope", body = ErrorBody),
+        (status = 403, description = "The token needs the snapshots:delete scope; a session needs its password entered in the last 15 minutes (code step_up_required)", body = ErrorBody),
         (status = 404, description = "Unknown snapshot", body = ErrorBody),
         (status = 502, description = "The repository storage is unavailable", body = ErrorBody),
     )
@@ -401,6 +401,7 @@ async fn delete_snapshot(
     auth: Scoped<SnapshotsDelete>,
     Path(id): Path<String>,
 ) -> Result<Json<DeletedSnapshot>, ApiError> {
+    auth.require_step_up()?;
     let unknown = || ApiError::NotFound("snapshot not found".into());
     let id = hex32(&parse_hex32(&id).ok_or_else(unknown)?);
     let repository_id: String = sqlx::query("SELECT repository_id FROM snapshots WHERE id = $1")

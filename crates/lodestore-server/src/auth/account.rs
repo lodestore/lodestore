@@ -16,8 +16,10 @@ use utoipa_axum::routes;
 
 use super::limits::{GuardError, client_ip};
 use super::{
-    AuthUser, SESSION_COOKIE, check_password, hash_password, session_hash, verify_password,
+    AuthUser, MAX_SUBMITTED_PASSWORD_BYTES, SESSION_COOKIE, check_password, hash_password,
+    session_hash, session_password_failed, verify_password,
 };
+use crate::db::now_ms;
 use crate::error::{ApiError, ErrorBody};
 use crate::maintenance::gc::api::FieldError;
 use crate::state::AppState;
@@ -41,6 +43,16 @@ pub struct AccountInput {
 pub struct PasswordChange {
     pub current_password: String,
     pub new_password: String,
+    /// Also revokes every API token and expires every unused join token.
+    /// The server has a single administrator, so tokens are not tied to a
+    /// user id and all of them go.
+    #[serde(default)]
+    pub revoke_tokens: bool,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct StepUp {
+    pub password: String,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -171,7 +183,8 @@ async fn update_account(
     tag = "Account",
     operation_id = "change_password",
     summary = "Change the administrator's password",
-    description = "Every other session is signed out; the current one stays. A wrong current \
+    description = "Every other session is signed out; the current one stays. With `revoke_tokens`, \
+        every API token is revoked and every unused join token expires. A wrong current \
         password answers 422, not 401, so the interface does not take it for an expired session.",
     security(("session" = [], "csrf" = [])),
     path = "/api/v1/account/password",
@@ -181,6 +194,7 @@ async fn update_account(
         (status = 401, description = "Not signed in", body = ErrorBody),
         (status = 422, description = "`wrong_password` or `weak_password`", body = ErrorBody),
         (status = 429, description = "Too many attempts", body = ErrorBody),
+        (status = 503, description = "`busy`: too many password checks at once; retry after the `Retry-After` seconds", body = ErrorBody),
     )
 )]
 async fn change_password(
@@ -194,6 +208,9 @@ async fn change_password(
     if let Err(message) = check_password(&input.new_password) {
         return Err(AccountFailure::Rejected("weak_password", message));
     }
+    if input.current_password.len() > MAX_SUBMITTED_PASSWORD_BYTES {
+        return Err(AccountFailure::Rejected("wrong_password", WRONG_PASSWORD));
+    }
     let client = client_ip(&state.config, peer, &headers);
     state.auth.limits.check_login(client, &user.username)?;
 
@@ -204,22 +221,34 @@ async fn change_password(
         .map_err(ApiError::from)?;
     let current_hash: String = row.try_get("password_hash").map_err(ApiError::from)?;
     let current = input.current_password;
-    let correct = tokio::task::spawn_blocking(move || verify_password(&current, &current_hash))
+    let correct = match state
+        .auth
+        .argon
+        .run(move || verify_password(&current, &current_hash))
         .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
-    if !correct {
-        return Err(AccountFailure::Rejected("wrong_password", WRONG_PASSWORD));
-    }
-    state.auth.limits.login_succeeded(client, &user.username);
-
-    let new = input.new_password;
-    let new_hash = tokio::task::spawn_blocking(move || hash_password(&new))
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))??;
-    let keep = jar
+    {
+        Ok(correct) => correct,
+        Err(busy) => {
+            state.auth.limits.login_released(client, &user.username);
+            return Err(busy.into());
+        }
+    };
+    let session = jar
         .get(SESSION_COOKIE)
         .map(|cookie| session_hash(cookie.value()))
         .unwrap_or_default();
+    if !correct {
+        session_password_failed(&state, &session)
+            .await
+            .map_err(ApiError::from)?;
+        return Err(AccountFailure::Rejected("wrong_password", WRONG_PASSWORD));
+    }
+    state.auth.limits.login_succeeded(client, &user.username);
+    state.auth.limits.step_up_succeeded(&session);
+
+    let new = input.new_password;
+    let new_hash = state.auth.argon.run(move || hash_password(&new)).await??;
+    let keep = session;
     let mut tx = state.db.pool.begin().await.map_err(ApiError::from)?;
     sqlx::query("UPDATE admin_users SET password_hash = $1 WHERE id = $2")
         .bind(new_hash)
@@ -229,7 +258,28 @@ async fn change_password(
         .map_err(ApiError::from)?;
     sqlx::query("DELETE FROM sessions WHERE user_id = $1 AND id_hash <> $2")
         .bind(&user.user_id)
-        .bind(keep)
+        .bind(&keep)
+        .execute(&mut *tx)
+        .await
+        .map_err(ApiError::from)?;
+    let now = now_ms();
+    if input.revoke_tokens {
+        sqlx::query("UPDATE api_tokens SET revoked_at = $1 WHERE revoked_at IS NULL")
+            .bind(now)
+            .execute(&mut *tx)
+            .await
+            .map_err(ApiError::from)?;
+        sqlx::query(
+            "UPDATE join_tokens SET expires_at = $1 WHERE used_at IS NULL AND expires_at > $1",
+        )
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(ApiError::from)?;
+    }
+    sqlx::query("UPDATE sessions SET authenticated_at = $1 WHERE id_hash = $2")
+        .bind(now)
+        .bind(&keep)
         .execute(&mut *tx)
         .await
         .map_err(ApiError::from)?;
@@ -237,8 +287,90 @@ async fn change_password(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    post,
+    tag = "Auth",
+    operation_id = "step_up",
+    summary = "Enter the password again",
+    description = "A signed-in session must have entered its password within the last 15 \
+        minutes to create an API token or a join token; to start a restore that writes in \
+        place, restores owners or targets an agent without `restore_roots_v1`; to create, \
+        update or apply policies so that hooks or retention change or retention runs more \
+        often, or to change host labels so that a policy with hooks reaches the host; to \
+        delete a snapshot, mark it suspicious or clear the mark; to start a cleanup, close \
+        its backup markers, exclude a quarantined snapshot or save the cleanup settings; \
+        and to start or resume an agent update. Otherwise those requests answer `403` \
+        `step_up_required`. A cleanup dry run or abort, and pausing, cancelling or \
+        dismissing an agent update, do not need it. This opens that window. Five wrong \
+        passwords in a row end the session.",
+    security(("session" = [], "csrf" = [])),
+    path = "/api/v1/auth/step-up",
+    request_body = StepUp,
+    responses(
+        (status = 204, description = "The password was entered; the window is open"),
+        (status = 401, description = "Not signed in", body = ErrorBody),
+        (status = 403, description = "Missing or wrong CSRF token", body = ErrorBody),
+        (status = 422, description = "`wrong_password`", body = ErrorBody),
+        (status = 429, description = "Too many attempts", body = ErrorBody),
+        (status = 503, description = "`busy`: too many password checks at once; retry after the `Retry-After` seconds", body = ErrorBody),
+    )
+)]
+async fn step_up(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
+    user: AuthUser,
+    jar: CookieJar,
+    Json(input): Json<StepUp>,
+) -> Result<StatusCode, AccountFailure> {
+    if input.password.len() > MAX_SUBMITTED_PASSWORD_BYTES {
+        return Err(AccountFailure::Rejected("wrong_password", WRONG_PASSWORD));
+    }
+    let session = jar
+        .get(SESSION_COOKIE)
+        .map(|cookie| session_hash(cookie.value()))
+        .unwrap_or_default();
+    let client = client_ip(&state.config, peer, &headers);
+    state.auth.limits.check_login(client, &user.username)?;
+    let row = sqlx::query("SELECT password_hash FROM admin_users WHERE id = $1")
+        .bind(&user.user_id)
+        .fetch_one(&state.db.pool)
+        .await
+        .map_err(ApiError::from)?;
+    let hash: String = row.try_get("password_hash").map_err(ApiError::from)?;
+    let password = input.password;
+    let correct = match state
+        .auth
+        .argon
+        .run(move || verify_password(&password, &hash))
+        .await
+    {
+        Ok(correct) => correct,
+        Err(busy) => {
+            state.auth.limits.login_released(client, &user.username);
+            return Err(busy.into());
+        }
+    };
+    if !correct {
+        session_password_failed(&state, &session)
+            .await
+            .map_err(ApiError::from)?;
+        return Err(AccountFailure::Rejected("wrong_password", WRONG_PASSWORD));
+    }
+    state.auth.limits.login_succeeded(client, &user.username);
+    state.auth.limits.step_up_succeeded(&session);
+    sqlx::query("UPDATE sessions SET authenticated_at = $1 WHERE id_hash = $2")
+        .bind(now_ms())
+        .bind(&session)
+        .execute(&state.db.pool)
+        .await
+        .map_err(ApiError::from)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(get_account, update_account))
         .routes(routes!(change_password))
+        .routes(routes!(step_up))
 }

@@ -1,3 +1,4 @@
+use std::net::IpAddr;
 use std::pin::Pin;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -10,7 +11,7 @@ use lodestore_proto::agent::v1::{
     RenewRequest, RenewResponse, RestorePlanBatch, RestorePlanRequest, S3Credentials,
     ServerMessage, UpdateChunk, UpdateS3Credentials,
 };
-use lodestore_proto::{ERROR_REVOKED, ERROR_VERSION_UNSUPPORTED};
+use lodestore_proto::{ERROR_CERT_STALE, ERROR_REVOKED, ERROR_VERSION_UNSUPPORTED};
 use sqlx::Row;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt};
@@ -25,6 +26,9 @@ use crate::state::AppState;
 const SEEN_WRITE_INTERVAL: Duration = Duration::from_secs(30);
 const MAX_CAPABILITIES: usize = 16;
 const MAX_CAPABILITY_LEN: usize = 32;
+const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
+const PREV_CERT_GRACE_MS: i64 = 24 * 60 * 60 * 1000;
+const PREV_CERT_DRAIN_MS: i64 = 2 * 60 * 1000;
 
 pub struct AgentService {
     pub state: AppState,
@@ -38,6 +42,11 @@ fn revoked() -> Status {
     )
 }
 
+/// The certificate checked out but the row moved under the renew; the agent retries instead of reading it as a revoke.
+fn renew_lost_race() -> Status {
+    Status::aborted("the certificate changed while it was being renewed; try again")
+}
+
 fn peer_cert_serial<T>(request: &Request<T>) -> String {
     request
         .peer_certs()
@@ -49,17 +58,116 @@ fn peer_cert_serial<T>(request: &Request<T>) -> String {
         .unwrap_or_default()
 }
 
-async fn agent_status(state: &AppState, agent_id: &str) -> Result<(String, String), Status> {
-    let row = sqlx::query("SELECT repository_id, status FROM agents WHERE id = $1")
-        .bind(agent_id)
-        .fetch_optional(&state.db.pool)
-        .await
-        .map_err(internal)?
-        .ok_or_else(|| Status::unauthenticated("unknown agent"))?;
-    Ok((
-        row.try_get("repository_id").map_err(internal)?,
-        row.try_get("status").map_err(internal)?,
-    ))
+fn cert_stale() -> Status {
+    status_with(
+        Code::PermissionDenied,
+        "this agent certificate is not the one the server issued last; re-enroll the host with a new join token",
+        ERROR_CERT_STALE,
+    )
+}
+
+/// Who is calling: the agent behind the client certificate, after the serial check.
+struct Peer {
+    agent_id: String,
+    repository_id: String,
+    serial: String,
+    ip: Option<IpAddr>,
+    /// The certificate is the current one, not the previous one inside its grace window.
+    fresh: bool,
+}
+
+/// Every RPC of an agent passes here. The certificate must be the one the server issued last, or the one before it
+/// until two minutes after the first session with the newer one (at most 24 h): a renew whose answer was lost must not lock the agent out.
+async fn check_peer<T>(state: &AppState, request: &Request<T>) -> Result<Peer, Status> {
+    let agent_id = peer_agent_id(request)?;
+    let serial = peer_cert_serial(request);
+    let ip = request.remote_addr().map(|a| a.ip());
+    check_serial(state, agent_id, serial, ip).await
+}
+
+async fn check_serial(
+    state: &AppState,
+    agent_id: String,
+    serial: String,
+    ip: Option<IpAddr>,
+) -> Result<Peer, Status> {
+    let row = sqlx::query(
+        "SELECT repository_id, status, cert_serial, prev_cert_serial, prev_cert_until \
+         FROM agents WHERE id = $1",
+    )
+    .bind(&agent_id)
+    .fetch_optional(&state.db.pool)
+    .await
+    .map_err(internal)?;
+    let Some(row) = row else {
+        if state.registry.note_unknown_agent() {
+            tracing::warn!(
+                agent_id,
+                serial,
+                ?ip,
+                "refused a certificate of an agent the catalog does not know; repeats are not logged for ten minutes"
+            );
+        }
+        return Err(cert_stale());
+    };
+    let status: String = row.try_get("status").map_err(internal)?;
+    if status == "revoked" || state.registry.is_revoked(&agent_id) {
+        state.registry.revoke(&agent_id);
+        return Err(revoked());
+    }
+    let current: String = row.try_get("cert_serial").map_err(internal)?;
+    let previous: Option<String> = row.try_get("prev_cert_serial").map_err(internal)?;
+    let until: Option<i64> = row.try_get("prev_cert_until").map_err(internal)?;
+    let fresh = serial == current;
+    if !fresh && !in_previous_window(previous.as_deref(), until, &serial) {
+        if state.registry.note_cert_rejected(&agent_id, &serial, ip) {
+            tracing::warn!(
+                agent_id,
+                serial,
+                ?ip,
+                "refused an agent certificate that is not the current one; repeats are not logged for ten minutes"
+            );
+        }
+        return Err(cert_stale());
+    }
+    Ok(Peer {
+        agent_id,
+        repository_id: row.try_get("repository_id").map_err(internal)?,
+        serial,
+        ip,
+        fresh,
+    })
+}
+
+fn in_previous_window(previous: Option<&str>, until: Option<i64>, serial: &str) -> bool {
+    previous == Some(serial) && until.is_some_and(|t| now_ms() < t)
+}
+
+/// Whether a session opened with the previous certificate may go on. A failed lookup keeps it: the next heartbeat asks again.
+async fn session_certificate_valid(state: &AppState, agent_id: &str, serial: &str) -> bool {
+    let row = sqlx::query(
+        "SELECT cert_serial, prev_cert_serial, prev_cert_until FROM agents \
+         WHERE id = $1 AND status <> 'revoked'",
+    )
+    .bind(agent_id)
+    .fetch_optional(&state.db.pool)
+    .await;
+    let row = match row {
+        Ok(Some(row)) => row,
+        Ok(None) => return false,
+        Err(error) => {
+            tracing::warn!(%error, agent_id, "could not re-check the certificate of a live session");
+            return true;
+        }
+    };
+    let (Ok(current), Ok(previous), Ok(until)) = (
+        row.try_get::<String, _>("cert_serial"),
+        row.try_get::<Option<String>, _>("prev_cert_serial"),
+        row.try_get::<Option<i64>, _>("prev_cert_until"),
+    ) else {
+        return true;
+    };
+    current == serial || in_previous_window(previous.as_deref(), until, serial)
 }
 
 const MAX_MOUNTS: usize = 64;
@@ -160,11 +268,20 @@ impl Agent for AgentService {
         request: Request<Streaming<AgentMessage>>,
     ) -> Result<Response<Self::SessionStream>, Status> {
         let state = self.state.clone();
-        let agent_id = peer_agent_id(&request)?;
-        let cert_serial = peer_cert_serial(&request);
+        let peer = check_peer(&state, &request).await?;
+        let Peer {
+            agent_id,
+            repository_id,
+            serial: cert_serial,
+            ip: peer_ip,
+            fresh,
+        } = peer;
         let mut inbound = request.into_inner();
 
-        let hello = match inbound.message().await?.and_then(|m| m.body) {
+        let first = tokio::time::timeout(HELLO_TIMEOUT, inbound.message())
+            .await
+            .map_err(|_| Status::deadline_exceeded("no Hello within 10 seconds"))??;
+        let hello = match first.and_then(|m| m.body) {
             Some(AgentBody::Hello(hello)) => hello,
             _ => return Err(Status::invalid_argument("the first message must be Hello")),
         };
@@ -176,10 +293,19 @@ impl Agent for AgentService {
             )
         })?;
 
-        let (repository_id, status) = agent_status(&state, &agent_id).await?;
-        if status == "revoked" {
-            state.registry.revoke(&agent_id);
-            return Err(revoked());
+        if fresh {
+            // The first session with the new certificate shortens the previous one's window to a drain period,
+            // not to zero: an RPC that picked up the old channel just before the agent replaced it is still on its way.
+            sqlx::query(
+                "UPDATE agents SET prev_cert_until = $3 \
+                 WHERE id = $1 AND cert_serial = $2 AND prev_cert_serial IS NOT NULL AND prev_cert_until > $3",
+            )
+            .bind(&agent_id)
+            .bind(&cert_serial)
+            .bind(now_ms() + PREV_CERT_DRAIN_MS)
+            .execute(&state.db.pool)
+            .await
+            .map_err(internal)?;
         }
 
         let capabilities: Vec<String> = hello
@@ -202,7 +328,7 @@ impl Agent for AgentService {
                 "the server could not record the agent version; reconnect later",
             ));
         }
-        let mut guard = state.registry.register(&agent_id, &repository_id);
+        let mut guard = state.registry.register(&agent_id, &repository_id, peer_ip);
         let rx = guard.take_rx();
         state.registry.set_capabilities(&agent_id, capabilities);
         let cancel = guard.cancel.clone();
@@ -270,6 +396,18 @@ impl Agent for AgentService {
                         }
                         Ok(Some(AgentMessage { body: Some(AgentBody::Heartbeat(hb)) })) => {
                             state.registry.touch(&agent_id);
+                            if !fresh
+                                && !session_certificate_valid(&state, &agent_id, &cert_serial).await
+                                && !cancel.is_cancelled()
+                            {
+                                tracing::info!(agent_id = %agent_id, "the previous certificate's window ended; closing the session");
+                                state.registry.send(&agent_id, ServerMessage {
+                                    body: Some(ServerBody::Disconnect(Disconnect {
+                                        reason: DisconnectReason::Unspecified as i32,
+                                    })),
+                                });
+                                break;
+                            }
                             if last_write.is_none_or(|t| t.elapsed() >= SEEN_WRITE_INTERVAL) {
                                 write_seen(&state, &agent_id, Some(&hb)).await;
                                 last_write = Some(Instant::now());
@@ -295,7 +433,7 @@ impl Agent for AgentService {
         &self,
         request: Request<RestorePlanRequest>,
     ) -> Result<Response<Self::RestorePlanStream>, Status> {
-        let agent_id = peer_agent_id(&request)?;
+        let agent_id = check_peer(&self.state, &request).await?.agent_id;
         let job_id = request.into_inner().job_id;
         let stream = restore::restore_plan(&self.state, &agent_id, &job_id).await?;
         Ok(Response::new(Box::pin(stream)))
@@ -305,7 +443,7 @@ impl Agent for AgentService {
         &self,
         request: Request<RefreshPackAccessRequest>,
     ) -> Result<Response<RefreshPackAccessResponse>, Status> {
-        let agent_id = peer_agent_id(&request)?;
+        let agent_id = check_peer(&self.state, &request).await?.agent_id;
         let response =
             restore::refresh_pack_access(&self.state, &agent_id, request.into_inner()).await?;
         Ok(Response::new(response))
@@ -315,7 +453,11 @@ impl Agent for AgentService {
         &self,
         request: Request<ReadPackRangeRequest>,
     ) -> Result<Response<Self::ReadPackRangeStream>, Status> {
-        let agent_id = peer_agent_id(&request)?;
+        let peer = check_peer(&self.state, &request).await?;
+        self.state
+            .registry
+            .note_pack_read(&peer.agent_id, &peer.serial);
+        let agent_id = peer.agent_id;
         let stream = restore::read_pack_range(&self.state, &agent_id, request.into_inner()).await?;
         Ok(Response::new(Box::pin(stream)))
     }
@@ -324,7 +466,7 @@ impl Agent for AgentService {
         &self,
         request: Request<FetchAgentUpdateRequest>,
     ) -> Result<Response<Self::FetchAgentUpdateStream>, Status> {
-        let agent_id = peer_agent_id(&request)?;
+        let agent_id = check_peer(&self.state, &request).await?.agent_id;
         let stream =
             crate::agent_update::fetch::fetch(&self.state, &agent_id, request.into_inner()).await?;
         Ok(Response::new(Box::pin(stream)))
@@ -335,12 +477,8 @@ impl Agent for AgentService {
         request: Request<RenewRequest>,
     ) -> Result<Response<RenewResponse>, Status> {
         let state = &self.state;
-        let agent_id = peer_agent_id(&request)?;
-        let (_, status) = agent_status(state, &agent_id).await?;
-        if status == "revoked" || state.registry.is_revoked(&agent_id) {
-            state.registry.revoke(&agent_id);
-            return Err(revoked());
-        }
+        let peer = check_peer(state, &request).await?;
+        let (agent_id, ip) = (peer.agent_id, peer.ip);
         let lifetime_secs = state.config.agent_cert_lifetime_secs.max(1);
         let cert = state
             .pki
@@ -351,19 +489,31 @@ impl Agent for AgentService {
             )
             .map_err(|e| Status::invalid_argument(format!("{e:#}")))?;
         let issued_at = cert.expires_at - lifetime_secs;
+        // The previous serial is the caller's, not the stored one: a renew whose answer was lost comes again with
+        // the certificate that was current when it was sent, and the window stretches only while that is the current one.
+        let now = now_ms();
         let updated = sqlx::query(
-            "UPDATE agents SET cert_serial = $1, cert_issued_at = $2, cert_not_after = $3 \
-             WHERE id = $4 AND status <> 'revoked'",
+            "UPDATE agents SET cert_serial = $1, cert_issued_at = $2, cert_not_after = $3, \
+             prev_cert_serial = $5, \
+             prev_cert_until = CASE WHEN cert_serial = $5 THEN $6 ELSE prev_cert_until END \
+             WHERE id = $4 AND status <> 'revoked' \
+             AND (cert_serial = $5 OR (prev_cert_serial = $5 AND prev_cert_until > $7))",
         )
         .bind(&cert.serial_hex)
         .bind(issued_at * 1000)
         .bind(cert.expires_at * 1000)
         .bind(&agent_id)
+        .bind(&peer.serial)
+        .bind(now + PREV_CERT_GRACE_MS)
+        .bind(now)
         .execute(&state.db.pool)
         .await
         .map_err(internal)?;
         if updated.rows_affected() == 0 {
-            return Err(revoked());
+            return Err(match check_serial(state, agent_id, peer.serial, ip).await {
+                Err(status) => status,
+                Ok(_) => renew_lost_race(),
+            });
         }
         tracing::info!(agent_id = %agent_id, cert_serial = %cert.serial_hex, "agent certificate renewed");
         Ok(Response::new(RenewResponse {
@@ -376,7 +526,19 @@ impl Agent for AgentService {
 
 #[cfg(test)]
 mod tests {
-    use super::clip;
+    use super::{clip, renew_lost_race};
+
+    #[test]
+    fn a_renew_that_lost_a_race_is_retryable_not_a_revoke() {
+        let status = renew_lost_race();
+        assert_eq!(status.code(), tonic::Code::Aborted);
+        assert!(
+            status
+                .metadata()
+                .get(lodestore_proto::ERROR_METADATA_KEY)
+                .is_none()
+        );
+    }
 
     #[test]
     fn heartbeat_strings_are_bounded_on_a_char_boundary() {

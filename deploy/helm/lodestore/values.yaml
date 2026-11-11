@@ -32,4 +32,13 @@ extraVolumeMounts: []
 metrics:
   port: 0
 
+serviceAccount:
+  create: true
+  name: ""
+
+networkPolicy:
+  enabled: true
+  metricsFrom: []
+  egress: []
+
 resources: {}

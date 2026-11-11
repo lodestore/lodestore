@@ -61,6 +61,8 @@ To upgrade, remove the container and run the same command with the new version. 
 
 Back up the server database before you upgrade to 0.2: copy the volume while the container is stopped. The first start of 0.2 re-seals the stored secrets, and a 0.1 server cannot read them afterwards, so going back to 0.1 needs the copy.
 
+A database restored from a backup remembers the certificate serial of each agent as of the backup. An agent that renewed its certificate after the backup is refused with `certificate_stale` and raises the alert `agent_certificate_rejected`; it keeps retrying and comes back only when the host is enrolled again with `install.sh --force` and a new join token. See [Agent credentials](/docs/security/threat-model/#agent-credentials).
+
 ## The unlock key
 
 Without `LODESTORE_UNLOCK_KEY_FILE` (or `LODESTORE_UNLOCK_KEY`) the server creates a key at `unlock.key` in its data directory and logs a warning. That works for a trial. A key that sits next to the database it protects is lost together with the volume, and a backup of the volume then holds both.

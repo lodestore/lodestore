@@ -79,6 +79,10 @@ function titleOf(alert: AlertDto, now: number) {
 			return { build: titles.offline, link: hostLink };
 		case "agent_update_failed":
 			return { build: titles.agentUpdateFailed, link: hostLink };
+		case "agent_session_conflict":
+			return { build: titles.agentSessionConflict, link: hostLink };
+		case "agent_certificate_rejected":
+			return { build: titles.agentCertificateRejected, link: hostLink };
 		case "check_failed": {
 			const level = alert.check_level ?? "";
 			const name =

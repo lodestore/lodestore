@@ -179,8 +179,8 @@ async fn jobs_api_detail_fields() {
         let idle = enroll(&ts, &api, &repo, "host-idle").await;
         let away = enroll(&ts, &api, &repo, "host-away").await;
         let registry = &ts.state().registry;
-        let _busy_session = registry.register(&busy, &repo);
-        let _idle_session = registry.register(&idle, &repo);
+        let _busy_session = registry.register(&busy, &repo, None);
+        let _idle_session = registry.register(&idle, &repo, None);
 
         let running = insert_job(
             &ts,

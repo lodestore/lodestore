@@ -21,7 +21,8 @@ trusted_proxies: [10.0.0.0/8]
 - When a request arrives over plain HTTP, the UI shows a warning banner.
 - The session cookie gets the `Secure` flag when `public_url` starts with `https://`.
 - Any ordinary reverse proxy works: nginx `proxy_pass`, Caddy, Traefik, a Kubernetes Ingress. Browser requests that change data are accepted when their `Origin` is the `public_url` origin or the host the request was addressed to, so the proxy does not have to pass the original `Host`.
-- Sign-in attempts are limited per client address and username, and only failed attempts count. IPv6 clients are grouped by their /64 prefix. By default the client address is the address of the TCP connection, so behind a proxy all clients share the proxy's address and its limit.
+- Sign-in attempts are limited per client address and username, and only failed attempts count. IPv6 clients are grouped by their /56 prefix. A user also has a limit of 60 failed attempts an hour, which does not apply to an address the user has signed in from before. By default the client address is the address of the TCP connection, so behind a proxy all clients share the proxy's address and its limits, and the limit for a user name does not hold: set `trusted_proxies`.
+- When too many passwords are being hashed at once, sign-in, creating the administrator, changing the password and entering the password again answer `503` `busy` with `Retry-After`, and the attempt is not counted. A proxy should pass that answer on and not retry it in a loop.
 - Set `trusted_proxies` (also `LODESTORE_TRUSTED_PROXIES`, comma separated) to the addresses or CIDR ranges of your reverse proxies. For connections from those addresses only, the server takes the client address from `X-Forwarded-For` (the closest entry that is not itself a trusted proxy). The proxy must set or append that header itself; never list a network that untrusted clients can connect from.
 
 ## gRPC: layer 4 or TLS passthrough
@@ -35,6 +36,13 @@ Use one of:
 - a Kubernetes `Service` of type `LoadBalancer` or `NodePort` pointing at the gRPC port (the Helm chart creates `<release>-grpc` for this)
 
 Agents keep one long-lived stream open and send HTTP/2 keepalive pings every 20 seconds. If you put a TCP proxy in between, set its idle timeout above 60 seconds so the stream is not cut.
+
+The server sees the address of whoever opens the TCP connection. Behind a layer 4 balancer that replaces it (SNAT, or passthrough without the original address), that is the address of the balancer or the node, so the alert `agent_session_conflict`, which compares the addresses of two live sessions of one agent, does not fire on a clone from another network; it still fires on five replacements of a live session within ten minutes. An agent whose traffic leaves through a pool of addresses can raise it without a clone. See [Alerts and notifications](/docs/guides/alerts/#alert-types).
+
+### Timeouts and limits
+
+- REST and the metrics port close a connection that has not sent a complete request head within 10 seconds, which includes a keep-alive connection that stays idle between two requests. Bodies and responses are not timed. A reverse proxy that keeps connections to the server open for reuse will find them closed after 10 idle seconds; set its upstream keep-alive timeout below that.
+- gRPC: the TLS handshake must finish within 10 seconds, a connection carries at most 32 streams at once, and the server accepts at most 4096 connections, at most 1024 of them from one client address (an IPv6 address counts by its /56); the next ones are closed at once. Agents behind one NAT address share those 1024. An agent that opens a session and sends no `Hello` within 10 seconds is disconnected.
 
 ### Addresses and certificate names
 

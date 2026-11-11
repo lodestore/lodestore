@@ -1,5 +1,6 @@
 import { type QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createRootRouteWithContext, Outlet } from "@tanstack/react-router";
+import { StepUpDialog } from "@/components/step-up-dialog";
 import { ThemeProvider } from "@/components/theme/theme-provider";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -17,6 +18,7 @@ function RootLayout() {
 			<ThemeProvider>
 				<TooltipProvider>
 					<Outlet />
+					<StepUpDialog />
 					<Toaster
 						position="bottom-right"
 						duration={4000}

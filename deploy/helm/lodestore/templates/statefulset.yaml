@@ -20,17 +20,22 @@ spec:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
       {{- end }}
     spec:
+      serviceAccountName: {{ include "lodestore.serviceAccountName" . }}
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
         runAsGroup: 65532
         fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: lodestore
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
           ports:
@@ -78,6 +83,8 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/lodestore
+            - name: tmp
+              mountPath: /tmp
             - name: secret
               mountPath: /etc/lodestore/secret
               readOnly: true
@@ -96,6 +103,9 @@ spec:
             {{- toYaml . | nindent 12 }}
             {{- end }}
       volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
         - name: secret
           secret:
             secretName: {{ include "lodestore.secretName" . }}

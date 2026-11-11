@@ -453,6 +453,7 @@ pub async fn start_dry_run(
     params(("id" = String, Path, description = "Repository id")),
     responses(
         (status = 202, description = "The cleanup started; follow it in the cleanup status", body = GcStarted),
+        (status = 403, description = "The token needs the snapshots:delete scope; a session needs its password entered in the last 15 minutes (code step_up_required)", body = ErrorBody),
         (status = 404, description = "Unknown repository", body = ErrorBody),
         (status = 409, description = "Cleanup is off, a cycle is running, or a safety check failed", body = GcPreflightError),
     )
@@ -462,6 +463,7 @@ pub async fn start_run(
     auth: Scoped<SnapshotsDelete>,
     Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<GcStarted>), GcFailure> {
+    auth.require_step_up()?;
     let cycle_id = start_real_cycle(&state, &id, GcOrigin::Manual, &auth.actor()).await?;
     Ok((StatusCode::ACCEPTED, Json(GcStarted { cycle_id })))
 }
@@ -513,6 +515,7 @@ pub async fn abort(
     params(("id" = String, Path, description = "Repository id")),
     responses(
         (status = 200, description = "The markers were closed", body = GcUnlocked),
+        (status = 403, description = "The token needs the snapshots:delete scope; a session needs its password entered in the last 15 minutes (code step_up_required)", body = ErrorBody),
         (status = 404, description = "Unknown repository", body = ErrorBody),
         (status = 409, description = "No cleanup is waiting on markers", body = ErrorBody),
     )
@@ -522,6 +525,7 @@ pub async fn unlock(
     auth: Scoped<SnapshotsDelete>,
     Path(id): Path<String>,
 ) -> Result<Json<GcUnlocked>, ApiError> {
+    auth.require_step_up()?;
     repository(&state, &id).await?;
     let none = || ApiError::Conflict("There are no markers to unlock.".into());
     let cycle = db::active_cycle_of(&state, &id, false)
@@ -561,6 +565,7 @@ pub async fn unlock(
     ),
     responses(
         (status = 200, description = "The snapshot is excluded", body = GcStatus),
+        (status = 403, description = "The token needs the snapshots:delete scope; a session needs its password entered in the last 15 minutes (code step_up_required)", body = ErrorBody),
         (status = 404, description = "Unknown repository, or no such snapshot in quarantine", body = ErrorBody),
         (status = 409, description = "The snapshot belongs to a backup job, or is already excluded", body = ErrorBody),
     )
@@ -570,6 +575,7 @@ pub async fn exclude(
     auth: Scoped<SnapshotsDelete>,
     Path((id, snapshot_id)): Path<(String, String)>,
 ) -> Result<Json<GcStatus>, ApiError> {
+    auth.require_step_up()?;
     let repo = repository(&state, &id).await?;
     let missing = || ApiError::NotFound("There is no such snapshot in quarantine.".into());
     let snapshot = parse_hex32(&snapshot_id).ok_or_else(missing)?;
@@ -712,6 +718,7 @@ impl IntoResponse for GcFailure {
     request_body = GcSettingsInput,
     responses(
         (status = 200, description = "Saved", body = GcStatus),
+        (status = 403, description = "The token needs the snapshots:delete scope; a session needs its password entered in the last 15 minutes (code step_up_required)", body = ErrorBody),
         (status = 404, description = "Unknown repository", body = ErrorBody),
         (status = 409, description = "Cleanup can't be turned on yet; nothing was saved", body = GcPreflightError),
         (status = 422, description = "A field is not valid", body = GcSettingsErrors),
@@ -719,10 +726,11 @@ impl IntoResponse for GcFailure {
 )]
 pub async fn put_settings(
     State(state): State<AppState>,
-    _auth: Scoped<SnapshotsDelete>,
+    auth: Scoped<SnapshotsDelete>,
     Path(id): Path<String>,
     Json(input): Json<GcSettingsInput>,
 ) -> Result<Json<GcStatus>, GcFailure> {
+    auth.require_step_up()?;
     let repo = repository(&state, &id).await?;
     let saved = db::load_settings(&state, &id).await?;
     let floor = if !input.enabled && parse_duration(input.pause.trim()) == Some(saved.pause) {

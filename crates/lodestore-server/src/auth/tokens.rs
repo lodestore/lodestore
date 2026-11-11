@@ -170,6 +170,28 @@ impl<S: ScopeName> Scoped<S> {
         }
     }
 
+    /// A token needs `scope`; a session needs the password entered in the
+    /// last 15 minutes. Use it where a session would otherwise pass unchecked.
+    pub fn require_also_or_step_up(
+        &self,
+        scope: Scope,
+        purpose: impl Into<Cow<'static, str>>,
+    ) -> Result<(), ApiError> {
+        match &self.0 {
+            Principal::Session(user) => super::require_recent_password(user),
+            Principal::Token { .. } => self.require_also(scope, purpose),
+        }
+    }
+
+    /// A session needs the password entered in the last 15 minutes; a token
+    /// is held to its scope alone.
+    pub fn require_step_up(&self) -> Result<(), ApiError> {
+        match &self.0 {
+            Principal::Session(user) => super::require_recent_password(user),
+            Principal::Token { .. } => Ok(()),
+        }
+    }
+
     pub fn actor(&self) -> String {
         match &self.0 {
             Principal::Session(user) => user.username.clone(),
@@ -338,6 +360,7 @@ async fn list_tokens(
     request_body = NewToken,
     responses(
         (status = 201, description = "The token; its secret is shown only in this response", body = CreatedToken),
+        (status = 403, description = "`step_up_required`: the password was not entered in the last 15 minutes", body = ErrorBody),
         (status = 422, description = "Invalid name, scopes or expiry", body = ErrorBody),
     )
 )]
@@ -346,6 +369,7 @@ async fn create_token(
     user: AuthUser,
     Json(input): Json<NewToken>,
 ) -> Result<(StatusCode, Json<CreatedToken>), ApiError> {
+    super::require_recent_password(&user)?;
     let name = input.name.trim().to_owned();
     if name.is_empty() || name.chars().count() > MAX_NAME_CHARS {
         return Err(ApiError::Validation("Enter a name for the token.".into()));

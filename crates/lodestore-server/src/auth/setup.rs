@@ -115,6 +115,7 @@ async fn verify(
         (status = 409, description = "An administrator already exists", body = ErrorBody),
         (status = 422, description = "Invalid username or password", body = ErrorBody),
         (status = 429, description = "Too many attempts", body = ErrorBody),
+        (status = 503, description = "`busy`: too many password checks at once; retry after the `Retry-After` seconds", body = ErrorBody),
     )
 )]
 async fn create_admin(
@@ -136,9 +137,13 @@ async fn create_admin(
     check_password(&req.password).map_err(|m| ApiError::Validation(m.into()))?;
 
     let password = req.password;
-    let hash = tokio::task::spawn_blocking(move || hash_password(&password))
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))??;
+    let hash = match state.auth.argon.run(move || hash_password(&password)).await {
+        Ok(hash) => hash?,
+        Err(busy) => {
+            state.auth.limits.setup_released(client);
+            return Err(busy);
+        }
+    };
     if !state.auth.setup.take(&req.token) {
         return Err(ApiError::NotFound("the setup link is invalid or already used".into()).into());
     }

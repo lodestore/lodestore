@@ -108,7 +108,7 @@
           "Account"
         ],
         "summary": "Change the administrator's password",
-        "description": "Every other session is signed out; the current one stays. A wrong current password answers 422, not 401, so the interface does not take it for an expired session.",
+        "description": "Every other session is signed out; the current one stays. With `revoke_tokens`, every API token is revoked and every unused join token expires. A wrong current password answers 422, not 401, so the interface does not take it for an expired session.",
         "operationId": "change_password",
         "requestBody": {
           "content": {
@@ -146,6 +146,16 @@
           },
           "429": {
             "description": "Too many attempts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`busy`: too many password checks at once; retry after the `Retry-After` seconds",
             "content": {
               "application/json": {
                 "schema": {
@@ -267,6 +277,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/RolloutStarted"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token lacks agents:update, or the session has not entered its password in the last 15 minutes (code step_up_required)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -498,6 +518,16 @@
         "responses": {
           "204": {
             "description": "The update continues"
+          },
+          "403": {
+            "description": "The token lacks agents:update, or the session has not entered its password in the last 15 minutes (code step_up_required)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           },
           "404": {
             "description": "Unknown update",
@@ -739,6 +769,16 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "`busy`: too many password checks at once; retry after the `Retry-After` seconds",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -805,6 +845,87 @@
             }
           }
         }
+      }
+    },
+    "/api/v1/auth/step-up": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Enter the password again",
+        "description": "A signed-in session must have entered its password within the last 15 minutes to create an API token or a join token; to start a restore that writes in place, restores owners or targets an agent without `restore_roots_v1`; to create, update or apply policies so that hooks or retention change or retention runs more often, or to change host labels so that a policy with hooks reaches the host; to delete a snapshot, mark it suspicious or clear the mark; to start a cleanup, close its backup markers, exclude a quarantined snapshot or save the cleanup settings; and to start or resume an agent update. Otherwise those requests answer `403` `step_up_required`. A cleanup dry run or abort, and pausing, cancelling or dismissing an agent update, do not need it. This opens that window. Five wrong passwords in a row end the session.",
+        "operationId": "step_up",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StepUp"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "The password was entered; the window is open"
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing or wrong CSRF token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`wrong_password`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many attempts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`busy`: too many password checks at once; retry after the `Retry-After` seconds",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
       }
     },
     "/api/v1/catalog": {
@@ -1552,7 +1673,7 @@
             }
           },
           "403": {
-            "description": "The token lacks hooks:write and the new labels make a policy with hooks reach this host",
+            "description": "The token lacks hooks:write, or the session has not entered its password in the last 15 minutes (code step_up_required), and the new labels make a policy with hooks reach this host",
             "content": {
               "application/json": {
                 "schema": {
@@ -2402,6 +2523,16 @@
               }
             }
           },
+          "403": {
+            "description": "`step_up_required`: the password was not entered in the last 15 minutes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "404": {
             "description": "Unknown repository",
             "content": {
@@ -2993,7 +3124,7 @@
             }
           },
           "403": {
-            "description": "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention or a more frequent cron",
+            "description": "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention or a more frequent cron. A session needs the password entered in the last 15 minutes for those changes (code step_up_required)",
             "content": {
               "application/json": {
                 "schema": {
@@ -3065,7 +3196,7 @@
             }
           },
           "403": {
-            "description": "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention or a more frequent cron",
+            "description": "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention or a more frequent cron. A session needs the password entered in the last 15 minutes for those changes (code step_up_required)",
             "content": {
               "application/json": {
                 "schema": {
@@ -3240,7 +3371,7 @@
             }
           },
           "403": {
-            "description": "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention or a more frequent cron",
+            "description": "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention or a more frequent cron. A session needs the password entered in the last 15 minutes for those changes (code step_up_required)",
             "content": {
               "application/json": {
                 "schema": {
@@ -4838,6 +4969,16 @@
               }
             }
           },
+          "403": {
+            "description": "The token needs the snapshots:delete scope; a session needs its password entered in the last 15 minutes (code step_up_required)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "404": {
             "description": "Unknown repository, or no such snapshot in quarantine",
             "content": {
@@ -4898,6 +5039,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/GcStarted"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token needs the snapshots:delete scope; a session needs its password entered in the last 15 minutes (code step_up_required)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -4972,6 +5123,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/GcStatus"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token needs the snapshots:delete scope; a session needs its password entered in the last 15 minutes (code step_up_required)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -5109,6 +5270,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/GcUnlocked"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token needs the snapshots:delete scope; a session needs its password entered in the last 15 minutes (code step_up_required)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -5302,7 +5473,7 @@
             }
           },
           "403": {
-            "description": "The token lacks `restore:host` for a new folder, or `restore:in-place` for a restore in place or with `restore_owners`",
+            "description": "The token lacks `restore:host` for a new folder, or `restore:in-place` for a restore in place or with `restore_owners`; or `step_up_required`: a session restores in place, with `restore_owners`, or to an agent that does not check restore folders, and the password was not entered in the last 15 minutes",
             "content": {
               "application/json": {
                 "schema": {
@@ -5475,6 +5646,16 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "`busy`: too many password checks at once; retry after the `Retry-After` seconds",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -5609,7 +5790,7 @@
             }
           },
           "403": {
-            "description": "The token needs the snapshots:delete scope",
+            "description": "The token needs the snapshots:delete scope; a session needs its password entered in the last 15 minutes (code step_up_required)",
             "content": {
               "application/json": {
                 "schema": {
@@ -6018,7 +6199,7 @@
             }
           },
           "403": {
-            "description": "The token needs the snapshots:delete scope",
+            "description": "The token needs the snapshots:delete scope; a session needs its password entered in the last 15 minutes (code step_up_required)",
             "content": {
               "application/json": {
                 "schema": {
@@ -6137,6 +6318,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/CreatedToken"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`step_up_required`: the password was not entered in the last 15 minutes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -6517,6 +6708,12 @@
             "format": "int64",
             "minimum": 0
           },
+          "ip": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "last_seen_at": {
             "type": [
               "integer",
@@ -6545,6 +6742,18 @@
               "null"
             ],
             "format": "int64"
+          },
+          "previous_ip": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "serial": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -6635,7 +6844,9 @@
           "certificate_expiring",
           "agent_update_failed",
           "snapshot_quarantined",
-          "repository_unavailable"
+          "repository_unavailable",
+          "agent_session_conflict",
+          "agent_certificate_rejected"
         ]
       },
       "Alerts": {
@@ -11257,6 +11468,10 @@
           },
           "new_password": {
             "type": "string"
+          },
+          "revoke_tokens": {
+            "type": "boolean",
+            "description": "Also revokes every API token and expires every unused join token.\nThe server has a single administrator, so tokens are not tied to a\nuser id and all of them go."
           }
         }
       },
@@ -13280,6 +13495,17 @@
               "null"
             ],
             "description": "Update every outdated host that can be updated."
+          }
+        }
+      },
+      "StepUp": {
+        "type": "object",
+        "required": [
+          "password"
+        ],
+        "properties": {
+          "password": {
+            "type": "string"
           }
         }
       },
