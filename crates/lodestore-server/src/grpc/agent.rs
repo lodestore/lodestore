@@ -65,6 +65,7 @@ struct Peer {
     agent_id: String,
     repository_id: String,
     serial: String,
+    ip: Option<IpAddr>,
     /// The certificate is the current one, not the previous one inside its grace window.
     fresh: bool,
 }
@@ -129,6 +130,7 @@ async fn check_serial(
         agent_id,
         repository_id: row.try_get("repository_id").map_err(internal)?,
         serial,
+        ip,
         fresh,
     })
 }
@@ -236,9 +238,9 @@ impl Agent for AgentService {
             agent_id,
             repository_id,
             serial: cert_serial,
+            ip: peer_ip,
             fresh,
         } = peer;
-        let peer_ip = request.remote_addr().map(|a| a.ip());
         let mut inbound = request.into_inner();
 
         let first = tokio::time::timeout(HELLO_TIMEOUT, inbound.message())
@@ -423,7 +425,7 @@ impl Agent for AgentService {
     ) -> Result<Response<RenewResponse>, Status> {
         let state = &self.state;
         let peer = check_peer(state, &request).await?;
-        let (agent_id, ip) = (peer.agent_id, request.remote_addr().map(|a| a.ip()));
+        let (agent_id, ip) = (peer.agent_id, peer.ip);
         let lifetime_secs = state.config.agent_cert_lifetime_secs.max(1);
         let cert = state
             .pki
