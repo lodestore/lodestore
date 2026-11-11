@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 0496ebd75c07f7cd1499e74ed5c9bb038f1fc97267718c3b850b2002dec8a36c # shrinks to Case { seed: 3781763187306866445, backups: [([3, 1], true), ([4], false), ([3, 3, 2], true), ([4, 2, 1], false)], plants: [Chain(15, 3), DanglingPack(1), DanglingSupersedes(3)], mid: Some(Mid { placement: 0, resurrect: false, pool: [3, 2] }) }
+cc d4073f03fa6bef3c80fd1f6a9ac620a57df1ed907ebe1b5be64e27a41fc7b821 # shrinks to Case { seed: 6610982925919069013, backups: [([1, 3, 3], false), ([2, 2], true)], plants: [Chain(3, 7), DanglingSupersedes(11), DanglingPack(9)], mid: Some(Mid { placement: 3, resurrect: false, pool: [4, 2] }) }

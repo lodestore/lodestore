@@ -6,8 +6,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::sync::Mutex;
 
+use adv_support::{attacker_keys, forge_offsets, open_all_shards, plant_shard, plant_shard_where};
 use bytes::Bytes;
 use gc_support::{Cycle, Fx};
+use lodestore_format::crypto::BlobId;
+use lodestore_format::pack::pack_object_key;
+use lodestore_format::pb;
 use lodestore_format::store::{
     BlobDelete, BlobError, BlobPurge, BlobStore, ListEntry, LocalFsStore, PurgeOutcome,
 };
@@ -137,11 +141,51 @@ async fn backup_of(fx: &Hfx, label: &str, seeds: &BTreeSet<u8>) -> BackupOutcome
     fx.backup(label, &files).await
 }
 
+/// What a host with writer keys puts into `index/`; the numbers pick records
+/// and shards of the real index. A real `supersedes` cycle cannot be written:
+/// a shard is named by the hash of its bytes, so it cannot name one that
+/// names it back.
+#[derive(Debug, Clone)]
+enum Plant {
+    /// The records of one pack, every blob one byte off its frame.
+    Forge(usize),
+    /// The forged records of a real shard, superseding it.
+    Supersede(usize),
+    /// A forged shard superseding a real one, and a second one superseding it.
+    Chain(usize, usize),
+    /// Forged records superseding a shard that does not exist.
+    DanglingSupersedes(usize),
+    /// A record that names a pack that is not in the bucket.
+    DanglingPack(usize),
+}
+
+/// A backup that opens and commits while the cycle runs.
+#[derive(Debug, Clone)]
+struct Mid {
+    placement: usize,
+    resurrect: bool,
+    pool: Vec<u8>,
+}
+
+/// Where a backup opens and commits: the number of GC steps already done. One
+/// opened before the manifest is published must commit before the verification.
+fn placements() -> Vec<(usize, usize)> {
+    let (published, verified) = (2, 2);
+    (0..=GC_STEPS)
+        .flat_map(|open| (open..=GC_STEPS).map(move |commit| (open, commit)))
+        .filter(|(open, commit)| *open >= published || *commit <= verified)
+        .collect()
+}
+
+const GC_STEPS: usize = 5;
+
 #[derive(Debug, Clone)]
 struct Case {
     seed: u64,
     /// Content from the shared pool of each backup, and whether it is forgotten.
     backups: Vec<(Vec<u8>, bool)>,
+    plants: Vec<Plant>,
+    mid: Option<Mid>,
 }
 
 impl Case {
@@ -157,15 +201,107 @@ impl Case {
     }
 }
 
+fn plant_strategy() -> impl Strategy<Value = Plant> {
+    prop_oneof![
+        (0..16usize).prop_map(Plant::Forge),
+        (0..16usize).prop_map(Plant::Supersede),
+        (0..16usize, 0..16usize).prop_map(|(i, j)| Plant::Chain(i, j)),
+        (0..16usize).prop_map(Plant::DanglingSupersedes),
+        (0..16usize).prop_map(Plant::DanglingPack),
+    ]
+}
+
 fn case_strategy() -> impl Strategy<Value = Case> {
+    let mid = prop::option::weighted(
+        0.5,
+        (
+            0..placements().len(),
+            any::<bool>(),
+            prop::collection::vec(1u8..=4, 0..=2),
+        )
+            .prop_map(|(placement, resurrect, pool)| Mid {
+                placement,
+                resurrect,
+                pool,
+            }),
+    );
     (
         any::<u64>(),
         prop::collection::vec(
             (prop::collection::vec(1u8..=4, 1..=3), any::<bool>()),
             2..=4,
         ),
+        prop::collection::vec(plant_strategy(), 0..=3),
+        mid,
     )
-        .prop_map(|(seed, backups)| Case { seed, backups })
+        .prop_map(|(seed, backups, plants, mid)| Case {
+            seed,
+            backups,
+            plants,
+            mid,
+        })
+}
+
+fn fake_id(seed: u64, n: u64) -> BlobId {
+    ChaCha20Rng::seed_from_u64(seed ^ (n << 56)).random()
+}
+
+/// Puts the shards into the bucket with the keys of a writer. Returns how many
+/// shards were planted, the pack objects their records name, and those among
+/// them that do not exist.
+async fn plant(fx: &Hfx, case: &Case) -> (u64, BTreeSet<String>, BTreeSet<String>) {
+    let keys = attacker_keys(&fx.repo);
+    let mut real = open_all_shards(&fx.store, &keys).await;
+    real.sort_by_key(|(id, _)| *id);
+    let records: Vec<pb::PackRecord> = real.iter().flat_map(|(_, s)| s.packs.clone()).collect();
+    let (mut shards, mut named, mut missing) = (0, BTreeSet::new(), BTreeSet::new());
+    let mut name = |record: &pb::PackRecord| {
+        named.insert(pack_object_key(
+            &record.pack_id.as_slice().try_into().unwrap(),
+        ));
+    };
+    for (n, p) in case.plants.iter().enumerate() {
+        let rec = |i: &usize| records[i % records.len()].clone();
+        let n = n as u64;
+        match p {
+            Plant::Forge(i) => {
+                name(&rec(i));
+                plant_shard(&fx.store, &keys, vec![forge_offsets(&rec(i))], vec![]).await;
+                shards += 1;
+            }
+            Plant::Supersede(i) => {
+                let (id, shard) = &real[i % real.len()];
+                shard.packs.iter().for_each(&mut name);
+                let forged = shard.packs.iter().map(forge_offsets).collect();
+                plant_shard(&fx.store, &keys, forged, vec![*id]).await;
+                shards += 1;
+            }
+            Plant::Chain(i, j) => {
+                name(&rec(i));
+                name(&rec(j));
+                let under = real[i % real.len()].0;
+                let first =
+                    plant_shard(&fx.store, &keys, vec![forge_offsets(&rec(i))], vec![under]).await;
+                plant_shard(&fx.store, &keys, vec![forge_offsets(&rec(j))], vec![first]).await;
+                shards += 2;
+            }
+            Plant::DanglingSupersedes(i) => {
+                name(&rec(i));
+                let ghost = fake_id(case.seed, n);
+                plant_shard(&fx.store, &keys, vec![forge_offsets(&rec(i))], vec![ghost]).await;
+                shards += 1;
+            }
+            Plant::DanglingPack(i) => {
+                let ghost = fake_id(case.seed, n);
+                let mut record = rec(i);
+                record.pack_id = ghost.to_vec();
+                missing.insert(pack_object_key(&ghost));
+                plant_shard(&fx.store, &keys, vec![record], vec![]).await;
+                shards += 1;
+            }
+        }
+    }
+    (shards, named, missing)
 }
 
 #[derive(Default)]
@@ -218,15 +354,48 @@ async fn run_case(case: &Case, tally: &Tally) -> Result<(), TestCaseError> {
         before.insert(*id, bytes_under(&fx.store.take_reads(), "packs/"));
     }
 
+    let (planted, named, missing) = plant(&fx, case).await;
     let start = keys(&fx.packs().await);
+    let mid = case.mid.as_ref().map(|m| {
+        let mut seeds: BTreeSet<u8> = m.pool.iter().copied().collect();
+        seeds.insert(200);
+        if m.resurrect {
+            let first = forgotten.iter().position(|f| *f).unwrap();
+            seeds.insert(unique_seed(first));
+        }
+        let owned = make_files(&seeds);
+        let files: Vec<(&str, u8, usize)> = owned.iter().map(|(n, s, z)| (&**n, *s, *z)).collect();
+        (placements()[m.placement], fx.make_src("mid", &files), seeds)
+    });
+    let mut writer = None;
     let mut cycle = Cycle::new(&fx);
-    cycle.survey(100).await;
-    let repacks = !cycle.survey.as_ref().unwrap().plan.repack.is_empty();
-    cycle.repack_publish().await;
-    cycle.verify_compact().await;
-    prop_assert!(cycle.sweep_shards().await.failed.is_empty());
-    prop_assert!(cycle.sweep_packs(usize::MAX).await.failed.is_empty());
-    prop_assert!(cycle.finish().await.failed.is_empty());
+    let mut repacks = false;
+    for gap in 0..=GC_STEPS {
+        if let Some(((open, commit), src, _)) = &mid {
+            if *open == gap {
+                writer = Some(fx.open_writer().await);
+            }
+            if *commit == gap {
+                fx.commit(writer.as_mut().unwrap(), src.clone()).await;
+            }
+        }
+        match gap {
+            0 => cycle.survey(100).await,
+            1 => {
+                repacks = !cycle.survey.as_ref().unwrap().plan.repack.is_empty();
+                cycle.repack_publish().await;
+            }
+            2 => {
+                cycle.verify_compact().await;
+            }
+            3 => prop_assert!(cycle.sweep_shards().await.failed.is_empty()),
+            4 => {
+                prop_assert!(cycle.sweep_packs(usize::MAX).await.failed.is_empty());
+                prop_assert!(cycle.finish().await.failed.is_empty());
+            }
+            _ => {}
+        }
+    }
 
     let after = fx.packs().await;
     let after_keys = keys(&after);
@@ -237,43 +406,57 @@ async fn run_case(case: &Case, tally: &Tally) -> Result<(), TestCaseError> {
         .set(tally.repacked.get() + u32::from(repacks));
 
     let index_total: u64 = fx.listing("index/").await.values().sum();
-    let planted = 0u64;
-    for (id, src) in &kept {
+    tally
+        .planted
+        .set(tally.planted.get() + u32::from(planted > 0));
+    tally
+        .interleaved
+        .set(tally.interleaved.get() + u32::from(mid.is_some()));
+    let present = fx.sources.borrow().clone();
+    for (id, src) in &present {
         fx.store.take_reads();
         fx.restore_one(id, src).await;
         let reads = fx.store.take_reads();
         for (key, _) in reads.iter().filter(|(k, _)| k.starts_with("packs/")) {
             prop_assert!(
-                after_keys.contains(key),
+                after_keys.contains(key) || missing.contains(key),
                 "restore read {key}, not in the bucket"
             );
         }
         let packs = bytes_under(&reads, "packs/");
-        let bound = (planted + 1) * before[id] + MIB;
-        prop_assert!(packs <= bound, "packs/ read {packs} > {bound}");
+        if let Some(earlier) = before.get(id) {
+            let bound = (planted + 1) * earlier + MIB;
+            prop_assert!(packs <= bound, "packs/ read {packs} > {bound}");
+            tally.worst_packs_milli.set(
+                tally
+                    .worst_packs_milli
+                    .get()
+                    .max(packs * 1000 / (*earlier).max(1)),
+            );
+        }
         let index = bytes_under(&reads, "index/");
         prop_assert!(
             index <= 2 * index_total,
             "index/ read {index} > 2 x {index_total}"
         );
-        let milli = |n: u64, d: u64| n * 1000 / d.max(1);
-        tally
-            .worst_packs_milli
-            .set(tally.worst_packs_milli.get().max(milli(packs, before[id])));
-        tally
-            .worst_index_milli
-            .set(tally.worst_index_milli.get().max(milli(index, index_total)));
+        tally.worst_index_milli.set(
+            tally
+                .worst_index_milli
+                .get()
+                .max(index * 1000 / index_total.max(1)),
+        );
     }
 
     let kept_seeds: BTreeSet<u8> = (0..case.backups.len())
         .filter(|i| !forgotten[*i])
         .flat_map(|i| seeds_of[i].iter().copied())
+        .chain(mid.iter().flat_map(|(_, _, seeds)| seeds.iter().copied()))
         .collect();
     for i in (0..case.backups.len()).filter(|i| forgotten[*i]) {
         if owned[i].is_disjoint(&kept_seeds) {
             for pack in &created[i] {
                 prop_assert!(
-                    !after_keys.contains(pack),
+                    named.contains(pack) || !after_keys.contains(pack),
                     "dead pack {pack} is still there"
                 );
             }
@@ -319,4 +502,35 @@ fn gc_hostile_repository_restores_after_cycle() {
     );
     assert!(tally.deleted.get() >= 8, "too few cases deleted a pack");
     assert!(tally.repacked.get() >= 4, "too few cases repacked");
+}
+
+/// A shard that lists, ahead of the real ones, the same blobs in packs the
+/// bucket does not have: the survey must still place them in the real packs.
+#[tokio::test]
+async fn gc_survey_places_blobs_in_packs_that_exist() {
+    let fx = Fx::new().await;
+    fx.backup("a", &[("a", 1, 100 << 10), ("b", 2, 50 << 10)])
+        .await;
+    let keys = attacker_keys(&fx.repo);
+    let real = open_all_shards(&fx.store, &keys).await;
+    let lowest = real.iter().map(|(id, _)| *id).min().unwrap();
+    let ghosts: Vec<pb::PackRecord> = real
+        .iter()
+        .flat_map(|(_, s)| s.packs.iter())
+        .zip(1u8..)
+        .map(|(record, n)| pb::PackRecord {
+            pack_id: vec![n; 32],
+            ..record.clone()
+        })
+        .collect();
+    plant_shard_where(&fx.store, &keys, ghosts, Vec::new(), |id| *id < lowest).await;
+
+    let mut cycle = Cycle::new(&fx);
+    cycle.survey(100).await;
+    cycle.repack_publish().await;
+    cycle.verify_compact().await;
+    cycle.sweep_shards().await;
+    cycle.sweep_packs(usize::MAX).await;
+    cycle.finish().await;
+    fx.assert_all_restore().await;
 }
