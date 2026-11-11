@@ -1,4 +1,4 @@
-import { screen } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { describe, expect, it } from "vitest";
@@ -231,10 +231,98 @@ describe("user: password", () => {
 			{
 				current_password: "old-password",
 				new_password: "a-long-enough-password",
+				revoke_tokens: false,
 			},
 		]);
 		expect(((await currentField()) as HTMLInputElement).value).toBe("");
 		expect((newField() as HTMLInputElement).value).toBe("");
 		expect((confirmField() as HTMLInputElement).value).toBe("");
+	});
+
+	it("shows the busy server on the password form", async () => {
+		mockAccount();
+		mockPassword(() =>
+			HttpResponse.json(
+				{ code: "busy", message: "busy" },
+				{ status: 503, headers: { "Retry-After": "2" } },
+			),
+		);
+		const user = userEvent.setup();
+		await openUser();
+		await fill(user, [
+			"old-password",
+			"a-long-enough-password",
+			"a-long-enough-password",
+		]);
+		await user.click(changeButton());
+		expect((await screen.findByRole("alert")).textContent).toBe(
+			"The server is busy. Try again in 2 seconds.",
+		);
+	});
+});
+
+function mockTokens(expiries: (number | null)[]) {
+	server.use(
+		http.get("/api/v1/tokens", () =>
+			HttpResponse.json(
+				expiries.map((expires_at, i) => ({
+					id: `t${i}`,
+					name: `token-${i}`,
+					prefix: "lsk_a1b2c3",
+					scopes: ["policies:read"],
+					created_at: Date.now() - 1000,
+					created_by: "admin",
+					expires_at,
+					last_used_at: null,
+					revoked_at: null,
+				})),
+			),
+		),
+	);
+}
+
+describe("user: password revokes tokens", () => {
+	const passwords: [string, string, string] = [
+		"old-password",
+		"a-long-enough-password",
+		"a-long-enough-password",
+	];
+
+	it("offers to revoke the live tokens and sends the choice", async () => {
+		mockAccount();
+		mockTokens([null, Date.now() + 86_400_000, Date.now() - 1000]);
+		const calls = mockPassword();
+		const user = userEvent.setup();
+		await openUser();
+		const box = await screen.findByRole("checkbox", {
+			name: "Revoke all API tokens (2)",
+		});
+		expect(box).toBeChecked();
+		await fill(user, passwords);
+		await user.click(changeButton());
+		await waitFor(() => expect(calls.changed).toHaveLength(1));
+
+		await user.click(box);
+		expect(box).not.toBeChecked();
+		await fill(user, passwords);
+		await user.click(changeButton());
+		await waitFor(() => expect(calls.changed).toHaveLength(2));
+		expect(
+			calls.changed.map((c) => (c as { revoke_tokens: boolean }).revoke_tokens),
+		).toEqual([true, false]);
+	});
+
+	it("has no checkbox when no token is live", async () => {
+		mockAccount();
+		mockTokens([Date.now() - 1000]);
+		const calls = mockPassword();
+		const user = userEvent.setup();
+		await openUser();
+		await currentField();
+		expect(screen.queryByRole("checkbox")).toBeNull();
+		await fill(user, passwords);
+		await user.click(changeButton());
+		await waitFor(() => expect(calls.changed).toHaveLength(1));
+		expect(calls.changed[0]).toMatchObject({ revoke_tokens: false });
 	});
 });

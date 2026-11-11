@@ -46,6 +46,7 @@ function LoginPage() {
 	const [showPassword, setShowPassword] = useState(false);
 	const [error, setError] = useState<string>();
 	const [wait, setWait] = useState(0);
+	const [busy, setBusy] = useState(false);
 	const [failures, setFailures] = useState(0);
 	const passwordRef = useRef<HTMLInputElement>(null);
 
@@ -84,7 +85,13 @@ function LoginPage() {
 					setPassword("");
 					setFailures((n) => n + 1);
 					if (e instanceof ApiError && e.status === 429) {
+						setBusy(false);
 						setWait(e.retryAfter ?? 60);
+						return;
+					}
+					if (e instanceof ApiError && e.status === 503) {
+						setBusy(true);
+						setWait(e.retryAfter ?? 5);
 						return;
 					}
 					if (e instanceof ApiError && e.status === 401) {
@@ -164,7 +171,11 @@ function LoginPage() {
 						<Alert variant="destructive" role="alert">
 							<CircleAlert aria-hidden />
 							<AlertDescription>
-								{wait > 0 ? copy.login.rateLimited(wait) : error}
+								{wait > 0
+									? busy
+										? copy.login.busy(wait)
+										: copy.login.rateLimited(wait)
+									: error}
 							</AlertDescription>
 						</Alert>
 					)}

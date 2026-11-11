@@ -4,8 +4,10 @@ import { toast } from "sonner";
 import { ApiError } from "@/api/fetcher";
 import {
 	getGetAccountQueryKey,
+	getListTokensQueryKey,
 	useChangePassword,
 	useGetAccount,
+	useListTokens,
 	useUpdateAccount,
 } from "@/api/gen/endpoints";
 import { Fact } from "@/components/fact";
@@ -19,7 +21,9 @@ import {
 	CardHeader,
 	CardTitle,
 } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { copy } from "@/copy";
@@ -150,7 +154,14 @@ export function EmailCard() {
 const password = copy.user.password;
 
 export function PasswordCard() {
+	const queryClient = useQueryClient();
 	const change = useChangePassword();
+	const tokens = useListTokens({ state: "active" });
+	const [revoke, setRevoke] = useState(true);
+	const now = Date.now();
+	const activeTokens = (tokens.data ?? []).filter(
+		(t) => t.expires_at == null || t.expires_at > now,
+	).length;
 	const [current, setCurrent] = useState("");
 	const [next, setNext] = useState("");
 	const [confirm, setConfirm] = useState("");
@@ -171,9 +182,18 @@ export function PasswordCard() {
 		setFailure(undefined);
 		if (short || different) return;
 		change.mutate(
-			{ data: { current_password: current, new_password: next } },
+			{
+				data: {
+					current_password: current,
+					new_password: next,
+					revoke_tokens: activeTokens > 0 && revoke,
+				},
+			},
 			{
 				onSuccess: () => {
+					void queryClient.invalidateQueries({
+						queryKey: getListTokensQueryKey(),
+					});
 					setCurrent("");
 					setNext("");
 					setConfirm("");
@@ -186,6 +206,8 @@ export function PasswordCard() {
 						setTooShort(true);
 					} else if (e instanceof ApiError && e.status === 429) {
 						setFailure(copy.login.rateLimited(e.retryAfter ?? 60));
+					} else if (e instanceof ApiError && e.status === 503) {
+						setFailure(copy.login.busy(e.retryAfter ?? 5));
 					} else {
 						setFailure(copy.errors.submit(password.action, e.message));
 					}
@@ -254,6 +276,18 @@ export function PasswordCard() {
 							/>
 						)}
 					</RowField>
+					{activeTokens > 0 && (
+						<div className="flex items-center gap-2">
+							<Checkbox
+								id="revoke-tokens"
+								checked={revoke}
+								onCheckedChange={(value) => setRevoke(value === true)}
+							/>
+							<Label htmlFor="revoke-tokens" className="font-normal">
+								{password.revokeTokens(activeTokens)}
+							</Label>
+						</div>
+					)}
 					{failure && (
 						<Alert variant="destructive" role="alert">
 							<AlertDescription>{failure}</AlertDescription>
