@@ -53,9 +53,17 @@ A restore or download started with a token records `token:<name>` as who started
 
 ## Entering the password again
 
-A signed-in session may create an API token (`POST /api/v1/tokens`), create a join token (`POST /api/v1/join-tokens`) and start a restore that writes in place, with `restore_owners: true`, or onto an agent that does not report `restore_roots_v1`, only if the password was entered in the last 15 minutes. Signing in or creating the administrator counts; a session started by the demo sign-in, or one that was open before this rule, has no such time. Otherwise the request answers `403` `step_up_required` ("Enter your password again to continue.") before anything is created. It is a `403`, not a `401`, so a client asks for the password instead of signing the user out.
+A signed-in session may do the following only if the password was entered in the last 15 minutes:
 
-`POST /api/v1/auth/step-up` with `{"password": "..."}` (session and CSRF token) opens a new 15-minute window and answers `204`. A wrong password answers `422` `wrong_password`, a password over 4096 bytes answers `422` without being checked, and five wrong passwords in a row on one session end that session. It shares the failed-attempt limits and the cap on concurrent password checks with sign-in. An API token never needs it and cannot create tokens or join tokens: those routes answer `401` to any token.
+- create an API token (`POST /api/v1/tokens`) or a join token (`POST /api/v1/join-tokens`);
+- start a restore that writes in place, with `restore_owners: true`, or onto an agent that does not report `restore_roots_v1`;
+- change what a token would need `hooks:write` for: create or update a policy (or apply policies) so that it sets or changes hooks, or so that a policy with hooks gets a different repository, a wider selector or, through new labels on a host (`PUT /api/v1/hosts/{id}/labels`), a host it did not reach;
+- change what a token would need `snapshots:delete` for: set or change retention, or give a policy with retention a cron that runs more often (the same endpoints), delete a snapshot (`DELETE /api/v1/snapshots/{id}`), mark a snapshot suspicious or clear the mark, start a cleanup (`POST /api/v1/repositories/{id}/gc/run`), close the backup markers that hold it back (`.../gc/unlock`), exclude a quarantined snapshot (`.../gc/quarantine/{snapshot_id}/exclude`) and save the cleanup settings (`PUT .../gc/settings`);
+- start an agent update (`POST /api/v1/agent-updates`) or continue a paused one (`POST /api/v1/agent-updates/{id}/resume`).
+
+A dry run of a cleanup, aborting a cleanup, and pausing, cancelling or dismissing an agent update do not need it. Signing in or creating the administrator counts; a session started by the demo sign-in, or one that was open before this rule, has no such time. Otherwise the request answers `403` `step_up_required` ("Enter your password again to continue.") before anything is created. It is a `403`, not a `401`, so a client asks for the password instead of signing the user out.
+
+`POST /api/v1/auth/step-up` with `{"password": "..."}` (session and CSRF token) opens a new 15-minute window and answers `204`. A wrong password answers `422` `wrong_password`, a password over 4096 bytes answers `422` without being checked, and five wrong passwords in a row on one session end that session. It shares the failed-attempt limits and the cap on concurrent password checks with sign-in. An API token never needs it; what it may do is limited by its scopes, and it cannot create tokens or join tokens: those routes answer `401` to any token.
 
 Sign-in, creating the administrator, changing the password and `POST /api/v1/auth/step-up` hash a password. When too many such checks run at once the server answers `503` `busy` with a `Retry-After` header (seconds) and spends none of the attempts allowed; retry after that time.
 
