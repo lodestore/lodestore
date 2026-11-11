@@ -4,12 +4,6 @@ on:
   schedule:
     - cron: "37 1 * * 6"
   workflow_dispatch:
-  pull_request:
-    paths:
-      - .cargo/mutants.toml
-      - .github/mutants-baseline.json
-      - .github/workflows/mutants.yml
-      - scripts/mutants-ratchet.sh
 
 concurrency:
   group: mutants-${{ github.ref }}
@@ -145,16 +139,3 @@ jobs:
             echo '```' >> "$GITHUB_STEP_SUMMARY"
           done
           exit "$failed"
-
-  lower-only:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Only lower the baseline
-        env:
-          BASE_REF: ${{ github.base_ref }}
-        run: scripts/mutants-ratchet.sh --lower-only .github/mutants-baseline.json "origin/$BASE_REF"
