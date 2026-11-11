@@ -108,3 +108,17 @@ path = "fuzz_targets/verify_shard.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "snapshot_resolves"
+path = "fuzz_targets/snapshot_resolves.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "restore_plan"
+path = "fuzz_targets/restore_plan.rs"
+test = false
+doc = false
+bench = false

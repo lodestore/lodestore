@@ -7,10 +7,16 @@ use std::path::Path;
 use lodestore_format::crypto::{BLOB_TYPE_TREE, BlobId};
 use lodestore_format::index::open_shard;
 use lodestore_format::pack::{ENTRY_LEN, PACK_MAGIC, PACK_PREFIX_LEN, read_pack_header};
+use lodestore_format::pb::{Node, NodeType};
 use lodestore_format::reader::Reader;
 use lodestore_format::repo::Repository;
 use lodestore_format::store::LocalFsStore;
 use lodestore_format::tree::decode_tree;
+use lodestore_proto::agent::v1::plan_item::Kind;
+use lodestore_proto::agent::v1::{
+    ChunkLoc, PackAccess, PlanChunks, PlanEnter, PlanEntry, PlanItem, PlanLeave, RestorePlanBatch,
+    RestoreTotals,
+};
 use prost::Message;
 
 use crate::stores;
@@ -47,6 +53,121 @@ fn hex_fields(text: &str, field: &str) -> Result<Vec<Vec<u8>>, String> {
 
 fn vectors(fixtures: &Path, name: &str) -> Result<String, String> {
     fs::read_to_string(fixtures.join(name)).map_err(|e| format!("{name}: {e}"))
+}
+
+fn plan_node(name: &[u8], kind: NodeType, size: u64, link: &[u8]) -> Vec<u8> {
+    Node {
+        name: name.to_vec(),
+        r#type: kind as i32,
+        mode: 0o640,
+        size,
+        link_target: link.to_vec(),
+        ..Default::default()
+    }
+    .encode_to_vec()
+}
+
+fn item(kind: Kind) -> PlanItem {
+    PlanItem { kind: Some(kind) }
+}
+
+fn enter(name: &[u8], ancestor: bool) -> PlanItem {
+    item(Kind::Enter(PlanEnter {
+        node: plan_node(name, NodeType::Dir, 0, b""),
+        ancestor,
+    }))
+}
+
+fn entry(name: &[u8], kind: NodeType, size: u64, chunks: Vec<ChunkLoc>, more: bool) -> PlanItem {
+    item(Kind::Entry(PlanEntry {
+        node: plan_node(name, kind, size, b"f"),
+        chunks,
+        more,
+    }))
+}
+
+fn chunk(offset: u32) -> ChunkLoc {
+    ChunkLoc {
+        pack: 0,
+        offset,
+        enc_len: 64,
+        ulen: 3,
+        id: vec![9; 32],
+    }
+}
+
+fn plan_input(flags: u8, batches: &[RestorePlanBatch]) -> Vec<u8> {
+    let mut out = vec![flags];
+    for batch in batches {
+        let body = batch.encode_to_vec();
+        out.extend_from_slice(&(body.len() as u16).to_le_bytes());
+        out.extend_from_slice(&body);
+    }
+    out
+}
+
+fn restore_plan_seeds() -> Vec<Vec<u8>> {
+    let leave = || item(Kind::Leave(PlanLeave {}));
+    let access = PackAccess {
+        pack: 0,
+        pack_id: vec![1; 32],
+        key: vec![2; 32],
+        url: String::new(),
+        expires_at_ms: 0,
+    };
+    let tree = RestorePlanBatch {
+        totals: Some(RestoreTotals { files: 1, bytes: 3 }),
+        packs: vec![access.clone()],
+        items: vec![
+            enter(b"a", false),
+            entry(b"f", NodeType::File, 3, vec![chunk(0)], false),
+            entry(b"l", NodeType::Symlink, 0, Vec::new(), false),
+            entry(b"p", NodeType::Fifo, 0, Vec::new(), false),
+            leave(),
+        ],
+        last: true,
+    };
+    let unsafe_names = RestorePlanBatch {
+        items: vec![
+            enter(b"..", false),
+            leave(),
+            enter(b"x", true),
+            entry(b"../../outside", NodeType::Fifo, 0, Vec::new(), false),
+            entry(b"..", NodeType::Symlink, 0, Vec::new(), false),
+            entry(b"", NodeType::File, 0, Vec::new(), false),
+            leave(),
+        ],
+        last: true,
+        ..Default::default()
+    };
+    let split = [
+        RestorePlanBatch {
+            totals: Some(RestoreTotals { files: 1, bytes: 9 }),
+            packs: vec![access],
+            items: vec![
+                enter(b"d", true),
+                entry(b"g", NodeType::File, 9, vec![chunk(0)], true),
+            ],
+            ..Default::default()
+        },
+        RestorePlanBatch {
+            items: vec![
+                item(Kind::Chunks(PlanChunks {
+                    chunks: vec![chunk(64), chunk(128)],
+                    more: false,
+                })),
+                leave(),
+            ],
+            last: true,
+            ..Default::default()
+        },
+    ];
+    vec![
+        plan_input(0b01001, std::slice::from_ref(&tree)),
+        plan_input(0b11001, std::slice::from_ref(&tree)),
+        plan_input(0, &[unsafe_names]),
+        plan_input(0b01001, &split),
+    ]
 }
 
 pub fn seeds(fixtures: &Path) -> Seeds {
@@ -205,5 +326,10 @@ pub fn try_seeds(fixtures: &Path) -> Result<Seeds, String> {
             out.push((target, bytes.clone()));
         }
     }
+    out.extend(
+        restore_plan_seeds()
+            .into_iter()
+            .map(|seed| ("restore_plan", seed)),
+    );
     Ok(out)
 }

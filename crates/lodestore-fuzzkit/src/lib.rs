@@ -3,6 +3,7 @@
 //! Every function here is the body of one fuzz target. None of them panics on
 //! any input; equality assertions exist only where they are written down.
 
+pub mod restore_plan;
 pub mod seeds;
 pub mod stores;
 
@@ -254,6 +255,7 @@ pub fn provenance_open(data: &[u8]) {
     let _ = open_provenance(keys, data);
 }
 
+pub use restore_plan::restore_plan;
 pub use stores::{snapshot_resolves, verify_shard};
 
 pub type Target = fn(&[u8]);
@@ -272,4 +274,6 @@ pub const TARGETS: &[(&str, Target)] = &[
     ("attest_open", attest_open),
     ("provenance_open", provenance_open),
     ("verify_shard", verify_shard),
+    ("snapshot_resolves", snapshot_resolves),
+    ("restore_plan", restore_plan),
 ];
