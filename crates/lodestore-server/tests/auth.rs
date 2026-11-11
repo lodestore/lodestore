@@ -1018,6 +1018,53 @@ async fn busy_login_returns_503_and_does_not_spend_the_attempt() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn busy_setup_returns_503_and_does_not_spend_the_attempt() {
+    let logs = capture_logs();
+    for backend in backends() {
+        let name = backend.name();
+        logs.take();
+        let ts = start_without_admin(&backend).await;
+        let (client, base) = (Client::new(), ts.rest_url());
+        let log = logs.take();
+        let token = setup_token(setup_lines(&log)[0]);
+        let gate = ts.state().auth.argon.clone();
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let held = Arc::new(Mutex::new(held));
+        let mut holders = Vec::new();
+        for _ in 0..gate.available() {
+            let (gate, held) = (gate.clone(), held.clone());
+            holders.push(tokio::spawn(async move {
+                gate.run(move || {
+                    let _ = held.lock().unwrap().recv();
+                })
+                .await
+            }));
+        }
+        while gate.available() > 0 {
+            tokio::task::yield_now().await;
+        }
+
+        let body = json!({ "token": token, "username": "root", "password": SETUP_PASSWORD });
+        for _ in 0..12 {
+            let busy = post(&client, &base, "/api/v1/setup", body.clone()).await;
+            assert_eq!(busy.status(), 503, "[{name}]");
+            assert_eq!(error_code(busy).await, "busy");
+        }
+        drop(release);
+        for holder in holders {
+            holder.await.unwrap().unwrap();
+        }
+        let created = post(&client, &base, "/api/v1/setup", body).await;
+        assert_eq!(
+            created.status(),
+            204,
+            "[{name}] a busy answer is not an attempt"
+        );
+        ts.stop().await;
+    }
+}
+
 async fn login_with_cookie(client: &Client, base: &str, cookie: &str, password: &str) -> Response {
     client
         .post(format!("{base}/api/v1/auth/login"))

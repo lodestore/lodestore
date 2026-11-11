@@ -137,11 +137,13 @@ async fn create_admin(
     check_password(&req.password).map_err(|m| ApiError::Validation(m.into()))?;
 
     let password = req.password;
-    let hash = state
-        .auth
-        .argon
-        .run(move || hash_password(&password))
-        .await??;
+    let hash = match state.auth.argon.run(move || hash_password(&password)).await {
+        Ok(hash) => hash?,
+        Err(busy) => {
+            state.auth.limits.setup_released(client);
+            return Err(busy);
+        }
+    };
     if !state.auth.setup.take(&req.token) {
         return Err(ApiError::NotFound("the setup link is invalid or already used".into()).into());
     }

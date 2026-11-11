@@ -224,6 +224,12 @@ impl Limits {
     }
 
     pub fn setup_succeeded(&self, ip: IpAddr) {
+        self.setup_released(ip);
+    }
+
+    /// Gives the attempt back when no setup was judged, for instance because
+    /// the server was busy.
+    pub fn setup_released(&self, ip: IpAddr) {
         self.setup.refund(&bucket(ip));
     }
 
