@@ -42,6 +42,11 @@ fn revoked() -> Status {
     )
 }
 
+/// The certificate checked out but the row moved under the renew; the agent retries instead of reading it as a revoke.
+fn renew_lost_race() -> Status {
+    Status::aborted("the certificate changed while it was being renewed; try again")
+}
+
 fn peer_cert_serial<T>(request: &Request<T>) -> String {
     request
         .peer_certs()
@@ -503,7 +508,7 @@ impl Agent for AgentService {
         if updated.rows_affected() == 0 {
             return Err(match check_serial(state, agent_id, peer.serial, ip).await {
                 Err(status) => status,
-                Ok(_) => revoked(),
+                Ok(_) => renew_lost_race(),
             });
         }
         tracing::info!(agent_id = %agent_id, cert_serial = %cert.serial_hex, "agent certificate renewed");
@@ -517,7 +522,19 @@ impl Agent for AgentService {
 
 #[cfg(test)]
 mod tests {
-    use super::clip;
+    use super::{clip, renew_lost_race};
+
+    #[test]
+    fn a_renew_that_lost_a_race_is_retryable_not_a_revoke() {
+        let status = renew_lost_race();
+        assert_eq!(status.code(), tonic::Code::Aborted);
+        assert!(
+            status
+                .metadata()
+                .get(lodestore_proto::ERROR_METADATA_KEY)
+                .is_none()
+        );
+    }
 
     #[test]
     fn heartbeat_strings_are_bounded_on_a_char_boundary() {
