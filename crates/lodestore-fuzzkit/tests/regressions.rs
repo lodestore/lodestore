@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 
 use lodestore_fuzzkit::TARGETS;
+use lodestore_fuzzkit::seeds::seeds;
 
 struct Counting;
 
@@ -53,6 +54,10 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static ALLOC: Counting = Counting;
 
+fn fixtures() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../lodestore-format/tests/fixtures/v1")
+}
+
 fn fuzz_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz")
 }
@@ -88,9 +93,21 @@ fn every_target_has_a_fuzz_target_file() {
 }
 
 #[test]
+fn every_target_has_a_seed() {
+    let seeds = seeds(&fixtures());
+    for (name, _) in TARGETS {
+        assert!(seeds.iter().any(|(t, _)| t == name), "{name} has no seed");
+    }
+}
+
+#[test]
 fn seeds_and_regressions_never_panic() {
+    let seeds = seeds(&fixtures());
     for (name, f) in TARGETS {
         run_bounded(name, *f, &[]);
+        for (_, input) in seeds.iter().filter(|(t, _)| t == name) {
+            run_bounded(name, *f, input);
+        }
         let Ok(dir) = fs::read_dir(fuzz_dir().join("regressions").join(name)) else {
             continue;
         };

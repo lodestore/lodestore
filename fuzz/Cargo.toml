@@ -24,3 +24,17 @@ path = "fuzz_targets/pack_prefix.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "pack_trailer"
+path = "fuzz_targets/pack_trailer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pack_entries"
+path = "fuzz_targets/pack_entries.rs"
+test = false
+doc = false
+bench = false

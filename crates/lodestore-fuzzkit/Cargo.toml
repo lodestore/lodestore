@@ -21,3 +21,8 @@ rand_chacha = "0.10.0"
 
 [dev-dependencies]
 lodestore-fuzzkit = { path = ".", features = ["test-hooks"] }
+
+[[bin]]
+name = "seed-corpus"
+path = "src/bin/seed-corpus.rs"
+required-features = ["test-hooks"]
