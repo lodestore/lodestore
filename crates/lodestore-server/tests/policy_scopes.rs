@@ -5,6 +5,7 @@ use lodestore_agent::{EnrollArgs, NetOptions};
 use lodestore_server::hosts::labels::Label;
 use lodestore_server::hosts::replace_labels;
 use serde_json::{Value, json};
+use sqlx::Row;
 
 const DUMP: &str = "  hooks:\n    before:\n      - script: dump-db\n";
 const DUMP_ARGS: &str =
@@ -631,6 +632,171 @@ async fn policy_scopes_labels_not_widening_allowed() {
         assert_eq!(got.0, 200, "[{what}] to a policy without hooks: {}", got.1);
         let got = plain.put(&path, &json!({ "labels": [] })).await;
         assert_eq!(got.0, 200, "[{what}] dropping labels: {}", got.1);
+        ts.stop().await;
+    }
+}
+
+const KEEP_THREE: &str = "  retention:\n    keepLast: 3\n";
+
+async fn age_sessions(ts: &TestServer) {
+    sqlx::query("UPDATE sessions SET authenticated_at = $1")
+        .bind(lodestore_server::db::now_ms() - 16 * 60_000)
+        .execute(&ts.state().db.pool)
+        .await
+        .unwrap();
+}
+
+async fn step_up(session: &Session<'_>) {
+    let (status, body) = session
+        .post(
+            "/api/v1/auth/step-up",
+            &json!({ "password": common::ADMIN_PASSWORD }),
+        )
+        .await;
+    assert_eq!(status, 204, "{body}");
+}
+
+fn assert_step_up(got: &(u16, Value), what: &str) {
+    assert_eq!(got.0, 403, "{what}: {}", got.1);
+    assert_eq!(got.1["code"], "step_up_required", "{what}");
+}
+
+async fn policy_rows(ts: &TestServer) -> i64 {
+    sqlx::query("SELECT COUNT(*) AS n FROM policies")
+        .fetch_one(&ts.state().db.pool)
+        .await
+        .unwrap()
+        .get("n")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn step_up_policies_hooks_retention_and_apply() {
+    for backend in backends() {
+        let what = backend.name();
+        let ts = TestServer::start(&backend).await;
+        ts.create_local_repository("main").await;
+        let session = Session {
+            api: ts.api().await,
+            ts: &ts,
+        };
+        session.create(yaml("plain", "main", "db", "")).await;
+        let strong = Token::new(
+            &ts,
+            &[
+                "policies:read",
+                "policies:write",
+                "hooks:write",
+                "snapshots:delete",
+            ],
+        )
+        .await;
+        age_sessions(&ts).await;
+        let rows = policy_rows(&ts).await;
+
+        let hooked = json!({ "yaml": yaml("db", "main", "db", DUMP) });
+        let got = session.post("/api/v1/policies", &hooked).await;
+        assert_step_up(&got, &format!("create with hooks [{what}]"));
+        let kept = json!({ "yaml": yaml("kept", "main", "db", KEEP_THREE) });
+        let got = session.post("/api/v1/policies", &kept).await;
+        assert_step_up(&got, &format!("create with retention [{what}]"));
+        let got = session
+            .put(
+                "/api/v1/policies/plain",
+                &update(yaml("plain", "main", "db", KEEP_THREE), 1),
+            )
+            .await;
+        assert_step_up(&got, &format!("update retention [{what}]"));
+        let got = session
+            .put(
+                "/api/v1/policies/plain",
+                &update(yaml("plain", "main", "db", DUMP), 1),
+            )
+            .await;
+        assert_step_up(&got, &format!("update hooks [{what}]"));
+        for dry_run in [true, false] {
+            let got = session
+                .post(
+                    "/api/v1/policies/apply",
+                    &json!({
+                        "documents": [{ "source": "p.yaml", "yaml": yaml("db", "main", "db", DUMP) }],
+                        "adopt": true,
+                        "dry_run": dry_run,
+                    }),
+                )
+                .await;
+            assert_step_up(&got, &format!("apply dry_run={dry_run} [{what}]"));
+        }
+        assert_eq!(policy_rows(&ts).await, rows, "[{what}] nothing changed");
+        let (_, current) = session
+            .send(reqwest::Method::GET, "/api/v1/policies/plain", None)
+            .await;
+        assert_eq!(current["revision"], 1, "[{what}]");
+
+        let moved = yaml("plain", "main", "db", "").replace("- /etc", "- /srv");
+        let got = session
+            .put("/api/v1/policies/plain", &update(moved, 1))
+            .await;
+        assert_eq!(got.0, 200, "[{what}] no hooks or retention: {}", got.1);
+        let got = session
+            .post(
+                "/api/v1/policies",
+                &json!({ "yaml": yaml("other", "main", "db", "") }),
+            )
+            .await;
+        assert_eq!(got.0, 201, "[{what}] {}", got.1);
+
+        let got = strong.post("/api/v1/policies", &hooked).await;
+        assert_eq!(got.0, 201, "[{what}] token needs no step-up: {}", got.1);
+        let got = strong
+            .put(
+                "/api/v1/policies/other",
+                &update(yaml("other", "main", "db", KEEP_THREE), 1),
+            )
+            .await;
+        assert_eq!(got.0, 200, "[{what}] token: {}", got.1);
+
+        step_up(&session).await;
+        let got = session.post("/api/v1/policies", &kept).await;
+        assert_eq!(got.0, 201, "[{what}] after step-up: {}", got.1);
+        let hooked_plain = yaml("plain", "main", "db", DUMP).replace("- /etc", "- /srv");
+        let got = session
+            .put("/api/v1/policies/plain", &update(hooked_plain, 2))
+            .await;
+        assert_eq!(got.0, 200, "[{what}] after step-up: {}", got.1);
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn step_up_labels_that_gain_hooks() {
+    for backend in backends() {
+        let what = backend.name();
+        let ts = TestServer::start(&backend).await;
+        let repo = ts.create_local_repository("main").await;
+        let session = Session {
+            api: ts.api().await,
+            ts: &ts,
+        };
+        let id = session.enroll(&repo, "web-1", "web").await;
+        session.create(yaml("db", "main", "db", DUMP)).await;
+        let path = format!("/api/v1/hosts/{id}/labels");
+        let strong = Token::new(&ts, &["hosts:read", "hosts:write", "hooks:write"]).await;
+        age_sessions(&ts).await;
+
+        let got = session.put(&path, &role("db")).await;
+        assert_step_up(&got, what);
+        assert_eq!(labels_of(&session, &id).await, role("web")["labels"]);
+        let (status, body) = session.put(&path, &role("cache")).await;
+        assert_eq!(status, 200, "[{what}] no hooks gained: {body}");
+
+        let got = strong.put(&path, &role("db")).await;
+        assert_eq!(got.0, 200, "[{what}] token: {}", got.1);
+        let got = strong.put(&path, &role("web")).await;
+        assert_eq!(got.0, 200, "[{what}] token: {}", got.1);
+
+        step_up(&session).await;
+        let (status, body) = session.put(&path, &role("db")).await;
+        assert_eq!(status, 200, "[{what}] after step-up: {body}");
         ts.stop().await;
     }
 }

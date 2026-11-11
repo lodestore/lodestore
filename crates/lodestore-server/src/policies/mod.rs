@@ -599,7 +599,7 @@ pub async fn list_policies(
     request_body = PolicyInput,
     responses(
         (status = 201, description = "The created policy", body = PolicyDetail),
-        (status = 403, description = "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention or a more frequent cron", body = ErrorBody),
+        (status = 403, description = "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention or a more frequent cron. A session needs the password entered in the last 15 minutes for those changes (code step_up_required)", body = ErrorBody),
         (status = 409, description = "The name is taken", body = ErrorBody),
         (status = 422, description = "Invalid policy", body = ErrorBody),
     )
@@ -611,11 +611,11 @@ pub async fn create_policy(
 ) -> Result<(StatusCode, Json<PolicyDetail>), ApiError> {
     let checked = check(&state, input.yaml, input.policy).await?;
     if retention_of(&checked.policy).is_some() {
-        auth.require_also(Scope::SnapshotsDelete, RETENTION_PURPOSE)?;
+        auth.require_also_or_step_up(Scope::SnapshotsDelete, RETENTION_PURPOSE)?;
     }
     let name = checked.policy.metadata.name.clone();
     if gains_hook_hosts(None, (&checked.repository_id, &checked.policy)) {
-        auth.require_also(
+        auth.require_also_or_step_up(
             Scope::HooksWrite,
             hooks_purpose(std::slice::from_ref(&name)),
         )?;
@@ -675,7 +675,7 @@ pub async fn get_policy(
     request_body = PolicyUpdate,
     responses(
         (status = 200, description = "The updated policy", body = PolicyDetail),
-        (status = 403, description = "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention or a more frequent cron", body = ErrorBody),
+        (status = 403, description = "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention or a more frequent cron. A session needs the password entered in the last 15 minutes for those changes (code step_up_required)", body = ErrorBody),
         (status = 404, description = "Unknown policy", body = ErrorBody),
         (status = 409, description = "The policy changed since base_revision (code policy_conflict)", body = ErrorBody),
         (status = 422, description = "Invalid policy or changed name", body = ErrorBody),
@@ -691,26 +691,23 @@ pub async fn update_policy(
     if checked.policy.metadata.name != name {
         return Err(ApiError::Validation("The name cannot be changed.".into()));
     }
-    if matches!(auth.principal(), Principal::Token { .. }) {
-        let current = find_policy(&state, &name).await?;
-        if current.revision != input.base_revision {
-            return Err(policy_conflict(&name));
-        }
-        if retention_of(&current.policy) != retention_of(&checked.policy) {
-            auth.require_also(Scope::SnapshotsDelete, RETENTION_PURPOSE)?;
-        }
-        if retention_of(&checked.policy).is_some()
-            && runs_more_often(&current.policy, &checked.policy)
-        {
-            auth.require_also(Scope::SnapshotsDelete, SCHEDULE_PURPOSE)?;
-        }
-        let old = (current.repository_id.as_str(), &current.policy);
-        if gains_hook_hosts(Some(old), (&checked.repository_id, &checked.policy)) {
-            auth.require_also(
-                Scope::HooksWrite,
-                hooks_purpose(std::slice::from_ref(&name)),
-            )?;
-        }
+    let current = find_policy(&state, &name).await?;
+    if current.revision != input.base_revision {
+        return Err(policy_conflict(&name));
+    }
+    if retention_of(&current.policy) != retention_of(&checked.policy) {
+        auth.require_also_or_step_up(Scope::SnapshotsDelete, RETENTION_PURPOSE)?;
+    }
+    if retention_of(&checked.policy).is_some() && runs_more_often(&current.policy, &checked.policy)
+    {
+        auth.require_also_or_step_up(Scope::SnapshotsDelete, SCHEDULE_PURPOSE)?;
+    }
+    let old = (current.repository_id.as_str(), &current.policy);
+    if gains_hook_hosts(Some(old), (&checked.repository_id, &checked.policy)) {
+        auth.require_also_or_step_up(
+            Scope::HooksWrite,
+            hooks_purpose(std::slice::from_ref(&name)),
+        )?;
     }
     let updated = sqlx::query(
         "UPDATE policies SET repository_id = $1, yaml = $2, spec_json = $3, \

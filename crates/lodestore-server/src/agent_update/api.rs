@@ -455,6 +455,7 @@ pub async fn agent_update_status(
     request_body = StartRollout,
     responses(
         (status = 202, description = "The update started", body = RolloutStarted),
+        (status = 403, description = "The token lacks agents:update, or the session has not entered its password in the last 15 minutes (code step_up_required)", body = ErrorBody),
         (status = 409, description = "Another update is running or paused", body = ErrorBody),
         (status = 422, description = "No signed target, no host to update or a bad request", body = ErrorBody),
     )
@@ -464,6 +465,7 @@ pub async fn start_rollout(
     auth: Scoped<AgentsUpdate>,
     Json(body): Json<StartRollout>,
 ) -> Result<(StatusCode, Json<RolloutStarted>), ApiError> {
+    auth.require_step_up()?;
     let selected: Option<HashSet<String>> = match (body.hosts, body.outdated == Some(true)) {
         (Some(hosts), false) if !hosts.is_empty() => Some(hosts.into_iter().collect()),
         (None, true) => None,
@@ -668,15 +670,17 @@ pub async fn pause_rollout(
     params(("id" = String, Path, description = "Update id")),
     responses(
         (status = 204, description = "The update continues"),
+        (status = 403, description = "The token lacks agents:update, or the session has not entered its password in the last 15 minutes (code step_up_required)", body = ErrorBody),
         (status = 404, description = "Unknown update", body = ErrorBody),
         (status = 409, description = "The update is not paused", body = ErrorBody),
     )
 )]
 pub async fn resume_rollout(
     State(state): State<AppState>,
-    _auth: Scoped<AgentsUpdate>,
+    auth: Scoped<AgentsUpdate>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    auth.require_step_up()?;
     let resumed = sqlx::query(
         "UPDATE agent_rollouts SET state = 'running', pause_reason = NULL, \
          canary_waived = CASE WHEN pause_reason = $1 THEN 1 ELSE canary_waived END, \

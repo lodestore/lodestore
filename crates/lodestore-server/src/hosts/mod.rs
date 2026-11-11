@@ -13,7 +13,7 @@ use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 use crate::auth::AuthUser;
-use crate::auth::tokens::{HostsRead, HostsWrite, Principal, Scope, Scoped};
+use crate::auth::tokens::{HostsRead, HostsWrite, Scope, Scoped};
 use crate::db::now_ms;
 use crate::error::{ApiError, ErrorBody};
 use crate::hosts::labels::Label;
@@ -255,7 +255,7 @@ pub struct SetLabels {
     responses(
         (status = 200, description = "Host with the new labels", body = HostDetail),
         (status = 404, description = "Unknown host", body = ErrorBody),
-        (status = 403, description = "The token lacks hooks:write and the new labels make a policy with hooks reach this host", body = ErrorBody),
+        (status = 403, description = "The token lacks hooks:write, or the session has not entered its password in the last 15 minutes (code step_up_required), and the new labels make a policy with hooks reach this host", body = ErrorBody),
         (status = 409, description = "The host is revoked or its labels changed since they were read", body = ErrorBody),
         (status = 422, description = "Invalid labels", body = ErrorBody),
     )
@@ -277,13 +277,11 @@ async fn set_labels(
         .await?
         .ok_or_else(|| ApiError::NotFound("host not found".into()))?
         .try_get("labels_json")?;
-    if matches!(auth.principal(), Principal::Token { .. }) {
-        let before: Vec<Label> =
-            serde_json::from_str(&stored).map_err(|e| ApiError::Internal(e.into()))?;
-        let names = hook_policies_gained_by_labels(&state, &id, &before, &req.labels).await?;
-        if !names.is_empty() {
-            auth.require_also(Scope::HooksWrite, hooks_purpose(&names))?;
-        }
+    let before: Vec<Label> =
+        serde_json::from_str(&stored).map_err(|e| ApiError::Internal(e.into()))?;
+    let names = hook_policies_gained_by_labels(&state, &id, &before, &req.labels).await?;
+    if !names.is_empty() {
+        auth.require_also_or_step_up(Scope::HooksWrite, hooks_purpose(&names))?;
     }
     if !replace_labels(&state, &id, &stored, &req.labels).await? {
         return Err(ApiError::Conflict(

@@ -281,6 +281,16 @@
               }
             }
           },
+          "403": {
+            "description": "The token lacks agents:update, or the session has not entered its password in the last 15 minutes (code step_up_required)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "409": {
             "description": "Another update is running or paused",
             "content": {
@@ -508,6 +518,16 @@
         "responses": {
           "204": {
             "description": "The update continues"
+          },
+          "403": {
+            "description": "The token lacks agents:update, or the session has not entered its password in the last 15 minutes (code step_up_required)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           },
           "404": {
             "description": "Unknown update",
@@ -1653,7 +1673,7 @@
             }
           },
           "403": {
-            "description": "The token lacks hooks:write and the new labels make a policy with hooks reach this host",
+            "description": "The token lacks hooks:write, or the session has not entered its password in the last 15 minutes (code step_up_required), and the new labels make a policy with hooks reach this host",
             "content": {
               "application/json": {
                 "schema": {
@@ -3104,7 +3124,7 @@
             }
           },
           "403": {
-            "description": "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention or a more frequent cron",
+            "description": "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention or a more frequent cron. A session needs the password entered in the last 15 minutes for those changes (code step_up_required)",
             "content": {
               "application/json": {
                 "schema": {
@@ -3176,7 +3196,7 @@
             }
           },
           "403": {
-            "description": "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention or a more frequent cron",
+            "description": "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention or a more frequent cron. A session needs the password entered in the last 15 minutes for those changes (code step_up_required)",
             "content": {
               "application/json": {
                 "schema": {
@@ -3351,7 +3371,7 @@
             }
           },
           "403": {
-            "description": "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention or a more frequent cron",
+            "description": "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention or a more frequent cron. A session needs the password entered in the last 15 minutes for those changes (code step_up_required)",
             "content": {
               "application/json": {
                 "schema": {
@@ -4949,6 +4969,16 @@
               }
             }
           },
+          "403": {
+            "description": "The token needs the snapshots:delete scope; a session needs its password entered in the last 15 minutes (code step_up_required)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "404": {
             "description": "Unknown repository, or no such snapshot in quarantine",
             "content": {
@@ -5009,6 +5039,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/GcStarted"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token needs the snapshots:delete scope; a session needs its password entered in the last 15 minutes (code step_up_required)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -5083,6 +5123,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/GcStatus"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token needs the snapshots:delete scope; a session needs its password entered in the last 15 minutes (code step_up_required)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -5220,6 +5270,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/GcUnlocked"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token needs the snapshots:delete scope; a session needs its password entered in the last 15 minutes (code step_up_required)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -5730,7 +5790,7 @@
             }
           },
           "403": {
-            "description": "The token needs the snapshots:delete scope",
+            "description": "The token needs the snapshots:delete scope; a session needs its password entered in the last 15 minutes (code step_up_required)",
             "content": {
               "application/json": {
                 "schema": {
@@ -6139,7 +6199,7 @@
             }
           },
           "403": {
-            "description": "The token needs the snapshots:delete scope",
+            "description": "The token needs the snapshots:delete scope; a session needs its password entered in the last 15 minutes (code step_up_required)",
             "content": {
               "application/json": {
                 "schema": {
