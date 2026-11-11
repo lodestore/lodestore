@@ -102,3 +102,66 @@ async fn notify_proxy_still_rejects_blocked_literals() {
     );
     assert!(quiet(&mut proxy_rx).await, "the proxy got a connection");
 }
+
+const PROXY_PASSWORD: &str = "s3cr3t-proxy-pw";
+
+async fn rejecting_proxy() -> String {
+    let socket = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = socket.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = socket.accept().await else {
+                return;
+            };
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let _ = stream
+                    .write_all(
+                        b"HTTP/1.1 407 Proxy Authentication Required\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                    )
+                    .await;
+            });
+        }
+    });
+    format!("127.0.0.1:{}", addr.port())
+}
+
+fn proxied(addr: &str) -> NotificationsConfig {
+    NotificationsConfig {
+        proxy: Some(Secret::new(format!("http://ops:{PROXY_PASSWORD}@{addr}"))),
+        ..Default::default()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn notify_proxy_password_stays_out_of_a_refused_connection_error() {
+    let socket = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = socket.local_addr().unwrap();
+    drop(socket);
+    let error = net::post_json(
+        &proxied(&addr.to_string()),
+        "http://hooks.example.invalid/x",
+        b"{}".to_vec(),
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(!error.to_string().contains(PROXY_PASSWORD), "{error}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn notify_proxy_password_stays_out_of_a_407_error() {
+    let config = proxied(&rejecting_proxy().await);
+    for url in [
+        "http://hooks.example.invalid/x",
+        "https://hooks.example.invalid/x",
+    ] {
+        let text = match net::post_json(&config, url, b"{}".to_vec(), None).await {
+            Ok(response) => net::expect_success(response).await.unwrap_err().to_string(),
+            Err(error) => error.to_string(),
+        };
+        assert!(!text.is_empty(), "{url}");
+        assert!(!text.contains(PROXY_PASSWORD), "{url}: {text}");
+    }
+}
