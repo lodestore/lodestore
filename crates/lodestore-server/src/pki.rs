@@ -449,11 +449,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = Config {
             data_dir: dir.path().to_path_buf(),
-            database_url: format!("sqlite://{}/pki.db?mode=rwc", dir.path().display()),
+            database_url: crate::config::Secret::new(format!(
+                "sqlite://{}/pki.db?mode=rwc",
+                dir.path().display()
+            )),
             unlock_key: Some(crate::config::Secret::new("07".repeat(32))),
             ..Config::default()
         };
-        let db = Db::connect(&config.database_url).await.unwrap();
+        let db = Db::connect(config.database_url.expose()).await.unwrap();
         let sealer = Sealer::load(&db, &config).await.unwrap();
         let pki = Pki::load_or_create(&db, &sealer, &config).await.unwrap();
 

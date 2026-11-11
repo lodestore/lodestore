@@ -26,6 +26,14 @@ impl Secret {
     }
 }
 
+impl std::str::FromStr for Secret {
+    type Err = std::convert::Infallible;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Ok(Secret::new(value))
+    }
+}
+
 impl fmt::Debug for Secret {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("Secret(<redacted>)")
@@ -54,7 +62,7 @@ pub struct Config {
     pub trusted_proxies: Vec<String>,
     pub grpc: GrpcConfig,
     pub data_dir: PathBuf,
-    pub database_url: String,
+    pub database_url: Secret,
     pub unlock_key: Option<Secret>,
     pub unlock_key_file: Option<PathBuf>,
     pub admin_username: String,
@@ -231,7 +239,7 @@ impl Default for Config {
             public_url: format!("http://{}:{}", nodename(), default_listen().port()),
             trusted_proxies: Vec::new(),
             grpc: GrpcConfig::default(),
-            database_url: default_database_url(&data_dir),
+            database_url: Secret::new(default_database_url(&data_dir)),
             data_dir,
             unlock_key: None,
             unlock_key_file: None,
@@ -275,17 +283,17 @@ pub struct ConfigArgs {
     #[arg(long, env = "LODESTORE_DATA_DIR")]
     pub data_dir: Option<PathBuf>,
     #[arg(long, env = "LODESTORE_DATABASE_URL", hide_env_values = true)]
-    pub database_url: Option<String>,
+    pub database_url: Option<Secret>,
     #[arg(long, env = "LODESTORE_DATABASE_URL_FILE")]
     pub database_url_file: Option<PathBuf>,
     #[arg(long, env = "LODESTORE_UNLOCK_KEY", hide_env_values = true)]
-    pub unlock_key: Option<String>,
+    pub unlock_key: Option<Secret>,
     #[arg(long, env = "LODESTORE_UNLOCK_KEY_FILE")]
     pub unlock_key_file: Option<PathBuf>,
     #[arg(long, env = "LODESTORE_ADMIN_USERNAME")]
     pub admin_username: Option<String>,
     #[arg(long, env = "LODESTORE_ADMIN_PASSWORD", hide_env_values = true)]
-    pub admin_password: Option<String>,
+    pub admin_password: Option<Secret>,
     #[arg(long, env = "LODESTORE_ADMIN_PASSWORD_FILE")]
     pub admin_password_file: Option<PathBuf>,
     #[arg(long, env = "LODESTORE_AGENT_DIR")]
@@ -318,7 +326,7 @@ struct FileConfig {
     trusted_proxies: Option<Vec<String>>,
     grpc: FileGrpc,
     data_dir: Option<PathBuf>,
-    database_url: Option<String>,
+    database_url: Option<Secret>,
     admin_username: Option<String>,
     agent_dir: Option<PathBuf>,
     join_token_ttl_secs: Option<i64>,
@@ -577,16 +585,16 @@ fn load_file(explicit: Option<&Path>) -> anyhow::Result<FileConfig> {
 
 fn secret_value(
     name: &str,
-    value: Option<String>,
+    value: Option<Secret>,
     file: Option<&Path>,
-) -> anyhow::Result<Option<String>> {
+) -> anyhow::Result<Option<Secret>> {
     match (value, file) {
         (Some(_), Some(_)) => anyhow::bail!("{name} and {name}_FILE are both set; use one of them"),
         (Some(value), None) => Ok(Some(value)),
         (None, Some(path)) => {
             let text = std::fs::read_to_string(path)
                 .with_context(|| format!("reading {name}_FILE {}", path.display()))?;
-            Ok(Some(text.trim_end().to_string()))
+            Ok(Some(Secret::new(text.trim_end())))
         }
         (None, None) => Ok(None),
     }
@@ -638,12 +646,12 @@ impl Config {
             args.database_url_file.as_deref(),
         )?
         .or(file.database_url)
-        .unwrap_or_else(|| default_database_url(&c.data_dir));
+        .unwrap_or_else(|| Secret::new(default_database_url(&c.data_dir)));
         anyhow::ensure!(
             args.unlock_key.is_none() || args.unlock_key_file.is_none(),
             "LODESTORE_UNLOCK_KEY and LODESTORE_UNLOCK_KEY_FILE are both set; use one of them"
         );
-        c.unlock_key = args.unlock_key.map(Secret::new);
+        c.unlock_key = args.unlock_key;
         c.unlock_key_file = args.unlock_key_file;
         if let Some(v) = args.admin_username.or(file.admin_username) {
             c.admin_username = v;
@@ -652,8 +660,7 @@ impl Config {
             "LODESTORE_ADMIN_PASSWORD",
             args.admin_password,
             args.admin_password_file.as_deref(),
-        )?
-        .map(Secret::new);
+        )?;
         if let Some(v) = args.agent_dir.or(file.agent_dir) {
             c.agent_dir = v;
         }
@@ -1039,6 +1046,26 @@ mod tests {
         assert!(!load("", &[]).unwrap().notifications.allow_private_targets);
         let c = load("notifications:\n  allow_private_targets: true", &[]).unwrap();
         assert!(c.notifications.allow_private_targets);
+    }
+
+    #[test]
+    fn config_debug_hides_database_url() {
+        let url = "postgres://u:hunter2@db/x";
+        let from_file = load(&format!("database_url: {url}"), &[]).unwrap();
+        assert_eq!(from_file.database_url.expose(), url);
+        assert!(!format!("{from_file:?}").contains("hunter2"));
+        let args = ConfigArgs {
+            database_url: Some(Secret::new(url)),
+            unlock_key: Some(Secret::new("hunter2-unlock")),
+            admin_password: Some(Secret::new("hunter2-long-password")),
+            ..ConfigArgs::default()
+        };
+        assert!(!format!("{args:?}").contains("hunter2"));
+        let from_args = Config::from_args(args).unwrap();
+        assert_eq!(from_args.database_url.expose(), url);
+        assert!(!format!("{from_args:?}").contains("hunter2"));
+        let file: FileConfig = yaml_serde::from_str(&format!("database_url: {url}")).unwrap();
+        assert!(!format!("{file:?}").contains("hunter2"));
     }
 
     #[test]

@@ -84,7 +84,7 @@ impl ServerHandle {
 
 pub async fn serve(config: Config, listeners: Listeners) -> anyhow::Result<ServerHandle> {
     std::fs::create_dir_all(&config.data_dir)?;
-    let db = Db::connect(&config.database_url).await?;
+    let db = Db::connect(config.database_url.expose()).await?;
     let sealer = Sealer::load(&db, &config).await?;
     let pki = Arc::new(Pki::load_or_create(&db, &sealer, &config).await?);
     if config.grpc_public_address_defaulted {
