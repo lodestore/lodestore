@@ -190,6 +190,60 @@ async fn snapshot_actions_need_delete_scope() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn snapshot_actions_need_a_recent_password_for_sessions() {
+    for backend in backends() {
+        let what = backend.name();
+        let ts = simple_server(&backend).await;
+        let api = ts.api().await;
+        let id = insert_snapshot(&ts, 1, None, "h", None, 1_000).await;
+        let marked = format!("/api/v1/snapshots/{id}/suspicious");
+        let deleted = format!("/api/v1/snapshots/{id}");
+        let body = json!({ "suspicious": true, "reason": "Odd" });
+        let deleter = bearer_client(&ts.issue_token(&["snapshots:delete"]).await);
+        sqlx::query("UPDATE sessions SET authenticated_at = $1")
+            .bind(lodestore_server::db::now_ms() - 16 * 60_000)
+            .execute(&ts.state().db.pool)
+            .await
+            .unwrap();
+
+        for (method, path) in [(Method::PUT, &marked), (Method::DELETE, &deleted)] {
+            let refused = session(&ts, &api, method, path, Some(&body)).await;
+            assert_eq!(refused.status(), 403, "{path} [{what}]");
+            let refused: Value = refused.json().await.unwrap();
+            assert_eq!(refused["code"], "step_up_required", "{path} [{what}]");
+        }
+        let rows: i64 = sqlx::query("SELECT COUNT(*) AS n FROM snapshots WHERE suspicious = 0")
+            .fetch_one(&ts.state().db.pool)
+            .await
+            .unwrap()
+            .get("n");
+        assert_eq!(rows, 1, "[{what}] the snapshot is untouched");
+
+        let by_token = deleter
+            .put(format!("{}{marked}", ts.rest_url()))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(by_token.status(), 200, "[{what}]");
+
+        let step = api
+            .post(
+                "/api/v1/auth/step-up",
+                &json!({ "password": common::ADMIN_PASSWORD }),
+            )
+            .await;
+        assert_eq!(step.status(), 204, "[{what}]");
+        let cleared = json!({ "suspicious": false, "reason": "Fine" });
+        let ok = session(&ts, &api, Method::PUT, &marked, Some(&cleared)).await;
+        assert_eq!(ok.status(), 200, "[{what}]");
+        let gone = session(&ts, &api, Method::DELETE, &deleted, None).await;
+        assert_ne!(gone.status(), 403, "[{what}]");
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn snapshot_actions_reason_required() {
     for backend in backends() {
         let ts = simple_server(&backend).await;

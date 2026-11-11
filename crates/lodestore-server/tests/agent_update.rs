@@ -529,6 +529,77 @@ async fn agent_update_start_requires_the_agents_update_scope() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agent_update_start_and_resume_need_a_recent_password_for_sessions() {
+    for backend in backends() {
+        let what = backend.name();
+        let ts = TestServer::start(&backend).await;
+        let hosts = signed_fleet(&ts, &["host-a"]).await;
+        let pool = &ts.state().db.pool;
+        setup_host(pool, &hosts[0], "0.0.1", None, true).await;
+        insert_rollout(pool, "held", "paused").await;
+        let api = ts.api().await;
+        sqlx::query("UPDATE sessions SET authenticated_at = $1")
+            .bind(now_ms() - 16 * 60_000)
+            .execute(pool)
+            .await
+            .unwrap();
+
+        let refused = api
+            .post(
+                "/api/v1/agent-updates",
+                &serde_json::json!({ "outdated": true }),
+            )
+            .await;
+        assert_eq!(refused.status(), 403, "start [{what}]");
+        let refused: serde_json::Value = refused.json().await.unwrap();
+        assert_eq!(refused["code"], "step_up_required", "start [{what}]");
+        let refused = api
+            .post("/api/v1/agent-updates/held/resume", &serde_json::json!({}))
+            .await;
+        assert_eq!(refused.status(), 403, "resume [{what}]");
+        let refused: serde_json::Value = refused.json().await.unwrap();
+        assert_eq!(refused["code"], "step_up_required", "resume [{what}]");
+        assert_eq!(
+            text(pool, ROLLOUT_STATE, "held").await.as_deref(),
+            Some("paused"),
+            "[{what}]"
+        );
+        assert_eq!(count(pool, "SELECT COUNT(*) FROM agent_rollouts").await, 1);
+
+        let paused = api
+            .post("/api/v1/agent-updates/held/pause", &serde_json::json!({}))
+            .await;
+        assert_eq!(paused.status(), 409, "pausing needs no step-up [{what}]");
+        let by_token = start(&ts, serde_json::json!({ "outdated": true })).await;
+        assert_eq!(by_token.status(), 409, "a token needs no step-up [{what}]");
+
+        let step = api
+            .post(
+                "/api/v1/auth/step-up",
+                &serde_json::json!({ "password": common::ADMIN_PASSWORD }),
+            )
+            .await;
+        assert_eq!(step.status(), 204, "[{what}]");
+        let resumed = api
+            .post("/api/v1/agent-updates/held/resume", &serde_json::json!({}))
+            .await;
+        assert_eq!(resumed.status(), 204, "resume after step-up [{what}]");
+        let cancelled = api
+            .post("/api/v1/agent-updates/held/cancel", &serde_json::json!({}))
+            .await;
+        assert_eq!(cancelled.status(), 204, "[{what}]");
+        let started = api
+            .post(
+                "/api/v1/agent-updates",
+                &serde_json::json!({ "outdated": true }),
+            )
+            .await;
+        assert_eq!(started.status(), 202, "start after step-up [{what}]");
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn agent_update_start_assigns_the_selected_host() {
     for backend in backends() {
         let ts = TestServer::start(&backend).await;
