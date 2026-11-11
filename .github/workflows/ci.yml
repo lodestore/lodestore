@@ -57,6 +57,8 @@ jobs:
             echo "$out" >&2
             exit 1
           fi
+      - name: Mutation skips have reasons and stay pinned
+        run: scripts/mutants-ratchet.sh --skips .github/mutants-baseline.json
 
   test:
     runs-on: ubuntu-latest
