@@ -112,24 +112,15 @@ pub fn plan(
 
     let mut live_bytes: HashMap<BlobId, u64> = HashMap::new();
     for (id, blob_type) in live.iter() {
-        let chosen = index.get(id, *blob_type).ok_or_else(|| {
+        let loc = index.get(id, *blob_type).ok_or_else(|| {
             Error::corrupt(
                 format!("blob {}", hex32(id)),
                 "is live but no index shard describes it",
             )
         })?;
-        let loc = if listed.contains_key(&chosen.pack_id) {
-            *chosen
-        } else {
-            // A shard from a write-key holder can name a pack that is not
-            // there ahead of the real one; only a blob with no listed copy
-            // is missing.
-            index
-                .locations(id, *blob_type)
-                .into_iter()
-                .find(|l| listed.contains_key(&l.pack_id))
-                .ok_or_else(|| pack_missing(&chosen.pack_id))?
-        };
+        if !listed.contains_key(&loc.pack_id) {
+            return Err(pack_missing(&loc.pack_id));
+        }
         *live_bytes.entry(loc.pack_id).or_default() += u64::from(loc.enc_len);
     }
 
