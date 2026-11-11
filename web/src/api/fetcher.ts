@@ -48,6 +48,7 @@ const AUTH_PATHS = [
 let csrfToken: string | undefined;
 let unauthorizedHandler: (() => void) | undefined;
 let demoBlockedHandler: (() => void) | undefined;
+let stepUpHandler: (() => Promise<boolean>) | undefined;
 
 export function setCsrfToken(token: string | undefined) {
 	csrfToken = token;
@@ -59,6 +60,12 @@ export function onUnauthorized(handler: (() => void) | undefined) {
 
 export function onDemoBlocked(handler: (() => void) | undefined) {
 	demoBlockedHandler = handler;
+}
+
+export function onStepUpRequired(
+	handler: (() => Promise<boolean>) | undefined,
+) {
+	stepUpHandler = handler;
 }
 
 /** Sends the user to login for a 401 from a request that bypasses apiFetch. */
@@ -79,6 +86,7 @@ function withParams(url: string, params?: Record<string, unknown>) {
 export async function apiFetch<T>(
 	{ url, method, params, data, headers, signal, responseType }: RequestConfig,
 	options?: RequestInit,
+	retried = false,
 ): Promise<T> {
 	const verb = method.toUpperCase();
 	const merged = new Headers(options?.headers);
@@ -119,6 +127,19 @@ export async function apiFetch<T>(
 		}
 		if (response.status === 403 && body?.code === "demo_mode") {
 			demoBlockedHandler?.();
+		}
+		if (
+			response.status === 403 &&
+			body?.code === "step_up_required" &&
+			!retried &&
+			stepUpHandler &&
+			(await stepUpHandler())
+		) {
+			return apiFetch<T>(
+				{ url, method, params, data, headers, signal, responseType },
+				options,
+				true,
+			);
 		}
 		throw error;
 	}
