@@ -522,13 +522,16 @@ async fn demo_session_lasts_an_hour() {
             .unwrap();
         let expired = session.get("/api/v1/auth/session").await;
         assert_eq!(expired.status, 401, "[{}]", backend.name());
-        let after: i64 = sqlx::query("SELECT expires_at FROM sessions")
-            .fetch_one(pool)
+        // The session janitor may purge the expired row before this read.
+        let after = sqlx::query("SELECT expires_at FROM sessions")
+            .fetch_optional(pool)
             .await
             .unwrap()
-            .try_get("expires_at")
-            .unwrap();
-        assert_eq!(after, past, "an expired demo session is not extended");
+            .map(|row| row.try_get::<i64, _>("expires_at").unwrap());
+        assert!(
+            after.is_none_or(|expires| expires == past),
+            "an expired demo session is not extended: {after:?}"
+        );
         ts.stop().await;
     }
 }
