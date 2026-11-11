@@ -124,7 +124,7 @@ impl TestServer {
                 ..GrpcConfig::default()
             },
             grpc_public_address_defaulted: false,
-            database_url,
+            database_url: Secret::new(database_url),
             data_dir,
             unlock_key: Some(Secret::new(data_encoding::HEXLOWER.encode(&[7u8; 32]))),
             admin_password: Some(Secret::new(ADMIN_PASSWORD)),

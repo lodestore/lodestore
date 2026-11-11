@@ -83,6 +83,15 @@ fn config_precedence() {
     assert!(parse(&["--config", &missing]).is_err());
 }
 
+#[tokio::test]
+async fn database_error_hides_url_password() {
+    let error = lodestore_server::db::Db::connect("postgres://u:hunter2@127.0.0.1:1/x")
+        .await
+        .err()
+        .expect("nothing listens on port 1");
+    assert!(!format!("{error:#}").contains("hunter2"), "{error:#}");
+}
+
 #[test]
 fn config_secret_files() {
     let dir = tempfile::tempdir().unwrap();
@@ -100,7 +109,7 @@ fn config_secret_files() {
     ])
     .unwrap();
     assert_eq!(config.admin_password.unwrap().expose(), "s3cret-value");
-    assert_eq!(config.database_url, "sqlite:///tmp/x.db?mode=rwc");
+    assert_eq!(config.database_url.expose(), "sqlite:///tmp/x.db?mode=rwc");
     assert_eq!(config.unlock_key_file.unwrap().display().to_string(), key);
     assert!(config.unlock_key.is_none());
 

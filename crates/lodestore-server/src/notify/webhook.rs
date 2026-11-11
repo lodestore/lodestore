@@ -57,12 +57,6 @@ pub async fn send(
     let body = serde_json::to_vec(&payload(&channel.name, &state.config.public_url, message))
         .map_err(|e| DeliveryError::new(e.to_string()))?;
     let bearer = channel.secrets.bearer.as_ref().map(|s| s.expose());
-    let response = net::post_json(
-        state.config.notifications.allow_private_targets,
-        url,
-        body,
-        bearer,
-    )
-    .await?;
+    let response = net::post_json(&state.config.notifications, url, body, bearer).await?;
     net::expect_success(response).await
 }

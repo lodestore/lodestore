@@ -412,11 +412,11 @@ mod tests {
     async fn sealer(dir: &Path, key: &str) -> Sealer {
         let config = Config {
             data_dir: dir.to_path_buf(),
-            database_url: format!("sqlite://{}/seal.db?mode=rwc", dir.display()),
+            database_url: Secret::new(format!("sqlite://{}/seal.db?mode=rwc", dir.display())),
             unlock_key: Some(Secret::new(key.repeat(32))),
             ..Config::default()
         };
-        let db = Db::connect(&config.database_url).await.unwrap();
+        let db = Db::connect(config.database_url.expose()).await.unwrap();
         Sealer::load(&db, &config).await.unwrap()
     }
 
