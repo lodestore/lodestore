@@ -15,7 +15,7 @@ zstd = "0.14.3"
 chacha20poly1305 = { version = "0.11.0", features = ["zeroize"] }
 hpke = { version = "=0.14.1", default-features = false, features = ["alloc", "getrandom", "mlkem", "x25519", "hkdfsha2", "chacha"] }
 argon2 = "0.6.0"
-rustix = { version = "1.1.5", features = ["fs", "process", "system"] }
+rustix = { version = "1.1.6", features = ["fs", "process", "system"] }
 getrandom = "0.4.3"
 rand_core = "0.10.1"
 zeroize = { version = "1.9.1", features = ["derive"] }

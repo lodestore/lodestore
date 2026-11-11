@@ -43,7 +43,7 @@ anyhow = "1"
 thiserror = "2.0.21"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-rustix = { version = "1.1.5", features = ["fs", "system", "process"] }
+rustix = { version = "1.1.6", features = ["fs", "system", "process"] }
 getrandom = "0.4.3"
 zeroize = "1.9.1"
 yaml_serde = "0.10.7"
