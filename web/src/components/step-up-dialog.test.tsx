@@ -125,9 +125,10 @@ describe("step-up dialog", () => {
 				screen.queryByRole("dialog", { name: "Confirm your password" }),
 			).toBeNull(),
 		);
-		expect(
-			screen.getByRole("dialog", { name: "Create API token" }),
-		).toBeInTheDocument();
+		const form = screen.getByRole("dialog", { name: "Create API token" });
+		await waitFor(() =>
+			expect(form).toContainElement(document.activeElement as HTMLElement),
+		);
 	});
 
 	it("shows a wrong password under the field and stays open", async () => {

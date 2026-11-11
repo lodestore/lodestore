@@ -194,7 +194,7 @@ export const copy = {
 	},
 	stepUp: {
 		title: "Confirm your password",
-		body: "Creating tokens and restoring in place needs your password again.",
+		body: "This action needs your password again.",
 		password: "Password",
 		confirm: "Confirm",
 		cancel: "Cancel",

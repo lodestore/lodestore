@@ -22,6 +22,7 @@ export function StepUpDialog() {
 	const [password, setPassword] = useState("");
 	const [error, setError] = useState<string>();
 	const waiting = useRef<Waiting>(undefined);
+	const returnFocus = useRef<HTMLElement | null>(null);
 	const stepUp = useStepUp({ mutation: { gcTime: 0 } });
 
 	useEffect(() => {
@@ -32,6 +33,15 @@ export function StepUpDialog() {
 					resolve = r;
 				});
 				waiting.current = { promise, resolve };
+				const active = document.activeElement;
+				returnFocus.current =
+					active instanceof HTMLElement && active !== document.body
+						? active
+						: (Array.from(
+								document.querySelectorAll<HTMLElement>(
+									'[role="dialog"][data-state="open"]',
+								),
+							).at(-1) ?? null);
 				setOpen(true);
 			}
 			return waiting.current.promise;
@@ -81,7 +91,22 @@ export function StepUpDialog() {
 			open={open}
 			onOpenChange={(next) => !next && !stepUp.isPending && settle(false)}
 		>
-			<DialogContent className="sm:max-w-[420px]">
+			<DialogContent
+				className="sm:max-w-[420px]"
+				onCloseAutoFocus={(event) => {
+					const target = returnFocus.current;
+					returnFocus.current = null;
+					if (!target?.isConnected) return;
+					event.preventDefault();
+					// The trigger is often disabled while its request waits; focus it once it settles.
+					setTimeout(() => {
+						target.focus();
+						if (document.activeElement !== target) {
+							target.closest<HTMLElement>('[role="dialog"]')?.focus();
+						}
+					}, 0);
+				}}
+			>
 				<DialogHeader>
 					<DialogTitle>{copy.stepUp.title}</DialogTitle>
 					<DialogDescription>{copy.stepUp.body}</DialogDescription>
