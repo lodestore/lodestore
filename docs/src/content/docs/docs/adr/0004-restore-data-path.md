@@ -1,5 +1,6 @@
 ---
 title: "ADR 0004: Restore data path"
+description: "How a Lodestore restore moves data to any host while the server stays out of the bulk transfer and the agent never reads the bucket with its own key."
 ---
 Status: Accepted
 Date: 2026-10-16

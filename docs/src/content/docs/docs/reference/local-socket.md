@@ -1,5 +1,6 @@
 ---
 title: "Agent local socket"
+description: "Stream a database dump to Lodestore through the agent's local unix socket, with no repository password or key on the host."
 ---
 The agent listens on a unix socket so that a user on the host can hand it a stream, for example a database dump, without holding any repository password or key. The agent writes the stream to the repository with its own keys and reports the job to the server like any other backup.
 

@@ -1,5 +1,6 @@
 ---
 title: "REST API"
+description: "The Lodestore REST API: an OpenAPI 3.1 document with an interactive reference embedded in the server, available offline and without a CDN."
 ---
 The server describes its REST API as an OpenAPI 3.1 document and renders it as an interactive reference.
 

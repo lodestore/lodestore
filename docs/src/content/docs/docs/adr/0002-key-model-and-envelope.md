@@ -1,5 +1,6 @@
 ---
 title: "ADR 0002: Key model and encryption envelope"
+description: "The Lodestore key model: a master key, key slots for passwords and recovery keys, and the encryption envelope that lets a restore work from the bucket alone."
 ---
 Status: Accepted
 Date: 2026-10-13

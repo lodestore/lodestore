@@ -1,5 +1,6 @@
 ---
 title: "ADR 0005: Server attestations"
+description: "Server attestations: objects only the Lodestore server can create, so a compromised host holding writer keys cannot plant index shards that readers trust."
 ---
 Status: Accepted
 Date: 2026-11-04

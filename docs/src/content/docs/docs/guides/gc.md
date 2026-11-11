@@ -1,5 +1,6 @@
 ---
 title: "Cleanup: freeing storage space"
+description: "Free storage space in Lodestore: cleanup deletes packs no snapshot uses, runs only on the server, and offers a dry run that never writes to the bucket."
 ---
 Retention only forgets snapshots. Their packs stay in the bucket until a cleanup cycle deletes what no remaining snapshot uses. Cleanup is run by the server, with the server's own storage key. Agents and `lode` cannot delete anything.
 

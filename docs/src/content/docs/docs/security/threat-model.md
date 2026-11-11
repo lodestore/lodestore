@@ -1,5 +1,6 @@
 ---
 title: "Threat model: secrets held by the server"
+description: "What the Lodestore server stores, how its secrets are protected, and what an attacker gets in each realistic compromise of the server or its database."
 ---
 This page describes what the Lodestore server stores, what protects it, and what an attacker gets in each realistic compromise. It does not cover the repository format itself; see [ADR 0002](/docs/adr/0002-key-model-and-envelope/) for the key hierarchy.
 

@@ -1,5 +1,6 @@
 ---
 title: "ADR 0001: Serialization of repository objects"
+description: "Why Lodestore repository objects use Protocol Buffers, so a third-party restorer in another language can read a repository long after this implementation."
 ---
 Status: Accepted
 Date: 2026-10-13

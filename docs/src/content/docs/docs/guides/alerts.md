@@ -1,5 +1,6 @@
 ---
 title: "Alerts and notifications"
+description: "Lodestore alerts for failed or missing backups, offline agents and failed checks, sent to Telegram, Slack, email or a webhook before you need a restore."
 ---
 Lodestore watches the fleet and raises an alert when something needs a person. Alerts show on the Overview page and on the host page. Notifications send them out to Telegram, Slack, email or a webhook, so you hear about a failed backup before you need the restore.
 
