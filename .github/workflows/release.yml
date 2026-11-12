@@ -63,6 +63,8 @@ jobs:
   build:
     needs: meta
     uses: ./.github/workflows/build.yml
+    with:
+      release: true
 
   linux-root:
     needs: meta

@@ -1,4 +1,4 @@
-FROM node:24-bookworm-slim AS web
+FROM node:24-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54 AS web
 WORKDIR /src/web
 RUN corepack enable
 COPY web/package.json web/pnpm-lock.yaml ./
@@ -6,7 +6,7 @@ RUN pnpm install --frozen-lockfile
 COPY web ./
 RUN pnpm build
 
-FROM rust:1.99.0-bookworm AS builder
+FROM rust:1.99.0-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6 AS builder
 ARG TARGETARCH
 ARG ZIGLANG_VERSION=0.17.0
 ARG ZIGBUILD_VERSION=0.23.4
@@ -32,7 +32,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     && cp "/out/lodestore-server-linux-${arch}" /out/lodestore-server \
     && mkdir -p /rootfs/var/lib/lodestore
 
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
 COPY --from=builder /out/lodestore-server /usr/local/bin/lodestore-server
 COPY --from=builder /out/lodestore-agent-linux-x86_64 /out/lodestore-agent-linux-aarch64 /usr/share/lodestore/agents/
 COPY --from=builder --chown=65532:65532 /rootfs/var/lib/lodestore /var/lib/lodestore
