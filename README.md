@@ -39,7 +39,7 @@ Start the server with one command, then connect a host and take a first backup i
 
 ```sh
 export LODESTORE_HOST=192.0.2.10
-export LODESTORE_VERSION=0.1.0
+export LODESTORE_VERSION=0.2.0
 docker run -d --name lodestore \
   -p 8080:8080 -p 8443:8443 \
   -v lodestore-data:/var/lib/lodestore \
