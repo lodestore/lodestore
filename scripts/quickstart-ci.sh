@@ -315,7 +315,7 @@ prepare_lode() {
 restore_without_server() {
   prepare_lode
   docker stop lodestore >/dev/null
-  printf '%s' "$repo_password" >"$workdir/repository-password"
+  printf '%s' "$repo_password" >"$workdir/repository-key"
   local block
   block=$(extract restore-without-server)
   block=${block//your-server-access-key/$minio_root_user}
