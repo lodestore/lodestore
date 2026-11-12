@@ -74,6 +74,21 @@ test('Binary and Helm tabs are fenced blocks of the install pages', () => {
 	}
 });
 
+test('Binary tab checks the signature before it installs', () => {
+	const key = readFileSync(here('../../crates/lodestore-agent/keys/project.pub'), 'utf8').split('\n')[1].trim();
+	const text = textOf(element(landing(), 'pre', 'inst-binary')).replace(/\\\n\s*/g, ' ');
+	assert.ok(text.indexOf('releases/download') >= 0 && text.indexOf('releases/download') < text.indexOf('minisign -V'), 'the download does not come before the check');
+	const chained = text.match(/minisign -V[^;&|\n]*&&\s*sudo install -m 0755 /g) ?? [];
+	assert.ok(chained.length > 0, 'no minisign -V ... && sudo install chain');
+	assert.equal(text.match(/sudo install/g)?.length, chained.length, 'an install is not chained after the signature check');
+	const keys = text.match(/RW[A-Za-z0-9+/]{40,}/g) ?? [];
+	assert.ok(keys.length > 0, 'no project key in the Binary tab');
+	for (const k of keys) assert.equal(k, key, 'the key differs from crates/lodestore-agent/keys/project.pub');
+	const flags = [...text.matchAll(/-P (\S+)/g)].map((m) => m[1]);
+	assert.ok(flags.length > 0);
+	for (const f of flags) assert.equal(f, key, `-P is followed by ${f}, not the project key`);
+});
+
 test('recovery terminal commands come from the restore recipe', () => {
 	const recipe = source('recipes/restore-without-server');
 	const lines = textOf(element(landing(), 'pre', 'tty'))
@@ -81,6 +96,10 @@ test('recovery terminal commands come from the restore recipe', () => {
 		.filter((l) => l.startsWith('$ '))
 		.map((l) => l.slice(2));
 	assert.ok(lines.length > 0, 'no command lines in the terminal');
+	assert.ok(
+		lines.every((l) => l.trim().length > 0),
+		'a bare prompt line is in the recovery terminal',
+	);
 	for (const line of lines) {
 		const name = line.match(/^export ([A-Z_]+)=/)?.[1];
 		if (name) assert.ok(recipe.includes(`export ${name}=`), `${name} is not exported in the recipe`);
