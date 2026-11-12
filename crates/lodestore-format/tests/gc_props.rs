@@ -373,6 +373,7 @@ async fn run_case(case: &Case, tally: &Tally) -> Result<(), TestCaseError> {
         (placements()[m.placement], fx.make_src("mid", &files), seeds)
     });
     let mut writer = None;
+    let mut mid_id = None;
     let mut cycle = Cycle::new(&fx);
     let mut repacks = false;
     for gap in 0..=GC_STEPS {
@@ -381,7 +382,11 @@ async fn run_case(case: &Case, tally: &Tally) -> Result<(), TestCaseError> {
                 writer = Some(fx.open_writer().await);
             }
             if *commit == gap {
-                fx.commit(writer.as_mut().unwrap(), src.clone()).await;
+                mid_id = Some(
+                    fx.commit(writer.as_mut().unwrap(), src.clone())
+                        .await
+                        .snapshot_id,
+                );
             }
         }
         match gap {
@@ -418,10 +423,14 @@ async fn run_case(case: &Case, tally: &Tally) -> Result<(), TestCaseError> {
         .interleaved
         .set(tally.interleaved.get() + u32::from(mid.is_some()));
     let present = fx.sources.borrow().clone();
+    let mut mid_reads = BTreeSet::new();
     for (id, src) in &present {
         fx.store.take_reads();
         fx.restore_one(id, src).await;
         let reads = fx.store.take_reads();
+        if mid_id == Some(*id) {
+            mid_reads.extend(reads.iter().map(|(k, _)| k.clone()));
+        }
         for (key, _) in reads.iter().filter(|(k, _)| k.starts_with("packs/")) {
             prop_assert!(
                 after_keys.contains(key) || missing.contains(key),
@@ -449,6 +458,14 @@ async fn run_case(case: &Case, tally: &Tally) -> Result<(), TestCaseError> {
                 .worst_index_milli
                 .get()
                 .max(index * 1000 / index_total.max(1)),
+        );
+    }
+
+    for pack in &cycle.resurrected {
+        let key = pack_object_key(pack);
+        prop_assert!(
+            named.contains(&key) || mid_reads.contains(&key),
+            "{key} was brought back, but no planted record names it and the backup made during the cycle does not read it"
         );
     }
 
@@ -537,6 +554,57 @@ async fn gc_survey_places_blobs_in_packs_that_exist() {
     cycle.sweep_shards().await;
     cycle.sweep_packs(usize::MAX).await;
     cycle.finish().await;
+    fx.assert_all_restore().await;
+}
+
+/// The same planted shard in front of a sparse pack: the repack must copy the
+/// live blobs out of the real pack, so verification has nothing to bring back
+/// and the dead bytes are freed in one cycle.
+#[tokio::test]
+async fn gc_repack_moves_blobs_a_planted_shard_misplaces() {
+    let fx = Fx::new().await;
+    let first = fx
+        .backup("ab", &[("a", 1, 100 << 10), ("b", 2, 900 << 10)])
+        .await;
+    fx.backup("a", &[("a", 1, 100 << 10)]).await;
+    fx.forget(&first.snapshot_id).await;
+    let keys = attacker_keys(&fx.repo);
+    let real = open_all_shards(&fx.store, &keys).await;
+    let lowest = real.iter().map(|(id, _)| *id).min().unwrap();
+    let ghosts: Vec<pb::PackRecord> = real
+        .iter()
+        .flat_map(|(_, s)| s.packs.iter())
+        .zip(1u8..)
+        .map(|(record, n)| pb::PackRecord {
+            pack_id: vec![n; 32],
+            ..record.clone()
+        })
+        .collect();
+    plant_shard_where(&fx.store, &keys, ghosts, Vec::new(), |id| *id < lowest).await;
+    let before = fx.pack_bytes().await;
+
+    let mut cycle = Cycle::new(&fx);
+    cycle.survey(50).await;
+    assert!(!cycle.survey.as_ref().unwrap().plan.repack.is_empty());
+    cycle.repack_publish().await;
+    assert!(!cycle.repack.replaced.is_empty());
+    assert!(!cycle.repack.new_packs.is_empty());
+    assert!(cycle.repack.bytes_written > 0);
+    cycle.verify_compact().await;
+    assert!(cycle.resurrected.is_empty(), "{:?}", cycle.resurrected);
+    cycle.sweep_shards().await;
+    cycle.sweep_packs(usize::MAX).await;
+    cycle.finish().await;
+
+    let packs = fx.packs().await;
+    for pack in &cycle.repack.replaced {
+        assert!(!packs.contains_key(&pack_object_key(pack)));
+    }
+    let after = fx.pack_bytes().await;
+    println!("pack bytes: before={before} after={after}");
+    assert!(after + (700 << 10) < before, "{before} -> {after}");
+    let again = fx.survey(50).await;
+    assert!(again.plan.repack.is_empty() && again.plan.delete.is_empty());
     fx.assert_all_restore().await;
 }
 

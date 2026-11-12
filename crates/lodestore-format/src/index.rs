@@ -19,7 +19,7 @@ use crate::pack::{
     parse_entries, read_pack_header,
 };
 use crate::pb;
-use crate::store::{BlobError, BlobStore, put_named, read_bounded};
+use crate::store::{BlobError, BlobStore, ListEntry, put_named, read_bounded};
 
 pub(crate) const INDEX_PREFIX: &str = "index/";
 pub(crate) const PACKS_PREFIX: &str = "packs/";
@@ -671,14 +671,19 @@ fn same_extent(a: &BlobLocation, b: &BlobLocation) -> bool {
 
 /// The packs `packs/` lists, with their sizes.
 pub async fn listed_packs<S: BlobStore>(store: &S) -> Result<HashMap<BlobId, u64>> {
+    Ok(listed_sizes(&store.list(PACKS_PREFIX).await?))
+}
+
+/// [`listed_packs`] from a listing of `packs/` taken already.
+pub(crate) fn listed_sizes(listing: &[ListEntry]) -> HashMap<BlobId, u64> {
     let mut listed = HashMap::new();
-    for entry in store.list(PACKS_PREFIX).await? {
+    for entry in listing {
         let id = entry.key.rsplit('/').next().and_then(parse_hex32);
         if let Some(id) = id.filter(|id| pack_object_key(id) == entry.key) {
             listed.insert(id, entry.size);
         }
     }
-    Ok(listed)
+    listed
 }
 
 #[derive(Debug, Default)]

@@ -8,7 +8,7 @@ use std::collections::HashSet;
 
 use crate::crypto::BlobId;
 use crate::error::Result;
-use crate::index::{Index, PACKS_PREFIX};
+use crate::index::{Index, PACKS_PREFIX, listed_sizes};
 use crate::keys::ReadKeys;
 use crate::pb;
 use crate::store::BlobStore;
@@ -76,7 +76,7 @@ pub async fn survey_with<S: BlobStore>(
     progress: &(dyn Fn(SurveyProgress) + Sync),
 ) -> Result<Survey> {
     let shards = load_shards(store, keys).await?;
-    let index = shards.index(&HashSet::new())?;
+    let mut index = shards.index(&HashSet::new())?;
     let MarkOutcome {
         live,
         snapshots,
@@ -86,8 +86,15 @@ pub async fn survey_with<S: BlobStore>(
         progress(SurveyProgress::Snapshots { done, total });
     })
     .await?;
+    let listing = store.list(PACKS_PREFIX).await?;
+    // A planted shard can name packs the bucket lacks; plan and repack must place a blob where verify does.
+    index.retain_packs(&listed_sizes(&listing));
     let plan = if quarantined.is_empty() {
-        let listing = store.list(PACKS_PREFIX).await?;
+        if let Some((id, blob_type)) = live.iter().find(|(id, t)| index.get(id, *t).is_none())
+            && let Some(gone) = shards.index(&HashSet::new())?.get(id, *blob_type)
+        {
+            return Err(plan::pack_missing(&gone.pack_id));
+        }
         plan(&shards, &index, &live, &listing, opts)?
     } else {
         GcPlan::default()
