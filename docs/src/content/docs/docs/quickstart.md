@@ -10,6 +10,7 @@ This page takes you from nothing to a first backup of one Linux host. It should 
 - A machine with Docker where the server will run. It must be reachable from the host you want to back up on ports 8080 (web interface and API) and 8443 (agents).
 - S3-compatible object storage (AWS S3, MinIO, Ceph and others), a bucket in it, and two access keys: a server key with full access and an agent key without delete rights. The setup wizard shows the exact policy for the agent key.
 - A Linux host with systemd and root access, to back up. It can be the same machine as the server.
+- `minisign` on the machine where you run `lode`, to check its signature in [Restore without the server](#restore-without-the-server). Where to get it: the [package table](/docs/install/binary/#agents-for-new-hosts).
 
 Know before you install: version 0.x backs up Linux hosts only (x86_64 and arm64), with no Windows or macOS agent. It does not yet back up Proxmox VMs and containers or Kubernetes, has no native database backup (today, dump the database in a pre-backup hook), no roles (RBAC) or single sign-on, and keeps repositories in S3-compatible storage or a folder, with no SFTP or WebDAV. See the [roadmap](/roadmap/).
 
@@ -107,13 +108,32 @@ Open **Restore**, choose the snapshot and the files, choose the host and a folde
 
 The server only manages and catalogs. Your data is in the bucket, encrypted with the repository password, and `lode` restores it with nothing else. This is the promise the product is built around, so try it once before you rely on it.
 
-Get `lode` from the [release binaries](/docs/install/binary/). Then set the storage address and the bucket, and put the repository password in a file. A recovery key works in place of the password.
+Download `lode`, check its signature and install it:
+
+```sh
+export ARCH=$(uname -m)
+base=https://github.com/lodestore/lodestore/releases/download/v$LODESTORE_VERSION
+curl --proto '=https' --tlsv1.2 -fsSLO "$base/lode-linux-$ARCH"
+curl --proto '=https' --tlsv1.2 -fsSLO "$base/lode-linux-$ARCH.minisig"
+minisign -Vm lode-linux-$ARCH -P RWR4L6XuZIijjGDS/pggnqvsOKeXTnAUspdDGzyF983eIpcnS+mKEREI && sudo install -m 0755 lode-linux-$ARCH /usr/local/bin/lode
+```
+
+Before it installs anything, minisign prints `Trusted comment: lode <version> <arch>`. If the signature does not match, the `&&` stops the chain and the file is not installed. The key is the project key; it is also published on [Binary](/docs/install/binary/#check-the-files).
+
+Then set the storage address and the bucket, and put the repository password in a file.
 
 ```sh
 export S3_ENDPOINT=https://s3.us-east-1.amazonaws.com
 export S3_BUCKET=my-backups
 umask 077
-printf '%s' 'your-repository-password' > ./repository-password
+printf '%s' 'your-repository-password' > ./repository-key
+```
+
+If you saved the recovery key instead, put it in the same file:
+
+```sh
+umask 077
+printf '%s' 'lode-rk1-…' > ./repository-key
 ```
 
 For MinIO or another S3-compatible store, `S3_ENDPOINT` is its address, for example `http://192.0.2.20:9000`.
@@ -124,7 +144,7 @@ export AWS_ACCESS_KEY_ID=your-server-access-key
 export AWS_SECRET_ACCESS_KEY=your-server-secret-key
 export AWS_REGION=us-east-1
 export LODE_REPOSITORY="s3:$S3_ENDPOINT/$S3_BUCKET"
-export LODE_PASSWORD_FILE=./repository-password
+export LODE_PASSWORD_FILE=./repository-key
 lode restore latest --target ./restored
 ```
 
