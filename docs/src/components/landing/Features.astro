@@ -1,7 +1,7 @@
 ---
 const tabs = [
 	{ label: 'Deduplicated and encrypted', icon: ['M12 3 4 7.5v9L12 21l8-4.5v-9Z'] },
-	{ label: 'Hosts cannot delete', icon: ['M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Z', 'm5.6 5.6 12.8 12.8'] },
+	{ label: "On S3, hosts can't delete", icon: ['M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Z', 'm5.6 5.6 12.8 12.8'] },
 	{
 		label: 'Policies as code',
 		icon: ['M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z', 'M14 3v6h6M10 13l-2 2 2 2M14 13l2 2-2 2'],
@@ -105,10 +105,14 @@ const alerts = [
 		</div>
 		<div class="pane" role="tabpanel" id="panel-1" aria-labelledby="tab-1" data-p="1">
 			<div>
-				<h3>A taken-over host <span class="em">cannot erase its history.</span></h3>
+				<h3>On S3, a taken-over host <span class="em">cannot delete its backups.</span></h3>
 				<p>
 					On S3-compatible storage the key the agents write with has no delete permission. Deletion and cleanup run only on
 					the server, in two phases with a wait longer than the longest backup.
+				</p>
+				<p>
+					An overwrite is refused where the storage enforces <code>If-None-Match</code>. Where it does not, versioning or
+					Object Lock keeps the earlier version. A local folder or NFS gives no such protection.
 				</p>
 				<p>It works with S3 Object Lock, so even the server cannot remove data before its time.</p>
 				<a class="more" href="/docs/security/threat-model/#agent-credentials"

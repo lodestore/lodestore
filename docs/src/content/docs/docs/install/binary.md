@@ -5,6 +5,19 @@ description: Download the Lodestore server, agent and lode binaries from GitHub 
 
 Every release publishes static Linux binaries on GitHub Releases. Use them when you cannot run Docker or Kubernetes. The main path is still [Docker](/docs/install/docker/).
 
+## The short way
+
+```sh
+export VERSION=0.1.0
+export ARCH=$(uname -m)
+base=https://github.com/lodestore/lodestore/releases/download/v$VERSION
+curl --proto '=https' --tlsv1.2 -fsSLO "$base/lodestore-server-linux-$ARCH"
+curl --proto '=https' --tlsv1.2 -fsSLO "$base/lodestore-server-linux-$ARCH.minisig"
+minisign -Vm lodestore-server-linux-$ARCH -P RWR4L6XuZIijjGDS/pggnqvsOKeXTnAUspdDGzyF983eIpcnS+mKEREI && sudo install -m 0755 lodestore-server-linux-$ARCH /usr/local/bin/lodestore-server
+```
+
+Before it installs anything, minisign prints `Trusted comment: lodestore-server <version> <arch>`. If the signature does not match, the `&&` stops the chain and the file is not installed. The sections below explain the checksums, the key from the release tag, the `lode` client and the agent.
+
 ## What a release contains
 
 Each release has three programs for two architectures, `x86_64` and `aarch64`:

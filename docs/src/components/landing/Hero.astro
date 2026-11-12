@@ -1,6 +1,8 @@
 ---
 import { liveDemoUrl } from '../site/nav';
 
+const joinCommand =
+	"curl --proto '=https' --tlsv1.2 -fsSL https://lodestore.example.com/install.sh | sh -s -- --join <join-token>";
 const words = ['Linux host.', 'file server.', 'web server.', 'build server.'];
 const check =
 	'<svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8.5 12 2.5 2.5 4.5-5"/></svg>';
@@ -42,7 +44,7 @@ const hosts = [
 			role="img"
 			aria-label="The Lodestore overview. A new host is added with one command and its first backup finishes."
 		>
-			<div class="chrome"><b></b><b></b><b></b><span class="url">lodestore.internal/overview</span></div>
+			<div class="chrome"><b></b><b></b><b></b><span class="url">lodestore.example.com/overview</span></div>
 			<div class="demo-body" id="dbody" inert>
 				<div class="demo-top">
 					<div>
@@ -94,7 +96,7 @@ const hosts = [
 					<h4>Add a host</h4>
 					<p>Run this as root on the host. The token works once.</p>
 					<div class="d-cmd">
-						<code>curl -fsSL https://lodestore.internal/install.sh | sudo sh -s -- --join lj1_7f3c9ae2</code><button
+						<code>{joinCommand}</code><button
 							class="d-copy"
 							id="dcopy"
 							type="button"
