@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { limitKeywords } from './roadmap-limits.mjs';
 
 const here = (path) => fileURLToPath(new URL(path, import.meta.url));
 
@@ -45,6 +46,34 @@ test('JSON-LD is one FAQPage that mirrors the h3 questions', () => {
 	}
 });
 
-test('the first group is present', () => {
-	assert.ok(h2.includes('Data and restore'), `h2 found: ${h2.join(', ')}`);
+test('the four groups come in order and there are at least twelve questions', () => {
+	assert.deepEqual(h2, ['Data and restore', 'Security', 'Project and license', 'Operations']);
+	assert.ok(h3.length >= 12, `only ${h3.length} questions`);
+});
+
+test('the page names no price, plan or edition', () => {
+	const text = strip(article);
+	assert.ok(!/\b(price|pricing|paid|subscription|edition|commercial)\b/i.test(text), 'D-11: money words on /faq/');
+});
+
+test('the answer about what is missing matches every limit of the roadmap', () => {
+	assert.ok(article.includes('href="/roadmap/"'), 'no link to /roadmap/ in the article');
+	const md = readFileSync(here('../src/content/pages/faq.md'), 'utf8');
+	const block = md.split(/^(?=#{2,3} )/m).find((b) => b.startsWith('### ') && b.includes('](/roadmap/)'));
+	assert.ok(block, 'no ### section links to /roadmap/');
+	for (const re of limitKeywords) {
+		assert.ok(re.test(block), `the roadmap answer does not mention ${re}`);
+	}
+});
+
+test('FAQ is linked from the header and the footer', () => {
+	for (const file of ['index.html', 'faq/index.html']) {
+		const doc = page(file);
+		for (const [where, re] of [
+			['nav#site-nav', /<nav\b[^>]*id="site-nav"[\s\S]*?<\/nav>/],
+			['footer.site-footer', /<footer\b[^>]*class="site-footer"[\s\S]*?<\/footer>/],
+		]) {
+			assert.ok(doc.match(re)?.[0].includes('href="/faq/"'), `${file}: no /faq/ link in ${where}`);
+		}
+	}
 });
