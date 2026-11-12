@@ -35,6 +35,7 @@ The current release is about one guarantee: a host that has been taken over cann
 - **Signed snapshot provenance.** Each snapshot carries a signed record of which host and job made it, and the latest snapshot is picked from those records.
 - **Tight token scopes.** Restore rights are split into download, restore to a new folder and restore in place, and dangerous actions in the web interface ask for the password again.
 - **A signed agent installer.** `install.sh` verifies the agent's minisign signature with the project key.
+- **Signed releases.** The Docker image and the Helm chart are signed with cosign, the binaries and the image carry build provenance, and the release notes list the commands that check them.
 - **Limits in the format.** Every object read from the bucket is read with a bounded size, so a planted oversized object cannot exhaust a server or an agent.
 - **Apache-2.0 everywhere.** The server is now licensed under Apache-2.0, like the agent, the CLI and the format.
 - **Documentation and a public site.** Quickstart, guides, a threat model, a comparison with other tools and a read-only [demo](https://demo.lodestore.dev).
