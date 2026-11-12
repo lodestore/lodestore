@@ -64,3 +64,20 @@ test('Ready today lists at least four items', () => {
 test('the install section no longer carries the platform line', () => {
 	assert.ok(!/class="plat"/.test(dist('index.html')));
 });
+
+test('Compare in detail: six chips to the compare pages', () => {
+	const compare = section(dist('index.html'), 'compare');
+	const chips = compare.match(/<div class="cmp-chips[^"]*">[\s\S]*?<\/div>/)?.[0];
+	assert.ok(chips, 'no .cmp-chips under the comparison table');
+	assert.equal(textOf(chips.match(/<p class="lbl">[\s\S]*?<\/p>/)[0]), 'Compare in detail');
+	const links = [...chips.matchAll(/<a href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g)].map((m) => [m[1], textOf(m[2])]);
+	assert.deepEqual(links, [
+		['/compare/restic/', 'vs restic'],
+		['/compare/plakar/', 'vs Plakar'],
+		['/compare/bareos/', 'vs Bareos'],
+		['/compare/proxmox-backup-server/', 'vs Proxmox Backup Server'],
+		['/compare/kopia/', 'vs Kopia'],
+		['/compare/backrest/', 'vs Backrest'],
+	]);
+	for (const [href] of links) dist(`${href.slice(1)}index.html`);
+});

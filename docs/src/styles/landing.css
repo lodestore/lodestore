@@ -278,7 +278,10 @@ html.js .kt.in tr:nth-child(5){transition-delay:480ms}
 .cmp .yes{display:inline-flex;gap:6px;align-items:flex-start}
 .cmp .yes .icon{width:16px;height:16px;color:var(--success);margin-top:3px}
 .cmp td::first-letter{text-transform:uppercase}
-.cmp-links{margin-top:16px;text-align:center}
+.cmp-chips{display:flex;flex-wrap:wrap;justify-content:center;align-items:center;gap:8px;margin-top:20px}
+.cmp-chips .lbl{width:100%;text-align:center;font-size:14px;color:var(--muted-foreground);margin:0 0 4px}
+.cmp-chips a{display:inline-flex;align-items:center;height:36px;padding:0 14px;border-radius:999px;border:1px solid var(--border);background:var(--card);font-size:14px;font-weight:600;color:var(--foreground);text-decoration:none;transition:border-color .2s}
+.cmp-chips a:hover{border-color:var(--primary)}
 
 .blog-sec{padding-bottom:0}
 .blog-sec .sec-head{text-align:left;margin-left:0}
