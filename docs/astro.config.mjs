@@ -48,7 +48,9 @@ export default defineConfig({
 			plugins: [
 				starlightLinksValidator({
 					exclude: ({ link }) =>
-						link === '/' || link.startsWith('/#') || link.startsWith('/blog') || link.startsWith('/compare'),
+						link === '/' || link.startsWith('/#') || link.startsWith('/blog') || link.startsWith('/compare') ||
+						link.startsWith('/roadmap') ||
+						link.startsWith('/faq'),
 				}),
 			],
 			editLink: {
