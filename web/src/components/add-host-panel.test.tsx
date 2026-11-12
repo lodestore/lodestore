@@ -243,15 +243,17 @@ describe("AddHostPanel", () => {
 				name: "Check the agent signature by hand",
 			}),
 		);
+		const inCommand = (needle: string) => (_: string, el: Element | null) =>
+			el?.tagName === "PRE" && !!el.textContent?.includes(needle);
 		expect(
 			await screen.findByText(
-				new RegExp(
-					`minisign -V -P ${serverInfo.project_key.replace(/[+/]/g, "\\$&")} -m lodestore-agent`,
+				inCommand(
+					`minisign -V -P ${serverInfo.project_key} -m lodestore-agent`,
 				),
 			),
 		).toBeInTheDocument();
 		expect(
-			screen.getByText(/\/install\/agent\/\$\(uname -m\)\.minisig/),
+			screen.getByText(inCommand("/install/agent/$(uname -m).minisig")),
 		).toBeInTheDocument();
 		expect(
 			screen.getByText(/compare it with the one on the Binary page/),
