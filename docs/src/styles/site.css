@@ -270,7 +270,7 @@ code,
 :root:not([data-theme='dark']) .ic-sun {
 	display: none;
 }
-@media (min-width: 768px) {
+@media (min-width: 900px) {
 	.nav {
 		display: flex;
 	}
@@ -279,13 +279,13 @@ code,
 		display: none;
 	}
 }
-@media (min-width: 768px) and (max-width: 1023px) {
+@media (min-width: 900px) and (max-width: 1023px) {
 	.pill-in,
 	.nav {
 		gap: 20px;
 	}
 }
-@media (max-width: 767px) {
+@media (max-width: 899px) {
 	.pill-in {
 		padding-left: 16px;
 		gap: 12px;
