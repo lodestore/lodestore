@@ -63,13 +63,13 @@ Then:
 
    ```sh
    export LODE_REPOSITORY="s3:$S3_ENDPOINT/$S3_BUCKET"
-   export LODE_PASSWORD_FILE=./repository-password
+   export LODE_PASSWORD_FILE=./repository-key
    lode restore latest --target ./restored
    ```
 
    `latest` is the newest snapshot the server signed, ordered by the time the storage wrote it, so a snapshot that a compromised host planted with a date in the future is not chosen.
 
-The quickstart uses plain HTTP so that it works on any network; put the server behind HTTPS for anything beyond a trial. Full walkthrough with the storage keys: <https://lodestore.dev/docs/quickstart/>
+The quickstart uses plain HTTP so that it works on any network; for anything beyond a trial, put the server behind HTTPS: [With HTTPS](https://lodestore.dev/docs/quickstart/#with-https). Full walkthrough with the storage keys: <https://lodestore.dev/docs/quickstart/>
 
 ## Installation
 
@@ -85,17 +85,17 @@ Repositories live on S3-compatible object storage or in a local or network folde
 
 Version 0.1 backs up files and directories on Linux (x86_64 and arm64). Databases are covered by [dumping them in a pre-backup hook](https://lodestore.dev/docs/recipes/database-backup-hook/).
 
-Planned: Proxmox and Kubernetes backups, and more storage backends.
+What works today, what is next and what comes later is on the public roadmap: <https://lodestore.dev/roadmap/>
 
 ## Documentation
 
 Everything below lives on the project site, <https://lodestore.dev>, along with the [blog](https://lodestore.dev/blog/).
 
-- [Quickstart](https://lodestore.dev/docs/quickstart/)
+- [Quickstart](https://lodestore.dev/docs/quickstart/), [roadmap](https://lodestore.dev/roadmap/) and [FAQ](https://lodestore.dev/faq/)
 - [Restore without the server](https://lodestore.dev/docs/recipes/restore-without-server/)
 - [Policies and retention](https://lodestore.dev/docs/guides/policies/), [alerts](https://lodestore.dev/docs/guides/alerts/), [cleanup](https://lodestore.dev/docs/guides/gc/)
 - [Threat model](https://lodestore.dev/docs/security/threat-model/) and [how we test data safety](https://lodestore.dev/docs/security/how-we-test/)
-- Comparisons: [restic](https://lodestore.dev/compare/restic/), [Bareos](https://lodestore.dev/compare/bareos/), [Plakar](https://lodestore.dev/compare/plakar/)
+- Comparisons: [restic](https://lodestore.dev/compare/restic/), [Bareos](https://lodestore.dev/compare/bareos/), [Plakar](https://lodestore.dev/compare/plakar/), [Proxmox Backup Server](https://lodestore.dev/compare/proxmox-backup-server/), [Kopia](https://lodestore.dev/compare/kopia/), [Backrest](https://lodestore.dev/compare/backrest/)
 
 ## Contributing and security
 
