@@ -103,4 +103,4 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. To report
 
 ## License
 
-Every crate in this repository is licensed under Apache-2.0; the text is in [LICENSE](LICENSE).
+Everything in this repository is licensed under Apache-2.0; the text is in [LICENSE](LICENSE). See [LICENSING.md](LICENSING.md) for third-party files and the history of the server license.
