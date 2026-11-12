@@ -2,6 +2,7 @@ mod common;
 
 use std::collections::HashMap;
 use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -185,6 +186,11 @@ async fn install_verify_server_missing_signature_refused() {
     let outcome = download(&ts, Run::default()).await;
     assert_eq!(outcome.code, 1, "{}", outcome.stderr);
     assert!(
+        outcome.stderr.contains("has no signature"),
+        "{}",
+        outcome.stderr
+    );
+    assert!(
         outcome.stderr.contains("nothing was installed"),
         "{}",
         outcome.stderr
@@ -209,6 +215,10 @@ async fn server_signed_with(comment: &str) -> (Outcome, Vec<u8>) {
     .await;
     ts.stop().await;
     (outcome, bytes)
+}
+
+fn has_line(outcome: &Outcome, prefix: &str) -> bool {
+    outcome.stderr.lines().any(|line| line.starts_with(prefix))
 }
 
 fn assert_refused(outcome: &Outcome, needle: &str) {
@@ -267,6 +277,47 @@ async fn install_verify_server_untrusted_key_refused() {
     )
     .await;
     assert_refused(&outcome, "does not verify");
+    assert!(has_line(&outcome, "minisign: Signature key id in"));
+    assert!(
+        !outcome
+            .stderr
+            .contains("Error while loading the public key file")
+    );
+    ts.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs minisign, curl and sha256sum"]
+async fn install_verify_broken_trust_key_shows_minisign_output() {
+    let ts = TestServer::start(&Backend::Sqlite).await;
+    let stranger = TestSigner::generate();
+    let bytes = agent_bytes();
+    put_agent(
+        &ts,
+        &bytes,
+        Some(&stranger.sign(&bytes, "lodestore-agent 0.2.0 x86_64")),
+    );
+    let key = ts.dir.path().join("broken.pub");
+    std::fs::write(&key, "not a minisign key\n").unwrap();
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let outcome = download(
+        &ts,
+        Run {
+            trust_keys: vec![key],
+            ..Run::default()
+        },
+    )
+    .await;
+    assert_refused(
+        &outcome,
+        "does not verify with the project key or any --trust-key",
+    );
+    assert!(has_line(
+        &outcome,
+        "minisign: Error while loading the public key file"
+    ));
+    assert!(has_line(&outcome, "minisign: Signature key id in"));
+    assert!(!has_line(&outcome, "minisign: checked with"));
     ts.stop().await;
 }
 
@@ -324,6 +375,7 @@ async fn install_verify_server_second_trust_key_installs() {
     )
     .await;
     assert_eq!(outcome.code, 0, "{}", outcome.stderr);
+    assert!(!outcome.stderr.contains("minisign: "), "{}", outcome.stderr);
     assert_eq!(outcome.installed.as_deref(), Some(bytes.as_slice()));
     ts.stop().await;
 }
@@ -456,11 +508,15 @@ async fn install_verify_server_without_minisign_notes() {
 
 struct Releases {
     files: HashMap<String, Vec<u8>>,
+    failing: Vec<String>,
     hits: AtomicUsize,
 }
 
 async fn release_file(State(releases): State<Arc<Releases>>, uri: Uri) -> Response {
     releases.hits.fetch_add(1, Ordering::SeqCst);
+    if releases.failing.iter().any(|path| path == uri.path()) {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
     match releases.files.get(uri.path()) {
         Some(body) => body.clone().into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
@@ -468,10 +524,21 @@ async fn release_file(State(releases): State<Arc<Releases>>, uri: Uri) -> Respon
 }
 
 async fn serve_releases(files: Vec<(&str, Vec<u8>)>) -> (String, Arc<Releases>) {
+    serve_releases_failing(files, &[]).await
+}
+
+async fn serve_releases_failing(
+    files: Vec<(&str, Vec<u8>)>,
+    failing: &[&str],
+) -> (String, Arc<Releases>) {
     let releases = Arc::new(Releases {
         files: files
             .into_iter()
             .map(|(name, body)| (format!("/v{VERSION}/{name}"), body))
+            .collect(),
+        failing: failing
+            .iter()
+            .map(|name| format!("/v{VERSION}/{name}"))
             .collect(),
         hits: AtomicUsize::new(0),
     });
@@ -581,6 +648,51 @@ async fn install_verify_github_tampered_sums_refused() {
 async fn install_verify_github_missing_signature_refused() {
     let run = github_with(&format!("lodestore release {VERSION}"), false, false).await;
     assert_refused(&run.outcome, "SHA256SUMS.minisig");
+    assert!(
+        run.outcome.stderr.contains("has no"),
+        "{}",
+        run.outcome.stderr
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs minisign, curl and sha256sum"]
+async fn install_verify_github_signature_server_error_is_not_missing() {
+    let ts = TestServer::start(&Backend::Sqlite).await;
+    let signer = TestSigner::generate();
+    let agent = agent_bytes();
+    let sums = sums_for(&agent);
+    let signature = signer
+        .sign(&sums, &format!("lodestore release {VERSION}"))
+        .into_bytes();
+    let (url, _) = serve_releases_failing(
+        vec![
+            (AGENT_FILE, agent),
+            ("SHA256SUMS", sums),
+            ("SHA256SUMS.minisig", signature),
+        ],
+        &["SHA256SUMS.minisig"],
+    )
+    .await;
+    let key = write_key(ts.dir.path(), "release", &signer);
+    let outcome = download(
+        &ts,
+        Run {
+            github: true,
+            trust_keys: vec![key],
+            releases_url: Some(url),
+            ..Run::default()
+        },
+    )
+    .await;
+    assert_refused(&outcome, "could not download");
+    assert!(outcome.stderr.contains("HTTP 500"), "{}", outcome.stderr);
+    assert!(
+        !outcome.stderr.contains("has no SHA256SUMS.minisig"),
+        "{}",
+        outcome.stderr
+    );
+    ts.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
