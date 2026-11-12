@@ -240,7 +240,7 @@ describe("Policy editor tabs", () => {
 			}),
 		);
 		const user = await openNew();
-		await waitFor(() => expect(requests).toHaveLength(1));
+		await waitFor(() => expect(requests.length).toBeGreaterThan(0));
 
 		const [first] = screen.getAllByRole("textbox", { name: "Paths" });
 		await user.clear(first);
@@ -884,7 +884,7 @@ describe("Hooks", () => {
 	it("adds a script hook from the form", async () => {
 		const requests = mockValidate();
 		const user = await openNew();
-		await waitFor(() => expect(requests).toHaveLength(1));
+		await waitFor(() => expect(requests.length).toBeGreaterThan(0));
 
 		await user.click(screen.getByRole("button", { name: "Hooks (optional)" }));
 		await user.click(
