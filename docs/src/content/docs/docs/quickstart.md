@@ -52,7 +52,7 @@ docker logs lodestore 2>&1 | grep 'setup?token='
 
 Open the link in a browser, choose a user name and a password.
 
-This quickstart uses plain HTTP so that it works on any network. For anything beyond a trial, put the server behind HTTPS.
+This quickstart uses plain HTTP so that it works on any network. For anything beyond a trial, use [HTTPS](#with-https).
 
 ## Set up the first repository
 
@@ -78,7 +78,9 @@ export JOIN_TOKEN='paste-the-token-from-add-host'
 curl -fsSL "http://$LODESTORE_HOST:8080/install.sh" | sudo sh -s -- --insecure --join "$JOIN_TOKEN"
 ```
 
-The `--insecure` flag is there because this quickstart serves the installer over plain HTTP. Over plain HTTP anyone on the network can get root on this host: the installer, the agent binary and its checksum can all be replaced on the way, and the installer runs as root. With HTTPS in front of the server, the command has no such flag.
+:::caution
+Over plain HTTP anyone on the network can get root on this host: the installer, the agent binary and its checksum can all be replaced on the way, and the installer runs as root. The `--insecure` flag is there only because this quickstart serves the installer over plain HTTP. With HTTPS in front of the server the command has no such flag: see [With HTTPS](#with-https).
+:::
 
 ### Check the agent by hand
 
@@ -150,6 +152,52 @@ lode restore latest --target ./restored
 
 On AWS, set `AWS_REGION` to the region of the bucket, or the request is refused; `us-east-1` suits most other S3-compatible stores. Files land under the target folder at their original absolute path. `latest` is the newest snapshot the server signed, ordered by the time the storage wrote it, not by the time written in the snapshot, so a snapshot that a compromised host planted with a date in the future is not chosen. If `lode` warns that the repository has no server signatures yet, no Lodestore 0.2 server has opened it; see [Restoring without the server](/docs/recipes/restore-without-server/).
 
+## With HTTPS
+
+Use this instead of the plain HTTP server above. You need a DNS name that points at this machine, and ports 80 and 443 open so that Caddy can get a certificate. Caddy ends TLS for the web interface and the API. The agent port 8443 is published directly: agents connect with client certificates and the join token pins the server's certificate authority, so a proxy that ends TLS there breaks them. A proxy in front of 8443 may only pass TCP or TLS through; see [Networking](/docs/reference/networking/#grpc-layer-4-or-tls-passthrough).
+
+```sh
+export LODESTORE_DOMAIN=backup.example.com
+```
+
+Ports 8080, 8443, 80 and 443 must not be held by the server of the main path, by the folder variant or by an earlier run of this one, so remove them first:
+
+```sh
+docker rm -f lodestore lodestore-folder lodestore-https lodestore-caddy
+```
+
+Create a network for the server and Caddy. The server trusts the client address that Caddy forwards only from this network, so `LODESTORE_TRUSTED_PROXIES` is its subnet. Port 8080 of the server is not published:
+
+```sh
+docker network create --subnet 172.30.0.0/24 lodestore-net
+docker run -d --name lodestore-https --network lodestore-net \
+  -p 8443:8443 \
+  -v lodestore-https-data:/var/lib/lodestore \
+  -e LODESTORE_PUBLIC_URL="https://$LODESTORE_DOMAIN" \
+  -e LODESTORE_GRPC_PUBLIC_ADDRESS="$LODESTORE_DOMAIN:8443" \
+  -e LODESTORE_TRUSTED_PROXIES=172.30.0.0/24 \
+  ghcr.io/lodestore/lodestore:$LODESTORE_VERSION
+docker run -d --name lodestore-caddy --network lodestore-net \
+  -p 80:80 -p 443:443 \
+  -v lodestore-caddy-data:/data \
+  -v lodestore-caddy-config:/config \
+  caddy:2 caddy reverse-proxy --from "$LODESTORE_DOMAIN" --to lodestore-https:8080
+```
+
+Get the setup link and open it on `https://` with your domain:
+
+```sh
+docker logs lodestore-https 2>&1 | grep 'setup?token='
+```
+
+The command for a new host is the one **Add host** shows, with no `--insecure` flag:
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSL "https://$LODESTORE_DOMAIN/install.sh" | sudo sh -s -- --join "$JOIN_TOKEN"
+```
+
+The continuous integration job does not run this section.
+
 ## Using a local or network folder
 
 A repository can live in a folder: a local disk, or a network share such as NFS mounted at the same path on the server and on every agent. The file system must support hard links.
@@ -158,7 +206,7 @@ A repository can live in a folder: a local disk, or a network share such as NFS 
 In a folder there is no separate agent key: the agent can delete and overwrite backups, and a compromised host can destroy its own. There is no Object Lock either. Prefer S3-compatible storage for data a compromised host must not be able to destroy.
 :::
 
-The repository has to be a folder that both the server and the agent can see, at the same path. The agent runs as root and creates files only their owner can read, so the server container has to run as root too. Start it with this command instead of the one above. Neither the server of the main path nor the HTTPS variant may hold ports 8080 and 8443, so remove them first:
+The repository has to be a folder that both the server and the agent can see, at the same path. The agent runs as root and creates files only their owner can read, so the server container has to run as root too. Start it with this command instead of the one above. Ports 8080 and 8443 must not be held by the server of the main path, by the HTTPS variant or by an earlier run of this one, so remove them first:
 
 ```sh
 docker rm -f lodestore lodestore-folder lodestore-https lodestore-caddy

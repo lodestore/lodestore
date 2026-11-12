@@ -101,6 +101,26 @@ test('lode is installed only in one && chain after minisign -V', () => {
 	assert.ok(need.includes('/docs/install/binary/#agents-for-new-hosts'), 'What you need does not link the minisign package table');
 });
 
+test('the HTTPS section proxies REST only, trusts one network and joins without --insecure', () => {
+	const sec = section(qs, '## With HTTPS');
+	const sh = shBlocks(sec).join('\n');
+	const join = joinLines(sh).split('\n').find((l) => l.includes('--join'));
+	assert.ok(join, 'the HTTPS section has no --join command');
+	assert.ok(join.includes("curl --proto '=https' --tlsv1.2"), 'the HTTPS join command does not force TLS 1.2 over https');
+	assert.ok(!sh.includes('--insecure'), 'the HTTPS section uses --insecure');
+	assert.ok(sh.includes('LODESTORE_PUBLIC_URL="https://'), 'LODESTORE_PUBLIC_URL is not https');
+	assert.ok(sh.includes('LODESTORE_TRUSTED_PROXIES='), 'LODESTORE_TRUSTED_PROXIES is not set');
+	assert.ok(sh.includes('reverse-proxy --from'), 'no Caddy reverse-proxy command');
+	assert.ok(!sh.includes('-p 8080:8080'), 'the HTTPS section publishes port 8080');
+});
+
+test('every paragraph about --insecure outside the HTTPS section says anyone can get root', () => {
+	const rest = qs.replace(section(qs, '## With HTTPS'), '');
+	const paragraphs = rest.split(/\n\s*\n/).filter((p) => !p.includes('```') && p.includes('--insecure'));
+	assert.ok(paragraphs.length >= 1, 'no paragraph warns about --insecure');
+	for (const p of paragraphs) assert.match(p, /\broot\b/, `a paragraph about --insecure does not mention root: ${p.slice(0, 60)}`);
+});
+
 test('every minisign key on the quickstart and Binary pages is the project key', () => {
 	const projectKey = read('../../crates/lodestore-agent/keys/project.pub').split('\n')[1].trim();
 	for (const page of ['quickstart', 'install/binary']) {
