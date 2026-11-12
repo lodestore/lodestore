@@ -185,9 +185,11 @@ Check after switching:
 ```sh
 curl -sI https://demo.mydomain.net/ | grep -i cf-ray
 curl -s https://demo.mydomain.net/ | grep -c /cdn-cgi/
-./smoke.sh https://demo.mydomain.net --external demo.mydomain.net
+./smoke.sh https://demo.mydomain.net --external ORIGIN_IP
 sudo certbot renew --dry-run
 ```
+
+Behind the proxy the name resolves to Cloudflare, which accepts 8443 itself, so `--external` takes the origin address.
 
 `cf-ray` is present, the HTML contains no `/cdn-cgi/` (the count is `0`), a second request for a file under `/assets/` answers `cf-cache-status: HIT`, `smoke.sh` ends with `demo ok`, the renewal dry run passes through the proxy, and `/var/log/nginx/access.log` shows visitor addresses, not Cloudflare ones.
 
