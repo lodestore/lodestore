@@ -22,7 +22,7 @@ function site(overrides = {}) {
 	const root = mkdtempSync(join(tmpdir(), 'check-site-'));
 	const dist = join(root, 'dist');
 	const files = {
-		'index.html': home('<a href="/docs/">docs</a><img src="/pic.light.abc123.webp"><img src="/pic.dark.def456.webp">'),
+		'index.html': home('<a href="/docs/">docs</a><img src="/pic.light.abc123.webp" alt=""><img src="/pic.dark.def456.webp" alt="">'),
 		'404.html': page('<h1 id="top">Not found</h1>'),
 		'docs/index.html': page('<a href="/">home</a>'),
 		'pic.light.abc123.webp': 'light',
@@ -124,4 +124,66 @@ test('an oversized file fails', () => {
 	const r = run(site({ 'big.bin': 'x'.repeat(1.5 * 1024 * 1024 + 1) }));
 	assert.equal(r.code, 1);
 	assert.match(r.out, /big\.bin/);
+});
+
+const post = ({ type = 'article', image = 'https://lodestore.dev/_astro/post.abc.png', alt = 'A card', title = 'Post | Lodestore' } = {}) =>
+	page(
+		'<h1>Post</h1>',
+		`<title>${title}</title><meta property="og:type" content="${type}">` +
+			(image ? `<meta property="og:image" content="${image}">` : '') +
+			(alt === null ? '' : `<meta property="og:image:alt" content="${alt}">`),
+	);
+const postSite = (opts, extra = {}) =>
+	site({ 'blog/post/index.html': post(opts), '_astro/post.abc.png': 'png', ...extra });
+
+test('an image without an alt attribute fails and an empty alt passes', () => {
+	const bad = run(site({ 'docs/index.html': page('<img src="/pic.light.abc123.webp">') }));
+	assert.equal(bad.code, 1);
+	assert.match(bad.out, /img without alt/);
+	const ok = run(site({ 'docs/index.html': page('<img src="/pic.light.abc123.webp" alt="">') }));
+	assert.equal(ok.code, 0, ok.out);
+});
+
+test('a valid blog post passes', () => {
+	const r = run(postSite());
+	assert.equal(r.code, 0, r.out);
+});
+
+test('a blog post that is not og:type article fails', () => {
+	const r = run(postSite({ type: 'website' }));
+	assert.equal(r.code, 1);
+	assert.match(r.out, /og:type is not article/);
+});
+
+test('a blog post without its own og:image fails', () => {
+	const std = run(postSite({ image: 'https://lodestore.dev/og.png' }, { 'og.png': 'png' }));
+	assert.equal(std.code, 1);
+	assert.match(std.out, /has no own og:image/);
+	const none = run(postSite({ image: '' }));
+	assert.equal(none.code, 1);
+	assert.match(none.out, /has no own og:image/);
+});
+
+test('an og:image that is not in dist fails', () => {
+	const r = run(postSite({ image: 'https://lodestore.dev/_astro/gone.png' }));
+	assert.equal(r.code, 1);
+	assert.match(r.out, /og:image not in dist/);
+});
+
+test('a blog post without og:image:alt fails', () => {
+	for (const alt of [null, '']) {
+		const r = run(postSite({ alt }));
+		assert.equal(r.code, 1);
+		assert.match(r.out, /no og:image:alt/);
+	}
+});
+
+test('a blog post title that repeats Lodestore fails', () => {
+	for (const title of ['Lodestore news: Lodestore', 'News: Lodestore']) {
+		const r = run(postSite({ title }));
+		assert.equal(r.code, 1, title);
+		assert.match(r.out, /title repeats Lodestore/);
+	}
+	const ok = run(postSite({ title: 'Introducing Lodestore 0.1' }));
+	assert.equal(ok.code, 0, ok.out);
 });

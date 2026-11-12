@@ -105,7 +105,9 @@ for (const page of pages) {
 	const html = readFileSync(page, 'utf8');
 	const pagePath = `/${rel(page)}`;
 	if (!html.includes('starlight-theme')) fail(rel(page), 'no starlight-theme');
-	for (const tag of parseTags(html)) {
+	const tags = parseTags(html);
+	for (const tag of tags) {
+		if (tag.name === 'img' && tag.attrs.alt === undefined) fail(rel(page), `img without alt: ${tag.attrs.src ?? ''}`);
 		for (const [attr, value] of urlsOf(tag)) {
 			if (SKIPPED_SCHEME.test(value)) continue;
 			if (EXTERNAL.test(value)) {
@@ -124,6 +126,24 @@ for (const page of pages) {
 		}
 	}
 	for (const m of html.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)) cssExternal(rel(page), m[1]);
+	if (/^blog\/[^/]+\/index\.html$/.test(rel(page))) checkPost(page, pagePath, html, tags);
+}
+
+function checkPost(page, pagePath, html, tags) {
+	const og = {};
+	for (const t of tags) {
+		if (t.name === 'meta' && t.attrs.property?.startsWith('og:')) og[t.attrs.property] = t.attrs.content ?? '';
+	}
+	const name = rel(page);
+	if (og['og:type'] !== 'article') fail(name, 'blog post og:type is not article');
+	if (!og['og:image'] || new URL(og['og:image'], 'http://site').pathname === '/og.png') {
+		fail(name, 'blog post has no own og:image');
+	} else if (!resolveTarget(pagePath, new URL(og['og:image'], 'http://site').pathname).file) {
+		fail(name, `og:image not in dist: ${og['og:image']}`);
+	}
+	if (!og['og:image:alt']) fail(name, 'blog post has no og:image:alt');
+	const title = /<title>([^<]*)<\/title>/.exec(html)?.[1] ?? '';
+	if (title.split('Lodestore').length > 2 || /:\s*Lodestore$/.test(title)) fail(name, `title repeats Lodestore: ${title}`);
 }
 
 function cssExternal(name, css) {

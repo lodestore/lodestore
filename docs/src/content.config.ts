@@ -36,6 +36,7 @@ export const collections = {
 				coverLight: image(),
 				coverDark: image(),
 				coverAlt: z.string(),
+				ogImage: image(),
 			}),
 	}),
 };
