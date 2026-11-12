@@ -537,6 +537,19 @@ async fn agent_update_start_and_resume_need_a_recent_password_for_sessions() {
         let pool = &ts.state().db.pool;
         setup_host(pool, &hosts[0], "0.0.1", None, true).await;
         insert_rollout(pool, "held", "paused").await;
+        let arch = arch_of(pool, &hosts[0].id).await;
+        insert_update(
+            pool,
+            "held-1",
+            "held",
+            &hosts[0].id,
+            &arch,
+            "0.0.1",
+            "99.0.0",
+            0,
+            "queued",
+        )
+        .await;
         let api = ts.api().await;
         sqlx::query("UPDATE sessions SET authenticated_at = $1")
             .bind(now_ms() - 16 * 60_000)
