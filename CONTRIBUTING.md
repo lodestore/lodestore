@@ -33,6 +33,39 @@ pnpm --dir docs check
 
 The documentation build also checks every internal link. `pnpm --dir docs check` runs on the built site and checks links and anchors, that the pages load nothing from outside, that every light image has its dark pair, the weight budget, the facts on the home page, robots.txt, the icons and the structured data of the home page, and that every page carries a content security policy meta tag with hashes of its own inline scripts. Inline event handlers (`onclick=` and the like) are not allowed on the site, and the build fails on them.
 
+## Fuzzing, mutation testing and the browser test
+
+The fuzz targets are in `fuzz/fuzz_targets/` and the code they run is in `crates/lodestore-fuzzkit`. The inputs saved from past crashes are replayed on stable by the normal tests:
+
+```sh
+cargo nextest run -p lodestore-fuzzkit
+```
+
+To fuzz, you need Linux, the nightly pinned in `fuzz/rust-toolchain.toml` and `cargo install --locked cargo-fuzz --version 0.13.2`:
+
+```sh
+cd fuzz
+cargo fuzz run <target> -- -max_total_time=60 -rss_limit_mb=2048 -malloc_limit_mb=256 -max_len=1048576
+```
+
+A crash writes its input to `fuzz/artifacts/<target>/`. Reproduce it with `cargo fuzz run <target> <file>`, shrink it with `cargo fuzz tmin <target> <file>`, fix the code, and commit the shrunk input to `fuzz/regressions/<target>/` in the same pull request. A new target is a function in `crates/lodestore-fuzzkit/src/lib.rs` listed in `TARGETS`, a file in `fuzz/fuzz_targets/`, a `[[bin]]` in `fuzz/Cargo.toml` and a seed in `seeds.rs`; the tests in `crates/lodestore-fuzzkit/tests/regressions.rs` fail when a target has no file in `fuzz/fuzz_targets/` or no seed.
+
+Mutation testing is slow, so run it on one file:
+
+```sh
+cargo mutants --file crates/lodestore-format/src/index.rs
+```
+
+The result of the weekly run is compared with `.github/mutants-baseline.json` by `scripts/mutants-ratchet.sh`. A mutant that survives is a missing or weak test: add the test. `#[mutants::skip]` is for a mutant that cannot change any observable behavior, and it needs a `//` comment with the reason on the line above. The baseline only goes down: `scripts/mutants-ratchet.sh --lower-only .github/mutants-baseline.json origin/main` shows what a pull request would loosen, and CI runs it.
+
+The browser test drives the web interface through the main path. It needs Linux with Docker and systemd, because it installs an agent on the machine:
+
+```sh
+scripts/quickstart-ci.sh <image> --e2e
+```
+
+The script starts MinIO and the server image, runs `pnpm e2e` in `web/` (Playwright with Chromium, installed with `pnpm --dir web exec playwright install chromium`) and then compares the restored files with the originals. `pnpm --dir web e2e` runs the test alone against a stand the script has set up; it reads the addresses and keys of that stand from `E2E_*` variables and stops with a message when one is missing.
+
 ## Screenshots, clips and the terminal recording
 
 The screenshots, the short clips and the terminal recording in `docs/src/assets/media/` are rendered by hand before a release and committed. CI does not render them.

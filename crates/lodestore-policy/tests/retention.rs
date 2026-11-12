@@ -353,3 +353,26 @@ fn retention_timezone_follows_schedule() {
     let policy = parse_yaml(&default_zone).unwrap();
     assert_eq!(timezone_of(&policy.spec), TimeZone::UTC);
 }
+
+#[test]
+fn retention_out_of_range_times_saturate_to_their_own_end() {
+    let rules = Retention {
+        keep_daily: Some(2),
+        ..Retention::default()
+    };
+    let snaps = vec![
+        snap("max", i64::MAX),
+        snap("late", ms("9999-12-30T10:00:00Z")),
+        snap("min", i64::MIN),
+    ];
+    let out = evaluate(&rules, &utc(), &snaps);
+    assert_eq!(held_by(&out, Rule::Daily), ["max", "min"]);
+
+    let zero = Retention {
+        keep_daily: Some(0),
+        keep_last: Some(0),
+        ..Retention::default()
+    };
+    let out = evaluate(&zero, &utc(), &hourly(5));
+    assert!(held_by(&out, Rule::Daily).is_empty() && held_by(&out, Rule::Last).is_empty());
+}

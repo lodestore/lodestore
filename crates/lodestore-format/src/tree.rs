@@ -681,6 +681,27 @@ pub(crate) async fn selection_totals<S: BlobStore>(
     Ok(totals)
 }
 
+/// Entry points for fuzz harnesses; not part of the format API.
+#[cfg(feature = "test-hooks")]
+pub mod hooks {
+    use super::{Result, Step, TreeCursor, count_tree_nodes, pb};
+
+    pub fn count_nodes(bytes: &[u8]) -> Result<u64> {
+        count_tree_nodes(bytes)
+    }
+
+    pub fn cursor_paths(nodes: Vec<pb::Node>, bytes: u64, base: Vec<u8>) -> Vec<Vec<u8>> {
+        let mut cursor = TreeCursor::new(nodes, bytes, base);
+        let mut paths = Vec::new();
+        while let Some(step) = cursor.next() {
+            if let Step::Node(node) = step {
+                paths.push(cursor.path_of(&node.name));
+            }
+        }
+        paths
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rand_chacha::ChaCha20Rng;

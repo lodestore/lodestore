@@ -1,0 +1,145 @@
+name: mutants
+
+on:
+  schedule:
+    - cron: "37 1 * * 6"
+  workflow_dispatch:
+
+concurrency:
+  group: mutants-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: "0"
+
+jobs:
+  shards:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        include:
+          - { group: format, shard: 0, shards: 24, args: "-p lodestore-format", filter: "" }
+          - { group: format, shard: 1, shards: 24, args: "-p lodestore-format", filter: "" }
+          - { group: format, shard: 2, shards: 24, args: "-p lodestore-format", filter: "" }
+          - { group: format, shard: 3, shards: 24, args: "-p lodestore-format", filter: "" }
+          - { group: format, shard: 4, shards: 24, args: "-p lodestore-format", filter: "" }
+          - { group: format, shard: 5, shards: 24, args: "-p lodestore-format", filter: "" }
+          - { group: format, shard: 6, shards: 24, args: "-p lodestore-format", filter: "" }
+          - { group: format, shard: 7, shards: 24, args: "-p lodestore-format", filter: "" }
+          - { group: format, shard: 8, shards: 24, args: "-p lodestore-format", filter: "" }
+          - { group: format, shard: 9, shards: 24, args: "-p lodestore-format", filter: "" }
+          - { group: format, shard: 10, shards: 24, args: "-p lodestore-format", filter: "" }
+          - { group: format, shard: 11, shards: 24, args: "-p lodestore-format", filter: "" }
+          - { group: format, shard: 12, shards: 24, args: "-p lodestore-format", filter: "" }
+          - { group: format, shard: 13, shards: 24, args: "-p lodestore-format", filter: "" }
+          - { group: format, shard: 14, shards: 24, args: "-p lodestore-format", filter: "" }
+          - { group: format, shard: 15, shards: 24, args: "-p lodestore-format", filter: "" }
+          - { group: format, shard: 16, shards: 24, args: "-p lodestore-format", filter: "" }
+          - { group: format, shard: 17, shards: 24, args: "-p lodestore-format", filter: "" }
+          - { group: format, shard: 18, shards: 24, args: "-p lodestore-format", filter: "" }
+          - { group: format, shard: 19, shards: 24, args: "-p lodestore-format", filter: "" }
+          - { group: format, shard: 20, shards: 24, args: "-p lodestore-format", filter: "" }
+          - { group: format, shard: 21, shards: 24, args: "-p lodestore-format", filter: "" }
+          - { group: format, shard: 22, shards: 24, args: "-p lodestore-format", filter: "" }
+          - { group: format, shard: 23, shards: 24, args: "-p lodestore-format", filter: "" }
+          - { group: gc, shard: 0, shards: 10, args: "-p lodestore-server --file crates/lodestore-server/src/maintenance/gc/*.rs", filter: "binary(/^(adv_)?gc_/)" }
+          - { group: gc, shard: 1, shards: 10, args: "-p lodestore-server --file crates/lodestore-server/src/maintenance/gc/*.rs", filter: "binary(/^(adv_)?gc_/)" }
+          - { group: gc, shard: 2, shards: 10, args: "-p lodestore-server --file crates/lodestore-server/src/maintenance/gc/*.rs", filter: "binary(/^(adv_)?gc_/)" }
+          - { group: gc, shard: 3, shards: 10, args: "-p lodestore-server --file crates/lodestore-server/src/maintenance/gc/*.rs", filter: "binary(/^(adv_)?gc_/)" }
+          - { group: gc, shard: 4, shards: 10, args: "-p lodestore-server --file crates/lodestore-server/src/maintenance/gc/*.rs", filter: "binary(/^(adv_)?gc_/)" }
+          - { group: gc, shard: 5, shards: 10, args: "-p lodestore-server --file crates/lodestore-server/src/maintenance/gc/*.rs", filter: "binary(/^(adv_)?gc_/)" }
+          - { group: gc, shard: 6, shards: 10, args: "-p lodestore-server --file crates/lodestore-server/src/maintenance/gc/*.rs", filter: "binary(/^(adv_)?gc_/)" }
+          - { group: gc, shard: 7, shards: 10, args: "-p lodestore-server --file crates/lodestore-server/src/maintenance/gc/*.rs", filter: "binary(/^(adv_)?gc_/)" }
+          - { group: gc, shard: 8, shards: 10, args: "-p lodestore-server --file crates/lodestore-server/src/maintenance/gc/*.rs", filter: "binary(/^(adv_)?gc_/)" }
+          - { group: gc, shard: 9, shards: 10, args: "-p lodestore-server --file crates/lodestore-server/src/maintenance/gc/*.rs", filter: "binary(/^(adv_)?gc_/)" }
+          - { group: retention, shard: 0, shards: 1, args: "-p lodestore-policy --file crates/lodestore-policy/src/retention.rs", filter: "" }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8
+        with:
+          tool: nextest@0.9.148,cargo-mutants@27.1.0
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: target/test-bin
+          key: test-bin-minio-RELEASE.2025-09-07T16-13-09Z-mc-RELEASE.2025-08-13T08-35-41Z
+      - name: Mutate the group
+        shell: bash
+        env:
+          SHARD: ${{ matrix.shard }}
+          SHARDS: ${{ matrix.shards }}
+          ARGS: ${{ matrix.args }}
+          FILTER: ${{ matrix.filter }}
+        run: |
+          read -ra args <<<"$ARGS"
+          cmd=(cargo mutants --no-shuffle -vV --in-place --shard "$SHARD/$SHARDS" "${args[@]}")
+          if [ -n "$FILTER" ]; then
+            cmd+=(-- -E "$FILTER")
+          fi
+          for attempt in 1 2; do
+            status=0
+            "${cmd[@]}" || status=$?
+            [ "$status" -eq 4 ] || break
+            echo "the unmutated baseline failed on attempt $attempt" >&2
+          done
+          case "$status" in
+            0 | 2 | 3) ;;
+            *) echo "cargo mutants exited with $status" >&2; exit "$status" ;;
+          esac
+      - name: Keep the outcomes
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: mutants-${{ matrix.group }}-${{ matrix.shard }}
+          path: |
+            mutants.out/outcomes.json
+            mutants.out/missed.txt
+          if-no-files-found: error
+      - name: Keep the logs of a failed shard
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: logs-${{ matrix.group }}-${{ matrix.shard }}
+          path: mutants.out/log
+          if-no-files-found: ignore
+
+  ratchet:
+    needs: shards
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every shard
+        if: needs.shards.result != 'success'
+        run: |
+          echo "shards finished as ${{ needs.shards.result }}; an incomplete set of shards is not accepted" >&2
+          exit 1
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          pattern: mutants-*
+      - name: Compare with the baseline
+        shell: bash
+        run: |
+          failed=0
+          scripts/mutants-ratchet.sh --skips .github/mutants-baseline.json || failed=1
+          for group in format gc retention; do
+            { echo "### mutants $group"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            scripts/mutants-ratchet.sh check .github/mutants-baseline.json "$group" mutants-"$group"-* 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || failed=1
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          done
+          exit "$failed"

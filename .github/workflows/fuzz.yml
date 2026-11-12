@@ -1,0 +1,145 @@
+name: fuzz
+
+on:
+  schedule:
+    - cron: "23 2 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - crates/lodestore-format/src/pack.rs
+      - crates/lodestore-format/src/index.rs
+      - crates/lodestore-format/src/tree.rs
+      - crates/lodestore-format/src/keys.rs
+      - crates/lodestore-format/src/locks.rs
+      - crates/lodestore-format/src/attest.rs
+      - crates/lodestore-format/src/provenance.rs
+      - crates/lodestore-format/src/snapshot.rs
+      - crates/lodestore-format/src/verify_snapshot.rs
+      - crates/lodestore-format/src/crypto.rs
+      - crates/lodestore-format/src/gc/**
+      - crates/lodestore-agent/src/update/minisign.rs
+      - crates/lodestore-agent/src/jobs/restore.rs
+      - crates/lodestore-fuzzkit/**
+      - fuzz/**
+      - .github/workflows/fuzz.yml
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+
+jobs:
+  targets:
+    runs-on: ubuntu-latest
+    outputs:
+      list: ${{ steps.targets.outputs.list }}
+      seconds: ${{ steps.targets.outputs.seconds }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - id: targets
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = pull_request ]; then
+            echo 'list=["index_shard","tree_decode"]' >> "$GITHUB_OUTPUT"
+            echo "seconds=30" >> "$GITHUB_OUTPUT"
+          else
+            list=$(for f in fuzz/fuzz_targets/*.rs; do basename "$f" .rs; done | jq -R . | jq -sc .)
+            echo "list=$list" >> "$GITHUB_OUTPUT"
+            echo "seconds=300" >> "$GITHUB_OUTPUT"
+          fi
+
+  fuzz:
+    needs: targets
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        target: ${{ fromJSON(needs.targets.outputs.list) }}
+    env:
+      TARGET: ${{ matrix.target }}
+      SECONDS_BUDGET: ${{ needs.targets.outputs.seconds }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install the pinned nightly toolchain
+        working-directory: fuzz
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          workspaces: fuzz
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - id: cargo-fuzz
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ~/.cargo/bin/cargo-fuzz
+          key: cargo-fuzz-0.13.2
+      - if: steps.cargo-fuzz.outputs.cache-hit != 'true'
+        working-directory: fuzz
+        run: cargo install --locked cargo-fuzz --version 0.13.2
+      - id: corpus
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+      - name: Seed the corpus from the golden fixtures
+        if: steps.corpus.outputs.cache-matched-key == ''
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          cargo run -p lodestore-fuzzkit --features test-hooks --bin seed-corpus -- crates/lodestore-format/tests/fixtures/v1 "$RUNNER_TEMP/seed"
+          mkdir -p fuzz/corpus
+          cp -r "$RUNNER_TEMP/seed/$TARGET" fuzz/corpus/
+      - name: Fuzz
+        working-directory: fuzz
+        run: |
+          mkdir -p "corpus/$TARGET"
+          cargo fuzz run "$TARGET" "corpus/$TARGET" -- -max_total_time="$SECONDS_BUDGET" -rss_limit_mb=2048 -malloc_limit_mb=256 -max_len=1048576 -timeout=10
+      - name: Minimize the corpus
+        working-directory: fuzz
+        run: cargo fuzz cmin "$TARGET" "corpus/$TARGET"
+      - if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore
+          retention-days: 30
+
+  report:
+    needs: fuzz
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    env:
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          pattern: fuzz-crash-*
+          path: crashes
+      - run: |
+          for dir in crashes/fuzz-crash-*; do
+            [ -d "$dir" ] || continue
+            target=${dir##*/fuzz-crash-}
+            title="fuzz crash: $target"
+            open=$(gh issue list --state open --search "in:title \"$title\"" --json title --jq "map(select(.title == \"$title\")) | length")
+            if [ "$open" = 0 ]; then
+              gh issue create --title "$title" --body "Run: $RUN_URL. The crashing input is the artifact fuzz-crash-$target of that run."
+            fi
+          done

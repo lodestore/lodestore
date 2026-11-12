@@ -1,0 +1,159 @@
+[package]
+name = "lodestore-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+lodestore-fuzzkit = { path = "../crates/lodestore-fuzzkit", features = ["test-hooks"] }
+
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "pack_prefix"
+path = "fuzz_targets/pack_prefix.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pack_trailer"
+path = "fuzz_targets/pack_trailer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pack_entries"
+path = "fuzz_targets/pack_entries.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tree_decode"
+path = "fuzz_targets/tree_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tree_count"
+path = "fuzz_targets/tree_count.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tree_cursor"
+path = "fuzz_targets/tree_cursor.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "attest_peek"
+path = "fuzz_targets/attest_peek.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "index_shard"
+path = "fuzz_targets/index_shard.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "gc_manifest"
+path = "fuzz_targets/gc_manifest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "writer_marker"
+path = "fuzz_targets/writer_marker.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "attest_open"
+path = "fuzz_targets/attest_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "provenance_open"
+path = "fuzz_targets/provenance_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "verify_shard"
+path = "fuzz_targets/verify_shard.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "snapshot_resolves"
+path = "fuzz_targets/snapshot_resolves.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "restore_plan"
+path = "fuzz_targets/restore_plan.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "key_slot"
+path = "fuzz_targets/key_slot.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "writer_keys"
+path = "fuzz_targets/writer_keys.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "recovery_key"
+path = "fuzz_targets/recovery_key.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "minisign_signature"
+path = "fuzz_targets/minisign_signature.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "snapshot_open"
+path = "fuzz_targets/snapshot_open.rs"
+test = false
+doc = false
+bench = false

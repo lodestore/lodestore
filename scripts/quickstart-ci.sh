@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-usage='usage: quickstart-ci.sh <image> [--published <version>]'
+usage='usage: quickstart-ci.sh <image> [--published <version> | --e2e]'
 image=${1:?$usage}
 published=
-if [ "${2:-}" = --published ]; then
+e2e=
+if [ "${2:-}" = --e2e ] && [ "$#" -eq 2 ]; then
+  e2e=1
+  budget=1500
+elif [ "${2:-}" = --published ]; then
   published=${3:?$usage}
   if [ "$image" != "ghcr.io/lodestore/lodestore:$published" ]; then
     echo "quickstart check failed: --published $published checks ghcr.io/lodestore/lodestore:$published, not $image" >&2
@@ -39,11 +43,12 @@ admin_user="admin"
 admin_password=quickstart-ci-password
 repo_name=quickstart
 repo_password=quickstart-ci-repo-password
-budget=600
+budget=${budget:-600}
 timings=()
 minio_pid=
 jar=$workdir/cookies
 mc_wrapper=$workdir/mc
+e2e_restore_to=/var/lib/lodestore/restore/e2e
 
 LODESTORE_HOST=$(hostname -I | awk '{print $1}')
 LODESTORE_VERSION=${published:-ci}
@@ -179,12 +184,18 @@ run_server() {
   wait_for /healthz curl -fsS "$base/healthz"
 }
 
-wizard() {
-  local setup_log token block
+setup_token() {
+  local setup_log block token
   block=$(extract setup-link)
   setup_log=$(bash -c "$block")
   token=$(printf '%s\n' "$setup_log" | sed -n 's/.*setup?token=\([A-Za-z0-9_-]*\).*/\1/p' | head -n 1)
   [ -n "$token" ] || fail "no setup token in the server log"
+  printf '%s' "$token"
+}
+
+wizard() {
+  local token
+  token=$(setup_token)
   api POST /api/v1/setup "$(jq -n --arg t "$token" --arg u "$admin_user" --arg p "$admin_password" \
     '{token: $t, username: $u, password: $p}')" >/dev/null
   csrf=$(api GET /api/v1/auth/session | jq -r .csrf_token)
@@ -237,13 +248,17 @@ add_host() {
   host_id=$(api GET /api/v1/hosts | jq -r '[.[] | select(.status == "online")][0].id')
 }
 
-first_backup() {
+prepare_data() {
   sudo install -d -m 0755 -o "$(id -u)" "$data_dir" "$data_dir/data"
   mkdir -p "$data_dir/data/docs/nested/deeper" "$data_dir/data/logs"
   printf 'alpha\n' >"$data_dir/data/docs/a.txt"
   printf 'bravo\n' >"$data_dir/data/docs/nested/deeper/b.txt"
   printf 'charlie\n' >"$data_dir/data/docs/file with space.txt"
   head -c 8388608 /dev/urandom >"$data_dir/data/logs/random.bin"
+}
+
+first_backup() {
+  prepare_data
   local yaml created
   yaml=$(printf 'apiVersion: lodestore.io/v1alpha1\nkind: BackupPolicy\nmetadata:\n  name: quickstart\nspec:\n  repository: %s\n  selector:\n    matchLabels:\n      agent: quickstart\n  paths:\n    - %s/data\n' "$repo_name" "$data_dir")
   api POST /api/v1/policies "$(jq -n --arg y "$yaml" '{yaml: $y}')" >/dev/null
@@ -313,6 +328,40 @@ restore_without_server() {
   compare_restored "$workdir/restored"
 }
 
+e2e_browser() {
+  prepare_data
+  curl -fsSL "$base/install.sh" -o "$workdir/install.sh"
+  local block token
+  block=$(extract install-agent)
+  {
+    cat <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+export JOIN_TOKEN=$1
+EOF
+    printf '%s\n' "$block"
+  } >"$workdir/install-agent"
+  chmod 0755 "$workdir/install-agent"
+  token=$(setup_token)
+  cd "$root/web"
+  E2E_BASE_URL=$base \
+    E2E_SETUP_TOKEN=$token \
+    E2E_S3_ENDPOINT=http://$LODESTORE_HOST:9000 \
+    E2E_BUCKET=$bucket \
+    E2E_MINIO_USER=$minio_root_user \
+    E2E_MINIO_PASSWORD=$minio_root_password \
+    E2E_MC=$mc_wrapper \
+    E2E_MC_ALIAS=$alias_name \
+    E2E_INSTALL_AGENT=$workdir/install-agent \
+    E2E_DATA=$data_dir/data \
+    E2E_RESTORE_TO=$e2e_restore_to \
+    pnpm e2e
+}
+
+e2e_verify() {
+  compare_restored "$e2e_restore_to"
+}
+
 step() {
   local started=$SECONDS
   echo "== $1"
@@ -322,7 +371,12 @@ step() {
 }
 
 SECONDS=0
-for name in start_storage run_server wizard add_host first_backup restore verify_bytes restore_without_server; do
+if [ -n "$e2e" ]; then
+  steps=(start_storage run_server e2e_browser e2e_verify)
+else
+  steps=(start_storage run_server wizard add_host first_backup restore verify_bytes restore_without_server)
+fi
+for name in "${steps[@]}"; do
   step "$name"
 done
 printf 'step %s\n' "${timings[@]}"

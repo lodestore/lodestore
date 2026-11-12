@@ -49,6 +49,23 @@ jobs:
             echo "$out" >&2
             exit 1
           done
+      - name: Keep test hooks out of release builds
+        run: |
+          out=$(cargo tree --workspace -e features,no-dev -i lodestore-format)
+          if printf '%s\n' "$out" | grep -q 'feature "test-hooks"'; then
+            echo "lodestore-format feature test-hooks is enabled outside dev-dependencies:" >&2
+            echo "$out" >&2
+            exit 1
+          fi
+      - name: Mutation skips have reasons and stay pinned
+        run: scripts/mutants-ratchet.sh --skips .github/mutants-baseline.json
+      - name: Mutation baseline only goes down
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git fetch --no-tags --depth=1 origin "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
+          scripts/mutants-ratchet.sh --lower-only .github/mutants-baseline.json "origin/$BASE_REF"
 
   test:
     runs-on: ubuntu-latest
