@@ -102,15 +102,16 @@ test('Policies as code YAML keys exist in the policies guide', () => {
 	}
 });
 
-test('hero modal command has the shape of the quickstart agent command', () => {
-	const qs = source('quickstart');
-	const real = qs.match(/<!-- ci:install-agent -->\n```sh\n(.+)\n```/)?.[1];
-	assert.ok(real?.startsWith('curl -fsSL'));
-	const shown = textOf(landing()).match(/curl -fsSL [^\n]*--join[^\n]*/)?.[0];
-	assert.ok(shown, 'no join command on the page');
-	assert.ok(shown.startsWith('curl -fsSL'));
-	assert.ok(shown.includes('| sudo sh -s -- '));
-	assert.ok(real.includes('| sudo sh -s -- ') && real.includes('--join'));
+test('hero modal command is the HTTPS Add host command of the server', () => {
+	const server = readFileSync(here('../../crates/lodestore-server/src/install/mod.rs'), 'utf8');
+	const template = server.match(/format!\("(curl --proto[^"]*)"/)?.[1];
+	assert.ok(template, 'install_command no longer has the https format! line in install/mod.rs');
+	const expected = template.replace('{url}', 'https://lodestore.example.com').replace('{token}', '<join-token>');
+	const text = textOf(landing());
+	assert.ok(text.includes(expected), `no join command on the page: ${expected}`);
+	assert.ok(!/\.internal\b/.test(text), 'an .internal host is on the landing page');
+	assert.ok(!/lode1\.[A-Za-z0-9_-]{8,}/.test(text), 'a realistic join token is on the landing page');
+	for (const m of text.matchAll(/--join (<join-token>|\S+)/g)) assert.equal(m[1], '<join-token>', `--join is followed by ${m[1]}`);
 });
 
 test('the hero heading is one sentence for crawlers', () => {
