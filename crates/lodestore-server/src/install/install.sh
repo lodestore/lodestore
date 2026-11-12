@@ -100,18 +100,28 @@ have_minisign() {
 }
 
 signed_comment() {
-  if comment=$(minisign -V -Q -P "$PROJECT_KEY" -m "$1" -x "$2" 2>/dev/null); then
+  log=$tmp/minisign.log
+  : >"$log"
+  printf '# checked with the project key:\n' >>"$log"
+  if comment=$(minisign -V -Q -P "$PROJECT_KEY" -m "$1" -x "$2" 2>>"$log"); then
     return 0
   fi
   old_ifs=$IFS
   IFS=$nl
   for key_file in $trust_keys; do
-    if comment=$(minisign -V -Q -p "$key_file" -m "$1" -x "$2" 2>/dev/null); then
+    printf '# checked with --trust-key %s:\n' "$key_file" >>"$log"
+    if comment=$(minisign -V -Q -p "$key_file" -m "$1" -x "$2" 2>>"$log"); then
       IFS=$old_ifs
       return 0
     fi
   done
   IFS=$old_ifs
+  while IFS= read -r line; do
+    case $line in
+      '# '*) printf '%s\n' "${line#'# '}" >&2 ;;
+      *) printf 'minisign: %s\n' "$line" >&2 ;;
+    esac
+  done <"$log"
   return 1
 }
 

@@ -2,6 +2,7 @@ mod common;
 
 use std::collections::HashMap;
 use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -216,6 +217,10 @@ async fn server_signed_with(comment: &str) -> (Outcome, Vec<u8>) {
     (outcome, bytes)
 }
 
+fn has_line(outcome: &Outcome, prefix: &str) -> bool {
+    outcome.stderr.lines().any(|line| line.starts_with(prefix))
+}
+
 fn assert_refused(outcome: &Outcome, needle: &str) {
     assert_eq!(outcome.code, 1, "{}", outcome.stderr);
     assert!(outcome.stderr.contains(needle), "{}", outcome.stderr);
@@ -272,6 +277,47 @@ async fn install_verify_server_untrusted_key_refused() {
     )
     .await;
     assert_refused(&outcome, "does not verify");
+    assert!(has_line(&outcome, "minisign: Signature key id in"));
+    assert!(
+        !outcome
+            .stderr
+            .contains("Error while loading the public key file")
+    );
+    ts.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs minisign, curl and sha256sum"]
+async fn install_verify_broken_trust_key_shows_minisign_output() {
+    let ts = TestServer::start(&Backend::Sqlite).await;
+    let stranger = TestSigner::generate();
+    let bytes = agent_bytes();
+    put_agent(
+        &ts,
+        &bytes,
+        Some(&stranger.sign(&bytes, "lodestore-agent 0.2.0 x86_64")),
+    );
+    let key = ts.dir.path().join("broken.pub");
+    std::fs::write(&key, "not a minisign key\n").unwrap();
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let outcome = download(
+        &ts,
+        Run {
+            trust_keys: vec![key],
+            ..Run::default()
+        },
+    )
+    .await;
+    assert_refused(
+        &outcome,
+        "does not verify with the project key or any --trust-key",
+    );
+    assert!(has_line(
+        &outcome,
+        "minisign: Error while loading the public key file"
+    ));
+    assert!(has_line(&outcome, "minisign: Signature key id in"));
+    assert!(!has_line(&outcome, "minisign: checked with"));
     ts.stop().await;
 }
 
@@ -329,6 +375,7 @@ async fn install_verify_server_second_trust_key_installs() {
     )
     .await;
     assert_eq!(outcome.code, 0, "{}", outcome.stderr);
+    assert!(!outcome.stderr.contains("minisign: "), "{}", outcome.stderr);
     assert_eq!(outcome.installed.as_deref(), Some(bytes.as_slice()));
     ts.stop().await;
 }
