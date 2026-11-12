@@ -15,6 +15,7 @@ export async function navItems(): Promise<{ label: string; href: string }[]> {
 		{ label: 'Product', href: '/#feat' },
 		{ label: 'Docs', href: '/docs/' },
 		{ label: 'Compare', href: '/#compare' },
+		{ label: 'Roadmap', href: '/roadmap/' },
 	];
 	if (await hasBlog()) items.push({ label: 'Blog', href: '/blog/' });
 	if (liveDemoUrl) items.push({ label: 'Live demo', href: liveDemoUrl });

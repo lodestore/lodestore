@@ -107,6 +107,16 @@ test('Next and Later promise no dates and no versions', () => {
 	assert.doesNotMatch(text, /\bv?\d+\.\d+(\.\d+)?\b/, 'a version number in Next or Later');
 });
 
+test('Roadmap is linked from the header and the footer', () => {
+	for (const file of ['index.html', 'roadmap/index.html']) {
+		const html = page(file);
+		const nav = html.match(/<nav\b[^>]*\bid="site-nav"[^>]*>[\s\S]*?<\/nav>/);
+		const footer = html.match(/<footer\b[^>]*\bsite-footer[^>]*>[\s\S]*?<\/footer>/);
+		assert.ok(nav?.[0].includes('href="/roadmap/"'), `${file}: no Roadmap link in nav#site-nav`);
+		assert.ok(footer?.[0].includes('href="/roadmap/"'), `${file}: no Roadmap link in footer.site-footer`);
+	}
+});
+
 test('single sign-on and other storage are Later', () => {
 	const html = page('roadmap/index.html');
 	const later = items(section(html, 'later'));
