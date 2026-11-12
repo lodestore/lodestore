@@ -30,7 +30,7 @@ cosign verify ghcr.io/lodestore/lodestore:0.2.0 \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
-The image also carries build provenance and an SBOM, signed in the same way. [gh](https://cli.github.com/) checks both without signing in to GitHub:
+The image also carries build provenance and an SBOM, signed in the same way. [gh](https://cli.github.com/) checks both; it reads them from the registry and needs to be signed in (`gh auth login`):
 
 ```sh
 gh attestation verify oci://ghcr.io/lodestore/lodestore:0.2.0 --repo lodestore/lodestore --bundle-from-oci \

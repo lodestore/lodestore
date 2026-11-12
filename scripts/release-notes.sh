@@ -93,7 +93,7 @@ notes() {
 
 ## Verify this release
 
-Download the files of this release into one directory and run these commands there. You need minisign, sha256sum, cosign 3 or newer and gh; you do not need to sign in to GitHub. Releases before 0.2.0 are not signed with cosign. The SBOM lists the dependencies declared in the lock files of the release commit (Rust crates and web interface packages), not the files in the image.
+Download the files of this release into one directory and run these commands there. You need minisign, sha256sum, cosign 3 or newer and gh. The image provenance and SBOM checks at the end read them from the registry and need gh signed in (\`gh auth login\`); the other checks do not. Releases before 0.2.0 are not signed with cosign. The SBOM lists the dependencies declared in the lock files of the release commit (Rust crates and web interface packages), not the files in the image.
 
 \`\`\`sh
 EOF

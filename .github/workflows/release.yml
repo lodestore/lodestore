@@ -451,13 +451,15 @@ jobs:
           fi
           scripts/release-notes.sh --commands "$VERSION" --image "$IMAGE" --chart "$CHART" --ref "$GITHUB_REF" | cmp - verify.sh
       - name: Run the block from the release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           if [ "$EVENT" = push ]; then
             DOCKER_CONFIG=$(mktemp -d)
             export DOCKER_CONFIG
           fi
           cd files
-          env -u GH_TOKEN -u GITHUB_TOKEN bash -euxo pipefail ../verify.sh
+          env -u GITHUB_TOKEN GH_TOKEN="$GH_TOKEN" bash -euxo pipefail ../verify.sh
 
   publish:
     needs: [meta, stage, verify]
