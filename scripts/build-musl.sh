@@ -23,6 +23,15 @@ if [ "${#targets[@]}" -eq 0 ]; then
 fi
 mkdir -p "$out"
 
+if [ -z "${SOURCE_DATE_EPOCH:-}" ] && git rev-parse --git-dir >/dev/null 2>&1; then
+  SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+  export SOURCE_DATE_EPOCH
+fi
+cargo_home=${CARGO_HOME:-$HOME/.cargo}
+sysroot=$(rustc --print sysroot)
+export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=$PWD=/build --remap-path-prefix=$cargo_home=/cargo --remap-path-prefix=$sysroot=/rustc"
+export CFLAGS="${CFLAGS:+$CFLAGS }-ffile-prefix-map=$PWD=/build -ffile-prefix-map=$cargo_home=/cargo"
+
 for target in "${targets[@]}"; do
   case "$target" in
     x86_64-unknown-linux-musl) arch=x86_64 ;;
