@@ -4,6 +4,10 @@ Thank you for taking the time. Bug reports, fixes, documentation and tests are a
 
 To report a vulnerability, follow [SECURITY.md](SECURITY.md) and do not open a public issue.
 
+## Questions and community
+
+Ask questions and share ideas in [Discussions](https://github.com/lodestore/lodestore/discussions). Taking part in the project means following the [Code of Conduct](CODE_OF_CONDUCT.md). [GOVERNANCE.md](GOVERNANCE.md) describes how decisions are made.
+
 ## Building and testing
 
 You need the Rust toolchain pinned in `rust-toolchain.toml` (the workspace builds with Rust 1.94 or newer, edition 2024) and [cargo-nextest](https://nexte.st/). The web interface needs Node.js 24 and pnpm; the documentation site needs the same.
