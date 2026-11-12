@@ -9,7 +9,7 @@ import type {
 	RestoreSnapshot,
 } from "@/api/gen/model";
 import { decodeB64, decodeText, encodeB64 } from "@/lib/names";
-import { apiError, renderApp, useSignedIn } from "@/test/app";
+import { apiError, renderApp, useSignedIn, useSignedOut } from "@/test/app";
 import { server } from "@/test/server";
 
 const HOST = "agent-web";
@@ -751,13 +751,19 @@ describe("File browser filter", { timeout: 30_000 }, () => {
 	it("sends an expired session to login", async () => {
 		mockBrowser();
 		server.use(
-			http.get("/api/v1/snapshots/:id/search", () =>
-				apiError(401, "unauthorized", "authentication required"),
-			),
+			http.get("/api/v1/snapshots/:id/search", () => {
+				useSignedOut();
+				return apiError(401, "unauthorized", "authentication required");
+			}),
 		);
 		const { router } = await openFiltered("log");
 
-		await waitFor(() => expect(router.state.location.pathname).toBe("/login"));
+		expect(
+			await screen.findByText(
+				"Your session expired. Sign in again to continue.",
+			),
+		).toBeInTheDocument();
+		expect(router.state.location.pathname).toBe("/login");
 	});
 
 	it("shows a search failure", async () => {

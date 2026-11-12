@@ -1,8 +1,9 @@
 import { QueryClient } from "@tanstack/react-query";
 import { createMemoryHistory, RouterProvider } from "@tanstack/react-router";
-import { render } from "@testing-library/react";
+import { render, waitFor } from "@testing-library/react";
 import { HttpResponse, http } from "msw";
 import { StrictMode } from "react";
+import { afterEach, expect } from "vitest";
 import { createAppRouter } from "@/router";
 import { server } from "./server";
 
@@ -68,6 +69,18 @@ export function useSignedOut(setupRequired = false) {
 	);
 }
 
+const mounted: [ReturnType<typeof createAppRouter>, HTMLElement][] = [];
+
+// Runs before cleanup() in setup.ts (after-hooks run in reverse order): a load still running at unmount resumes after jsdom teardown.
+afterEach(async () => {
+	await waitFor(() => {
+		for (const [router, container] of mounted) {
+			if (container.isConnected) expect(router.state.status).toBe("idle");
+		}
+	});
+	mounted.length = 0;
+});
+
 export function renderApp(path: string, strict = false) {
 	window.matchMedia ??= ((query: string) => ({
 		matches: false,
@@ -83,6 +96,7 @@ export function renderApp(path: string, strict = false) {
 		queryClient,
 	);
 	const tree = <RouterProvider router={router} />;
-	render(strict ? <StrictMode>{tree}</StrictMode> : tree);
+	const { container } = render(strict ? <StrictMode>{tree}</StrictMode> : tree);
+	mounted.push([router, container]);
 	return { router, queryClient };
 }
