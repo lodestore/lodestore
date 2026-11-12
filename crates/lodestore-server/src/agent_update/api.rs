@@ -177,6 +177,11 @@ struct Assessment {
     blocker: Option<HostUpdateBlocker>,
 }
 
+pub(super) fn offered(host_version: &str, target: &Version) -> bool {
+    Version::parse(host_version)
+        .is_ok_and(|host| host < *target && lodestore_proto::accepts_channel(&host, target))
+}
+
 fn assess(
     version: &str,
     arch: &str,
@@ -185,7 +190,7 @@ fn assess(
     binaries: &[manifest::AgentBinary],
 ) -> Assessment {
     let outdated = match target {
-        Some(target) => !Version::parse(version).is_ok_and(|v| v >= *target),
+        Some(target) => offered(version, target),
         None => !super::reached(version, env!("CARGO_PKG_VERSION")),
     };
     let has_binary = target.is_some_and(|t| manifest::binary_for(binaries, arch, t).is_some());
@@ -800,5 +805,138 @@ mod tests {
         let lowest_pre = format!("{}.{}.{}-0", server.major, server.minor, server.patch);
         assert!(outdated(&lowest_pre));
         assert!(outdated("not a version"));
+    }
+
+    fn binary(version: &str) -> manifest::AgentBinary {
+        manifest::AgentBinary {
+            arch: "x86_64",
+            path: Default::default(),
+            signature_path: Default::default(),
+            size: 1,
+            sha256: None,
+            version: Some(version.parse().unwrap()),
+            signed: true,
+        }
+    }
+
+    #[test]
+    fn stable_host_is_not_offered_a_pre_release() {
+        let target: Version = "0.3.0-rc.1".parse().unwrap();
+        let bins = [binary("0.3.0-rc.1")];
+        let stable = assess("0.2.0", "x86_64", true, Some(&target), &bins);
+        assert!(!stable.outdated);
+        assert!(stable.blocker.is_none());
+        let rc = assess("0.3.0-rc.0", "x86_64", true, Some(&target), &bins);
+        assert!(rc.outdated && rc.updatable);
+        assert!(!assess("not a version", "x86_64", true, Some(&target), &bins).outdated);
+    }
+
+    struct Gen {
+        text: String,
+        triple: (u32, u32, u32),
+        is_pre: bool,
+        parses: bool,
+    }
+
+    fn versions() -> Vec<Gen> {
+        let pres = [
+            None,
+            Some("rc.0"),
+            Some("rc.1"),
+            Some("rc.9"),
+            Some("rc.10"),
+            Some("beta.1"),
+            Some("RC1"),
+            Some("rc-1"),
+            Some("0"),
+        ];
+        let mut all = Vec::new();
+        for maj in 0..3 {
+            for min in 0..3 {
+                for pat in 0..3 {
+                    for pre in pres {
+                        for build in [None, Some("b1")] {
+                            let mut text = format!("{maj}.{min}.{pat}");
+                            if let Some(pre) = pre {
+                                text = format!("{text}-{pre}");
+                            }
+                            if let Some(build) = build {
+                                text = format!("{text}+{build}");
+                            }
+                            all.push(Gen {
+                                text,
+                                triple: (maj, min, pat),
+                                is_pre: pre.is_some(),
+                                parses: true,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        all
+    }
+
+    #[test]
+    fn offer_matches_the_agent_version_gate() {
+        let targets = versions();
+        let mut hosts = versions();
+        for text in [
+            "",
+            "not a version",
+            "1.2",
+            "v1.2.3",
+            "1.0.0-",
+            "01.0.0",
+            " 1.0.0",
+            "1.0.0+",
+            "1.0.0\n",
+        ] {
+            hosts.push(Gen {
+                text: text.to_string(),
+                triple: (0, 0, 0),
+                is_pre: false,
+                parses: false,
+            });
+        }
+        let (mut stable_to_pre, mut pre_to_stable, mut older, mut newer) = (0, 0, 0, 0);
+        for target in &targets {
+            let parsed: Version = target.text.parse().unwrap();
+            let bins = [binary(&target.text)];
+            for host in &hosts {
+                let verdict = assess(&host.text, "x86_64", true, Some(&parsed), &bins);
+                let offered = verdict.outdated && verdict.updatable;
+                let accepted =
+                    lodestore_agent::update::apply::version_gate(&host.text, &target.text).is_ok();
+                let at = format!("host {:?} target {}", host.text, target.text);
+                assert_eq!(offered, accepted, "{at}");
+                if !host.parses {
+                    assert!(!offered && !accepted, "{at}");
+                    continue;
+                }
+                if !host.is_pre && target.is_pre {
+                    assert!(!accepted, "{at}");
+                    stable_to_pre += 1;
+                }
+                if target.triple < host.triple {
+                    assert!(!accepted, "{at}");
+                    older += 1;
+                }
+                if target.triple > host.triple && (!target.is_pre || host.is_pre) {
+                    assert!(accepted, "{at}");
+                    newer += 1;
+                }
+                if target.triple == host.triple && host.is_pre && !target.is_pre {
+                    assert!(accepted, "{at}");
+                    pre_to_stable += 1;
+                }
+                if host.text == target.text {
+                    assert!(!accepted, "{at}");
+                }
+            }
+        }
+        for seen in [stable_to_pre, pre_to_stable, older, newer] {
+            assert!(seen > 0);
+        }
     }
 }

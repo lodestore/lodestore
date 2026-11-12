@@ -451,6 +451,15 @@ async fn assign_waves(state: &AppState, now: i64) -> anyhow::Result<()> {
             cancel_queued(state, &id, reason, now).await?;
             continue;
         }
+        if let (Ok(host_v), Ok(target_v)) = (Version::parse(&version), Version::parse(&target))
+            && !lodestore_proto::accepts_channel(&host_v, &target_v)
+        {
+            let reason = format!(
+                "The host runs {version} and takes only stable releases; {target} is a pre-release."
+            );
+            cancel_queued(state, &id, reason, now).await?;
+            continue;
+        }
         if open.get(&rollout).is_some_and(|open| wave > *open) {
             continue;
         }
