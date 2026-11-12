@@ -14,6 +14,7 @@
 .rot::after{content:attr(data-sizer);visibility:hidden;height:0;white-space:nowrap}
 .rot-in{display:flex;flex-direction:column;transition:transform 600ms cubic-bezier(.22,1,.36,1)}
 .rot-in span{height:1.05em;white-space:nowrap}
+.rot-in span[data-w]::before{content:attr(data-w)}
 .hero .lead{margin:24px 0 32px}
 .hero .lead b{color:var(--foreground);font-weight:600}
 .trust{display:flex;flex-wrap:wrap;gap:8px 20px;margin-top:28px;font-size:14px;color:var(--muted-foreground)}
