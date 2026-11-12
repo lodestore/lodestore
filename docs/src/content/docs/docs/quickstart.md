@@ -11,6 +11,8 @@ This page takes you from nothing to a first backup of one Linux host. It should 
 - S3-compatible object storage (AWS S3, MinIO, Ceph and others), a bucket in it, and two access keys: a server key with full access and an agent key without delete rights. The setup wizard shows the exact policy for the agent key.
 - A Linux host with systemd and root access, to back up. It can be the same machine as the server.
 
+Know before you install: version 0.x backs up Linux hosts only (x86_64 and arm64), with no Windows or macOS agent. It does not yet back up Proxmox VMs and containers or Kubernetes, has no native database backup (today, dump the database in a pre-backup hook), no roles (RBAC) or single sign-on, and keeps repositories in S3-compatible storage or a folder, with no SFTP or WebDAV. See the [roadmap](/roadmap/).
+
 No bucket? See [Using a local or network folder](#using-a-local-or-network-folder).
 
 ### Why S3-compatible storage
@@ -63,6 +65,12 @@ The wizard opens after you sign in. It has four steps:
 ## Add a host
 
 Open **Hosts** and choose **Add host**. The page shows a command with a one-time join token. Run it as root on the host you want to back up. The installer downloads the agent from your server, checks its checksum and, when `minisign` is installed on the host, its signature, then installs a systemd service and registers the host.
+
+Put the token from the page in a variable:
+
+```sh
+export JOIN_TOKEN='paste-the-token-from-add-host'
+```
 
 <!-- ci:install-agent -->
 ```sh
@@ -130,17 +138,27 @@ A repository can live in a folder: a local disk, or a network share such as NFS 
 In a folder there is no separate agent key: the agent can delete and overwrite backups, and a compromised host can destroy its own. There is no Object Lock either. Prefer S3-compatible storage for data a compromised host must not be able to destroy.
 :::
 
-The repository has to be a folder that both the server and the agent can see, at the same path. The agent runs as root and creates files only their owner can read, so the server container has to run as root too. Start it with this command instead of the one above:
+The repository has to be a folder that both the server and the agent can see, at the same path. The agent runs as root and creates files only their owner can read, so the server container has to run as root too. Start it with this command instead of the one above. Neither the server of the main path nor the HTTPS variant may hold ports 8080 and 8443, so remove them first:
+
+```sh
+docker rm -f lodestore lodestore-folder lodestore-https lodestore-caddy
+```
 
 ```sh
 sudo install -d -m 0700 /srv/lodestore-repo
-docker run -d --name lodestore --user 0:0 \
+docker run -d --name lodestore-folder --user 0:0 \
   -p 8080:8080 -p 8443:8443 \
-  -v lodestore-data:/var/lib/lodestore \
+  -v lodestore-folder-data:/var/lib/lodestore \
   -v /srv/lodestore-repo:/srv/lodestore-repo \
   -e LODESTORE_PUBLIC_URL="http://$LODESTORE_HOST:8080" \
   -e LODESTORE_GRPC_PUBLIC_ADDRESS="$LODESTORE_HOST:8443" \
   ghcr.io/lodestore/lodestore:$LODESTORE_VERSION
+```
+
+The setup link of this server:
+
+```sh
+docker logs lodestore-folder 2>&1 | grep 'setup?token='
 ```
 
 Choose **Local folder** in the first step of the wizard and enter `/srv/lodestore-repo`. The continuous integration job does not run this section.
