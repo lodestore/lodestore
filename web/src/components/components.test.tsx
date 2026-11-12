@@ -115,6 +115,28 @@ describe("CodeBlock", () => {
 		expect(await screen.findByText("Copied")).toBeInTheDocument();
 	});
 
+	it("offers a line break after each slash without changing the text", () => {
+		const text =
+			"curl -fsSL http://192.0.2.10:8080/install.sh | sh -s -- --insecure --join lode1.abc";
+		render(<CodeBlock text={text} object="install command" />);
+		const region = screen.getByRole("region", { name: "install command" });
+		expect(region.textContent).toBe(text);
+		const breaks = region.querySelectorAll("wbr");
+		expect(breaks.length).toBeGreaterThan(0);
+		for (const br of breaks) {
+			expect(br.previousElementSibling?.textContent).toMatch(/\/$/);
+		}
+	});
+
+	it("adds no line break offers to text without a slash", () => {
+		render(<CodeBlock text="lode1.abcdef" object="join token" />);
+		expect(
+			screen
+				.getByRole("region", { name: "join token" })
+				.querySelectorAll("wbr"),
+		).toHaveLength(0);
+	});
+
 	it("disables the copy button when disabled", () => {
 		render(<CodeBlock text="x" object="install command" disabled />);
 		expect(

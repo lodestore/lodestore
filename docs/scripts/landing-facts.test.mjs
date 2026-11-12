@@ -74,6 +74,21 @@ test('Binary and Helm tabs are fenced blocks of the install pages', () => {
 	}
 });
 
+test('Binary tab checks the signature before it installs', () => {
+	const key = readFileSync(here('../../crates/lodestore-agent/keys/project.pub'), 'utf8').split('\n')[1].trim();
+	const text = textOf(element(landing(), 'pre', 'inst-binary')).replace(/\\\n\s*/g, ' ');
+	assert.ok(text.indexOf('releases/download') >= 0 && text.indexOf('releases/download') < text.indexOf('minisign -V'), 'the download does not come before the check');
+	const chained = text.match(/minisign -V[^;&|\n]*&&\s*sudo install -m 0755 /g) ?? [];
+	assert.ok(chained.length > 0, 'no minisign -V ... && sudo install chain');
+	assert.equal(text.match(/sudo install/g)?.length, chained.length, 'an install is not chained after the signature check');
+	const keys = text.match(/RW[A-Za-z0-9+/]{40,}/g) ?? [];
+	assert.ok(keys.length > 0, 'no project key in the Binary tab');
+	for (const k of keys) assert.equal(k, key, 'the key differs from crates/lodestore-agent/keys/project.pub');
+	const flags = [...text.matchAll(/-P (\S+)/g)].map((m) => m[1]);
+	assert.ok(flags.length > 0);
+	for (const f of flags) assert.equal(f, key, `-P is followed by ${f}, not the project key`);
+});
+
 test('recovery terminal commands come from the restore recipe', () => {
 	const recipe = source('recipes/restore-without-server');
 	const lines = textOf(element(landing(), 'pre', 'tty'))
@@ -81,6 +96,10 @@ test('recovery terminal commands come from the restore recipe', () => {
 		.filter((l) => l.startsWith('$ '))
 		.map((l) => l.slice(2));
 	assert.ok(lines.length > 0, 'no command lines in the terminal');
+	assert.ok(
+		lines.every((l) => l.trim().length > 0),
+		'a bare prompt line is in the recovery terminal',
+	);
 	for (const line of lines) {
 		const name = line.match(/^export ([A-Z_]+)=/)?.[1];
 		if (name) assert.ok(recipe.includes(`export ${name}=`), `${name} is not exported in the recipe`);
@@ -102,15 +121,26 @@ test('Policies as code YAML keys exist in the policies guide', () => {
 	}
 });
 
-test('hero modal command has the shape of the quickstart agent command', () => {
-	const qs = source('quickstart');
-	const real = qs.match(/<!-- ci:install-agent -->\n```sh\n(.+)\n```/)?.[1];
-	assert.ok(real?.startsWith('curl -fsSL'));
-	const shown = textOf(landing()).match(/curl -fsSL [^\n]*--join[^\n]*/)?.[0];
-	assert.ok(shown, 'no join command on the page');
-	assert.ok(shown.startsWith('curl -fsSL'));
-	assert.ok(shown.includes('| sudo sh -s -- '));
-	assert.ok(real.includes('| sudo sh -s -- ') && real.includes('--join'));
+test('hero modal command is the HTTPS Add host command of the server', () => {
+	const server = readFileSync(here('../../crates/lodestore-server/src/install/mod.rs'), 'utf8');
+	const template = server.match(/format!\("(curl --proto[^"]*)"/)?.[1];
+	assert.ok(template, 'install_command no longer has the https format! line in install/mod.rs');
+	const expected = template.replace('{url}', 'https://lodestore.example.com').replace('{token}', '<join-token>');
+	const text = textOf(landing());
+	assert.ok(text.includes(expected), `no join command on the page: ${expected}`);
+	assert.ok(!/\.internal\b/.test(text), 'an .internal host is on the landing page');
+	assert.ok(!/lode1\.[A-Za-z0-9_-]{8,}/.test(text), 'a realistic join token is on the landing page');
+	for (const m of text.matchAll(/--join (<join-token>|\S+)/g)) assert.equal(m[1], '<join-token>', `--join is followed by ${m[1]}`);
+});
+
+test('the delete claim matches the threat table', () => {
+	const html = landing();
+	assert.equal(textOf(element(html, 'button', 'tab-1')).trim(), "On S3, hosts can't delete");
+	const panel = element(html, 'div', 'panel-1');
+	const text = textOf(panel);
+	assert.ok(textOf(panel.match(/<h3\b[^>]*>([\s\S]*?)<\/h3>/)?.[1] ?? '').includes('S3'), 'the panel heading does not say S3');
+	for (const fact of ['If-None-Match', 'Object Lock', 'versioning', 'folder']) assert.ok(text.includes(fact), `the panel does not mention ${fact}`);
+	assert.ok(!/erase its history/i.test(text), 'the old unconditional heading is back');
 });
 
 test('the hero heading is one sentence for crawlers', () => {

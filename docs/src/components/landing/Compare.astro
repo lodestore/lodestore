@@ -32,6 +32,15 @@ const rows = [
 		bareos: 'GNU AGPLv3',
 	},
 ];
+
+const detail = [
+	['restic', 'restic'],
+	['plakar', 'Plakar'],
+	['bareos', 'Bareos'],
+	['proxmox-backup-server', 'Proxmox Backup Server'],
+	['kopia', 'Kopia'],
+	['backrest', 'Backrest'],
+];
 ---
 
 <section class="wrap" id="compare">
@@ -67,8 +76,8 @@ const rows = [
 			</tbody>
 		</table>
 	</div>
-	<p class="small muted cmp-links">
-		<a class="more" href="/compare/restic/">vs restic</a> &nbsp;·&nbsp; <a class="more" href="/compare/plakar/">vs Plakar</a>
-		&nbsp;·&nbsp; <a class="more" href="/compare/bareos/">vs Bareos</a>
-	</p>
+	<div class="cmp-chips rise">
+		<p class="lbl">Compare in detail</p>
+		{detail.map(([slug, name]) => <a href={`/compare/${slug}/`}>vs {name}</a>)}
+	</div>
 </section>

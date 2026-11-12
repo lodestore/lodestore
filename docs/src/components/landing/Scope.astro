@@ -1,0 +1,53 @@
+---
+import { getEntry } from 'astro:content';
+
+const entry = await getEntry('pages', 'roadmap');
+const ready = entry?.data.ready ?? [];
+const limits = entry?.data.limits ?? [];
+const arrow = 'M5 12h14M13 6l6 6-6 6';
+---
+
+{
+	limits.length > 0 && (
+		<section class="sec-pad wrap" id="scope">
+			<div class="sec-head rise">
+				<h2>
+					What 0.2 covers <span class="em">and what comes next.</span>
+				</h2>
+				<p>Know the boundaries before you install. The roadmap is public and changes with the code.</p>
+			</div>
+			<div class="scope rise">
+				<div class="scard">
+					<h3>Ready today</h3>
+					<ul>
+						{ready.map((t) => (
+							<li class="ok">
+								<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+									<path d="m5 12 5 5 9-10" />
+								</svg>
+								<span>{t}</span>
+							</li>
+						))}
+					</ul>
+				</div>
+				<div class="scard">
+					<h3>Not in 0.x yet</h3>
+					<ul>
+						{limits.map((l) => (
+							<li>
+								<span>{l.title}</span>
+								<span class={l.status === 'Next' ? 'status-tag next' : 'status-tag'}>{l.status}</span>
+							</li>
+						))}
+					</ul>
+					<a class="more" href="/roadmap/">
+						See the full roadmap
+						<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+							<path d={arrow} />
+						</svg>
+					</a>
+				</div>
+			</div>
+		</section>
+	)
+}

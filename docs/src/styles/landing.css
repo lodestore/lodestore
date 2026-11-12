@@ -14,6 +14,7 @@
 .rot::after{content:attr(data-sizer);visibility:hidden;height:0;white-space:nowrap}
 .rot-in{display:flex;flex-direction:column;transition:transform 600ms cubic-bezier(.22,1,.36,1)}
 .rot-in span{height:1.05em;white-space:nowrap}
+.rot-in span[data-w]::before{content:attr(data-w)}
 .hero .lead{margin:24px 0 32px}
 .hero .lead b{color:var(--foreground);font-weight:600}
 .trust{display:flex;flex-wrap:wrap;gap:8px 20px;margin-top:28px;font-size:14px;color:var(--muted-foreground)}
@@ -223,7 +224,6 @@ html:not(.js) .ipane{grid-area:auto;visibility:visible}
 html:not(.js) .ipane::before{content:attr(data-label);display:block;color:var(--ink-muted)}
 .stor{margin-top:32px}
 .stor>p:first-child{font-size:14px;font-weight:600;margin-bottom:12px}
-.stor .plat{margin-top:16px;font-size:14px;color:var(--muted-foreground)}
 .sch{display:flex;flex-wrap:wrap;gap:8px}
 .sch span{display:inline-flex;align-items:center;gap:8px;height:36px;padding:0 14px;border-radius:999px;border:1px solid var(--border);background:var(--card);font-size:14px;font-weight:600}
 .sch svg{width:16px;height:16px;color:var(--primary-strong)}
@@ -263,11 +263,26 @@ html.js .kt.in tr:nth-child(5){transition-delay:480ms}
 .ink .more{color:#6fe8ff}
 .ink-star{position:absolute;right:-60px;top:-60px;width:320px;height:320px;opacity:.08}
 
+.scope{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-top:40px}
+@media(max-width:767px){.scope{grid-template-columns:1fr}}
+.scope>*{min-width:0}
+.scard{border:1px solid var(--border);border-radius:20px;background:var(--card);padding:28px}
+.scard h3{font-size:18px;font-weight:600;margin:0 0 16px}
+.scard ul{list-style:none;margin:0;padding:0;display:grid;gap:12px}
+.scard li{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;font-size:15px;line-height:1.45}
+.scard li.ok{justify-content:flex-start}
+.scard li.ok svg{width:18px;height:18px;flex:none;margin-top:2px;color:var(--success)}
+.scard .more{display:inline-flex;align-items:center;gap:6px;margin-top:20px}
+.scard .more svg{width:16px;height:16px}
+
 #compare{scroll-margin-top:96px}
 .cmp .yes{display:inline-flex;gap:6px;align-items:flex-start}
 .cmp .yes .icon{width:16px;height:16px;color:var(--success);margin-top:3px}
 .cmp td::first-letter{text-transform:uppercase}
-.cmp-links{margin-top:16px;text-align:center}
+.cmp-chips{display:flex;flex-wrap:wrap;justify-content:center;align-items:center;gap:8px;margin-top:20px}
+.cmp-chips .lbl{width:100%;text-align:center;font-size:14px;color:var(--muted-foreground);margin:0 0 4px}
+.cmp-chips a{display:inline-flex;align-items:center;height:36px;padding:0 14px;border-radius:999px;border:1px solid var(--border);background:var(--card);font-size:14px;font-weight:600;color:var(--foreground);text-decoration:none;transition:border-color .2s}
+.cmp-chips a:hover{border-color:var(--primary)}
 
 .blog-sec{padding-bottom:0}
 .blog-sec .sec-head{text-align:left;margin-left:0}

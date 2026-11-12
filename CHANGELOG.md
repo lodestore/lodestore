@@ -6,6 +6,12 @@ All notable changes to Lodestore are recorded here. The format follows [Keep a C
 
 ### Added
 
+- The public roadmap at <https://lodestore.dev/roadmap/> and a "What 0.2 covers" section on the home page that quotes it; the header and footer link to the roadmap.
+- A FAQ at <https://lodestore.dev/faq/> with `FAQPage` markup, linked from the header and footer.
+- Comparisons with Proxmox Backup Server, Kopia and Backrest, linked from the home page next to the comparisons with restic, Bareos and Plakar.
+- [LICENSING.md](LICENSING.md): what is under which license, the third-party files, the DCO and the history of the server license (AGPL-3.0-only in 0.1, Apache-2.0 from 0.2).
+- The quickstart has a With HTTPS section, downloads `lode` and checks its signature before installing it, shows the recovery key and lists the limits of 0.x before you install.
+- Site checks: every image has `alt`, a blog post has its own preview image and `og:type` `article`, and the quickstart page is linted for the mistakes that broke copy and paste.
 - `install.sh` verifies the agent's minisign signature with the project key built into it, and with any key given by `--trust-key`: always with `--from-github` (the signature of `SHA256SUMS`), and on the server path when `minisign` is installed on the host. Without `minisign` the server path keeps the checksum check and prints a `note:`. The server serves the signature at `/install/agent/<arch>.minisig`, `GET /api/v1/server/info` has a new `project_key` field, and Add host warns about plain HTTP and shows the commands to check the agent by hand.
 - A check of the `Signed-off-by` trailer on every commit of a pull request (job `dco`): each commit needs a sign-off with the name and email of its author, added by `git commit -s`. See [CONTRIBUTING](CONTRIBUTING.md).
 - Server-side verification of every new backup an agent makes. After a job finishes, the server opens the new frames the snapshot depends on and checks that the snapshot resolves through shards it has checked. It downloads every new byte once, so expect that much extra egress. A job can turn `failed` with `verification_failed` after it was reported as finished, also when the server could not check the backup within one hour; its snapshot then carries `unverified_reason` in the snapshot list of the API, and the alert for a failed backup fires when that job is still the latest finished job of its policy on that host (a job without a policy, such as a stdin backup, raises no alert yet). A job that reports a snapshot already linked to another job fails the check, and the server never signs a host's shard that lists `supersedes`.
@@ -41,6 +47,11 @@ All notable changes to Lodestore are recorded here. The format follows [Keep a C
 
 ### Changed
 
+- The Add host command on the home page is the HTTPS command of the server with placeholders, and the Binary tab checks the signature before it installs.
+- The promise about deletion on the home page is limited to S3 and matches the threat model.
+- Blog posts have titles without the repeated project name and their own preview image.
+- The secret file in the quickstart is `./repository-key`.
+- The command blocks of the web interface wrap at spaces and after `/`.
 - `Trees checked` of the structure check (`trees_checked` in the API) counts the different trees read, not every read, so a directory shared by many snapshots counts once.
 - **Upgrade:** Back up the server database before upgrading to 0.2: the first start re-seals the stored secrets, and a 0.1 server cannot read them afterwards: started on the migrated database it stops with `unlock key does not match`, and the only way back is to restore the database backup.
 - The server seals its secrets with associated data that carries the length of the kind and of the id, and migrates the secrets of 0.1 once at start, in one transaction.
@@ -92,6 +103,8 @@ All notable changes to Lodestore are recorded here. The format follows [Keep a C
 
 ### Fixed
 
+- Blog clips pause and resume on a click, Enter or Space.
+- Copying the heading of the home page no longer copies the words of the rotating text.
 - Cleanup no longer stops, or rewrites the same pack in every cycle, when an index shard planted by a compromised host names blobs in packs that do not exist. Data was not lost, but one such shard could keep cleanup from freeing space.
 - The index chooses the same copy of a blob whatever the order in which its shards are loaded.
 - A file whose chunk sizes in the index do not add up made a restore read every chunk it names before charging them to the walk budget, and the structure check read them without any limit, so one planted file naming one chunk many times could make the nightly check read terabytes. Now each distinct chunk of such a file is read once per visit, every reference to a chunk is charged as it is read, and charging and reading stop once the chunks hold more than the file says. The structure check reads such chunks within the walk budget of one restore per run, reads no other chunk once that budget is spent, and reports a file it could not read for every snapshot that reaches it. Every copy of such a chunk that is fetched is charged to that budget, also the copies before the real one that do not open, and a chunk none of whose copies opens is not read again for the next file that names it.

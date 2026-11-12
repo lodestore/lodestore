@@ -1,0 +1,54 @@
+---
+import { getEntry, render } from 'astro:content';
+import Site from '../layouts/Site.astro';
+import '../styles/compare.css';
+
+const entry = await getEntry('pages', 'faq');
+if (!entry) throw new Error('docs/src/content/pages/faq.md is missing');
+const { Content } = await render(entry);
+
+const plain = (s: string) =>
+	s
+		.replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+		.replace(/[`*]/g, '')
+		.replace(/\s+/g, ' ')
+		.trim();
+
+const questions: { name: string; text: string }[] = [];
+for (const line of (entry.body ?? '').split('\n')) {
+	if (line.startsWith('### ')) questions.push({ name: plain(line.slice(4)), text: '' });
+	else if (line.startsWith('#')) questions.push({ name: '', text: '' });
+	else if (questions.length) questions[questions.length - 1].text += ` ${line}`;
+}
+const ld = JSON.stringify({
+	'@context': 'https://schema.org',
+	'@type': 'FAQPage',
+	mainEntity: questions
+		.filter((q) => q.name)
+		.map((q) => ({
+			'@type': 'Question',
+			name: q.name,
+			acceptedAnswer: { '@type': 'Answer', text: plain(q.text) },
+		})),
+}).replace(/</g, '\\u003c');
+---
+
+<Site title="FAQ | Lodestore" description={entry.data.description}>
+	<script type="application/ld+json" set:html={ld} />
+	<main>
+		<header class="cmp-hero">
+			<div class="wrap rise">
+				<h1>{entry.data.title}</h1>
+				<p class="lead">{entry.data.description}</p>
+			</div>
+		</header>
+		<div class="wrap">
+			<article class="prose rise">
+				<Content />
+			</article>
+			<div class="cmp-foot rise">
+				<a class="btn btn-primary" href="/docs/quickstart/">Protect a host in 10 minutes</a>
+			</div>
+		</div>
+	</main>
+</Site>

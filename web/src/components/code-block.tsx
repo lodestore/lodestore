@@ -1,6 +1,7 @@
 import { Check, Copy } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { TextWithPaths } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
 import { copy } from "@/copy";
 import { copyText } from "@/lib/clipboard";
@@ -57,7 +58,7 @@ export function CodeBlock({
 						: "text-[0.8125rem] leading-relaxed",
 				)}
 			>
-				{text}
+				<TextWithPaths text={text} />
 			</pre>
 			<Button
 				type="button"

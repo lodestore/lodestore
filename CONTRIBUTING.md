@@ -104,7 +104,7 @@ The repository format is frozen by committed data, because a silent change to ch
 
 ## License
 
-The whole repository is licensed under Apache-2.0 (`LICENSE`), and a contribution is accepted under the same license.
+The whole repository is licensed under Apache-2.0 (`LICENSE`), and a contribution is accepted under the same license. [LICENSING.md](LICENSING.md) lists third-party files and the history of the server license.
 
 ## Security-sensitive code
 

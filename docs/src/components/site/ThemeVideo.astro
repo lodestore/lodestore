@@ -20,7 +20,10 @@ const { light, dark, posterLight, posterDark, label, caption } = Astro.props;
 		loop
 		playsinline
 		preload="none"
+		tabindex="0"
+		role="button"
 		aria-label={label}
+		data-label={label}
 		poster={posterLight.src}
 		width={posterLight.width}
 		height={posterLight.height}
@@ -31,7 +34,10 @@ const { light, dark, posterLight, posterDark, label, caption } = Astro.props;
 		loop
 		playsinline
 		preload="none"
+		tabindex="0"
+		role="button"
 		aria-label={label}
+		data-label={label}
 		poster={posterDark.src}
 		width={posterDark.width}
 		height={posterDark.height}

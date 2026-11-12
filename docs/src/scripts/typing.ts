@@ -20,16 +20,10 @@ function el(tag: string, cls: string, text = '') {
 	return node;
 }
 
-function prompt() {
-	const line = el('div', '');
-	line.append(el('span', 'p', '$ '), el('span', 'cur'));
-	return line;
-}
-
 export function showWaiting(tty: HTMLElement) {
 	const note = el('div', '');
-	note.append(el('span', 'c', waiting));
-	tty.replaceChildren(note, prompt());
+	note.append(el('span', 'c', waiting), el('span', 'cur'));
+	tty.replaceChildren(note);
 }
 
 export async function typeScript(tty: HTMLElement, alive: () => boolean) {
@@ -57,5 +51,5 @@ export async function typeScript(tty: HTMLElement, alive: () => boolean) {
 			await wait(350);
 		}
 	}
-	if (alive()) tty.append(prompt());
+	if (alive()) tty.lastElementChild?.append(el('span', 'cur'));
 }

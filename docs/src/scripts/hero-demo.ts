@@ -22,7 +22,7 @@ function rotateWord(rot: HTMLElement) {
 	for (const w of [...words, first]) {
 		const span = document.createElement('span');
 		span.setAttribute('aria-hidden', 'true');
-		span.textContent = w;
+		span.dataset.w = w;
 		rot.append(span);
 	}
 	let ri = 0;

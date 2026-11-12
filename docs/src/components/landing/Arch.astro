@@ -121,16 +121,16 @@ const packets = [
 		<div class="term term-tall rise d1">
 			<div class="term-bar"><b></b><b></b><b></b><span>any Linux machine</span></div>
 			<pre id="tty">{
-				restoreScript.map(([kind, text]) =>
+				restoreScript.map(([kind, text], i) =>
 					kind === 'c' ? (
 						<div><span class="c">{text}</span></div>
 					) : kind === 'o' ? (
 						<div>{text}</div>
 					) : (
-						<div><span class="p">$ </span>{text}</div>
+						<div><span class="p">$ </span>{text}{i === restoreScript.length - 1 && <span class="cur" />}</div>
 					),
 				)
-			}<div><span class="p">$ </span><span class="cur"></span></div></pre>
+			}</pre>
 		</div>
 	</div>
 </section>
