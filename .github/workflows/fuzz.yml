@@ -42,7 +42,7 @@ jobs:
       list: ${{ steps.targets.outputs.list }}
       seconds: ${{ steps.targets.outputs.seconds }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
       - id: targets
@@ -70,19 +70,19 @@ jobs:
       TARGET: ${{ matrix.target }}
       SECONDS_BUDGET: ${{ needs.targets.outputs.seconds }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
       - name: Install the pinned nightly toolchain
         working-directory: fuzz
         run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
           workspaces: fuzz
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - id: cargo-fuzz
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: ~/.cargo/bin/cargo-fuzz
           key: cargo-fuzz-0.13.2
@@ -90,7 +90,7 @@ jobs:
         working-directory: fuzz
         run: cargo install --locked cargo-fuzz --version 0.13.2
       - id: corpus
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: fuzz/corpus/${{ matrix.target }}
           key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
