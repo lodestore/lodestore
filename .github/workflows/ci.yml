@@ -150,6 +150,7 @@ jobs:
       - run: scripts/install-minisign.sh
       - run: scripts/check-version.sh --self-test
       - run: scripts/release-sign.sh --self-test
+      - run: scripts/release-notes.sh --self-test
 
   fixtures-append-only:
     runs-on: ubuntu-latest
