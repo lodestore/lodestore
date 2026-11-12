@@ -185,6 +185,11 @@ async fn install_verify_server_missing_signature_refused() {
     let outcome = download(&ts, Run::default()).await;
     assert_eq!(outcome.code, 1, "{}", outcome.stderr);
     assert!(
+        outcome.stderr.contains("has no signature"),
+        "{}",
+        outcome.stderr
+    );
+    assert!(
         outcome.stderr.contains("nothing was installed"),
         "{}",
         outcome.stderr
@@ -456,11 +461,15 @@ async fn install_verify_server_without_minisign_notes() {
 
 struct Releases {
     files: HashMap<String, Vec<u8>>,
+    failing: Vec<String>,
     hits: AtomicUsize,
 }
 
 async fn release_file(State(releases): State<Arc<Releases>>, uri: Uri) -> Response {
     releases.hits.fetch_add(1, Ordering::SeqCst);
+    if releases.failing.iter().any(|path| path == uri.path()) {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
     match releases.files.get(uri.path()) {
         Some(body) => body.clone().into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
@@ -468,10 +477,21 @@ async fn release_file(State(releases): State<Arc<Releases>>, uri: Uri) -> Respon
 }
 
 async fn serve_releases(files: Vec<(&str, Vec<u8>)>) -> (String, Arc<Releases>) {
+    serve_releases_failing(files, &[]).await
+}
+
+async fn serve_releases_failing(
+    files: Vec<(&str, Vec<u8>)>,
+    failing: &[&str],
+) -> (String, Arc<Releases>) {
     let releases = Arc::new(Releases {
         files: files
             .into_iter()
             .map(|(name, body)| (format!("/v{VERSION}/{name}"), body))
+            .collect(),
+        failing: failing
+            .iter()
+            .map(|name| format!("/v{VERSION}/{name}"))
             .collect(),
         hits: AtomicUsize::new(0),
     });
@@ -581,6 +601,51 @@ async fn install_verify_github_tampered_sums_refused() {
 async fn install_verify_github_missing_signature_refused() {
     let run = github_with(&format!("lodestore release {VERSION}"), false, false).await;
     assert_refused(&run.outcome, "SHA256SUMS.minisig");
+    assert!(
+        run.outcome.stderr.contains("has no"),
+        "{}",
+        run.outcome.stderr
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs minisign, curl and sha256sum"]
+async fn install_verify_github_signature_server_error_is_not_missing() {
+    let ts = TestServer::start(&Backend::Sqlite).await;
+    let signer = TestSigner::generate();
+    let agent = agent_bytes();
+    let sums = sums_for(&agent);
+    let signature = signer
+        .sign(&sums, &format!("lodestore release {VERSION}"))
+        .into_bytes();
+    let (url, _) = serve_releases_failing(
+        vec![
+            (AGENT_FILE, agent),
+            ("SHA256SUMS", sums),
+            ("SHA256SUMS.minisig", signature),
+        ],
+        &["SHA256SUMS.minisig"],
+    )
+    .await;
+    let key = write_key(ts.dir.path(), "release", &signer);
+    let outcome = download(
+        &ts,
+        Run {
+            github: true,
+            trust_keys: vec![key],
+            releases_url: Some(url),
+            ..Run::default()
+        },
+    )
+    .await;
+    assert_refused(&outcome, "could not download");
+    assert!(outcome.stderr.contains("HTTP 500"), "{}", outcome.stderr);
+    assert!(
+        !outcome.stderr.contains("has no SHA256SUMS.minisig"),
+        "{}",
+        outcome.stderr
+    );
+    ts.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

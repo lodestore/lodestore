@@ -120,11 +120,17 @@ agent_comment_ok() {
 }
 
 fetch_signature() {
+  rc=0
   if [ "$insecure" = 1 ]; then
-    curl -fsSL -o "$2" "$1" || die "$3; nothing was installed"
+    code=$(curl -fsSL -w '%{http_code}' -o "$2" "$1") || rc=$?
   else
-    curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL -o "$2" "$1" || die "$3; nothing was installed"
+    code=$(curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL -w '%{http_code}' -o "$2" "$1") || rc=$?
   fi
+  [ "$rc" != 0 ] || return 0
+  [ "$rc" = 22 ] && [ "$code" = 404 ] && die "$3; nothing was installed"
+  status=
+  [ "$code" = 000 ] || status=", HTTP $code"
+  die "could not download $1 (curl exit $rc$status); nothing was installed"
 }
 
 download_agent() {
