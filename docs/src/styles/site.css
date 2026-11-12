@@ -511,6 +511,10 @@ main:has(> .final:last-child) + .site-footer {
 	justify-content: space-between;
 	gap: 4px 12px;
 }
+.limits li > span:first-child {
+	flex: 1 1 0;
+	min-width: 0;
+}
 .limits li p {
 	flex-basis: 100%;
 	margin: 0;
