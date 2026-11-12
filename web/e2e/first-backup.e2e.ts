@@ -20,6 +20,11 @@ function stand(name: string) {
 
 async function a11y(page: Page, marker: Locator) {
 	await expect(marker).toBeVisible();
+	await page.waitForFunction(() =>
+		document
+			.getAnimations()
+			.every((a) => a.effect?.getComputedTiming().iterations === Infinity),
+	);
 	const results = await new AxeBuilder({ page })
 		.withTags(["wcag2a", "wcag2aa"])
 		.analyze();
