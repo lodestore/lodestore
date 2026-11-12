@@ -49,11 +49,12 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
         run: |
-          list=$(for f in fuzz/fuzz_targets/*.rs; do basename "$f" .rs; done | jq -R . | jq -sc .)
-          echo "list=$list" >> "$GITHUB_OUTPUT"
           if [ "$EVENT" = pull_request ]; then
+            echo 'list=["index_shard","tree_decode"]' >> "$GITHUB_OUTPUT"
             echo "seconds=30" >> "$GITHUB_OUTPUT"
           else
+            list=$(for f in fuzz/fuzz_targets/*.rs; do basename "$f" .rs; done | jq -R . | jq -sc .)
+            echo "list=$list" >> "$GITHUB_OUTPUT"
             echo "seconds=300" >> "$GITHUB_OUTPUT"
           fi
 
