@@ -6,7 +6,7 @@ const blog = await hasBlog();
 
 <footer class="site-footer">
 	<div class="wrap">
-		<div>
+		<div class="brand">
 			<a class="logo" href="/">
 				<svg viewBox="0 0 32 32" aria-hidden="true"
 					><path
@@ -22,7 +22,7 @@ const blog = await hasBlog();
 				>Lodestore
 			</a>
 			<p class="blurb">
-				Centralized, encrypted backup for your server fleet. Open source under Apache-2.0.
+				Backups for every Linux host.<br />Restore with only the bucket and your key.
 			</p>
 		</div>
 		<div>
@@ -54,5 +54,10 @@ const blog = await hasBlog();
 				{blog && <li><a href="/blog/">Blog</a></li>}
 			</ul>
 		</div>
+		<p class="legal">
+			<a href={`${GITHUB_URL}/blob/main/LICENSE`}>Apache-2.0</a>
+			<span aria-hidden="true">·</span>
+			<a href={GITHUB_URL}>Source on GitHub</a>
+		</p>
 	</div>
 </footer>
