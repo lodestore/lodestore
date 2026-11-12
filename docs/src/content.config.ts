@@ -13,6 +13,17 @@ export const collections = {
 			description: z.string(),
 		}),
 	}),
+	pages: defineCollection({
+		loader: glob({ base: './src/content/pages', pattern: '*.md' }),
+		schema: z.object({
+			title: z.string(),
+			description: z.string(),
+			ready: z.array(z.string()).optional(),
+			limits: z
+				.array(z.object({ title: z.string(), status: z.enum(['Next', 'Later']), note: z.string().optional() }))
+				.optional(),
+		}),
+	}),
 	blog: defineCollection({
 		loader: glob({ base: './src/content/blog', pattern: '**/*.{md,mdx}' }),
 		schema: ({ image }) =>

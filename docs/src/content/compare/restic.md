@@ -29,5 +29,5 @@ restic is a command-line backup program. Lodestore is a server with an agent on 
 |---------|--------|---------------|
 | AWS S3 and S3-compatible storage | Yes | Yes |
 | Local or network folder | Yes | Yes, the agent can delete in it |
-| SFTP, Azure Blob Storage, Google Cloud Storage | Yes | Planned |
+| SFTP, Azure Blob Storage, Google Cloud Storage | Yes | Not yet, see the [roadmap](/roadmap/) |
 | REST Server, OpenStack Swift, Backblaze B2, Alibaba Cloud OSS, other services through rclone | Yes | Not in 0.2 |

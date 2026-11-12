@@ -460,6 +460,47 @@ main:has(> .final:last-child) + .site-footer {
 	color: var(--foreground);
 }
 
+.status-tag {
+	display: inline-flex;
+	align-items: center;
+	flex: none;
+	height: 22px;
+	padding: 0 8px;
+	border: 1px solid var(--border);
+	border-radius: 999px;
+	background: var(--card);
+	color: var(--muted-foreground);
+	font-size: 12px;
+	font-weight: 600;
+	white-space: nowrap;
+}
+.status-tag.next {
+	border-color: color-mix(in oklab, var(--primary) 45%, var(--border));
+	background: var(--primary-subtle);
+	color: var(--primary-strong);
+}
+.limits,
+.prose .limits {
+	display: grid;
+	gap: 12px;
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+.limits li {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 4px 12px;
+}
+.limits li p {
+	flex-basis: 100%;
+	margin: 0;
+	font-size: 14px;
+	color: var(--muted-foreground);
+}
+
 @media (prefers-reduced-motion: reduce) {
 	html.js .rise {
 		opacity: 1;
