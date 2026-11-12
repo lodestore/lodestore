@@ -4,6 +4,8 @@ All notable changes to Lodestore are recorded here. The format follows [Keep a C
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-12
+
 ### Added
 
 - The public roadmap at <https://lodestore.dev/roadmap/> and a "What 0.2 covers" section on the home page that quotes it; the header and footer link to the roadmap.
