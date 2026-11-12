@@ -2746,3 +2746,92 @@ async fn agent_update_race_claims_serialize() {
         ts.stop().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agent_update_stable_hosts_skip_a_pre_release_target() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let hosts = fleet(&ts, &["host-a"]).await;
+        let pool = &ts.state().db.pool;
+        let arch = arch_of(pool, &hosts[0].id).await;
+        publish(&ts, &arch, "99.0.0-rc.1", b"binary");
+        setup_host(pool, &hosts[0], "0.0.1", None, true).await;
+
+        let listed = status(&ts).await;
+        let host = host_of(&listed, "host-a");
+        assert_eq!(host["outdated"], false, "[{}]", backend.name());
+        assert!(host["blocker"].is_null());
+
+        for body in [
+            serde_json::json!({ "outdated": true }),
+            serde_json::json!({ "hosts": [hosts[0].id] }),
+        ] {
+            let refused = start(&ts, body.clone()).await;
+            assert_eq!(refused.status(), 422, "{body} [{}]", backend.name());
+            let queued = count(
+                pool,
+                "SELECT COUNT(*) FROM agent_updates WHERE state = 'queued'",
+            )
+            .await;
+            assert_eq!(queued, 0, "{body} [{}]", backend.name());
+        }
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agent_update_pre_release_hosts_take_a_pre_release_target() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let hosts = fleet(&ts, &["host-a"]).await;
+        let pool = &ts.state().db.pool;
+        let arch = arch_of(pool, &hosts[0].id).await;
+        publish(&ts, &arch, "99.0.0-rc.1", b"binary");
+        setup_host(pool, &hosts[0], "99.0.0-rc.0", None, true).await;
+
+        let started = start(&ts, serde_json::json!({ "outdated": true })).await;
+        assert_eq!(started.status(), 202, "[{}]", backend.name());
+        assert_eq!(counts(started).await, (Some(1), Some(0)));
+        let queued = count(
+            pool,
+            "SELECT COUNT(*) FROM agent_updates WHERE state = 'queued'",
+        )
+        .await;
+        assert_eq!(queued, 1, "[{}]", backend.name());
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agent_update_queued_pre_release_for_a_stable_host_is_cancelled() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let hosts = fleet(&ts, &["host-a"]).await;
+        let pool = &ts.state().db.pool;
+        let arch = arch_of(pool, &hosts[0].id).await;
+        publish(&ts, &arch, "99.0.0-rc.1", b"binary");
+        setup_host(pool, &hosts[0], "99.0.0-rc.0", None, true).await;
+        let rollout = begin_one(&ts, &hosts[0]).await;
+
+        let mut agent = Fake::connect(&ts, &hosts[0], "0.0.2").await;
+        let id = text(
+            pool,
+            "SELECT id FROM agent_updates WHERE host_id = $1",
+            &hosts[0].id,
+        )
+        .await
+        .unwrap();
+        wait_text(pool, UPDATE_STATE, &id, "cancelled").await;
+        agent.no_assign(Duration::from_millis(500)).await;
+        assert_eq!(
+            text(pool, UPDATE_REASON, &id).await.as_deref(),
+            Some(
+                "The host runs 0.0.2 and takes only stable releases; 99.0.0-rc.1 is a pre-release."
+            ),
+            "[{}]",
+            backend.name()
+        );
+        wait_text(pool, ROLLOUT_STATE, &rollout, "done").await;
+        ts.stop().await;
+    }
+}

@@ -201,6 +201,79 @@ async fn same_or_older_version_is_rejected() {
 }
 
 #[tokio::test]
+async fn stable_agent_rejects_a_signed_pre_release() {
+    let host = Host::new();
+    let marks = tempfile::tempdir().unwrap();
+    let marker = marks.path().join("ran");
+    let body = format!(
+        "#!/bin/sh\ntouch '{}'\necho \"lodestore-agent 99.0.0-rc.1\"\n",
+        marker.display()
+    );
+    host.download(&body);
+    let sig = host.sign(&body, "99.0.0-rc.1", std::env::consts::ARCH);
+    let assign = host.assign(&body, "99.0.0-rc.1");
+    let reason = rejected(host.install(&host.runtime("0.0.1"), &assign, &sig).await);
+    assert_eq!(
+        reason,
+        "Version 99.0.0-rc.1 is a pre-release and agent 0.0.1 takes only stable releases."
+    );
+    assert!(!marker.exists(), "the downloaded binary was executed");
+    host.untouched();
+}
+
+#[tokio::test]
+async fn pre_release_agent_takes_a_newer_stable_release() {
+    let host = Host::new();
+    let body = script("1.0.0");
+    host.download(&body);
+    let sig = host.sign(&body, "1.0.0", std::env::consts::ARCH);
+    let outcome = host
+        .install(
+            &host.runtime("1.0.0-rc.1"),
+            &host.assign(&body, "1.0.0"),
+            &sig,
+        )
+        .await;
+    assert_eq!(outcome, UpdateOutcome::Switched);
+    assert_eq!(host.switcher.calls().len(), 1);
+}
+
+#[tokio::test]
+async fn pre_release_agent_takes_a_newer_pre_release() {
+    let host = Host::new();
+    let body = script("1.0.0-rc.2");
+    host.download(&body);
+    let sig = host.sign(&body, "1.0.0-rc.2", std::env::consts::ARCH);
+    let outcome = host
+        .install(
+            &host.runtime("1.0.0-rc.1"),
+            &host.assign(&body, "1.0.0-rc.2"),
+            &sig,
+        )
+        .await;
+    assert_eq!(outcome, UpdateOutcome::Switched);
+    assert_eq!(host.switcher.calls().len(), 1);
+}
+
+#[tokio::test]
+async fn pre_release_agent_rejects_an_older_release() {
+    let host = Host::new();
+    let body = script("0.9.0");
+    host.download(&body);
+    let sig = host.sign(&body, "0.9.0", std::env::consts::ARCH);
+    let reason = rejected(
+        host.install(
+            &host.runtime("1.0.0-rc.1"),
+            &host.assign(&body, "0.9.0"),
+            &sig,
+        )
+        .await,
+    );
+    assert_eq!(reason, "Version 0.9.0 is not newer than 1.0.0-rc.1.");
+    host.untouched();
+}
+
+#[tokio::test]
 async fn signed_version_must_match_the_assignment() {
     let host = Host::new();
     let body = script("99.0.0");

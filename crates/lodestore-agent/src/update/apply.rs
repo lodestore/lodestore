@@ -143,19 +143,25 @@ async fn check(
             std::env::consts::ARCH
         ));
     }
-    let new = semver::Version::parse(&release.version)
-        .map_err(|_| format!("Version {} is not a valid version.", release.version))?;
-    let current = semver::Version::parse(&runtime.version).map_err(|_| {
-        format!(
-            "Running version {} is not a valid version.",
-            runtime.version
-        )
-    })?;
+    version_gate(&runtime.version, &release.version)?;
+
+    run_version(bin, &release.version).await
+}
+
+pub fn version_gate(current: &str, signed: &str) -> Result<(), String> {
+    let new = semver::Version::parse(signed)
+        .map_err(|_| format!("Version {signed} is not a valid version."))?;
+    let current = semver::Version::parse(current)
+        .map_err(|_| format!("Running version {current} is not a valid version."))?;
+    if !lodestore_proto::accepts_channel(&current, &new) {
+        return Err(format!(
+            "Version {new} is a pre-release and agent {current} takes only stable releases."
+        ));
+    }
     if new <= current {
         return Err(format!("Version {new} is not newer than {current}."));
     }
-
-    run_version(bin, &release.version).await
+    Ok(())
 }
 
 fn hash_file(path: &Path, limit: u64) -> Result<(String, [u8; 64]), String> {

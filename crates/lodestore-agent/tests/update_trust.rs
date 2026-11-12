@@ -2,7 +2,9 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
 use lodestore_agent::Paths;
-use lodestore_agent::update::minisign::{Digest512, PublicKey, Signature, verify};
+use lodestore_agent::update::minisign::{
+    Digest512, PublicKey, Signature, SignatureError, TrustedRelease, verify,
+};
 use lodestore_agent::update::trust::{PROJECT_KEY, trusted_keys};
 use lodestore_testkit::minisign::TestSigner;
 
@@ -60,6 +62,51 @@ fn host_key_is_trusted_and_verifies_its_signatures() {
         verify(&keys, &digest.finalize(), &sig),
         Ok("lodestore-agent 1.2.3 x86_64")
     );
+}
+
+#[test]
+fn two_host_keys_both_verify_and_a_third_does_not() {
+    let (_root, paths, dir) = setup();
+    let old = TestSigner::generate();
+    let new = TestSigner::generate();
+    let third = TestSigner::generate();
+    key_file(&dir, "old.pub", &old, 0o644);
+    key_file(&dir, "new.pub", &new, 0o644);
+
+    let keys = trusted_keys(&paths);
+    assert_eq!(keys.len(), 3);
+
+    let comment = "lodestore-agent 1.0.0 x86_64";
+    let mut digest = Digest512::new();
+    digest.update(b"binary");
+    let digest = digest.finalize();
+    for signer in [&old, &new] {
+        let sig = Signature::parse(&signer.sign(b"binary", comment)).unwrap();
+        assert_eq!(verify(&keys, &digest, &sig), Ok(comment));
+    }
+    let sig = Signature::parse(&third.sign(b"binary", comment)).unwrap();
+    assert!(matches!(
+        verify(&keys, &digest, &sig),
+        Err(SignatureError::UntrustedKey)
+    ));
+}
+
+#[test]
+fn release_comments_of_0_2_parse_as_three_words() {
+    let stable = TrustedRelease::parse("lodestore-agent 0.2.0 x86_64").unwrap();
+    assert_eq!(
+        (stable.version.as_str(), stable.arch.as_str()),
+        ("0.2.0", "x86_64")
+    );
+    let rc = TrustedRelease::parse("lodestore-agent 0.3.0-rc.1 aarch64").unwrap();
+    assert_eq!(
+        (rc.version.as_str(), rc.arch.as_str()),
+        ("0.3.0-rc.1", "aarch64")
+    );
+    assert!(matches!(
+        TrustedRelease::parse("lodestore-agent 0.3.0-rc.1 aarch64 rc"),
+        Err(SignatureError::Malformed(_))
+    ));
 }
 
 #[test]
