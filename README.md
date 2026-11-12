@@ -81,9 +81,9 @@ The quickstart uses plain HTTP so that it works on any network; for anything bey
 
 Repositories live on S3-compatible object storage or in a local or network folder. On S3-compatible storage the agent key has no delete rights and Object Lock is available; in a folder the agent can delete and overwrite, so prefer object storage for data that a compromised host must not be able to destroy. The server checks every new backup an agent makes, so index metadata forged by a compromised host does not lead to the deletion of other hosts' data. The server signs which host and job made each snapshot, and the server and `lode` pick the latest snapshot from those signatures, not from the time a host writes into the snapshot. See [Agent credentials](https://lodestore.dev/docs/security/threat-model/#agent-credentials) and [index metadata from a compromised agent](https://lodestore.dev/docs/security/threat-model/#index-metadata-from-a-compromised-agent).
 
-## Version 0.1 and roadmap
+## Version 0.2 and roadmap
 
-Version 0.1 backs up files and directories on Linux (x86_64 and arm64). Databases are covered by [dumping them in a pre-backup hook](https://lodestore.dev/docs/recipes/database-backup-hook/).
+Version 0.2 backs up files and directories on Linux (x86_64 and arm64). Databases are covered by [dumping them in a pre-backup hook](https://lodestore.dev/docs/recipes/database-backup-hook/).
 
 What works today, what is next and what comes later is on the public roadmap: <https://lodestore.dev/roadmap/>
 
