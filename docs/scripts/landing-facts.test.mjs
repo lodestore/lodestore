@@ -133,6 +133,16 @@ test('hero modal command is the HTTPS Add host command of the server', () => {
 	for (const m of text.matchAll(/--join (<join-token>|\S+)/g)) assert.equal(m[1], '<join-token>', `--join is followed by ${m[1]}`);
 });
 
+test('the delete claim matches the threat table', () => {
+	const html = landing();
+	assert.equal(textOf(element(html, 'button', 'tab-1')).trim(), "On S3, hosts can't delete");
+	const panel = element(html, 'div', 'panel-1');
+	const text = textOf(panel);
+	assert.ok(textOf(panel.match(/<h3\b[^>]*>([\s\S]*?)<\/h3>/)?.[1] ?? '').includes('S3'), 'the panel heading does not say S3');
+	for (const fact of ['If-None-Match', 'Object Lock', 'versioning', 'folder']) assert.ok(text.includes(fact), `the panel does not mention ${fact}`);
+	assert.ok(!/erase its history/i.test(text), 'the old unconditional heading is back');
+});
+
 test('the hero heading is one sentence for crawlers', () => {
 	const h1 = landing().match(/<h1\b[^>]*>[\s\S]*?<\/h1>/)?.[0];
 	assert.ok(h1, 'no h1 on the landing page');
