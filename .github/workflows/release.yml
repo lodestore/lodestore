@@ -3,12 +3,17 @@ name: release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        type: string
+        required: true
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -20,6 +25,10 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       prerelease: ${{ steps.version.outputs.prerelease }}
+      dry-run: ${{ steps.names.outputs.dry-run }}
+      image: ${{ steps.names.outputs.image }}
+      chart: ${{ steps.names.outputs.chart }}
+      chart-repo: ${{ steps.names.outputs.chart-repo }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -27,13 +36,20 @@ jobs:
           persist-credentials: false
       - name: Install the pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
+      - id: names
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: scripts/check-version.sh --names "$EVENT" "$REF_TYPE" >>"$GITHUB_OUTPUT"
       - id: version
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: scripts/check-version.sh "$TAG" >>"$GITHUB_OUTPUT"
       - name: Require the tag commit on main
+        if: github.event_name == 'push'
         run: git merge-base --is-ancestor HEAD origin/main
       - name: Refuse a version that is already published
+        if: github.event_name == 'push'
         env:
           TAG: ${{ github.ref_name }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -77,7 +93,73 @@ jobs:
         with:
           name: dist-signed
           path: dist
-          retention-days: 2
+          retention-days: ${{ github.event_name == 'workflow_dispatch' && 1 || 2 }}
+
+  sbom:
+    needs: meta
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Collect the lock files
+        run: |
+          mkdir -p sbom-src/web
+          cp Cargo.lock sbom-src/
+          cp web/package.json web/pnpm-lock.yaml sbom-src/web/
+      - uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c
+        with:
+          path: sbom-src
+          format: spdx-json
+          output-file: lodestore-${{ needs.meta.outputs.version }}.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: sbom
+          path: lodestore-${{ needs.meta.outputs.version }}.spdx.json
+          retention-days: ${{ github.event_name == 'workflow_dispatch' && 1 || 2 }}
+
+  attest-binaries:
+    needs: [meta, sign]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: dist-signed
+          path: dist-signed
+      - id: provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
+        with:
+          subject-checksums: dist-signed/SHA256SUMS
+      - name: Keep the bundle as a release file
+        env:
+          BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+        run: |
+          mkdir attest
+          out=attest/lodestore-$VERSION.provenance.jsonl
+          jq -c . "$BUNDLE" >"$out"
+          if [ "$(wc -l <"$out")" -ne 1 ] || ! jq -e . "$out" >/dev/null; then
+            echo "$out is not one line of JSON" >&2
+            exit 1
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: attest
+          path: attest/lodestore-${{ needs.meta.outputs.version }}.provenance.jsonl
+          retention-days: ${{ github.event_name == 'workflow_dispatch' && 1 || 2 }}
 
   image:
     needs: [meta, sign]
@@ -150,30 +232,47 @@ jobs:
       dist-artifact: dist-signed
       image-artifact: candidate-image
 
-  publish:
-    needs: [meta, smoke, smoke-arm64, quickstart-candidate]
+  stage:
+    needs: [meta, smoke, smoke-arm64, quickstart-candidate, attest-binaries, sbom]
     runs-on: ubuntu-latest
     permissions:
       contents: write
       packages: write
+    outputs:
+      image-digest: ${{ steps.image.outputs.image-digest }}
+      chart-digest: ${{ steps.chart.outputs.chart-digest }}
     env:
       VERSION: ${{ needs.meta.outputs.version }}
       PRERELEASE: ${{ needs.meta.outputs.prerelease }}
-      IMAGE: ghcr.io/lodestore/lodestore
+      IMAGE: ${{ needs.meta.outputs.image }}
+      CHART: ${{ needs.meta.outputs.chart }}
+      CHART_REPO: ${{ needs.meta.outputs.chart-repo }}
+      EVENT: ${{ github.event_name }}
       GH_REPO: ${{ github.repository }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+      - name: Refuse names that do not match the event
+        run: scripts/check-version.sh --guard-names "$EVENT" "$IMAGE" "$CHART" "$CHART_REPO"
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: dist-signed
           path: dist-signed
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
+          name: attest
+          path: attest
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: sbom
+          path: attest
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
           name: candidate-image
           path: candidate
       - name: Refuse a version that is already published
+        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: scripts/check-version.sh --unpublished "v$VERSION"
@@ -181,16 +280,23 @@ jobs:
         run: |
           docker load -i candidate/image-amd64.tar
           docker load -i candidate/image-arm64.tar
+      - name: Render the release notes
+        run: scripts/release-notes.sh "$VERSION" --image "$IMAGE" --chart "$CHART" --ref "$GITHUB_REF" >notes.md
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: notes
+          path: notes.md
+          retention-days: ${{ github.event_name == 'workflow_dispatch' && 1 || 2 }}
       - name: Create the draft release
+        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          scripts/release-notes.sh "$VERSION" >notes.md
           flags=()
           if [ "$PRERELEASE" = true ]; then
             flags=(--prerelease)
           fi
-          gh release create "v$VERSION" dist-signed/* --draft --verify-tag --notes-file notes.md "${flags[@]}"
+          gh release create "v$VERSION" dist-signed/* attest/* --draft --verify-tag --title "Lodestore $VERSION" --notes-file notes.md "${flags[@]}"
       - name: Push the version images
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -201,22 +307,217 @@ jobs:
             docker push "$IMAGE:$VERSION-$arch"
           done
           docker buildx imagetools create -t "$IMAGE:$VERSION" "$IMAGE:$VERSION-amd64" "$IMAGE:$VERSION-arm64"
+      - id: image
+        run: |
+          digest=$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{.Manifest.Digest}}')
+          if ! [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "no digest for $IMAGE:$VERSION: '$digest'" >&2
+            exit 1
+          fi
+          echo "image-digest=$digest" >>"$GITHUB_OUTPUT"
       - name: Push the chart
+        id: chart
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           helm package deploy/helm/lodestore --version "$VERSION" --app-version "$VERSION"
           printf '%s' "$GH_TOKEN" | helm registry login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          helm push "lodestore-$VERSION.tgz" oci://ghcr.io/lodestore/charts
+          helm push "lodestore-$VERSION.tgz" "$CHART_REPO" 2>&1 | tee push.log
+          digest=$(sed -n 's/^Digest: //p' push.log)
+          if ! [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "no digest for the chart $VERSION: '$digest'" >&2
+            exit 1
+          fi
+          echo "chart-digest=$digest" >>"$GITHUB_OUTPUT"
+
+  sign-artifacts:
+    needs: [meta, stage]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      IMAGE: ${{ needs.meta.outputs.image }}
+      CHART: ${{ needs.meta.outputs.chart }}
+      CHART_REPO: ${{ needs.meta.outputs.chart-repo }}
+      IMAGE_DIGEST: ${{ needs.stage.outputs.image-digest }}
+      CHART_DIGEST: ${{ needs.stage.outputs.chart-digest }}
+      EVENT: ${{ github.event_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Refuse names that do not match the event
+        run: scripts/check-version.sh --guard-names "$EVENT" "$IMAGE" "$CHART" "$CHART_REPO"
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532
+      - name: Log in to the registry
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - name: Sign the image and the chart
+        run: |
+          cosign sign --yes "$IMAGE@$IMAGE_DIGEST"
+          cosign sign --yes "$CHART@$CHART_DIGEST"
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
+        with:
+          subject-name: ${{ needs.meta.outputs.image }}
+          subject-digest: ${{ needs.stage.outputs.image-digest }}
+          push-to-registry: true
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: sbom
+          path: sbom
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-name: ${{ needs.meta.outputs.image }}
+          subject-digest: ${{ needs.stage.outputs.image-digest }}
+          sbom-path: sbom/lodestore-${{ needs.meta.outputs.version }}.spdx.json
+          push-to-registry: true
+
+  verify:
+    needs: [meta, stage, sign-artifacts]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      IMAGE: ${{ needs.meta.outputs.image }}
+      CHART: ${{ needs.meta.outputs.chart }}
+      IMAGE_DIGEST: ${{ needs.stage.outputs.image-digest }}
+      CHART_DIGEST: ${{ needs.stage.outputs.chart-digest }}
+      EVENT: ${{ github.event_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: dist-signed
+          path: files
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: attest
+          path: files
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: sbom
+          path: files
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: notes
+      - run: scripts/install-minisign.sh
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532
+      - name: Log in to read the dry-run packages
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - name: Check that the release files are here
+        run: |
+          names=(SHA256SUMS SHA256SUMS.minisig "lodestore-$VERSION.provenance.jsonl" "lodestore-$VERSION.spdx.json")
+          for f in lodestore-agent-linux-x86_64 lodestore-agent-linux-aarch64 lodestore-server-linux-x86_64 lodestore-server-linux-aarch64 lode-linux-x86_64 lode-linux-aarch64; do
+            names+=("$f" "$f.minisig")
+          done
+          for f in "${names[@]}"; do
+            if [ ! -f "files/$f" ]; then
+              echo "the release file $f is missing" >&2
+              exit 1
+            fi
+          done
+      - name: Check that the tags point at the staged digests
+        run: |
+          for pair in "$IMAGE:$VERSION $IMAGE_DIGEST" "$CHART:$VERSION $CHART_DIGEST"; do
+            ref=${pair% *}
+            want=${pair#* }
+            got=$(docker buildx imagetools inspect "$ref" --format '{{.Manifest.Digest}}')
+            if [ "$got" != "$want" ]; then
+              echo "$ref points at '$got', the staged digest is '$want'" >&2
+              exit 1
+            fi
+          done
+      - name: Extract the block from the release notes
+        run: |
+          awk '/^## Verify this release$/ { h = 1; next } h && /^```sh$/ && !on { on = 1; next } on && /^```$/ { exit } on { print }' notes.md >verify.sh
+          if [ ! -s verify.sh ]; then
+            echo "the release notes have no command block" >&2
+            exit 1
+          fi
+          scripts/release-notes.sh --commands "$VERSION" --image "$IMAGE" --chart "$CHART" --ref "$GITHUB_REF" | cmp - verify.sh
+      - name: Run the block from the release notes
+        run: |
+          if [ "$EVENT" = push ]; then
+            DOCKER_CONFIG=$(mktemp -d)
+            export DOCKER_CONFIG
+          fi
+          cd files
+          env -u GH_TOKEN -u GITHUB_TOKEN bash -euxo pipefail ../verify.sh
+
+  publish:
+    needs: [meta, stage, verify]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      IMAGE: ${{ needs.meta.outputs.image }}
+      CHART: ${{ needs.meta.outputs.chart }}
+      CHART_REPO: ${{ needs.meta.outputs.chart-repo }}
+      EVENT: ${{ github.event_name }}
+      IMAGE_DIGEST: ${{ needs.stage.outputs.image-digest }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Refuse names that do not match the event
+        run: scripts/check-version.sh --guard-names "$EVENT" "$IMAGE" "$CHART" "$CHART_REPO"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: dist-signed
+          path: verified
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: attest
+          path: verified
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: sbom
+          path: verified
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: notes
+      - name: Check the draft against the verified files
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "v$VERSION" -D draft
+          (cd draft && sha256sum -- * | LC_ALL=C sort -k2) >draft.sums
+          (cd verified && sha256sum -- * | LC_ALL=C sort -k2) >verified.sums
+          if ! diff draft.sums verified.sums; then
+            echo "the draft release does not hold the files that were verified" >&2
+            exit 1
+          fi
+          body=$(gh release view "v$VERSION" --json body -q .body | tr -d '\r')
+          if [ "$body" != "$(cat notes.md)" ]; then
+            echo "the text of the draft release is not the text that was verified" >&2
+            exit 1
+          fi
       - id: channels
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: scripts/check-version.sh --channels "v$VERSION" >>"$GITHUB_OUTPUT"
-      - name: Publish the release
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532
+      - name: Log in to the registry
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          LATEST: ${{ steps.channels.outputs.latest }}
-        run: gh release edit "v$VERSION" --draft=false --latest="$LATEST"
+        run: printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
       - name: Move the channel tags
         env:
           LATEST: ${{ steps.channels.outputs.latest }}
@@ -230,10 +531,39 @@ jobs:
             tags+=(-t "$IMAGE:latest")
           fi
           if [ "${#tags[@]}" -gt 0 ]; then
-            docker buildx imagetools create "${tags[@]}" "$IMAGE:$VERSION"
+            docker buildx imagetools create "${tags[@]}" "$IMAGE@$IMAGE_DIGEST"
           fi
+      - name: Check the channel tags
+        env:
+          LATEST: ${{ steps.channels.outputs.latest }}
+          MINOR: ${{ steps.channels.outputs.minor }}
+        run: |
+          tags=()
+          if [ "$MINOR" = true ]; then
+            tags+=("$IMAGE:${VERSION%.*}")
+          fi
+          if [ "$LATEST" = true ]; then
+            tags+=("$IMAGE:latest")
+          fi
+          for t in "${tags[@]}"; do
+            got=$(docker buildx imagetools inspect "$t" --format '{{.Manifest.Digest}}')
+            if [ "$got" != "$IMAGE_DIGEST" ]; then
+              echo "$t points at '$got', the signed digest is '$IMAGE_DIGEST'" >&2
+              exit 1
+            fi
+            cosign verify "$t" \
+              --certificate-identity "https://github.com/lodestore/lodestore/.github/workflows/release.yml@$GITHUB_REF" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          done
+      - name: Publish the release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LATEST: ${{ steps.channels.outputs.latest }}
+        run: gh release edit "v$VERSION" --draft=false --latest="$LATEST"
 
   post-publish:
+    if: github.event_name == 'push'
     needs: [meta, publish]
     uses: ./.github/workflows/quickstart.yml
     with:
@@ -241,7 +571,7 @@ jobs:
 
   report:
     needs: [meta, post-publish]
-    if: failure()
+    if: failure() && github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       issues: write
@@ -253,4 +583,7 @@ jobs:
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh issue create --title "Release $TAG failed" --body "The release workflow failed. Run: $RUN_URL"
+          body="The release workflow failed. Run: $RUN_URL
+
+          If the stage job already pushed the image and the chart, re-run the failed jobs first. If the code has to change, delete the package versions ${TAG#v}, ${TAG#v}-amd64 and ${TAG#v}-arm64 of the image, the chart version ${TAG#v} and the draft release, then release the next patch version."
+          gh issue create --title "Release $TAG failed" --body "$body"

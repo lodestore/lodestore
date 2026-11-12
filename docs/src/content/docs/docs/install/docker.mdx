@@ -11,7 +11,7 @@ The [Quickstart](/docs/quickstart/) starts the server with one `docker run` and 
 
 ## The image
 
-`ghcr.io/lodestore/lodestore` holds the server, the web interface and the agent binaries that `install.sh` hands to new hosts. The agents in the official image come with their signatures. An image you build from source has none: on a host with `minisign` the installer will not install its agents until you sign them with your own key and pass it with `--trust-key`, see [Signing your own builds](/docs/guides/agent-updates/#signing-your-own-builds). It is built for `linux/amd64` and `linux/arm64`. A release `0.1.0` is published as `:0.1.0`; stable releases also move `:0.1` and `:latest`. Pin the full version.
+`ghcr.io/lodestore/lodestore` holds the server, the web interface and the agent binaries that `install.sh` hands to new hosts. The agents in the official image come with their signatures. An image you build from source has none: on a host with `minisign` the installer will not install its agents until you sign them with your own key and pass it with `--trust-key`, see [Signing your own builds](/docs/guides/agent-updates/#signing-your-own-builds). It is built for `linux/amd64` and `linux/arm64`. A release `0.2.0` is published as `:0.2.0`; stable releases also move `:0.2` and `:latest`. Pin the full version.
 
 The image runs as user `65532` with no shell, keeps its state in `/var/lib/lodestore` and listens on two ports:
 
@@ -19,6 +19,34 @@ The image runs as user `65532` with no shell, keeps its state in `/var/lib/lodes
 | --- | --- |
 | 8080 | The web interface and the REST API |
 | 8443 | Agents, over gRPC with mutual TLS |
+
+## Check the image
+
+Images from 0.2.0 on are signed with [cosign](https://docs.sigstore.dev/cosign/) 3 or newer. There is no key to download: the signature names the release workflow that made it, and the check below names that workflow too.
+
+```sh
+cosign verify ghcr.io/lodestore/lodestore:0.2.0 \
+  --certificate-identity https://github.com/lodestore/lodestore/.github/workflows/release.yml@refs/tags/v0.2.0 \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+The image also carries build provenance and an SBOM, signed in the same way. [gh](https://cli.github.com/) checks both without signing in to GitHub:
+
+```sh
+gh attestation verify oci://ghcr.io/lodestore/lodestore:0.2.0 --repo lodestore/lodestore --bundle-from-oci \
+  --cert-identity https://github.com/lodestore/lodestore/.github/workflows/release.yml@refs/tags/v0.2.0 \
+  --cert-oidc-issuer https://token.actions.githubusercontent.com \
+  --source-ref refs/tags/v0.2.0
+gh attestation verify oci://ghcr.io/lodestore/lodestore:0.2.0 --repo lodestore/lodestore --bundle-from-oci \
+  --predicate-type https://spdx.dev/Document/v2.3 \
+  --cert-identity https://github.com/lodestore/lodestore/.github/workflows/release.yml@refs/tags/v0.2.0 \
+  --cert-oidc-issuer https://token.actions.githubusercontent.com \
+  --source-ref refs/tags/v0.2.0
+```
+
+The SBOM lists the dependencies declared in the lock files of the release commit (Rust crates and web interface packages), not the files in the image.
+
+Verify the version tag, not the per-architecture tags. The signature and the attestations belong to the multi-architecture image that `:0.2.0`, `:0.2` and `:latest` point at; `:0.2.0-amd64` and `:0.2.0-arm64` are not signed.
 
 ## Run it
 
@@ -41,7 +69,7 @@ docker run -d --name lodestore --restart unless-stopped \
   -e LODESTORE_UNLOCK_KEY_FILE=/etc/lodestore/unlock.key \
   -e LODESTORE_PUBLIC_URL=https://lodestore.example.com \
   -e LODESTORE_GRPC_PUBLIC_ADDRESS=lodestore.example.com:8443 \
-  ghcr.io/lodestore/lodestore:0.1.0
+  ghcr.io/lodestore/lodestore:0.2.0
 ```
 
 On first start the server prints a one-time link that creates the administrator:

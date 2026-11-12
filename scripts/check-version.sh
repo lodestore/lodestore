@@ -4,10 +4,17 @@
 # With --unpublished it fails if the tag already has a release or a version tag in GHCR.
 # With --channels it prints "latest=" and "minor=" lines: whether this release may move
 # :latest and :X.Y. Both modes need GH_REPO and GH_TOKEN, --unpublished also GITHUB_ACTOR.
+# With --names it prints the "dry-run=", "image=", "chart=" and "chart-repo=" lines for a
+# workflow event: a tag push publishes to the release packages, a dispatch from a branch is a
+# dry run in the -dryrun packages, anything else is refused. --guard-names re-checks the names
+# a job is about to write to against the event. These two modes hold the only copy of the
+# package names in the repository.
 #
 #   scripts/check-version.sh TAG
 #   scripts/check-version.sh --unpublished TAG
 #   scripts/check-version.sh --channels TAG
+#   scripts/check-version.sh --names EVENT REF_TYPE
+#   scripts/check-version.sh --guard-names EVENT IMAGE CHART CHART_REPO
 #   scripts/check-version.sh --self-test
 set -euo pipefail
 
@@ -52,6 +59,38 @@ check_unpublished() {
       die "cannot read the tags of ghcr.io/$repo"
     fi
   done
+}
+
+print_names() {
+  local event=$1 ref_type=$2
+  case "$event:$ref_type" in
+    push:tag)
+      printf 'dry-run=false\nimage=ghcr.io/lodestore/lodestore\nchart=ghcr.io/lodestore/charts/lodestore\nchart-repo=oci://ghcr.io/lodestore/charts\n'
+      ;;
+    workflow_dispatch:branch)
+      printf 'dry-run=true\nimage=ghcr.io/lodestore/lodestore-dryrun\nchart=ghcr.io/lodestore/charts-dryrun/lodestore\nchart-repo=oci://ghcr.io/lodestore/charts-dryrun\n'
+      ;;
+    workflow_dispatch:*) die "a dry run runs from a branch, not from $ref_type" ;;
+    *) die "no package names for event '$event' on a $ref_type" ;;
+  esac
+}
+
+guard_names() {
+  local event=$1 name
+  shift
+  case "$event" in
+    workflow_dispatch)
+      for name in "$@"; do
+        [[ $name == *-dryrun* ]] || die "a dry run must not write to $name"
+      done
+      ;;
+    push)
+      for name in "$@"; do
+        [[ $name != *dryrun* ]] || die "a release must not write to $name"
+      done
+      ;;
+    *) die "no package names for event '$event'" ;;
+  esac
 }
 
 is_highest() {
@@ -102,6 +141,42 @@ self_test_channels() {
   expect v0.1.2 'latest=false minor=true' "$(stable v10.1.5 v0.1.1)"
   expect v0.1.1-rc.1 'latest=false minor=false' '[]'
   unset -f gh stable expect
+}
+
+self_test_names() {
+  local push dispatch pair event ref_type
+  push=$(print_names push tag | tr '\n' ' ')
+  dispatch=$(print_names workflow_dispatch branch | tr '\n' ' ')
+  [ "$push" = 'dry-run=false image=ghcr.io/lodestore/lodestore chart=ghcr.io/lodestore/charts/lodestore chart-repo=oci://ghcr.io/lodestore/charts ' ] ||
+    die "self-test failed: push names are '$push'"
+  [ "$dispatch" = 'dry-run=true image=ghcr.io/lodestore/lodestore-dryrun chart=ghcr.io/lodestore/charts-dryrun/lodestore chart-repo=oci://ghcr.io/lodestore/charts-dryrun ' ] ||
+    die "self-test failed: dispatch names are '$dispatch'"
+
+  for pair in workflow_dispatch:tag push:branch pull_request:branch schedule:branch; do
+    if (print_names "${pair%:*}" "${pair#*:}") >/dev/null 2>&1; then
+      die "self-test failed: names accepted for '$pair'"
+    fi
+  done
+
+  for pair in push:tag workflow_dispatch:branch; do
+    event=${pair%:*} ref_type=${pair#*:}
+    # shellcheck disable=SC2046
+    guard_names "$event" $(print_names "$event" "$ref_type" | sed -e '/^dry-run=/d' -e 's/^[a-z-]*=//') ||
+      die "self-test failed: the guard refused its own names for $pair"
+  done
+  local live=(ghcr.io/lodestore/lodestore ghcr.io/lodestore/charts/lodestore oci://ghcr.io/lodestore/charts)
+  local dry=(ghcr.io/lodestore/lodestore-dryrun ghcr.io/lodestore/charts-dryrun/lodestore oci://ghcr.io/lodestore/charts-dryrun)
+  guarded() {
+    if (guard_names "$@") 2>/dev/null; then
+      die "self-test failed: the guard accepted $*"
+    fi
+  }
+  guarded workflow_dispatch "${live[@]}"
+  guarded push "${dry[@]}"
+  guarded workflow_dispatch "${dry[0]}" "${live[1]}" "${dry[2]}"
+  guarded push "${live[0]}" "${dry[1]}" "${live[2]}"
+  guarded pull_request "${live[@]}"
+  unset -f guarded
 }
 
 self_test_unpublished() {
@@ -155,6 +230,7 @@ self_test_unpublished() {
 if [ "${1:-}" = "--self-test" ]; then
   self_test_unpublished
   self_test_channels
+  self_test_names
   for bad in 'v1.2.3;id' '1.2.3' 'v1.2' 'v1.2.3-rc.1;id' 'v1.2.3-beta.1' 'v1.2.3 ' $'v1.2.3\nx' ''; do
     if tag_ok "$bad"; then
       die "self-test failed: accepted '$bad'"
@@ -168,6 +244,17 @@ if [ "${1:-}" = "--self-test" ]; then
 fi
 
 case "${1:-}" in
+  --names)
+    [ "$#" -eq 3 ] || die "usage: $0 --names EVENT REF_TYPE"
+    print_names "$2" "$3"
+    exit 0
+    ;;
+  --guard-names)
+    [ "$#" -eq 5 ] || die "usage: $0 --guard-names EVENT IMAGE CHART CHART_REPO"
+    shift
+    guard_names "$@"
+    exit 0
+    ;;
   --unpublished | --channels)
     [ "$#" -eq 2 ] || die "usage: $0 $1 TAG"
     tag_ok "$2" || die "tag does not look like vX.Y.Z or vX.Y.Z-rc.N"
@@ -176,7 +263,7 @@ case "${1:-}" in
     ;;
 esac
 
-[ "$#" -eq 1 ] || die "usage: $0 TAG | --unpublished TAG | --channels TAG | --self-test"
+[ "$#" -eq 1 ] || die "usage: $0 TAG | --unpublished TAG | --channels TAG | --names EVENT REF_TYPE | --guard-names EVENT IMAGE CHART CHART_REPO | --self-test"
 tag=$1
 tag_ok "$tag" || die "tag does not look like vX.Y.Z or vX.Y.Z-rc.N"
 version=${tag#v}

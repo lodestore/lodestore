@@ -5,7 +5,7 @@ description: Install the Lodestore server on Kubernetes from the chart in the OC
 Every release publishes the chart to GitHub's container registry, with the same version as the server image. Install it from there:
 
 ```sh
-helm install lodestore oci://ghcr.io/lodestore/charts/lodestore --version 0.1.0 \
+helm install lodestore oci://ghcr.io/lodestore/charts/lodestore --version 0.2.0 \
   --set publicUrl=https://lodestore.example.com \
   --set grpc.publicAddress=lodestore.example.com:8443
 ```
@@ -21,6 +21,18 @@ helm install lodestore deploy/helm/lodestore \
 ```
 
 A checkout starts the image that its `appVersion` names. To deploy Lodestore from a GitOps tool, see [GitOps with Helm](/docs/recipes/gitops-helm/).
+
+## Check the chart
+
+Charts from 0.2.0 on are signed with [cosign](https://docs.sigstore.dev/cosign/) 3 or newer, by the same release workflow as the image. The signature has no key to download; the check names the workflow:
+
+```sh
+cosign verify ghcr.io/lodestore/charts/lodestore:0.2.0 \
+  --certificate-identity https://github.com/lodestore/lodestore/.github/workflows/release.yml@refs/tags/v0.2.0 \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+Checking the image of the same version is in [Docker](/docs/install/docker/#check-the-image).
 
 ## The unlock key
 
