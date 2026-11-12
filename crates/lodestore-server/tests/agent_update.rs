@@ -2803,6 +2803,36 @@ async fn agent_update_pre_release_hosts_take_a_pre_release_target() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agent_update_queued_pre_release_for_an_unparsable_host_version_is_cancelled() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let hosts = fleet(&ts, &["host-a"]).await;
+        let pool = &ts.state().db.pool;
+        let arch = arch_of(pool, &hosts[0].id).await;
+        publish(&ts, &arch, "99.0.0-rc.1", b"binary");
+        setup_host(pool, &hosts[0], "99.0.0-rc.0", None, true).await;
+        begin_one(&ts, &hosts[0]).await;
+        sqlx::query("UPDATE agents SET version = 'not-a-version' WHERE id = $1")
+            .bind(&hosts[0].id)
+            .execute(pool)
+            .await
+            .unwrap();
+
+        let mut agent = Fake::connect(&ts, &hosts[0], "").await;
+        let id = text(
+            pool,
+            "SELECT id FROM agent_updates WHERE host_id = $1",
+            &hosts[0].id,
+        )
+        .await
+        .unwrap();
+        wait_text(pool, UPDATE_STATE, &id, "cancelled").await;
+        agent.no_assign(Duration::from_millis(500)).await;
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn agent_update_queued_pre_release_for_a_stable_host_is_cancelled() {
     for backend in backends() {
         let ts = TestServer::start(&backend).await;
