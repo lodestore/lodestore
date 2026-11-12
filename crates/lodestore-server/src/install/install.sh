@@ -121,7 +121,9 @@ signed_comment() {
       '# '*) printf '%s\n' "${line#'# '}" >&2 ;;
       *) printf 'minisign: %s\n' "$line" >&2 ;;
     esac
-  done <"$log"
+  done <<EOF
+$(tr -d '\000-\010\013-\037\177' <"$log")
+EOF
   return 1
 }
 
@@ -137,7 +139,7 @@ fetch_signature() {
     code=$(curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL -w '%{http_code}' -o "$2" "$1") || rc=$?
   fi
   [ "$rc" != 0 ] || return 0
-  [ "$rc" = 22 ] && [ "$code" = 404 ] && die "$3; nothing was installed"
+  [ "$code" = 404 ] && die "$3; nothing was installed"
   status=
   [ "$code" = 000 ] || status=", HTTP $code"
   die "could not download $1 (curl exit $rc$status); nothing was installed"

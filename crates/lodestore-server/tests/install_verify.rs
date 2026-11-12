@@ -51,6 +51,7 @@ fn write_key(dir: &Path, name: &str, signer: &TestSigner) -> PathBuf {
 struct Run {
     github: bool,
     no_minisign: bool,
+    http2_curl: bool,
     trust_keys: Vec<PathBuf>,
     remove_keys_after_snapshot: bool,
     releases_url: Option<String>,
@@ -91,6 +92,7 @@ async fn download(ts: &TestServer, run: Run) -> Outcome {
          snapshot_trust_keys\n\
          {remove_keys}\n\
          {no_minisign}\n\
+         {http2_curl}\n\
          download_agent\n\
          cp \"$tmp/agent\" \"$OUT\"\n",
         github = u8::from(run.github),
@@ -105,6 +107,11 @@ async fn download(ts: &TestServer, run: Run) -> Outcome {
             )
         } else {
             String::new()
+        },
+        http2_curl = if run.http2_curl {
+            "curl() { rc=0; command curl \"$@\" || rc=$?; [ \"$rc\" = 22 ] && return 56; return \"$rc\"; }"
+        } else {
+            ""
         },
         no_minisign = if run.no_minisign {
             "have_minisign() { return 1; }"
@@ -653,6 +660,31 @@ async fn install_verify_github_missing_signature_refused() {
         "{}",
         run.outcome.stderr
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs minisign, curl and sha256sum"]
+async fn install_verify_github_missing_signature_over_http2_is_missing() {
+    let ts = TestServer::start(&Backend::Sqlite).await;
+    let signer = TestSigner::generate();
+    let agent = agent_bytes();
+    let sums = sums_for(&agent);
+    let (url, _) = serve_releases(vec![(AGENT_FILE, agent), ("SHA256SUMS", sums)]).await;
+    let key = write_key(ts.dir.path(), "release", &signer);
+    let outcome = download(
+        &ts,
+        Run {
+            github: true,
+            http2_curl: true,
+            trust_keys: vec![key],
+            releases_url: Some(url),
+            ..Run::default()
+        },
+    )
+    .await;
+    assert_refused(&outcome, "SHA256SUMS.minisig");
+    assert!(outcome.stderr.contains("has no"), "{}", outcome.stderr);
+    ts.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
