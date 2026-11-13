@@ -2205,7 +2205,7 @@ dependencies = [
 
 [[package]]
 name = "lode-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2233,7 +2233,7 @@ dependencies = [
 
 [[package]]
 name = "lodestore-agent"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -2277,7 +2277,7 @@ dependencies = [
 
 [[package]]
 name = "lodestore-format"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "argon2",
  "blake3",
@@ -2309,7 +2309,7 @@ dependencies = [
 
 [[package]]
 name = "lodestore-fuzzkit"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "bytes",
@@ -2325,7 +2325,7 @@ dependencies = [
 
 [[package]]
 name = "lodestore-policy"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "croner",
  "jiff",
@@ -2338,10 +2338,11 @@ dependencies = [
 
 [[package]]
 name = "lodestore-proto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "prost",
  "protox",
+ "semver",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
@@ -2349,7 +2350,7 @@ dependencies = [
 
 [[package]]
 name = "lodestore-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -2413,7 +2414,7 @@ dependencies = [
 
 [[package]]
 name = "lodestore-testkit"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aws-lc-rs",
  "axum",

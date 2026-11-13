@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Security fixes are made for the latest release of the current minor version, which is 0.1.x. Older versions do not receive fixes; upgrade to the latest release.
+Security fixes are made for the latest release of the current minor version, which is 0.2.x. Older versions do not receive fixes; upgrade to the latest release.
 
 ## Reporting a vulnerability
 
@@ -32,3 +32,4 @@ Include what you found, the version, how to reproduce it, and what an attacker g
 
 - [Threat model](https://lodestore.dev/docs/security/threat-model/): what the server stores, what each kind of attacker gets, and the boundaries of agents, updates, hooks and tokens.
 - [How we test data safety](https://lodestore.dev/docs/security/how-we-test/): which automated checks exist and what they do not cover.
+- [Signing keys](https://lodestore.dev/docs/security/signing-keys/): what each release key signs, how the project key is rotated and what to do if it is stolen.

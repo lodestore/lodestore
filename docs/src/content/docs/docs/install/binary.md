@@ -8,7 +8,7 @@ Every release publishes static Linux binaries on GitHub Releases. Use them when 
 ## The short way
 
 ```sh
-export VERSION=0.1.0
+export VERSION=0.2.0
 export ARCH=$(uname -m)
 base=https://github.com/lodestore/lodestore/releases/download/v$VERSION
 curl --proto '=https' --tlsv1.2 -fsSLO "$base/lodestore-server-linux-$ARCH"
@@ -28,12 +28,12 @@ Each release has three programs for two architectures, `x86_64` and `aarch64`:
 | `lodestore-agent-linux-<arch>` | The agent that runs on each backed-up host |
 | `lode-linux-<arch>` | The `lode` command line client |
 
-Next to every file is its signature, `<file>.minisig`. `SHA256SUMS` lists the checksums of all six binaries and has its own signature, `SHA256SUMS.minisig`.
+Next to every file is its signature, `<file>.minisig`. `SHA256SUMS` lists the checksums of all six binaries and has its own signature, `SHA256SUMS.minisig`. From 0.2.0 a release also holds the build provenance of the binaries and an SBOM, `lodestore-<version>.provenance.jsonl` and `lodestore-<version>.spdx.json`; neither is listed in `SHA256SUMS`.
 
 ## Download
 
 ```sh
-export VERSION=0.1.0
+export VERSION=0.2.0
 export ARCH=x86_64
 base=https://github.com/lodestore/lodestore/releases/download/v$VERSION
 for f in lodestore-server-linux-$ARCH lodestore-server-linux-$ARCH.minisig \
@@ -75,7 +75,23 @@ minisign -Vm lodestore-server-linux-$ARCH -p project.pub
 minisign -Vm lode-linux-$ARCH -p project.pub
 ```
 
-Each command prints `Signature and comment signature verified` and, as its last line, `Trusted comment:` with the signed text. For a binary that text names the product, the version and the architecture, for example `Trusted comment: lodestore-server 0.1.0 x86_64`. For `SHA256SUMS` it is `Trusted comment: lodestore release 0.1.0`. Check that it is the one you asked for. Do not run a file that fails.
+Each command prints `Signature and comment signature verified` and, as its last line, `Trusted comment:` with the signed text. For a binary that text names the product, the version and the architecture, for example `Trusted comment: lodestore-server 0.2.0 x86_64`. For `SHA256SUMS` it is `Trusted comment: lodestore release 0.2.0`. Check that it is the one you asked for. Do not run a file that fails.
+
+## Check the build provenance
+
+The signatures show that the project made the files. The build provenance shows how: it is a record, signed through GitHub, that the release workflow `release.yml` built these exact files from the tag of the release. It is published from 0.2.0 on, as `lodestore-$VERSION.provenance.jsonl` next to the binaries. Download it and check the binaries you downloaded with [gh](https://cli.github.com/); you do not need to sign in to GitHub for this:
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSLO "$base/lodestore-$VERSION.provenance.jsonl"
+for f in lodestore-server-linux-$ARCH lode-linux-$ARCH; do
+  gh attestation verify "$f" --repo lodestore/lodestore --bundle lodestore-$VERSION.provenance.jsonl \
+    --cert-identity https://github.com/lodestore/lodestore/.github/workflows/release.yml@refs/tags/v0.2.0 \
+    --cert-oidc-issuer https://token.actions.githubusercontent.com \
+    --source-ref refs/tags/v$VERSION
+done
+```
+
+The release also holds an SBOM, `lodestore-$VERSION.spdx.json`. It lists the dependencies declared in the lock files of the release commit (Rust crates and web interface packages). The same SBOM is attached to the Docker image, see [Check the image](/docs/install/docker/#check-the-image). The provenance and the SBOM are not listed in `SHA256SUMS`.
 
 ## Install
 

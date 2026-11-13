@@ -70,7 +70,7 @@ permissions:
 env:
   LODESTORE_SERVER: ${{ vars.LODESTORE_SERVER }}
   LODESTORE_TOKEN: ${{ secrets.LODESTORE_TOKEN }}
-  LODE_VERSION: "0.1.0"
+  LODE_VERSION: "0.2.0"
 jobs:
   policies:
     runs-on: ubuntu-latest
@@ -141,7 +141,7 @@ spec:
   project: default
   source:
     repoURL: oci://ghcr.io/lodestore/charts/lodestore
-    targetRevision: 0.1.0
+    targetRevision: 0.2.0
     path: .
     helm:
       valuesObject:
@@ -168,7 +168,7 @@ spec:
   interval: 1h
   url: oci://ghcr.io/lodestore/charts/lodestore
   ref:
-    tag: 0.1.0
+    tag: 0.2.0
   layerSelector:
     mediaType: application/vnd.cncf.helm.chart.content.v1.tar+gzip
     operation: copy

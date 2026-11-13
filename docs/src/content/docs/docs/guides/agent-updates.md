@@ -8,7 +8,7 @@ The server can replace the agent binary on your hosts. Nothing updates by itself
 
 1. The server finds the signed agent builds in its agent directory (`agent_dir`, `/usr/share/lodestore/agents` by default). The highest signed version is the target. A build counts as signed only when `lodestore-agent-linux-<arch>.minisig` sits next to it.
 2. You start the update. Hosts connected at that moment go first, so the `canary` hosts of wave 0 can act at once; the rest follow in blocks of `wave`. A host with a backup or restore running waits for it, and no backup starts on a host while its update is in progress.
-3. The agent downloads the binary and the signature over its own authenticated connection to the server. It checks the SHA-256 the server announced, the minisign signature, that the signed version is the requested one, that the architecture is its own, that the version is newer than the running one, and that the new binary prints its version when started with `version`. Any failure ends the update with the reason, and the running binary is not touched.
+3. The agent downloads the binary and the signature over its own authenticated connection to the server. It checks the SHA-256 the server announced, the minisign signature, that the signed version is the requested one, that the architecture is its own, that the version is newer than the running one, that a stable agent is not asked to take a pre-release (see [Release channels](#release-channels)), and that the new binary prints its version when started with `version`. Any failure ends the update with the reason, and the running binary is not touched.
 4. The agent keeps the old binary as `lodestore-agent.prev`, switches, arms a rollback timer for 120 seconds and restarts through systemd.
 5. The new agent connects and reports its version. The update is then `succeeded`. If it does not report in 2 minutes, the timer puts `lodestore-agent.prev` back and the host reports the rollback with the reason, for example "The new version did not connect within 2 min. Running 0.1.0 again."
 
@@ -21,6 +21,15 @@ After that the server starts the next wave only when no host of the update is st
 A rollout pauses itself when the rollbacks since the last continue are **more than** `pause_after`. With the default `pause_after: 1`, one rollback is tolerated and the second pauses the rollout; hosts already in progress finish. Resume it after you have looked at the reason in **Jobs**; resuming forgets the rollbacks so far. You can also pause, resume or cancel a rollout yourself.
 
 A rollout also pauses when the signed binary of its target for a host's architecture is gone from `agent_dir`, for example because a newer version replaced it. The rollout shows the reason, the hosts stay queued and nothing counts as a rollback. Put the binary back and resume, or cancel and start a new update to the newer version.
+
+## Release channels
+
+A version with a suffix such as `-rc.1` is a release candidate; one without a suffix is stable. An agent's channel is its own version, and nothing configures it.
+
+- A stable agent refuses a pre-release before it runs the downloaded binary: `Version 0.3.0-rc.1 is a pre-release and agent 0.2.0 takes only stable releases.`
+- A release candidate agent takes a newer release candidate and a newer stable release. Leaving the release candidate channel is one-way: a host that took the stable release no longer takes release candidates, and only a new `install.sh` run puts it back on one.
+- A server whose agent directory holds a pre-release does not show stable hosts as outdated and does not start an update for them, and it cancels such hosts that were already queued. Agents of 0.1 check no channel, so this filter is what protects them.
+- A new host installed from that server gets the pre-release agent, because `install.sh` and the download for it do not check the channel.
 
 ## Settings
 

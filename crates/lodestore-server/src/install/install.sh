@@ -100,18 +100,30 @@ have_minisign() {
 }
 
 signed_comment() {
-  if comment=$(minisign -V -Q -P "$PROJECT_KEY" -m "$1" -x "$2" 2>/dev/null); then
+  log=$tmp/minisign.log
+  : >"$log"
+  printf '# checked with the project key:\n' >>"$log"
+  if comment=$(minisign -V -Q -P "$PROJECT_KEY" -m "$1" -x "$2" 2>>"$log"); then
     return 0
   fi
   old_ifs=$IFS
   IFS=$nl
   for key_file in $trust_keys; do
-    if comment=$(minisign -V -Q -p "$key_file" -m "$1" -x "$2" 2>/dev/null); then
+    printf '# checked with --trust-key %s:\n' "$key_file" >>"$log"
+    if comment=$(minisign -V -Q -p "$key_file" -m "$1" -x "$2" 2>>"$log"); then
       IFS=$old_ifs
       return 0
     fi
   done
   IFS=$old_ifs
+  while IFS= read -r line; do
+    case $line in
+      '# '*) printf '%s\n' "${line#'# '}" >&2 ;;
+      *) printf 'minisign: %s\n' "$line" >&2 ;;
+    esac
+  done <<EOF
+$(tr -d '\000-\010\013-\037\177' <"$log")
+EOF
   return 1
 }
 
@@ -120,11 +132,17 @@ agent_comment_ok() {
 }
 
 fetch_signature() {
+  rc=0
   if [ "$insecure" = 1 ]; then
-    curl -fsSL -o "$2" "$1" || die "$3; nothing was installed"
+    code=$(curl -fsSL -w '%{http_code}' -o "$2" "$1") || rc=$?
   else
-    curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL -o "$2" "$1" || die "$3; nothing was installed"
+    code=$(curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL -w '%{http_code}' -o "$2" "$1") || rc=$?
   fi
+  [ "$rc" != 0 ] || return 0
+  [ "$code" = 404 ] && die "$3; nothing was installed"
+  status=
+  [ "$code" = 000 ] || status=", HTTP $code"
+  die "could not download $1 (curl exit $rc$status); nothing was installed"
 }
 
 download_agent() {

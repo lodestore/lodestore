@@ -170,6 +170,45 @@ sudo nginx -t && sudo systemctl reload nginx
 
 The working copy stays clean, so `git checkout` of a new tag in the Update section goes through.
 
+### Behind Cloudflare
+
+The 443 block restores the visitor address from `CF-Connecting-IP` and trusts that header only from the Cloudflare ranges in `set_real_ip_from`. Install this vhost, run `sudo nginx -t && sudo systemctl reload nginx`, and only then switch the demo record to proxied (orange cloud). Without `real_ip`, every visitor behind one Cloudflare edge shares one rate limit bucket. A request sent straight to the origin with a forged `CF-Connecting-IP` keeps its own address, because the origin is not in the trusted list.
+
+Cloudflare settings for the zone or host:
+
+- SSL/TLS mode **Full (strict)**: the origin has a Let's Encrypt certificate.
+- Turn off Rocket Loader, Email Address Obfuscation and the automatic Web Analytics installation. The demo serves a strict CSP and injected scripts break the page.
+- No cache rules: the server marks `/assets/*` as `immutable`, and HTML, the API and archives are not cached.
+
+Check after switching:
+
+```sh
+curl -sI https://demo.mydomain.net/ | grep -i cf-ray
+curl -s https://demo.mydomain.net/ | grep -c /cdn-cgi/
+./smoke.sh https://demo.mydomain.net --external ORIGIN_IP
+sudo certbot renew --dry-run
+```
+
+Behind the proxy the name resolves to Cloudflare, which accepts 8443 itself, so `--external` takes the origin address.
+
+`cf-ray` is present, the HTML contains no `/cdn-cgi/` (the count is `0`), a second request for a file under `/assets/` answers `cf-cache-status: HIT`, `smoke.sh` ends with `demo ok`, the renewal dry run passes through the proxy, and `/var/log/nginx/access.log` shows visitor addresses, not Cloudflare ones.
+
+To check that the download limit counts visitors, send a short burst for an id that does not exist, so no archive is created:
+
+```sh
+for i in $(seq 15); do curl -4 -s -o /dev/null -w '%{http_code}\n' https://demo.mydomain.net/api/v1/downloads/ratecheck/archive; done
+curl -s https://demo.mydomain.net/cdn-cgi/trace | grep '^ip='
+```
+
+Some of the 15 answers are `429`, and the access log lines for them start with the `ip=` address, not with a Cloudflare one. No `429`, or a Cloudflare address in the log, means the limit is counted per CDN edge: check `real_ip`. The limit is per address, so an IPv6 visitor is counted per /128.
+
+The ranges are inline. Compare them with the published lists and, on a difference, update `proxy/nginx.conf` and the site vhost, then install the vhost again:
+
+```sh
+diff <(curl -fsS https://www.cloudflare.com/ips-v4; echo; curl -fsS https://www.cloudflare.com/ips-v6; echo) \
+  <(sed -n 's/^ *set_real_ip_from \(.*\);/\1/p' proxy/nginx.conf)
+```
+
 For another proxy keep the same limits: per-IP rate limits on `/api/v1/auth/demo` and `/api/v1/downloads`, a body limit, download timeouts and a trusted `X-Forwarded-For`. Never route 8443 or 9000 anywhere.
 
 ## Maintenance window

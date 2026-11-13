@@ -76,11 +76,12 @@ An agent update replaces the binary of a process that runs as root on the host. 
 
 - The public key of the project, built into the agent binary, and the `*.pub` files in `/etc/lodestore/trusted-keys` on the host. Nothing else counts as a signer, and the server has no message that adds, replaces or removes a key.
 - A key file counts only when it passes the same ownership test as a hook: the file and the directory belong to the agent's user (root in the systemd unit), are not writable by group or others, and the file is not a symlink and is at most 4 KiB. `install.sh --trust-key` installs a key that way, as `root:root` with mode 0644 in a 0755 directory.
-- The signature covers the binary and a trusted comment, `lodestore-agent <version> <arch>`, under a global signature. The agent checks the SHA-256 the server announced, the signature, that the signed version is the requested one, that the architecture is its own, that the version is newer than the running one, and that the new binary prints its version when started with `version`. It refuses anything else and reports the reason.
+- The signature covers the binary and a trusted comment, `lodestore-agent <version> <arch>`, under a global signature. The agent checks the SHA-256 the server announced, the signature, that the signed version is the requested one, that the architecture is its own, that the version is newer than the running one, that a stable agent does not take a pre-release version, and that the new binary prints its version when started with `version`. It refuses anything else and reports the reason.
 
 **What the server can and cannot do.**
 
 - It can hold updates back by never starting them, or roll out a newer version that a trusted key signed. A rollout of an older signed binary is refused by the agent, so a downgrade is not possible.
+- Through an update it cannot move a stable agent of 0.2 or newer to a release candidate: the agent refuses a signed pre-release. A server that is taken over can move agents of 0.1 to a release candidate, because they do not check the channel; 0.2 agents refuse.
 - Through an update it cannot give an agent a key to trust, a binary for another architecture, a binary signed by an unknown key, or a binary of its own making.
 - Only a token or session with the scope `agents:update` starts, pauses, resumes or cancels a rollout. `hosts:write` is not enough.
 

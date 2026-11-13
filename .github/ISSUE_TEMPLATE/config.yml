@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and help
+    url: https://github.com/lodestore/lodestore/discussions/categories/q-a
+    about: Ask a question or get help in Discussions.
+  - name: Report a security vulnerability
+    url: https://github.com/lodestore/lodestore/security/advisories/new
+    about: Report it privately, see SECURITY.md. Do not open a public issue.
