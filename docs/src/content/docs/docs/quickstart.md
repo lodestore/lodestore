@@ -18,7 +18,7 @@ No bucket? See [Using a local or network folder](#using-a-local-or-network-folde
 
 ### Why S3-compatible storage
 
-Only there can a host hold a separate key without delete rights, and only there is Object Lock available. Those two are what keep a compromised host from destroying its own backups.
+Only there can a host hold a separate key without delete rights, and only there is Object Lock available. Those two are what keep a compromised host from destroying its own backups. With Object Lock in COMPLIANCE mode, even the server cannot delete locked data before its retention period ends.
 
 No delete rights does not mean no overwrite. The wizard tries to replace a throwaway object with the agent key and shows the result. **Write-only verified** means the storage refused. **Can overwrite** means it did not, and on MinIO this is what you will see: whoever steals the key can replace objects with garbage. Turn on versioning or Object Lock on the bucket, so that a replaced object keeps its earlier version. See [Agent credentials](/docs/security/threat-model/#agent-credentials).
 
