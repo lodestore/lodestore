@@ -54,6 +54,15 @@ for (const [file, text] of pages) {
 	});
 }
 
+test('bareos.md: the delete point is not sold as a difference', () => {
+	const text = readFileSync(`${dir}bareos.md`, 'utf8');
+	assert.doesNotMatch(
+		section(text, '## Why teams pick Lodestore'),
+		/cannot delete|can't delete/i,
+		'Bareos clients hold no object-store keys either: it is not a difference',
+	);
+});
+
 test('proxmox-backup-server.md: scenarios are split honestly', () => {
 	const text = readFileSync(`${dir}proxmox-backup-server.md`, 'utf8');
 	const row = text.split('\n').find((l) => l.startsWith('| Proxmox VM'));
