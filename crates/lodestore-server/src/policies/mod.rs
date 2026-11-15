@@ -1,6 +1,8 @@
 pub mod apply;
 pub mod matching;
 
+use std::collections::BTreeSet;
+
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -34,6 +36,23 @@ pub(crate) fn retention_of(policy: &BackupPolicy) -> Option<&Retention> {
 
 pub(crate) const SCHEDULE_PURPOSE: &str = "run a policy with retention more often";
 pub(crate) const SCHEDULE_HORIZON_DAYS: i64 = 366;
+pub(crate) const CONTENT_PURPOSE: &str = "change what or where a policy with retention backs up";
+pub(crate) const DELETE_PURPOSE: &str = "delete a policy with retention";
+
+/// Whether an edit changes what or where a policy with retention (before or
+/// after the edit) backs up. Paths are a set because their union ignores order;
+/// excludes are a list because the last matching pattern wins and `!` re-includes.
+pub fn changes_retained_content(old: &BackupPolicy, new: &BackupPolicy) -> bool {
+    if retention_of(old).is_none() && retention_of(new).is_none() {
+        return false;
+    }
+    let (old, new) = (&old.spec, &new.spec);
+    old.paths.iter().collect::<BTreeSet<_>>() != new.paths.iter().collect::<BTreeSet<_>>()
+        || old.exclude != new.exclude
+        || old.one_file_system != new.one_file_system
+        || old.exclude_caches != new.exclude_caches
+        || old.repository != new.repository
+}
 
 const SHORTEST_GAP: SignedDuration = SignedDuration::from_secs(60);
 
@@ -675,7 +694,7 @@ pub async fn get_policy(
     request_body = PolicyUpdate,
     responses(
         (status = 200, description = "The updated policy", body = PolicyDetail),
-        (status = 403, description = "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention or a more frequent cron. A session needs the password entered in the last 15 minutes for those changes (code step_up_required)", body = ErrorBody),
+        (status = 403, description = "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention, a more frequent cron, or a change of paths, exclude, oneFileSystem, excludeCaches or repository of a policy with retention. A session needs the password entered in the last 15 minutes for those changes (code step_up_required)", body = ErrorBody),
         (status = 404, description = "Unknown policy", body = ErrorBody),
         (status = 409, description = "The policy changed since base_revision (code policy_conflict)", body = ErrorBody),
         (status = 422, description = "Invalid policy or changed name", body = ErrorBody),
@@ -702,6 +721,9 @@ pub async fn update_policy(
     {
         auth.require_also_or_step_up(Scope::SnapshotsDelete, SCHEDULE_PURPOSE)?;
     }
+    if changes_retained_content(&current.policy, &checked.policy) {
+        auth.require_also_or_step_up(Scope::SnapshotsDelete, CONTENT_PURPOSE)?;
+    }
     let old = (current.repository_id.as_str(), &current.policy);
     if gains_hook_hosts(Some(old), (&checked.repository_id, &checked.policy)) {
         auth.require_also_or_step_up(
@@ -711,13 +733,13 @@ pub async fn update_policy(
     }
     let updated = sqlx::query(
         "UPDATE policies SET repository_id = $1, yaml = $2, spec_json = $3, \
-         revision = revision + 1, updated_at = $4 WHERE name = $5 AND revision = $6",
+         revision = revision + 1, updated_at = $4 WHERE id = $5 AND revision = $6",
     )
     .bind(&checked.repository_id)
     .bind(&checked.yaml)
     .bind(serde_json::to_string(&checked.policy).map_err(|e| ApiError::Internal(e.into()))?)
     .bind(now_ms())
-    .bind(&name)
+    .bind(&current.id)
     .bind(input.base_revision)
     .execute(&state.db.pool)
     .await?
@@ -742,27 +764,32 @@ pub async fn update_policy(
     params(("name" = String, Path, description = "Policy name")),
     responses(
         (status = 204, description = "The policy is deleted"),
+        (status = 403, description = "The token lacks snapshots:delete to delete a policy with retention. A session needs the password entered in the last 15 minutes (code step_up_required)", body = ErrorBody),
         (status = 404, description = "Unknown policy", body = ErrorBody),
-        (status = 409, description = "The policy has jobs in progress", body = ErrorBody),
+        (status = 409, description = "The policy has jobs in progress, or the policy changed since it was read (code policy_conflict)", body = ErrorBody),
     )
 )]
 pub async fn delete_policy(
     State(state): State<AppState>,
-    _auth: Scoped<PoliciesWrite>,
+    auth: Scoped<PoliciesWrite>,
     Path(name): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    let row = find_policy(&state, &name).await?;
+    if retention_of(&row.policy).is_some() {
+        auth.require_also_or_step_up(Scope::SnapshotsDelete, DELETE_PURPOSE)?;
+    }
     let deleted = sqlx::query(sqlx::AssertSqlSafe(format!(
-        "DELETE FROM policies WHERE name = $1 AND NOT EXISTS \
+        "DELETE FROM policies WHERE id = $1 AND revision = $2 AND NOT EXISTS \
          (SELECT 1 FROM jobs WHERE jobs.policy_id = policies.id AND jobs.state IN ({ACTIVE_STATES}))"
     )))
-    .bind(&name)
+    .bind(&row.id)
+    .bind(row.revision)
     .execute(&state.db.pool)
     .await?
     .rows_affected();
     if deleted == 1 {
         return Ok(StatusCode::NO_CONTENT);
     }
-    let row = find_policy(&state, &name).await?;
     let active: i64 = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT COUNT(*) AS n FROM jobs WHERE policy_id = $1 AND state IN ({ACTIVE_STATES})"
     )))
@@ -770,6 +797,9 @@ pub async fn delete_policy(
     .fetch_one(&state.db.pool)
     .await?
     .try_get("n")?;
+    if active == 0 {
+        return Err(policy_conflict(&name));
+    }
     Err(ApiError::Conflict(format!(
         "Policy \"{name}\" has {active} jobs in progress. Cancel them first, then delete the policy."
     )))

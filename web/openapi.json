@@ -853,7 +853,7 @@
           "Auth"
         ],
         "summary": "Enter the password again",
-        "description": "A signed-in session must have entered its password within the last 15 minutes to create an API token or a join token; to start a restore that writes in place, restores owners or targets an agent without `restore_roots_v1`; to create, update or apply policies so that hooks or retention change or retention runs more often, or to change host labels so that a policy with hooks reaches the host; to delete a snapshot, mark it suspicious or clear the mark; to start a cleanup, close its backup markers, exclude a quarantined snapshot or save the cleanup settings; and to start or resume an agent update. Otherwise those requests answer `403` `step_up_required`. A cleanup dry run or abort, and pausing, cancelling or dismissing an agent update, do not need it. This opens that window. Five wrong passwords in a row end the session.",
+        "description": "A signed-in session must have entered its password within the last 15 minutes to create an API token or a join token; to start a restore that writes in place, restores owners or targets an agent without `restore_roots_v1`; to create, update or apply policies so that hooks or retention change, retention runs more often, or what or where a policy with retention backs up changes; to delete a policy with retention, directly or by an apply prune; to change host labels so that a policy with hooks reaches the host; to delete a snapshot, mark it suspicious or clear the mark; to start a cleanup, close its backup markers, exclude a quarantined snapshot or save the cleanup settings; and to start or resume an agent update. Otherwise those requests answer `403` `step_up_required`. A cleanup dry run or abort, and pausing, cancelling or dismissing an agent update, do not need it. This opens that window. Five wrong passwords in a row end the session.",
         "operationId": "step_up",
         "requestBody": {
           "content": {
@@ -3196,7 +3196,7 @@
             }
           },
           "403": {
-            "description": "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention or a more frequent cron. A session needs the password entered in the last 15 minutes for those changes (code step_up_required)",
+            "description": "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention, a more frequent cron, a change of paths, exclude, oneFileSystem, excludeCaches or repository of a policy with retention, or a --prune that deletes a policy with retention. A session needs the password entered in the last 15 minutes for those changes (code step_up_required)",
             "content": {
               "application/json": {
                 "schema": {
@@ -3371,7 +3371,7 @@
             }
           },
           "403": {
-            "description": "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention or a more frequent cron. A session needs the password entered in the last 15 minutes for those changes (code step_up_required)",
+            "description": "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention, a more frequent cron, or a change of paths, exclude, oneFileSystem, excludeCaches or repository of a policy with retention. A session needs the password entered in the last 15 minutes for those changes (code step_up_required)",
             "content": {
               "application/json": {
                 "schema": {
@@ -3444,6 +3444,16 @@
           "204": {
             "description": "The policy is deleted"
           },
+          "403": {
+            "description": "The token lacks snapshots:delete to delete a policy with retention. A session needs the password entered in the last 15 minutes (code step_up_required)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "404": {
             "description": "Unknown policy",
             "content": {
@@ -3455,7 +3465,7 @@
             }
           },
           "409": {
-            "description": "The policy has jobs in progress",
+            "description": "The policy has jobs in progress, or the policy changed since it was read (code policy_conflict)",
             "content": {
               "application/json": {
                 "schema": {

@@ -11,8 +11,9 @@ use sqlx::Row;
 use utoipa::ToSchema;
 
 use super::{
-    Checked, Failure, PolicyRow, RETENTION_PURPOSE, SCHEDULE_PURPOSE, all_policies,
-    gains_hook_hosts, hooks_purpose, resolve, retention_of, runs_more_often,
+    CONTENT_PURPOSE, Checked, DELETE_PURPOSE, Failure, PolicyRow, RETENTION_PURPOSE,
+    SCHEDULE_PURPOSE, all_policies, changes_retained_content, gains_hook_hosts, hooks_purpose,
+    resolve, retention_of, runs_more_often,
 };
 use crate::auth::tokens::{PoliciesWrite, Scope, Scoped};
 use crate::db::now_ms;
@@ -157,6 +158,7 @@ enum Step {
     },
     Delete {
         id: String,
+        revision: i64,
         name: String,
     },
 }
@@ -298,6 +300,8 @@ struct Plan {
     unchanged: u64,
     retention_changed: bool,
     schedule_faster: bool,
+    content_changed: bool,
+    retention_deleted: bool,
     hooks_policies: Vec<String>,
 }
 
@@ -324,6 +328,7 @@ fn plan(
     let mut unchanged = 0;
     let mut retention_changed = false;
     let mut schedule_faster = false;
+    let mut content_changed = false;
     let mut hooks_policies = Vec::new();
     let mut wanted = BTreeSet::new();
     for input in inputs {
@@ -385,6 +390,7 @@ fn plan(
         retention_changed |= retention_of(&row.policy) != retention_of(&input.checked.policy);
         schedule_faster |= retention_of(&input.checked.policy).is_some()
             && runs_more_often(&row.policy, &input.checked.policy);
+        content_changed |= changes_retained_content(&row.policy, &input.checked.policy);
         if gains_hook_hosts(
             Some((&row.repository_id, &row.policy)),
             (&input.checked.repository_id, &input.checked.policy),
@@ -403,27 +409,30 @@ fn plan(
     if !problems.is_empty() {
         return Err(ApplyFailure::Problems(problems));
     }
-    let deletes = current
+    let pruned: Vec<&PolicyRow> = current
         .iter()
         .filter(|row| req.prune && row.managed_by.as_deref() == Some(manager))
         .filter(|row| !wanted.contains(&row.policy.metadata.name))
-        .map(|row| {
-            let name = row.policy.metadata.name.clone();
-            (
-                PolicyChange {
-                    action: ChangeAction::Delete,
-                    name: name.clone(),
-                    source: None,
-                    adopted: false,
-                    managed_by: Some(manager.to_string()),
-                    fields: Vec::new(),
-                },
-                Step::Delete {
-                    id: row.id.clone(),
-                    name,
-                },
-            )
-        });
+        .collect();
+    let retention_deleted = pruned.iter().any(|row| retention_of(&row.policy).is_some());
+    let deletes = pruned.into_iter().map(|row| {
+        let name = row.policy.metadata.name.clone();
+        (
+            PolicyChange {
+                action: ChangeAction::Delete,
+                name: name.clone(),
+                source: None,
+                adopted: false,
+                managed_by: Some(manager.to_string()),
+                fields: Vec::new(),
+            },
+            Step::Delete {
+                id: row.id.clone(),
+                revision: row.revision,
+                name,
+            },
+        )
+    });
     let (changes, steps) = creates.into_iter().chain(updates).chain(deletes).unzip();
     Ok(Plan {
         changes,
@@ -431,6 +440,8 @@ fn plan(
         unchanged,
         retention_changed,
         schedule_faster,
+        content_changed,
+        retention_deleted,
         hooks_policies,
     })
 }
@@ -484,14 +495,15 @@ async fn execute(state: &AppState, manager: &str, steps: Vec<Step>) -> Result<()
                     return Err(ApiError::Conflict(RACE.into()).into());
                 }
             }
-            Step::Delete { id, name } => {
+            Step::Delete { id, revision, name } => {
                 let deleted = sqlx::query(sqlx::AssertSqlSafe(format!(
-                    "DELETE FROM policies WHERE id = $1 AND managed_by = $2 AND NOT EXISTS \
-                     (SELECT 1 FROM jobs WHERE jobs.policy_id = policies.id \
+                    "DELETE FROM policies WHERE id = $1 AND managed_by = $2 AND revision = $3 \
+                     AND NOT EXISTS (SELECT 1 FROM jobs WHERE jobs.policy_id = policies.id \
                      AND jobs.state IN ({ACTIVE_STATES}))"
                 )))
                 .bind(&id)
                 .bind(manager)
+                .bind(revision)
                 .execute(&mut *tx)
                 .await?
                 .rows_affected();
@@ -533,7 +545,7 @@ fn spec_json(policy: &BackupPolicy) -> Result<String, ApiError> {
     request_body = ApplyRequest,
     responses(
         (status = 200, description = "The plan; applied unless dry_run is set", body = ApplyResponse),
-        (status = 403, description = "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention or a more frequent cron. A session needs the password entered in the last 15 minutes for those changes (code step_up_required)", body = ErrorBody),
+        (status = 403, description = "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention, a more frequent cron, a change of paths, exclude, oneFileSystem, excludeCaches or repository of a policy with retention, or a --prune that deletes a policy with retention. A session needs the password entered in the last 15 minutes for those changes (code step_up_required)", body = ErrorBody),
         (status = 409, description = "A policy to delete has jobs in progress, or policies changed while applying", body = ErrorBody),
         (status = 422, description = "Invalid input; nothing is applied", body = ApplyErrorBody),
     )
@@ -568,6 +580,8 @@ pub async fn apply_policies(
         unchanged,
         retention_changed,
         schedule_faster,
+        content_changed,
+        retention_deleted,
         hooks_policies,
     } = plan(&req, &manager, inputs, all_policies(&state).await?)?;
     if retention_changed {
@@ -575,6 +589,12 @@ pub async fn apply_policies(
     }
     if schedule_faster {
         auth.require_also_or_step_up(Scope::SnapshotsDelete, SCHEDULE_PURPOSE)?;
+    }
+    if content_changed {
+        auth.require_also_or_step_up(Scope::SnapshotsDelete, CONTENT_PURPOSE)?;
+    }
+    if retention_deleted {
+        auth.require_also_or_step_up(Scope::SnapshotsDelete, DELETE_PURPOSE)?;
     }
     if !hooks_policies.is_empty() {
         auth.require_also_or_step_up(Scope::HooksWrite, hooks_purpose(&hooks_policies))?;
