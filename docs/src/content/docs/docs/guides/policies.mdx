@@ -114,7 +114,7 @@ Details that matter:
 - Two snapshots with the same time are ordered by id.
 - The two newest good snapshots of each pool of a host are always kept, whatever the rules say, so a bad rule or a run of failed backups cannot empty a host. A good snapshot is one that is neither suspicious nor incomplete. Incomplete snapshots take part in the rules like any other, but do not count towards these two.
 - Suspicious snapshots (flagged by the anomaly detector or by an administrator) take no slot in any rule and are never forgotten. The good snapshots around them are counted as if they were not there.
-- If a policy is deleted, its snapshots stay.
+- If a policy is deleted, its snapshots stay. A new policy with the same name in the same repository takes them into its pool.
 - Forgetting removes only the snapshot manifest. The data it referenced stays in the repository until garbage collection frees the space.
 
 ## limits
@@ -149,7 +149,9 @@ A web session may change everything on this page. An API token, for example in a
 | --- | --- |
 | Add, change or remove `retention`, or `includeStdin` | `snapshots:delete`, because retention makes the server delete snapshots |
 | Run a policy with retention more often | `snapshots:delete`. The server compares the shortest gap between two runs of the schedule over the next 366 days, in the time zone of the policy, before and after the change. That also catches `0 3 * 12 *`, which runs daily but only in December, in place of a weekly schedule, and a schedule with no two runs in that year, such as `* * 29 2 *`, in place of a daily one. A schedule that runs less often, or at another time of day, needs only `policies:write` |
-| Add, change or remove `hooks`, or widen a policy that has hooks: change its `repository`, or its selector in any way other than a shorter `hosts` list or more `matchLabels` added (an empty selector, a changed or removed label and a host id that is not enrolled yet all count as wider), or change host labels so that a host joins it | `hooks:write`, because hooks run commands as root on the hosts. It does not matter which hosts are enrolled at that moment. Deleting a whole policy needs only `policies:write` |
+| Add, change or remove `hooks`, or widen a policy that has hooks: change its `repository`, or its selector in any way other than a shorter `hosts` list or more `matchLabels` added (an empty selector, a changed or removed label and a host id that is not enrolled yet all count as wider), or change host labels so that a host joins it | `hooks:write`, because hooks run commands as root on the hosts. It does not matter which hosts are enrolled at that moment. Deleting a whole policy without retention needs only `policies:write` |
+| Change `paths`, `exclude`, `oneFileSystem`, `excludeCaches` or `repository` of a policy with retention (before or after the edit) | `snapshots:delete`, because narrower paths or another repository make the next backups hold less or sit in another pool, and retention then forgets real snapshots. Paths compare as a set, so reordering them needs only `policies:write`; excludes compare as an ordered list, because a later `!` pattern can bring back what an earlier one excluded, so reordering or repeating one counts as a change; `/etc` and `/etc/` count as different paths. A policy without retention needs only `policies:write` |
+| Delete a policy with retention, also with `lode apply --prune` | `snapshots:delete`, because a new policy with the same name and repository takes over its snapshots |
 
 The server answers 403 and names the scope; for hooks it also lists the policies. `lode apply` refuses the whole run in these cases, and `--dry-run` shows the refusal beforehand.
 
