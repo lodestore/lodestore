@@ -1,6 +1,8 @@
 pub mod apply;
 pub mod matching;
 
+use std::collections::BTreeSet;
+
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -34,6 +36,22 @@ pub(crate) fn retention_of(policy: &BackupPolicy) -> Option<&Retention> {
 
 pub(crate) const SCHEDULE_PURPOSE: &str = "run a policy with retention more often";
 pub(crate) const SCHEDULE_HORIZON_DAYS: i64 = 366;
+pub(crate) const CONTENT_PURPOSE: &str = "change what or where a policy with retention backs up";
+
+/// Whether an edit changes what or where a policy with retention (before or
+/// after the edit) backs up. Paths are a set because their union ignores order;
+/// excludes are a list because the last matching pattern wins and `!` re-includes.
+pub fn changes_retained_content(old: &BackupPolicy, new: &BackupPolicy) -> bool {
+    if retention_of(old).is_none() && retention_of(new).is_none() {
+        return false;
+    }
+    let (old, new) = (&old.spec, &new.spec);
+    old.paths.iter().collect::<BTreeSet<_>>() != new.paths.iter().collect::<BTreeSet<_>>()
+        || old.exclude != new.exclude
+        || old.one_file_system != new.one_file_system
+        || old.exclude_caches != new.exclude_caches
+        || old.repository != new.repository
+}
 
 const SHORTEST_GAP: SignedDuration = SignedDuration::from_secs(60);
 
@@ -701,6 +719,9 @@ pub async fn update_policy(
     if retention_of(&checked.policy).is_some() && runs_more_often(&current.policy, &checked.policy)
     {
         auth.require_also_or_step_up(Scope::SnapshotsDelete, SCHEDULE_PURPOSE)?;
+    }
+    if changes_retained_content(&current.policy, &checked.policy) {
+        auth.require_also_or_step_up(Scope::SnapshotsDelete, CONTENT_PURPOSE)?;
     }
     let old = (current.repository_id.as_str(), &current.policy);
     if gains_hook_hosts(Some(old), (&checked.repository_id, &checked.policy)) {

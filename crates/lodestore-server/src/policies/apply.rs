@@ -11,8 +11,9 @@ use sqlx::Row;
 use utoipa::ToSchema;
 
 use super::{
-    Checked, Failure, PolicyRow, RETENTION_PURPOSE, SCHEDULE_PURPOSE, all_policies,
-    gains_hook_hosts, hooks_purpose, resolve, retention_of, runs_more_often,
+    CONTENT_PURPOSE, Checked, Failure, PolicyRow, RETENTION_PURPOSE, SCHEDULE_PURPOSE,
+    all_policies, changes_retained_content, gains_hook_hosts, hooks_purpose, resolve, retention_of,
+    runs_more_often,
 };
 use crate::auth::tokens::{PoliciesWrite, Scope, Scoped};
 use crate::db::now_ms;
@@ -298,6 +299,7 @@ struct Plan {
     unchanged: u64,
     retention_changed: bool,
     schedule_faster: bool,
+    content_changed: bool,
     hooks_policies: Vec<String>,
 }
 
@@ -324,6 +326,7 @@ fn plan(
     let mut unchanged = 0;
     let mut retention_changed = false;
     let mut schedule_faster = false;
+    let mut content_changed = false;
     let mut hooks_policies = Vec::new();
     let mut wanted = BTreeSet::new();
     for input in inputs {
@@ -385,6 +388,7 @@ fn plan(
         retention_changed |= retention_of(&row.policy) != retention_of(&input.checked.policy);
         schedule_faster |= retention_of(&input.checked.policy).is_some()
             && runs_more_often(&row.policy, &input.checked.policy);
+        content_changed |= changes_retained_content(&row.policy, &input.checked.policy);
         if gains_hook_hosts(
             Some((&row.repository_id, &row.policy)),
             (&input.checked.repository_id, &input.checked.policy),
@@ -431,6 +435,7 @@ fn plan(
         unchanged,
         retention_changed,
         schedule_faster,
+        content_changed,
         hooks_policies,
     })
 }
@@ -568,6 +573,7 @@ pub async fn apply_policies(
         unchanged,
         retention_changed,
         schedule_faster,
+        content_changed,
         hooks_policies,
     } = plan(&req, &manager, inputs, all_policies(&state).await?)?;
     if retention_changed {
@@ -575,6 +581,9 @@ pub async fn apply_policies(
     }
     if schedule_faster {
         auth.require_also_or_step_up(Scope::SnapshotsDelete, SCHEDULE_PURPOSE)?;
+    }
+    if content_changed {
+        auth.require_also_or_step_up(Scope::SnapshotsDelete, CONTENT_PURPOSE)?;
     }
     if !hooks_policies.is_empty() {
         auth.require_also_or_step_up(Scope::HooksWrite, hooks_purpose(&hooks_policies))?;
