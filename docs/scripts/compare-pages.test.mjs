@@ -35,6 +35,23 @@ for (const [file, text] of pages) {
 		assert.doesNotMatch(body, /\d{4}-\d{2}-\d{2}/);
 		assert.doesNotMatch(body, /Checked on/);
 	});
+
+	test(`${file}: sources and as-of date`, () => {
+		const front = text.slice(0, text.indexOf('\n---\n', 4));
+		assert.match(front, /^asOf: \d{4}-\d{2}-\d{2}$/m);
+		const block = front.split(/^sources:\n/m)[1];
+		assert.ok(block, 'no sources block');
+		const items = block.split(/^ {2}- /m).slice(1);
+		assert.ok(items.length > 0, 'sources is empty');
+		const urls = items.map((item) => {
+			const field = (name) => item.match(new RegExp(`(?:^|\\n) {0,4}${name}: "([^"]+)"`))?.[1];
+			assert.ok(field('title'), `a source has no title: ${item}`);
+			assert.ok(field('version'), `a source has no version: ${item}`);
+			assert.match(field('url') ?? '', /^https:\/\/\S+$/, `a source has no https url: ${item}`);
+			return field('url');
+		});
+		assert.equal(new Set(urls).size, urls.length, 'a source url is listed twice');
+	});
 }
 
 test('proxmox-backup-server.md: scenarios are split honestly', () => {

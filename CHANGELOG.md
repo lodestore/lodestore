@@ -4,6 +4,10 @@ All notable changes to Lodestore are recorded here. The format follows [Keep a C
 
 ## [Unreleased]
 
+### Changed
+
+- The comparison pages show the date the facts about each competitor were checked and a list of sources with their versions.
+
 ## [0.2.0] - 2026-11-12
 
 ### Added
