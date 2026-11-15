@@ -2374,6 +2374,7 @@ dependencies = [
  "lodestore-proto",
  "lodestore-testkit",
  "opendal",
+ "proptest",
  "prost",
  "rcgen",
  "reqsign-aws-v4",
