@@ -1,6 +1,7 @@
 //! A token that may edit policies must not empty a policy with retention by
-//! changing what or where it backs up. Only public REST paths of the first
-//! release are used, so the scenario runs unchanged against that release.
+//! changing what or where it backs up, or by deleting it. Only public REST
+//! paths of the first release are used, so the scenario runs unchanged against
+//! that release.
 
 mod common;
 
@@ -10,6 +11,8 @@ use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::{Value, json};
 
 const CONTENT_REFUSED: &str = "The token needs the snapshots:delete scope to change what or where a policy with retention backs up.";
+const DELETE_REFUSED: &str =
+    "The token needs the snapshots:delete scope to delete a policy with retention.";
 const PATHS: &str = "  paths:\n    - /etc\n    - /srv\n";
 const EXCLUDE: &str = "  exclude:\n    - \"*.log\"\n    - \"!keep.log\"\n";
 
@@ -104,6 +107,33 @@ impl Caller {
             .collect();
         let body = json!({ "documents": documents, "adopt": true, "dry_run": dry_run });
         self.send(Method::POST, "/api/v1/policies/apply", Some(&body))
+            .await
+    }
+
+    async fn prune(&self, documents: &[String], dry_run: bool) -> (u16, Value) {
+        let documents: Vec<Value> = documents
+            .iter()
+            .map(|yaml| json!({ "source": "p.yaml", "yaml": yaml }))
+            .collect();
+        let body = json!({
+            "documents": documents,
+            "manager": "ci",
+            "prune": true,
+            "dry_run": dry_run,
+        });
+        self.send(Method::POST, "/api/v1/policies/apply", Some(&body))
+            .await
+    }
+
+    async fn exists(&self, name: &str) -> bool {
+        let got = self
+            .send(Method::GET, &format!("/api/v1/policies/{name}"), None)
+            .await;
+        got.0 == 200
+    }
+
+    async fn delete(&self, name: &str) -> (u16, Value) {
+        self.send(Method::DELETE, &format!("/api/v1/policies/{name}"), None)
             .await
     }
 
@@ -213,6 +243,29 @@ async fn adv_policies_write_cannot_change_what_a_retention_policy_backs_up() {
             .apply(&[kept("other", &format!("{PATHS}{EXCLUDE}"))], false)
             .await;
         assert_eq!(got.0, 200, "[{what}] snapshots:delete apply: {}", got.1);
+
+        let got = weak.delete("kept").await;
+        assert_refused(&got, DELETE_REFUSED, &format!("[{what}] DELETE"));
+        assert!(weak.exists("kept").await, "[{what}]");
+        let pk = policy("pk", "main", true, PATHS);
+        let ps = policy("ps", "main", false, PATHS);
+        let got = session.prune(&[pk, ps.clone()], false).await;
+        assert_eq!(got.0, 200, "[{what}] {}", got.1);
+        for dry_run in [true, false] {
+            let got = weak.prune(std::slice::from_ref(&ps), dry_run).await;
+            assert_refused(
+                &got,
+                DELETE_REFUSED,
+                &format!("[{what}] prune dry_run={dry_run}"),
+            );
+        }
+        assert!(weak.exists("pk").await, "[{what}]");
+        assert!(weak.exists("ps").await, "[{what}]");
+        let got = strong.prune(std::slice::from_ref(&ps), false).await;
+        assert_eq!(got.0, 200, "[{what}] snapshots:delete prune: {}", got.1);
+        assert!(!weak.exists("pk").await, "[{what}]");
+        let got = weak.delete("other-p").await;
+        assert_eq!(got.0, 204, "[{what}] no retention: {}", got.1);
         ts.stop().await;
     }
 }

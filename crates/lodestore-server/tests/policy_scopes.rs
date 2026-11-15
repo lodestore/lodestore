@@ -768,6 +768,96 @@ async fn step_up_policies_hooks_retention_and_apply() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn step_up_content_and_delete_of_a_retention_policy() {
+    for backend in backends() {
+        let what = backend.name();
+        let ts = TestServer::start(&backend).await;
+        ts.create_local_repository("main").await;
+        ts.create_local_repository("other").await;
+        let session = Session {
+            api: ts.api().await,
+            ts: &ts,
+        };
+        session.create(yaml("kept", "main", "db", KEEP_THREE)).await;
+        let managed = |prune: bool, dry_run: bool, docs: &[String]| {
+            json!({
+                "documents": docs
+                    .iter()
+                    .map(|y| json!({ "source": "p.yaml", "yaml": y }))
+                    .collect::<Vec<_>>(),
+                "prune": prune,
+                "dry_run": dry_run,
+            })
+        };
+        let ps = yaml("ps", "main", "db", "");
+        let got = session
+            .post(
+                "/api/v1/policies/apply",
+                &managed(
+                    false,
+                    false,
+                    &[yaml("pk", "main", "db", KEEP_THREE), ps.clone()],
+                ),
+            )
+            .await;
+        assert_eq!(got.0, 200, "[{what}] {}", got.1);
+        age_sessions(&ts).await;
+        let rows = policy_rows(&ts).await;
+
+        let moved = yaml("kept", "main", "db", KEEP_THREE).replace("- /etc", "- /srv");
+        let got = session
+            .put("/api/v1/policies/kept", &update(moved.clone(), 1))
+            .await;
+        assert_step_up(&got, &format!("update paths [{what}]"));
+        let got = session
+            .put(
+                "/api/v1/policies/kept",
+                &update(yaml("kept", "other", "db", KEEP_THREE), 1),
+            )
+            .await;
+        assert_step_up(&got, &format!("update repository [{what}]"));
+        let got = session
+            .post(
+                "/api/v1/policies/apply",
+                &json!({
+                    "documents": [{ "source": "p.yaml", "yaml": moved }],
+                    "adopt": true,
+                    "dry_run": true,
+                }),
+            )
+            .await;
+        assert_step_up(&got, &format!("apply paths dry run [{what}]"));
+        let got = session
+            .send(reqwest::Method::DELETE, "/api/v1/policies/kept", None)
+            .await;
+        assert_step_up(&got, &format!("delete [{what}]"));
+        let got = session
+            .post(
+                "/api/v1/policies/apply",
+                &managed(true, true, std::slice::from_ref(&ps)),
+            )
+            .await;
+        assert_step_up(&got, &format!("prune dry run [{what}]"));
+        assert_eq!(policy_rows(&ts).await, rows, "[{what}] nothing changed");
+        let (_, current) = session
+            .send(reqwest::Method::GET, "/api/v1/policies/kept", None)
+            .await;
+        assert_eq!(current["revision"], 1, "[{what}]");
+
+        step_up(&session).await;
+        let got = session
+            .put("/api/v1/policies/kept", &update(moved, 1))
+            .await;
+        assert_eq!(got.0, 200, "[{what}] after step-up: {}", got.1);
+        let got = session
+            .send(reqwest::Method::DELETE, "/api/v1/policies/kept", None)
+            .await;
+        assert_eq!(got.0, 204, "[{what}] after step-up: {}", got.1);
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn step_up_labels_that_gain_hooks() {
     for backend in backends() {
         let what = backend.name();
