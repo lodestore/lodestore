@@ -1,17 +1,17 @@
 ---
 title: Lodestore vs Backrest
 description: How Lodestore, a self-hosted backup server with agents, compares with Backrest, a web interface built on top of restic. Facts are taken from Backrest's own documentation.
-asOf: 2026-11-12
+asOf: 2026-11-15
 sources:
   - title: "Backrest README"
     url: "https://github.com/garethgeorge/backrest/blob/main/README.md"
     version: "v1.14.1"
   - title: "Multihost Sync"
     url: "https://garethgeorge.github.io/backrest/docs/multihost"
-    version: "page as of 2026-11-12"
+    version: "page as of 2026-11-15"
   - title: "restic, Removing backup snapshots"
     url: "https://restic.readthedocs.io/en/stable/060_forget.html"
-    version: "page as of 2026-11-12"
+    version: "0.19.1"
   - title: "Backrest release"
     url: "https://github.com/garethgeorge/backrest/releases/tag/v1.14.1"
     version: "v1.14.1"
@@ -20,7 +20,7 @@ Backrest is a web-accessible backup solution built on top of restic: a web inter
 
 ## Why teams pick Lodestore
 
-- **Hosts that cannot delete their own backups.** On S3-compatible storage the agent writes with a key that has no delete rights, and deletion and cleanup run only on the server, with S3 Object Lock and versioning supported. In restic, the engine under Backrest, `forget` and `prune` need full access to the repository. See the [threat model](/docs/security/threat-model/#agent-credentials).
+- **Hosts that cannot delete their own backups.** On S3-compatible storage the agent writes with a key that has no delete rights, and deletion and cleanup run only on the server, with S3 Object Lock and versioning supported. With Object Lock in COMPLIANCE mode, even the server cannot delete locked data before its retention period ends. In restic, the engine under Backrest, `forget` and `prune` need full access to the repository. See the [threat model](/docs/security/threat-model/#agent-credentials).
 - **One server for a fleet of Linux hosts.** Schedules and retention run on the server, alerts cover failed or missing backups, offline hosts and failed checks, and you can find a file across the snapshots of every host.
 - **Apache-2.0 end to end.** The server, the agent and the format are Apache-2.0; Backrest is GPL-3.0.
 - **A short path to the first backup.** One server image and a one-line install per host; see the [Quickstart](/docs/quickstart/).
