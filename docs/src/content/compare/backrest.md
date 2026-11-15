@@ -1,6 +1,20 @@
 ---
 title: Lodestore vs Backrest
 description: How Lodestore, a self-hosted backup server with agents, compares with Backrest, a web interface built on top of restic. Facts are taken from Backrest's own documentation.
+asOf: 2026-11-12
+sources:
+  - title: "Backrest README"
+    url: "https://github.com/garethgeorge/backrest/blob/main/README.md"
+    version: "v1.14.1"
+  - title: "Multihost Sync"
+    url: "https://garethgeorge.github.io/backrest/docs/multihost"
+    version: "page as of 2026-11-12"
+  - title: "restic, Removing backup snapshots"
+    url: "https://restic.readthedocs.io/en/stable/060_forget.html"
+    version: "page as of 2026-11-12"
+  - title: "Backrest release"
+    url: "https://github.com/garethgeorge/backrest/releases/tag/v1.14.1"
+    version: "v1.14.1"
 ---
 Backrest is a web-accessible backup solution built on top of restic: a web interface that wraps the restic command line. Lodestore is a self-hosted server with an agent on each host and its own repository format.
 

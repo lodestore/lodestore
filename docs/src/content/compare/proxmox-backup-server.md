@@ -1,6 +1,29 @@
 ---
 title: Lodestore vs Proxmox Backup Server
 description: How Lodestore, a self-hosted backup server with agents, compares with Proxmox Backup Server. Facts are taken from Proxmox's own documentation.
+asOf: 2026-11-12
+sources:
+  - title: "Introduction"
+    url: "https://pbs.proxmox.com/docs/introduction.html"
+    version: "docs 4.2.10-1"
+  - title: "Storage"
+    url: "https://pbs.proxmox.com/docs/storage.html"
+    version: "docs 4.2.10-1"
+  - title: "User Management"
+    url: "https://pbs.proxmox.com/docs/user-management.html"
+    version: "docs 4.2.10-1"
+  - title: "Technical Overview"
+    url: "https://pbs.proxmox.com/docs/technical-overview.html"
+    version: "docs 4.2.10-1"
+  - title: "FAQ"
+    url: "https://pbs.proxmox.com/docs/faq.html"
+    version: "docs 4.2.10-1"
+  - title: "Backup Client"
+    url: "https://pbs.proxmox.com/docs/backup-client.html"
+    version: "docs 4.2.10-1"
+  - title: "Roadmap"
+    url: "https://pbs.proxmox.com/wiki/index.php/Roadmap"
+    version: "docs 4.2.10-1"
 ---
 Proxmox Backup Server is a client-server backup solution specially optimized for Proxmox Virtual Environment. For virtual machines and containers on Proxmox VE it is the tool to use today. Lodestore backs up the files of Linux hosts: an agent on each host writes deduplicated, encrypted data straight to S3-compatible storage, and the server manages and catalogs.
 
