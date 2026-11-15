@@ -961,3 +961,216 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(run_host))
         .routes(routes!(list_host_policies))
 }
+
+#[cfg(test)]
+mod tests {
+    use lodestore_format::fs::filter::PathMatcher;
+    use proptest::prelude::*;
+
+    use super::*;
+
+    const BODIES: [(char, &str); 13] = [
+        ('a', "  repository: main\n  paths: [/etc]\n"),
+        ('b', "  repository: main\n  paths: [/etc, /srv]\n"),
+        ('c', "  repository: main\n  paths: [/srv, /etc]\n"),
+        ('d', "  repository: main\n  paths: [/etc/]\n"),
+        (
+            'e',
+            "  repository: main\n  paths: [/etc]\n  exclude: [\"*.log\"]\n",
+        ),
+        (
+            'f',
+            "  repository: main\n  paths: [/etc]\n  exclude: [\"*.log\", \"*.log\"]\n",
+        ),
+        (
+            'g',
+            "  repository: main\n  paths: [/etc]\n  oneFileSystem: true\n",
+        ),
+        (
+            'h',
+            "  repository: main\n  paths: [/etc]\n  excludeCaches: true\n",
+        ),
+        (
+            'i',
+            "  repository: main\n  paths: [/etc]\n  limits:\n    nice: 10\n",
+        ),
+        (
+            'j',
+            "  repository: main\n  paths: [/etc]\n  exclude: [\"*.log\", \"!keep.log\"]\n",
+        ),
+        (
+            'k',
+            "  repository: main\n  paths: [/etc]\n  exclude: [\"!keep.log\", \"*.log\"]\n",
+        ),
+        (
+            'l',
+            "  repository: main\n  paths: [/etc]\n  exclude: [\"*.log\", \"!keep.log\", \"*.log\"]\n",
+        ),
+        ('m', "  repository: other\n  paths: [/etc]\n"),
+    ];
+
+    fn spec(id: char, retention: bool) -> BackupPolicy {
+        let body = BODIES.iter().find(|(b, _)| *b == id).unwrap().1;
+        let retention = if retention {
+            "  retention:\n    keepLast: 3\n"
+        } else {
+            ""
+        };
+        lodestore_policy::parse_yaml(&format!(
+            "apiVersion: lodestore.io/v1alpha1\nkind: BackupPolicy\nmetadata:\n  name: db\n\
+             spec:\n{body}{retention}"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn content_rule_literals() {
+        for (old, new, changed) in [
+            ('b', 'c', false),
+            ('a', 'i', false),
+            ('a', 'a', false),
+            ('e', 'f', true),
+            ('j', 'k', true),
+            ('j', 'l', true),
+            ('a', 'b', true),
+            ('a', 'd', true),
+            ('a', 'e', true),
+            ('a', 'g', true),
+            ('a', 'h', true),
+            ('a', 'm', true),
+        ] {
+            assert_eq!(
+                changes_retained_content(&spec(old, true), &spec(new, true)),
+                changed,
+                "({old},{new})"
+            );
+        }
+        assert!(changes_retained_content(
+            &spec('a', true),
+            &spec('b', false)
+        ));
+        assert!(changes_retained_content(
+            &spec('a', false),
+            &spec('b', true)
+        ));
+        assert!(!changes_retained_content(
+            &spec('a', false),
+            &spec('b', false)
+        ));
+    }
+
+    const FILES: [&str; 7] = [
+        "/a/x.log",
+        "/a/keep.log",
+        "/a/b/y.txt",
+        "/a/b/keep.log",
+        "/a/b/z.log",
+        "/c/w.txt",
+        "/c/keep.log",
+    ];
+    const ROOTS: [&str; 3] = ["/a", "/a/b", "/c"];
+    const EXCLUDES: [&str; 6] = ["*.log", "!keep.log", "b/", "/c", "!/c/w.txt", "**/keep.log"];
+
+    /// The files the agent backs up: the walk starts at the outermost root
+    /// above a file and skips every entry on the way down that is excluded,
+    /// so an excluded directory hides a file `!` would bring back.
+    fn selected(policy: &BackupPolicy, tree: &[&str]) -> BTreeSet<String> {
+        let matcher = PathMatcher::new(&policy.spec.exclude).unwrap();
+        let roots: BTreeSet<&str> = policy.spec.paths.iter().map(String::as_str).collect();
+        let kept = |file: &str| {
+            let Some(root) = roots.iter().find(|r| file.starts_with(&format!("{r}/"))) else {
+                return false;
+            };
+            let mut path = (*root).to_string();
+            if matcher.is_match(path.as_bytes(), true) {
+                return false;
+            }
+            for name in file[root.len() + 1..].split('/') {
+                path = format!("{path}/{name}");
+                if matcher.is_match(path.as_bytes(), path != file) {
+                    return false;
+                }
+            }
+            true
+        };
+        tree.iter()
+            .filter(|f| kept(f))
+            .map(|f| f.to_string())
+            .collect()
+    }
+
+    fn list(alphabet: &'static [&'static str], min: usize) -> BoxedStrategy<Vec<String>> {
+        prop::collection::vec(prop::sample::select(alphabet), min..=4)
+            .prop_map(|v| v.into_iter().map(String::from).collect())
+            .boxed()
+    }
+
+    /// Mostly an edit that keeps the elements: a permutation or one element
+    /// repeated; sometimes an unrelated list.
+    fn edit(
+        old: Vec<String>,
+        alphabet: &'static [&'static str],
+        min: usize,
+    ) -> BoxedStrategy<Vec<String>> {
+        let repeat = (any::<prop::sample::Index>(), any::<prop::sample::Index>()).prop_map({
+            let old = old.clone();
+            move |(which, at)| {
+                let mut new = old.clone();
+                if !old.is_empty() {
+                    new.insert(at.index(old.len() + 1), old[which.index(old.len())].clone());
+                }
+                new
+            }
+        });
+        prop_oneof![
+            2 => Just(old).prop_shuffle(),
+            2 => repeat,
+            1 => list(alphabet, min),
+        ]
+        .boxed()
+    }
+
+    fn content(paths: Vec<String>, exclude: Vec<String>, flags: [bool; 3]) -> BackupPolicy {
+        let mut policy = spec('a', true);
+        policy.spec.paths = paths;
+        policy.spec.exclude = exclude;
+        policy.spec.one_file_system = flags[0];
+        policy.spec.exclude_caches = flags[1];
+        policy.spec.repository = if flags[2] { "other" } else { "main" }.into();
+        policy
+    }
+
+    fn pair() -> impl Strategy<Value = (BackupPolicy, BackupPolicy)> {
+        (list(&ROOTS, 1), list(&EXCLUDES, 0), any::<[bool; 3]>()).prop_flat_map(
+            |(paths, exclude, flags)| {
+                (
+                    edit(paths.clone(), &ROOTS, 1),
+                    edit(exclude.clone(), &EXCLUDES, 0),
+                    prop::array::uniform3(prop::bool::weighted(0.1)),
+                )
+                    .prop_map(move |(new_paths, new_exclude, flip)| {
+                        let new_flags = [0, 1, 2].map(|i| flags[i] ^ flip[i]);
+                        (
+                            content(paths.clone(), exclude.clone(), flags),
+                            content(new_paths, new_exclude, new_flags),
+                        )
+                    })
+            },
+        )
+    }
+
+    proptest! {
+        #[test]
+        fn unchanged_content_selects_the_same_files(
+            (old, new) in pair(),
+            tree in prop::sample::subsequence(FILES.to_vec(), 0..=FILES.len()),
+        ) {
+            if !changes_retained_content(&old, &new) {
+                prop_assert_eq!(selected(&old, &tree), selected(&new, &tree));
+                prop_assert_eq!(old.spec.one_file_system, new.spec.one_file_system);
+                prop_assert_eq!(old.spec.exclude_caches, new.spec.exclude_caches);
+                prop_assert_eq!(&old.spec.repository, &new.spec.repository);
+            }
+        }
+    }
+}
