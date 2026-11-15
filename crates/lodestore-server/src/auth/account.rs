@@ -295,8 +295,10 @@ async fn change_password(
     description = "A signed-in session must have entered its password within the last 15 \
         minutes to create an API token or a join token; to start a restore that writes in \
         place, restores owners or targets an agent without `restore_roots_v1`; to create, \
-        update or apply policies so that hooks or retention change or retention runs more \
-        often, or to change host labels so that a policy with hooks reaches the host; to \
+        update or apply policies so that hooks or retention change, retention runs more \
+        often, or what or where a policy with retention backs up changes; to \
+        delete a policy with retention, directly or by an apply prune; to change host \
+        labels so that a policy with hooks reaches the host; to \
         delete a snapshot, mark it suspicious or clear the mark; to start a cleanup, close \
         its backup markers, exclude a quarantined snapshot or save the cleanup settings; \
         and to start or resume an agent update. Otherwise those requests answer `403` \

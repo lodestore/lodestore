@@ -694,7 +694,7 @@ pub async fn get_policy(
     request_body = PolicyUpdate,
     responses(
         (status = 200, description = "The updated policy", body = PolicyDetail),
-        (status = 403, description = "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention or a more frequent cron. A session needs the password entered in the last 15 minutes for those changes (code step_up_required)", body = ErrorBody),
+        (status = 403, description = "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention, a more frequent cron, or a change of paths, exclude, oneFileSystem, excludeCaches or repository of a policy with retention. A session needs the password entered in the last 15 minutes for those changes (code step_up_required)", body = ErrorBody),
         (status = 404, description = "Unknown policy", body = ErrorBody),
         (status = 409, description = "The policy changed since base_revision (code policy_conflict)", body = ErrorBody),
         (status = 422, description = "Invalid policy or changed name", body = ErrorBody),
@@ -764,8 +764,9 @@ pub async fn update_policy(
     params(("name" = String, Path, description = "Policy name")),
     responses(
         (status = 204, description = "The policy is deleted"),
+        (status = 403, description = "The token lacks snapshots:delete to delete a policy with retention. A session needs the password entered in the last 15 minutes (code step_up_required)", body = ErrorBody),
         (status = 404, description = "Unknown policy", body = ErrorBody),
-        (status = 409, description = "The policy has jobs in progress", body = ErrorBody),
+        (status = 409, description = "The policy has jobs in progress, or the policy changed since it was read (code policy_conflict)", body = ErrorBody),
     )
 )]
 pub async fn delete_policy(
