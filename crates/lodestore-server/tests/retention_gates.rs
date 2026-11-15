@@ -360,9 +360,8 @@ async fn retention_gates_slower_or_shifted_cron_allowed() {
             assert_eq!(status, 200, "[{what}] {cron}: {body}");
             revision = body["revision"].as_i64().unwrap();
         }
-        let (status, body) = plain
-            .update(yaml(Some("0 3 * * 1"), true, "/srv"), revision)
-            .await;
+        let relabelled = yaml(Some("0 3 * * 1"), true, "/etc").replace("role: db", "role: web");
+        let (status, body) = plain.update(relabelled, revision).await;
         assert_eq!(status, 200, "[{what}] unchanged schedule: {body}");
         ts.stop().await;
     }
