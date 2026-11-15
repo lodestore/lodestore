@@ -1,7 +1,7 @@
 ---
 title: Lodestore vs restic
 description: How Lodestore, a backup server with agents, compares with restic, a command-line backup program. Facts are taken from restic's own documentation.
-asOf: 2026-11-02
+asOf: 2026-11-15
 sources:
   - title: "restic on GitHub"
     url: "https://github.com/restic/restic"
@@ -30,7 +30,7 @@ restic is a command-line backup program. Lodestore is a server with an agent on 
 ## Why teams pick Lodestore
 
 - **One place for a fleet of Linux hosts.** A web interface shows which hosts backed up and which did not, schedules and retention run on the server, and alerts cover failed or missing backups, offline hosts and failed checks. Files can be searched across the snapshots of every host.
-- **Hosts that cannot delete their own backups.** On S3-compatible storage the agent writes with a key that has no delete rights, and deletion and cleanup run only on the server, with S3 Object Lock and versioning supported. See the [threat model](/docs/security/threat-model/#agent-credentials) for what this does and does not cover.
+- **Hosts that cannot delete their own backups.** On S3-compatible storage the agent writes with a key that has no delete rights, and deletion and cleanup run only on the server, with S3 Object Lock and versioning supported. With Object Lock in COMPLIANCE mode, even the server cannot delete locked data before its retention period ends. See the [threat model](/docs/security/threat-model/#agent-credentials) for what this does and does not cover.
 - **Restore without the server.** The bucket and a password or recovery key are enough for `lode` to restore, so losing the server does not lose the data.
 - **Checks you do not script.** Scheduled integrity checks, including a test restore of sampled files, are reported in the interface.
 - **A short path to the first backup.** One server image and a one-line install per host; see the [Quickstart](/docs/quickstart/).
