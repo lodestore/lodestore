@@ -127,7 +127,7 @@ Keep this key off the backed-up hosts. Only the server uses it. [Cleanup](/docs/
 
 ## Turn on Object Lock
 
-Object Lock makes S3 refuse to delete or overwrite an object version until its retention period ends, whoever asks. With it, even a stolen server key, or a stolen agent key on MinIO, cannot destroy backups that are still inside the period.
+In COMPLIANCE mode, Object Lock makes S3 refuse to delete or overwrite an object version until its retention period ends, whoever asks. In GOVERNANCE mode, a user with the `s3:BypassGovernanceRetention` right can still delete it. With either mode, even a stolen server key, or a stolen agent key on MinIO, cannot destroy backups that are still inside the period, as long as the key has no bypass right, which the policies on this page do not grant.
 
 Create the bucket with Object Lock on. This also turns on versioning:
 

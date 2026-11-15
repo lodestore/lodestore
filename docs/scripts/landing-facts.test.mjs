@@ -139,8 +139,11 @@ test('the delete claim matches the threat table', () => {
 	const panel = element(html, 'div', 'panel-1');
 	const text = textOf(panel);
 	assert.ok(textOf(panel.match(/<h3\b[^>]*>([\s\S]*?)<\/h3>/)?.[1] ?? '').includes('S3'), 'the panel heading does not say S3');
-	for (const fact of ['If-None-Match', 'Object Lock', 'versioning', 'folder']) assert.ok(text.includes(fact), `the panel does not mention ${fact}`);
+	for (const fact of ['If-None-Match', 'Object Lock', 'COMPLIANCE', 'versioning', 'folder']) assert.ok(text.includes(fact), `the panel does not mention ${fact}`);
 	assert.ok(!/erase its history/i.test(text), 'the old unconditional heading is back');
+	const row = element(html, 'section', 'security').match(/<tr\b(?:(?!<\/tr>)[\s\S])*Delete a backup[\s\S]*?<\/tr>/)?.[0];
+	assert.ok(row, 'no Delete a backup row in the threat table');
+	assert.ok(textOf(row).includes('S3-compatible'), 'the Delete a backup row does not say S3-compatible');
 });
 
 test('the hero heading is one sentence for crawlers', () => {
