@@ -11,6 +11,16 @@ export const collections = {
 		schema: z.object({
 			title: z.string(),
 			description: z.string(),
+			asOf: z.coerce.date(),
+			sources: z
+				.array(
+					z.object({
+						title: z.string().min(1),
+						url: z.url({ protocol: /^https$/ }),
+						version: z.string().min(1),
+					}),
+				)
+				.min(1),
 		}),
 	}),
 	pages: defineCollection({

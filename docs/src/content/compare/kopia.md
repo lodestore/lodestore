@@ -1,6 +1,20 @@
 ---
 title: Lodestore vs Kopia
 description: How Lodestore, a self-hosted backup server with agents, compares with Kopia, a snapshot backup tool with a command line and a graphical interface. Facts are taken from Kopia's own documentation.
+asOf: 2026-11-12
+sources:
+  - title: "Features"
+    url: "https://kopia.io/docs/features/"
+    version: "page as of 2026-11-12"
+  - title: "Repository Server"
+    url: "https://kopia.io/docs/repository-server/"
+    version: "page as of 2026-11-12"
+  - title: "Repositories"
+    url: "https://kopia.io/docs/repositories/"
+    version: "page as of 2026-11-12"
+  - title: "Kopia release"
+    url: "https://github.com/kopia/kopia/releases/tag/v0.23.1"
+    version: "v0.23.1"
 ---
 Kopia is a snapshot backup tool with a command-line interface and an official graphical interface, designed to back up individual machines, with an optional server mode. Lodestore is a self-hosted server with an agent on each host, built for a fleet of Linux hosts.
 

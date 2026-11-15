@@ -1,6 +1,29 @@
 ---
 title: Lodestore vs restic
 description: How Lodestore, a backup server with agents, compares with restic, a command-line backup program. Facts are taken from restic's own documentation.
+asOf: 2026-11-02
+sources:
+  - title: "restic on GitHub"
+    url: "https://github.com/restic/restic"
+    version: "v0.19.1"
+  - title: "Preparing a new repository"
+    url: "https://restic.readthedocs.io/en/stable/030_preparing_a_new_repo.html"
+    version: "0.19.1"
+  - title: "Installation"
+    url: "https://restic.readthedocs.io/en/stable/020_installation.html"
+    version: "0.19.1"
+  - title: "Backing up"
+    url: "https://restic.readthedocs.io/en/stable/040_backup.html"
+    version: "0.19.1"
+  - title: "References"
+    url: "https://restic.readthedocs.io/en/stable/100_references.html"
+    version: "0.19.1"
+  - title: "Removing backup snapshots"
+    url: "https://restic.readthedocs.io/en/stable/060_forget.html"
+    version: "0.19.1"
+  - title: "Working with repositories"
+    url: "https://restic.readthedocs.io/en/stable/045_working_with_repos.html"
+    version: "0.19.1"
 ---
 restic is a command-line backup program. Lodestore is a server with an agent on each host. Both store encrypted, deduplicated snapshots; they differ in who runs the backups and where the control sits.
 
