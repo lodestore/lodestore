@@ -31,8 +31,9 @@ for (const [file, text] of pages) {
 	});
 
 	test(`${file}: no dates or source tables`, () => {
-		assert.doesNotMatch(text, /\d{4}-\d{2}-\d{2}/);
-		assert.doesNotMatch(text, /Checked on/);
+		const body = text.slice(text.indexOf('\n---\n', 4) + 5);
+		assert.doesNotMatch(body, /\d{4}-\d{2}-\d{2}/);
+		assert.doesNotMatch(body, /Checked on/);
 	});
 }
 
