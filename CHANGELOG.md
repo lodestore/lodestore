@@ -8,6 +8,10 @@ All notable changes to Lodestore are recorded here. The format follows [Keep a C
 
 - The comparison pages show the date the facts about each competitor were checked and a list of sources with their versions.
 
+### Security
+
+- A token needs `snapshots:delete` in addition to `policies:write` to change `spec.paths`, `spec.exclude`, `spec.oneFileSystem`, `spec.excludeCaches` or `spec.repository` of a policy that has retention before or after the edit, and to delete a policy with retention (`DELETE /api/v1/policies/{name}`, `lode server policies delete`, `lode apply --prune`), dry runs included. Without it the server answers 403 and `lode` exits with code 13; a session needs its password entered in the last 15 minutes. Reordering paths is not a change, reordering or repeating an exclude is. See [API tokens and scopes](https://lodestore.dev/docs/security/threat-model/).
+
 ## [0.2.0] - 2026-11-12
 
 ### Added

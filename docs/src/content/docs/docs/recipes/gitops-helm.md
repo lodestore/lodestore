@@ -24,8 +24,8 @@ Create an API token in the web interface under Settings, API tokens. It is shown
 | Scope | Why |
 | --- | --- |
 | `policies:read` | `lode apply` reads the current policies to plan the change |
-| `policies:write` | `lode apply` creates, updates and, with `--prune`, deletes them |
-| `snapshots:delete` | Only if your files set or change a `retention` block, or make the schedule of a policy with retention run more often. Retention makes the server delete snapshots, so the server refuses the change without it (exit code 13) |
+| `policies:write` | `lode apply` creates, updates and, with `--prune`, deletes them (a policy with retention also needs `snapshots:delete`) |
+| `snapshots:delete` | Only if your files set or change a `retention` block, make the schedule of a policy with retention run more often, change what or where a policy with retention backs up (`paths`, `exclude`, `oneFileSystem`, `excludeCaches`, `repository`), or, with `--prune`, delete a policy with retention. Retention makes the server delete snapshots, so the server refuses the change without it (exit code 13) |
 | `hooks:write` | Only if your files add, change or remove `hooks`, or widen a policy with hooks (another `repository`, or a selector that is not narrower: an empty one, a changed label, a new host id). Hooks run commands as root on the hosts, so the server refuses the change without it (exit code 13) |
 
 Store the token as a secret of your CI system, and the server address as an ordinary variable. `lode` reads them from `LODESTORE_SERVER` and `LODESTORE_TOKEN`. There is no flag for the token, so it does not show in the process list. Use an `https://` address; over plain HTTP the token travels unprotected and `lode` warns about it.
@@ -98,7 +98,7 @@ jobs:
 
 ### What `--prune` deletes
 
-`--prune` removes the policies of one **manager** that the files no longer contain. The manager is `lode-apply` unless you pass `--manager NAME`. Policies of other managers, and policies made in the web interface, are never deleted. Use a different manager name for every repository that applies policies to the same server.
+`--prune` removes the policies of one **manager** that the files no longer contain. The manager is `lode-apply` unless you pass `--manager NAME`. Policies of other managers, and policies made in the web interface, are never deleted. A policy with retention is deleted only if the token also has `snapshots:delete`, because a new policy with the same name and repository takes over its snapshots; without the scope the run fails with exit code 13, `--dry-run` included. Use a different manager name for every repository that applies policies to the same server.
 
 A policy of the same name that was made in the web interface is an error until you pass `--adopt`. Without a terminal, as in CI, `--prune` is the consent and deletes without asking, so read the plan on the pull request first. `--prune` refuses to run when the files contain no policy at all, so a template that renders to nothing cannot delete everything. See [Command line](/docs/reference/cli/#gitops-with-lode-apply) for all options.
 
