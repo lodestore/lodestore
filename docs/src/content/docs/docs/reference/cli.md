@@ -40,7 +40,7 @@ An `http://` address that is not on the loopback interface works, but the token 
 | `lode server hosts label <host> KEY=VALUE...` or `--clear` (replaces all labels) | `hosts:write` |
 | `lode server policies list` | `policies:read` |
 | `lode server policies get <name>` (prints the YAML) | `policies:read` |
-| `lode server policies delete <name> [--yes]` | `policies:write` |
+| `lode server policies delete <name> [--yes]` | `policies:write`, plus `snapshots:delete` for a policy with retention |
 | `lode server policies run <name>` | `jobs:run`; see [Run limit](#run-limit) |
 | `lode server policies retention <name>` | `policies:read` |
 | `lode server jobs list [--state S] [--policy NAME] [--host HOST] [--kind K] [--page N]` | `jobs:read` |
@@ -51,7 +51,7 @@ An `http://` address that is not on the loopback interface works, but the token 
 | `lode server snapshots list --host <host> [--limit N]` | `snapshots:read` |
 | `lode server snapshots mark <id> --reason TEXT` and `clear <id> --reason TEXT` | `snapshots:delete` |
 | `lode server snapshots delete <id> [--yes]` | `snapshots:delete` |
-| `lode apply -f <file or folder> [--dry-run] [--prune] [--adopt] [--manager NAME] [--yes]` | `policies:read` and `policies:write`, plus `snapshots:delete` when the files set or change `retention` or run a policy with retention more often, and `hooks:write` when they change `hooks` or bring more hosts under a policy with hooks |
+| `lode apply -f <file or folder> [--dry-run] [--prune] [--adopt] [--manager NAME] [--yes]` | `policies:read` and `policies:write`, plus `snapshots:delete` when the files set or change `retention`, run a policy with retention more often, change `paths`, `exclude`, `oneFileSystem`, `excludeCaches` or `repository` of a policy with retention, or (with `--prune`) delete a policy with retention, and `hooks:write` when they change `hooks` or bring more hosts under a policy with hooks |
 | `lode gc [--dry-run] <repo>`, `lode gc status <repo>`, `lode gc unlock <repo>` (also `lode server gc ...`) | See [Cleanup](#cleanup) |
 | `lode server check <repo> [--level structure\|packs\|restore]` | See [Integrity checks](#integrity-checks) |
 | `lode server find <pattern> [--host HOST]... [--label KEY=VALUE]...` | `snapshots:read`; see [Find a file](#find-a-file) |
@@ -92,9 +92,9 @@ The last line starts with `Applied:` when something was applied. Colors appear o
 
 On a terminal, `--prune` shows the plan first and asks `Delete N policies? [y/N]`. Without a terminal, as in CI, `--prune` itself is the consent and deletes without asking. Run `--dry-run` first when you want to see the deletions before they happen. `--prune` refuses to run, with exit code 2, when the files contain no policy at all (an empty file or one with only comments), so a template that renders to nothing cannot delete every policy of the manager.
 
-The token needs `policies:read` and `policies:write`. When the files add or change a `retention` block, it also needs `snapshots:delete`, because retention makes the server delete snapshots; without it the server refuses with exit code 13. The same scope is needed to run a policy that has retention more often: the server compares the shortest gap between two runs of the cron schedule over the next 366 days, in the time zone of the policy, before and after the change. A schedule that runs less often, or at another time of day, needs only `policies:write`.
+The token needs `policies:read` and `policies:write`. When the files add or change a `retention` block, it also needs `snapshots:delete`, because retention makes the server delete snapshots; without it the server refuses with exit code 13. The same scope is needed to run a policy that has retention more often: the server compares the shortest gap between two runs of the cron schedule over the next 366 days, in the time zone of the policy, before and after the change. A schedule that runs less often, or at another time of day, needs only `policies:write`. The scope is also needed to change `paths`, `exclude`, `oneFileSystem`, `excludeCaches` or `repository` of a policy that has retention before or after the edit, and to delete a policy with retention, which `--prune` does when the files no longer contain it; `--dry-run` shows the refusal beforehand, and without the scope the command exits with code 13. Reordering paths is not a change; reordering or repeating an exclude is, and `/etc` and `/etc/` differ.
 
-When the files add, change or remove `hooks`, or widen a policy that has hooks (change its `repository`, or its selector other than to a shorter `hosts` list or more `matchLabels`), whichever hosts are enrolled, the token also needs `hooks:write`, because hooks run commands as root on the hosts. The server then refuses the whole run with exit code 13 and names the scope and the policies. `--dry-run` shows the same refusal before anything is applied. Deleting a policy, with or without `--prune`, needs only `policies:write`. A problem in a file is printed as `file.yaml:LINE:COL: message` on stderr, with exit code 2.
+When the files add, change or remove `hooks`, or widen a policy that has hooks (change its `repository`, or its selector other than to a shorter `hosts` list or more `matchLabels`), whichever hosts are enrolled, the token also needs `hooks:write`, because hooks run commands as root on the hosts. The server then refuses the whole run with exit code 13 and names the scope and the policies. `--dry-run` shows the same refusal before anything is applied. Deleting a policy without retention, with or without `--prune`, needs only `policies:write`. A problem in a file is printed as `file.yaml:LINE:COL: message` on stderr, with exit code 2.
 
 A CI job that fails on drift and one that applies:
 

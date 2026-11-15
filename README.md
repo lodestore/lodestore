@@ -26,7 +26,7 @@
 Lodestore is a backup system for fleets of Linux hosts. A lightweight agent on each host writes deduplicated, encrypted data straight to S3-compatible object storage (AWS S3, MinIO, Ceph and others) or to a local or network folder such as NFS. The server only manages and catalogs, so backups never pass through it and a restore works without it.
 
 - **Restore needs only the repository and a key.** The bucket, plus the repository password or the recovery key, is enough to restore with the `lode` command line, even if the server is gone.
-- **On S3-compatible storage, hosts cannot delete their own backups.** An agent holds a key without delete rights; deletion and cleanup run only on the server, and work with S3 Object Lock and versioning.
+- **On S3-compatible storage, hosts cannot delete their own backups.** An agent holds a key without delete rights; deletion and cleanup run only on the server, and work with S3 Object Lock and versioning. In COMPLIANCE mode, even the server cannot delete locked data before its retention period ends.
 - **API tokens with narrow scopes.** Restoring files onto a host, restoring over the original files, changing backup hooks and deleting snapshots are separate scopes. The agent writes restored files only into folders its own configuration allows.
 - **One place to run many hosts.** Schedules and retention as YAML policies, alerts to Telegram, Slack, email and webhooks, Prometheus metrics, a fleet-wide search for a file across every host's snapshots, and agent updates that the agent installs only after checking a signature.
 - **Cleanup that is safe around running backups.** Two-phase garbage collection: mark, wait longer than the longest backup, check again, then delete. A dry run is always available.

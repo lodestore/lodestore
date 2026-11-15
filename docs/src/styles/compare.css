@@ -38,10 +38,32 @@
 .cmp-hero .lead {
 	margin-top: 20px;
 }
+@media (max-width: 767px) {
+	.cmp-hero::after {
+		display: none;
+	}
+	.cmp-hero .lead {
+		position: relative;
+	}
+	.cmp-hero .lead::before {
+		content: '';
+		position: absolute;
+		z-index: -1;
+		top: -10px;
+		bottom: -72px;
+		left: -100vw;
+		right: -100vw;
+		background: color-mix(in srgb, var(--primary-subtle) 65%, var(--background));
+		border-top: 1px solid color-mix(in srgb, var(--primary-strong) 25%, transparent);
+	}
+}
 @media (min-width: 1024px) {
 	.cmp-hero h1 {
 		font-size: 48px;
 	}
+}
+.prose .cmp-asof {
+	color: var(--muted-foreground);
 }
 
 .prose {

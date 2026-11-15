@@ -1,6 +1,8 @@
 pub mod apply;
 pub mod matching;
 
+use std::collections::BTreeSet;
+
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -34,6 +36,23 @@ pub(crate) fn retention_of(policy: &BackupPolicy) -> Option<&Retention> {
 
 pub(crate) const SCHEDULE_PURPOSE: &str = "run a policy with retention more often";
 pub(crate) const SCHEDULE_HORIZON_DAYS: i64 = 366;
+pub(crate) const CONTENT_PURPOSE: &str = "change what or where a policy with retention backs up";
+pub(crate) const DELETE_PURPOSE: &str = "delete a policy with retention";
+
+/// Whether an edit changes what or where a policy with retention (before or
+/// after the edit) backs up. Paths are a set because their union ignores order;
+/// excludes are a list because the last matching pattern wins and `!` re-includes.
+pub fn changes_retained_content(old: &BackupPolicy, new: &BackupPolicy) -> bool {
+    if retention_of(old).is_none() && retention_of(new).is_none() {
+        return false;
+    }
+    let (old, new) = (&old.spec, &new.spec);
+    old.paths.iter().collect::<BTreeSet<_>>() != new.paths.iter().collect::<BTreeSet<_>>()
+        || old.exclude != new.exclude
+        || old.one_file_system != new.one_file_system
+        || old.exclude_caches != new.exclude_caches
+        || old.repository != new.repository
+}
 
 const SHORTEST_GAP: SignedDuration = SignedDuration::from_secs(60);
 
@@ -675,7 +694,7 @@ pub async fn get_policy(
     request_body = PolicyUpdate,
     responses(
         (status = 200, description = "The updated policy", body = PolicyDetail),
-        (status = 403, description = "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention or a more frequent cron. A session needs the password entered in the last 15 minutes for those changes (code step_up_required)", body = ErrorBody),
+        (status = 403, description = "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention, a more frequent cron, or a change of paths, exclude, oneFileSystem, excludeCaches or repository of a policy with retention. A session needs the password entered in the last 15 minutes for those changes (code step_up_required)", body = ErrorBody),
         (status = 404, description = "Unknown policy", body = ErrorBody),
         (status = 409, description = "The policy changed since base_revision (code policy_conflict)", body = ErrorBody),
         (status = 422, description = "Invalid policy or changed name", body = ErrorBody),
@@ -702,6 +721,9 @@ pub async fn update_policy(
     {
         auth.require_also_or_step_up(Scope::SnapshotsDelete, SCHEDULE_PURPOSE)?;
     }
+    if changes_retained_content(&current.policy, &checked.policy) {
+        auth.require_also_or_step_up(Scope::SnapshotsDelete, CONTENT_PURPOSE)?;
+    }
     let old = (current.repository_id.as_str(), &current.policy);
     if gains_hook_hosts(Some(old), (&checked.repository_id, &checked.policy)) {
         auth.require_also_or_step_up(
@@ -711,13 +733,13 @@ pub async fn update_policy(
     }
     let updated = sqlx::query(
         "UPDATE policies SET repository_id = $1, yaml = $2, spec_json = $3, \
-         revision = revision + 1, updated_at = $4 WHERE name = $5 AND revision = $6",
+         revision = revision + 1, updated_at = $4 WHERE id = $5 AND revision = $6",
     )
     .bind(&checked.repository_id)
     .bind(&checked.yaml)
     .bind(serde_json::to_string(&checked.policy).map_err(|e| ApiError::Internal(e.into()))?)
     .bind(now_ms())
-    .bind(&name)
+    .bind(&current.id)
     .bind(input.base_revision)
     .execute(&state.db.pool)
     .await?
@@ -742,27 +764,32 @@ pub async fn update_policy(
     params(("name" = String, Path, description = "Policy name")),
     responses(
         (status = 204, description = "The policy is deleted"),
+        (status = 403, description = "The token lacks snapshots:delete to delete a policy with retention. A session needs the password entered in the last 15 minutes (code step_up_required)", body = ErrorBody),
         (status = 404, description = "Unknown policy", body = ErrorBody),
-        (status = 409, description = "The policy has jobs in progress", body = ErrorBody),
+        (status = 409, description = "The policy has jobs in progress, or the policy changed since it was read (code policy_conflict)", body = ErrorBody),
     )
 )]
 pub async fn delete_policy(
     State(state): State<AppState>,
-    _auth: Scoped<PoliciesWrite>,
+    auth: Scoped<PoliciesWrite>,
     Path(name): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    let row = find_policy(&state, &name).await?;
+    if retention_of(&row.policy).is_some() {
+        auth.require_also_or_step_up(Scope::SnapshotsDelete, DELETE_PURPOSE)?;
+    }
     let deleted = sqlx::query(sqlx::AssertSqlSafe(format!(
-        "DELETE FROM policies WHERE name = $1 AND NOT EXISTS \
+        "DELETE FROM policies WHERE id = $1 AND revision = $2 AND NOT EXISTS \
          (SELECT 1 FROM jobs WHERE jobs.policy_id = policies.id AND jobs.state IN ({ACTIVE_STATES}))"
     )))
-    .bind(&name)
+    .bind(&row.id)
+    .bind(row.revision)
     .execute(&state.db.pool)
     .await?
     .rows_affected();
     if deleted == 1 {
         return Ok(StatusCode::NO_CONTENT);
     }
-    let row = find_policy(&state, &name).await?;
     let active: i64 = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT COUNT(*) AS n FROM jobs WHERE policy_id = $1 AND state IN ({ACTIVE_STATES})"
     )))
@@ -770,6 +797,9 @@ pub async fn delete_policy(
     .fetch_one(&state.db.pool)
     .await?
     .try_get("n")?;
+    if active == 0 {
+        return Err(policy_conflict(&name));
+    }
     Err(ApiError::Conflict(format!(
         "Policy \"{name}\" has {active} jobs in progress. Cancel them first, then delete the policy."
     )))
@@ -930,4 +960,217 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(run_policy))
         .routes(routes!(run_host))
         .routes(routes!(list_host_policies))
+}
+
+#[cfg(test)]
+mod tests {
+    use lodestore_format::fs::filter::PathMatcher;
+    use proptest::prelude::*;
+
+    use super::*;
+
+    const BODIES: [(char, &str); 13] = [
+        ('a', "  repository: main\n  paths: [/etc]\n"),
+        ('b', "  repository: main\n  paths: [/etc, /srv]\n"),
+        ('c', "  repository: main\n  paths: [/srv, /etc]\n"),
+        ('d', "  repository: main\n  paths: [/etc/]\n"),
+        (
+            'e',
+            "  repository: main\n  paths: [/etc]\n  exclude: [\"*.log\"]\n",
+        ),
+        (
+            'f',
+            "  repository: main\n  paths: [/etc]\n  exclude: [\"*.log\", \"*.log\"]\n",
+        ),
+        (
+            'g',
+            "  repository: main\n  paths: [/etc]\n  oneFileSystem: true\n",
+        ),
+        (
+            'h',
+            "  repository: main\n  paths: [/etc]\n  excludeCaches: true\n",
+        ),
+        (
+            'i',
+            "  repository: main\n  paths: [/etc]\n  limits:\n    nice: 10\n",
+        ),
+        (
+            'j',
+            "  repository: main\n  paths: [/etc]\n  exclude: [\"*.log\", \"!keep.log\"]\n",
+        ),
+        (
+            'k',
+            "  repository: main\n  paths: [/etc]\n  exclude: [\"!keep.log\", \"*.log\"]\n",
+        ),
+        (
+            'l',
+            "  repository: main\n  paths: [/etc]\n  exclude: [\"*.log\", \"!keep.log\", \"*.log\"]\n",
+        ),
+        ('m', "  repository: other\n  paths: [/etc]\n"),
+    ];
+
+    fn spec(id: char, retention: bool) -> BackupPolicy {
+        let body = BODIES.iter().find(|(b, _)| *b == id).unwrap().1;
+        let retention = if retention {
+            "  retention:\n    keepLast: 3\n"
+        } else {
+            ""
+        };
+        lodestore_policy::parse_yaml(&format!(
+            "apiVersion: lodestore.io/v1alpha1\nkind: BackupPolicy\nmetadata:\n  name: db\n\
+             spec:\n{body}{retention}"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn content_rule_literals() {
+        for (old, new, changed) in [
+            ('b', 'c', false),
+            ('a', 'i', false),
+            ('a', 'a', false),
+            ('e', 'f', true),
+            ('j', 'k', true),
+            ('j', 'l', true),
+            ('a', 'b', true),
+            ('a', 'd', true),
+            ('a', 'e', true),
+            ('a', 'g', true),
+            ('a', 'h', true),
+            ('a', 'm', true),
+        ] {
+            assert_eq!(
+                changes_retained_content(&spec(old, true), &spec(new, true)),
+                changed,
+                "({old},{new})"
+            );
+        }
+        assert!(changes_retained_content(
+            &spec('a', true),
+            &spec('b', false)
+        ));
+        assert!(changes_retained_content(
+            &spec('a', false),
+            &spec('b', true)
+        ));
+        assert!(!changes_retained_content(
+            &spec('a', false),
+            &spec('b', false)
+        ));
+    }
+
+    const FILES: [&str; 7] = [
+        "/a/x.log",
+        "/a/keep.log",
+        "/a/b/y.txt",
+        "/a/b/keep.log",
+        "/a/b/z.log",
+        "/c/w.txt",
+        "/c/keep.log",
+    ];
+    const ROOTS: [&str; 3] = ["/a", "/a/b", "/c"];
+    const EXCLUDES: [&str; 6] = ["*.log", "!keep.log", "b/", "/c", "!/c/w.txt", "**/keep.log"];
+
+    /// The files the agent backs up: the walk starts at the outermost root
+    /// above a file and skips every entry on the way down that is excluded,
+    /// so an excluded directory hides a file `!` would bring back.
+    fn selected(policy: &BackupPolicy, tree: &[&str]) -> BTreeSet<String> {
+        let matcher = PathMatcher::new(&policy.spec.exclude).unwrap();
+        let roots: BTreeSet<&str> = policy.spec.paths.iter().map(String::as_str).collect();
+        let kept = |file: &str| {
+            let Some(root) = roots.iter().find(|r| file.starts_with(&format!("{r}/"))) else {
+                return false;
+            };
+            let mut path = (*root).to_string();
+            if matcher.is_match(path.as_bytes(), true) {
+                return false;
+            }
+            for name in file[root.len() + 1..].split('/') {
+                path = format!("{path}/{name}");
+                if matcher.is_match(path.as_bytes(), path != file) {
+                    return false;
+                }
+            }
+            true
+        };
+        tree.iter()
+            .filter(|f| kept(f))
+            .map(|f| f.to_string())
+            .collect()
+    }
+
+    fn list(alphabet: &'static [&'static str], min: usize) -> BoxedStrategy<Vec<String>> {
+        prop::collection::vec(prop::sample::select(alphabet), min..=4)
+            .prop_map(|v| v.into_iter().map(String::from).collect())
+            .boxed()
+    }
+
+    /// Mostly an edit that keeps the elements: a permutation or one element
+    /// repeated; sometimes an unrelated list.
+    fn edit(
+        old: Vec<String>,
+        alphabet: &'static [&'static str],
+        min: usize,
+    ) -> BoxedStrategy<Vec<String>> {
+        let repeat = (any::<prop::sample::Index>(), any::<prop::sample::Index>()).prop_map({
+            let old = old.clone();
+            move |(which, at)| {
+                let mut new = old.clone();
+                if !old.is_empty() {
+                    new.insert(at.index(old.len() + 1), old[which.index(old.len())].clone());
+                }
+                new
+            }
+        });
+        prop_oneof![
+            2 => Just(old).prop_shuffle(),
+            2 => repeat,
+            1 => list(alphabet, min),
+        ]
+        .boxed()
+    }
+
+    fn content(paths: Vec<String>, exclude: Vec<String>, flags: [bool; 3]) -> BackupPolicy {
+        let mut policy = spec('a', true);
+        policy.spec.paths = paths;
+        policy.spec.exclude = exclude;
+        policy.spec.one_file_system = flags[0];
+        policy.spec.exclude_caches = flags[1];
+        policy.spec.repository = if flags[2] { "other" } else { "main" }.into();
+        policy
+    }
+
+    fn pair() -> impl Strategy<Value = (BackupPolicy, BackupPolicy)> {
+        (list(&ROOTS, 1), list(&EXCLUDES, 0), any::<[bool; 3]>()).prop_flat_map(
+            |(paths, exclude, flags)| {
+                (
+                    edit(paths.clone(), &ROOTS, 1),
+                    edit(exclude.clone(), &EXCLUDES, 0),
+                    prop::array::uniform3(prop::bool::weighted(0.1)),
+                )
+                    .prop_map(move |(new_paths, new_exclude, flip)| {
+                        let new_flags = [0, 1, 2].map(|i| flags[i] ^ flip[i]);
+                        (
+                            content(paths.clone(), exclude.clone(), flags),
+                            content(new_paths, new_exclude, new_flags),
+                        )
+                    })
+            },
+        )
+    }
+
+    proptest! {
+        #[test]
+        fn unchanged_content_selects_the_same_files(
+            (old, new) in pair(),
+            tree in prop::sample::subsequence(FILES.to_vec(), 0..=FILES.len()),
+        ) {
+            if !changes_retained_content(&old, &new) {
+                prop_assert_eq!(selected(&old, &tree), selected(&new, &tree));
+                prop_assert_eq!(old.spec.one_file_system, new.spec.one_file_system);
+                prop_assert_eq!(old.spec.exclude_caches, new.spec.exclude_caches);
+                prop_assert_eq!(&old.spec.repository, &new.spec.repository);
+            }
+        }
+    }
 }

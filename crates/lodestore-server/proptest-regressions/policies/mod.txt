@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc c7238f0d87207be897c993f0f1bb345d1983db8d5823e82c530275c3c19d041d # shrinks to (old, new) = (BackupPolicy { api_version: "lodestore.io/v1alpha1", kind: "BackupPolicy", metadata: Metadata { name: "db" }, spec: PolicySpec { repository: "other", selector: Selector { match_labels: {}, hosts: None }, paths: ["/a"], exclude: ["!keep.log", "*.log"], one_file_system: true, exclude_caches: false, hooks: Hooks { before: [], after: [] }, schedule: None, retention: Some(Retention { keep_last: Some(3), keep_within: None, keep_daily: None, keep_weekly: None, keep_monthly: None, include_stdin: false }), limits: None, alerts: None } }, BackupPolicy { api_version: "lodestore.io/v1alpha1", kind: "BackupPolicy", metadata: Metadata { name: "db" }, spec: PolicySpec { repository: "other", selector: Selector { match_labels: {}, hosts: None }, paths: ["/a"], exclude: ["*.log", "!keep.log"], one_file_system: true, exclude_caches: false, hooks: Hooks { before: [], after: [] }, schedule: None, retention: Some(Retention { keep_last: Some(3), keep_within: None, keep_daily: None, keep_weekly: None, keep_monthly: None, include_stdin: false }), limits: None, alerts: None } }), tree = ["/a/x.log", "/a/b/y.txt", "/a/b/keep.log", "/a/b/z.log"]

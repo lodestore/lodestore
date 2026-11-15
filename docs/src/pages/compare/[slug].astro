@@ -11,6 +11,8 @@ export async function getStaticPaths() {
 const { entry, others } = Astro.props;
 const { Content } = await render(entry);
 const [lead, rival] = entry.data.title.split(' vs ');
+const { asOf, sources } = entry.data;
+const asOfDay = asOf?.toISOString().slice(0, 10);
 ---
 
 <Site title={entry.data.title} description={entry.data.description}>
@@ -23,7 +25,22 @@ const [lead, rival] = entry.data.title.split(' vs ');
 		</header>
 		<div class="wrap">
 			<article class="prose rise">
+				{asOfDay && <p class="cmp-asof">Facts about {rival} as of <time datetime={asOfDay}>{asOfDay}</time>.</p>}
 				<Content />
+				{
+					sources && (
+						<>
+							<h2 id="sources">Sources</h2>
+							<ul>
+								{sources.map((s) => (
+									<li>
+										<a href={s.url}>{s.title}</a>, {s.version}
+									</li>
+								))}
+							</ul>
+						</>
+					)
+				}
 			</article>
 			<div class="cmp-foot rise">
 				<p class="muted">

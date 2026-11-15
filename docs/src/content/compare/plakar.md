@@ -1,6 +1,56 @@
 ---
 title: Lodestore vs Plakar
 description: How Lodestore, a self-hosted backup server with agents, compares with Plakar and its commercial Control Plane. Facts are taken from Plakar's own documentation.
+asOf: 2026-11-15
+sources:
+  - title: "Plakar on GitHub"
+    url: "https://github.com/PlakarKorp/plakar"
+    version: "v1.1.8"
+  - title: "Plakar README"
+    url: "https://github.com/PlakarKorp/plakar/blob/main/README.md"
+    version: "v1.1.8"
+  - title: "Integrations"
+    url: "https://docs.plakar.io/docs/community/main/integrations/"
+    version: "developer-branch docs, latest release v1.1.8"
+  - title: "Azure Blob Storage integration"
+    url: "https://docs.plakar.io/docs/community/main/integrations/azblob/"
+    version: "developer-branch docs, latest release v1.1.8"
+  - title: "Google Cloud Storage integration"
+    url: "https://docs.plakar.io/docs/community/main/integrations/gcs/"
+    version: "developer-branch docs, latest release v1.1.8"
+  - title: "plakar.io"
+    url: "https://www.plakar.io/"
+    version: "page as of 2026-11-15"
+  - title: "Installation"
+    url: "https://www.plakar.io/docs/community/v1.1.0/quickstart/installation/"
+    version: "1.1.x docs, v1.1.8 builds"
+  - title: "Download"
+    url: "https://www.plakar.io/download/"
+    version: "1.1.x docs, v1.1.8 builds"
+  - title: "Control Plane overview"
+    url: "https://www.plakar.io/docs/control-plane/intro/overview/"
+    version: "page as of 2026-11-15"
+  - title: "Billing & Plans"
+    url: "https://www.plakar.io/docs/control-plane/intro/billing/"
+    version: "page as of 2026-11-15"
+  - title: "Control Plane documentation"
+    url: "https://www.plakar.io/docs/control-plane/"
+    version: "page as of 2026-11-15"
+  - title: "Control Plane resource types"
+    url: "https://docs.plakar.io/docs/control-plane/resources/"
+    version: "page as of 2026-11-15"
+  - title: "Object Storage"
+    url: "https://docs.plakar.io/docs/control-plane/resources/object-storage/"
+    version: "page as of 2026-11-15"
+  - title: "File Storage"
+    url: "https://docs.plakar.io/docs/control-plane/resources/file-storage/"
+    version: "page as of 2026-11-15"
+  - title: "S3 resource"
+    url: "https://docs.plakar.io/docs/control-plane/resources/object-storage/s3/"
+    version: "page as of 2026-11-15"
+  - title: "References"
+    url: "https://docs.plakar.io/docs/control-plane/references/"
+    version: "page as of 2026-11-15"
 ---
 Plakar is an open-source backup engine with a command-line client, and a separate commercial product, Plakar Control Plane, for managing backups across an organization. Lodestore is a self-hosted server with an agent on each host.
 
@@ -9,7 +59,7 @@ Two products carry the Plakar name, so the table below separates them where the 
 ## Why teams pick Lodestore
 
 - **Central management, self-hosted, without plans or caps.** One server with a web interface, schedules and retention, integrity checks and alerts (Telegram, Slack, email, webhooks). The server, the agent and the format are Apache-2.0.
-- **Hosts that cannot delete their own backups.** On S3-compatible storage the agent writes with a key that has no delete rights. Deletion is done by the server alone, with a two-phase cleanup that works with S3 Object Lock. See the [threat model](/docs/security/threat-model/#agent-credentials).
+- **Hosts that cannot delete their own backups.** On S3-compatible storage the agent writes with a key that has no delete rights. Deletion is done by the server alone, with a two-phase cleanup that works with S3 Object Lock. With Object Lock in COMPLIANCE mode, even the server cannot delete locked data before its retention period ends. See the [threat model](/docs/security/threat-model/#agent-credentials).
 - **Restore without the server.** The bucket and a password or recovery key are enough for `lode` to restore, and you can restore a single file from the web interface.
 - **Fleet-wide search and agent updates.** Find a file across the snapshots of every host; roll out agent updates that each agent installs only after checking a signature.
 - **A short path to the first backup.** One server image and a one-line install per host; see the [Quickstart](/docs/quickstart/).
@@ -22,6 +72,6 @@ Two products carry the Plakar name, so the table below separates them where the 
 | Protection from a compromised host | Immutable backups on object-lock storage, per the Plakar website | Immutable backups on object-lock storage, per the Plakar website | Agent key without delete rights on S3-compatible storage; deletion is server-only; the server checks every new backup an agent makes, so index metadata forged by a compromised host cannot delete the backups of other hosts or pass off an unrestorable backup as a success; the latest snapshot is picked from signed records of which host and job made each snapshot, not from the time a host writes into it; the agent writes restored files only into folders its own configuration allows, even when the server asks for more |
 | Plans | None | Free (up to 500 GB of managed data), Community (for qualifying organizations) and Enterprise | None |
 | Sources | Files, plus integrations such as PostgreSQL, MySQL, MongoDB, Microsoft SQL Server, etcd, Kubernetes, Proxmox, VMware and S3-compatible object stores | More resource types, including Proxmox | Files and directories; databases through a dump in a pre-backup hook |
-| Storage | Local folders, S3-compatible object storage and SFTP, and more through integrations | Object storage resources: S3-compatible storage, Azure Blob Storage and Google Cloud Storage | S3-compatible object storage, or a local or network folder such as NFS |
+| Storage | Local folders, S3-compatible object storage and SFTP, and more through [integrations](https://docs.plakar.io/docs/community/main/integrations/), including Azure Blob Storage and Google Cloud Storage | Object storage resources: S3-compatible storage, Azure Blob Storage and Google Cloud Storage | S3-compatible object storage, or a local or network folder such as NFS |
 | Platforms | Linux, macOS, Windows, FreeBSD | Virtual appliance | Linux, x86_64 and arm64 |
 | Web interface | Local, started with `plakar ui` | Full web interface | Fleet web interface served by the server |

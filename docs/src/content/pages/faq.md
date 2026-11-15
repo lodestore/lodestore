@@ -30,7 +30,7 @@ The agent on a host holds a write-only S3 key. It can add data and cannot read i
 
 ### How does Object Lock help?
 
-Object Lock makes S3 refuse to delete or overwrite an object version until its retention period ends, whoever asks. With it, even a stolen server key cannot destroy backups that are still inside the period. Lodestore does the deleting only on the server and works with Object Lock. The tests cover Object Lock against MinIO; test your setup on a throwaway bucket before you rely on it. See [S3 access keys and Object Lock](/docs/recipes/s3-iam-object-lock/#turn-on-object-lock).
+In COMPLIANCE mode, Object Lock makes S3 refuse to delete or overwrite an object version until its retention period ends, whoever asks. With it, even a stolen server key cannot destroy backups that are still inside the period. In GOVERNANCE mode, a user with the bypass right can still delete such a version. Lodestore does the deleting only on the server and works with Object Lock. The tests cover Object Lock against MinIO; test your setup on a throwaway bucket before you rely on it. See [S3 access keys and Object Lock](/docs/recipes/s3-iam-object-lock/#turn-on-object-lock).
 
 ### How is my data encrypted?
 

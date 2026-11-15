@@ -3,11 +3,78 @@ mod common;
 use common::{Api, TestServer, backends, bearer_client};
 use lodestore_agent::{EnrollArgs, NetOptions};
 use lodestore_server::db::now_ms;
+use lodestore_server::policies::changes_retained_content;
 use serde_json::{Value, json};
 
 const DAILY: &str = "0 3 * * *";
 const SCHEDULE_REFUSED: &str =
     "The token needs the snapshots:delete scope to run a policy with retention more often.";
+const CONTENT_REFUSED: &str = "The token needs the snapshots:delete scope to change what or where a policy with retention backs up.";
+const RETENTION_REFUSED: &str =
+    "The token needs the snapshots:delete scope to set or change retention.";
+
+const BODIES: [(char, &str); 13] = [
+    ('a', "  repository: main\n  paths: [/etc]\n"),
+    ('b', "  repository: main\n  paths: [/etc, /srv]\n"),
+    ('c', "  repository: main\n  paths: [/srv, /etc]\n"),
+    ('d', "  repository: main\n  paths: [/etc/]\n"),
+    (
+        'e',
+        "  repository: main\n  paths: [/etc]\n  exclude: [\"*.log\"]\n",
+    ),
+    (
+        'f',
+        "  repository: main\n  paths: [/etc]\n  exclude: [\"*.log\", \"*.log\"]\n",
+    ),
+    (
+        'g',
+        "  repository: main\n  paths: [/etc]\n  oneFileSystem: true\n",
+    ),
+    (
+        'h',
+        "  repository: main\n  paths: [/etc]\n  excludeCaches: true\n",
+    ),
+    (
+        'i',
+        "  repository: main\n  paths: [/etc]\n  limits:\n    nice: 10\n",
+    ),
+    (
+        'j',
+        "  repository: main\n  paths: [/etc]\n  exclude: [\"*.log\", \"!keep.log\"]\n",
+    ),
+    (
+        'k',
+        "  repository: main\n  paths: [/etc]\n  exclude: [\"!keep.log\", \"*.log\"]\n",
+    ),
+    (
+        'l',
+        "  repository: main\n  paths: [/etc]\n  exclude: [\"*.log\", \"!keep.log\", \"*.log\"]\n",
+    ),
+    ('m', "  repository: other\n  paths: [/etc]\n"),
+];
+
+fn body(id: char) -> &'static str {
+    BODIES.iter().find(|(b, _)| *b == id).unwrap().1
+}
+
+fn content_yaml(name: &str, retention: bool, body: &str) -> String {
+    let retention = if retention {
+        "  retention:\n    keepLast: 3\n"
+    } else {
+        ""
+    };
+    format!(
+        "apiVersion: lodestore.io/v1alpha1\nkind: BackupPolicy\nmetadata:\n  name: {name}\n\
+         spec:\n{body}{retention}"
+    )
+}
+
+fn oracle(old: (bool, &str), new: (bool, &str)) -> bool {
+    let parse = |(retention, body)| {
+        lodestore_policy::parse_yaml(&content_yaml("x", retention, body)).unwrap()
+    };
+    changes_retained_content(&parse(old), &parse(new))
+}
 
 fn yaml(cron: Option<&str>, retention: bool, path: &str) -> String {
     let schedule = cron.map_or(String::new(), |c| {
@@ -121,6 +188,86 @@ impl Token {
         )
         .await
     }
+
+    async fn put(&self, name: &str, yaml: String, revision: i64) -> (u16, Value) {
+        self.send(
+            reqwest::Method::PUT,
+            &format!("/api/v1/policies/{name}"),
+            &json!({ "yaml": yaml, "base_revision": revision }),
+        )
+        .await
+    }
+
+    async fn apply(&self, yaml: String, dry_run: bool) -> (u16, Value) {
+        self.send(
+            reqwest::Method::POST,
+            "/api/v1/policies/apply",
+            &json!({
+                "documents": [{ "source": "p.yaml", "yaml": yaml }],
+                "adopt": true,
+                "dry_run": dry_run,
+            }),
+        )
+        .await
+    }
+
+    async fn revision(&self, name: &str) -> Value {
+        let (status, body) = self
+            .send(
+                reqwest::Method::GET,
+                &format!("/api/v1/policies/{name}"),
+                &Value::Null,
+            )
+            .await;
+        assert_eq!(status, 200, "{name}: {body}");
+        body["revision"].clone()
+    }
+}
+
+/// Two copies of `old`, `pa-{tag}` and `pb-{tag}`, then `new` through apply
+/// dry-run on `pb`, PUT on `pa` and apply on `pb`, in that order.
+async fn write_paths(
+    session: &Session<'_>,
+    token: &Token,
+    tag: &str,
+    old: (bool, &str),
+    new: (bool, &str),
+) -> [(u16, Value); 3] {
+    let (pa, pb) = (format!("pa-{tag}"), format!("pb-{tag}"));
+    session.create(content_yaml(&pa, old.0, old.1)).await;
+    session.create(content_yaml(&pb, old.0, old.1)).await;
+    let dry_run = token.apply(content_yaml(&pb, new.0, new.1), true).await;
+    let put = token.put(&pa, content_yaml(&pa, new.0, new.1), 1).await;
+    let applied = token.apply(content_yaml(&pb, new.0, new.1), false).await;
+    [dry_run, put, applied]
+}
+
+async fn assert_all_refused(token: &Token, tag: &str, got: &[(u16, Value); 3], messages: &[&str]) {
+    for (path, (status, body)) in ["apply dry-run", "PUT", "apply"].iter().zip(got) {
+        assert_eq!(*status, 403, "{tag} {path}: {body}");
+        assert_eq!(body["code"], "forbidden", "{tag} {path}");
+        let message = body["message"].as_str().unwrap_or_default();
+        assert!(messages.contains(&message), "{tag} {path}: {body}");
+    }
+    for name in [format!("pa-{tag}"), format!("pb-{tag}")] {
+        assert_eq!(token.revision(&name).await, 1, "{name}");
+    }
+}
+
+async fn policy_count(ts: &TestServer) -> i64 {
+    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM policies")
+        .fetch_one(&ts.state().db.pool)
+        .await
+        .unwrap()
+}
+
+async fn assert_apply_settled(token: &Token, tag: &str, new: (bool, &str)) {
+    let (status, body) = token
+        .apply(content_yaml(&format!("pb-{tag}"), new.0, new.1), false)
+        .await;
+    assert_eq!(status, 200, "{tag} repeated apply: {body}");
+    assert_eq!(body["unchanged"], 1, "{tag} repeated apply: {body}");
+    assert_eq!(body["changes"], json!([]), "{tag} repeated apply: {body}");
 }
 
 async fn settle_jobs(ts: &TestServer) {
@@ -360,9 +507,8 @@ async fn retention_gates_slower_or_shifted_cron_allowed() {
             assert_eq!(status, 200, "[{what}] {cron}: {body}");
             revision = body["revision"].as_i64().unwrap();
         }
-        let (status, body) = plain
-            .update(yaml(Some("0 3 * * 1"), true, "/srv"), revision)
-            .await;
+        let relabelled = yaml(Some("0 3 * * 1"), true, "/etc").replace("role: db", "role: web");
+        let (status, body) = plain.update(relabelled, revision).await;
         assert_eq!(status, 200, "[{what}] unchanged schedule: {body}");
         ts.stop().await;
     }
@@ -423,6 +569,105 @@ async fn retention_gates_apply_faster_cron_dry_run() {
             )
             .await;
         assert_eq!(got.0, 200, "[{}] {}", backend.name(), got.1);
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retention_gates_content_rule_is_the_same_on_every_path() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        ts.create_local_repository("main").await;
+        ts.create_local_repository("other").await;
+        let session = Session {
+            api: ts.api().await,
+            ts: &ts,
+        };
+        let plain = Token::new(&ts, &["policies:read", "policies:write"]).await;
+        let what = backend.name();
+
+        for (i, old) in BODIES {
+            for (j, new) in BODIES {
+                let tag = format!("{i}-{j}");
+                let changed = oracle((true, old), (true, new));
+                let got = write_paths(&session, &plain, &tag, (true, old), (true, new)).await;
+                let expected = if changed { 403 } else { 200 };
+                assert_eq!(
+                    got.each_ref().map(|g| g.0),
+                    [expected; 3],
+                    "[{what}] ({tag}) apply dry-run, PUT, apply: {got:?}"
+                );
+                if changed {
+                    assert_all_refused(&plain, &tag, &got, &[CONTENT_REFUSED]).await;
+                } else {
+                    assert_apply_settled(&plain, &tag, (true, new)).await;
+                }
+            }
+        }
+
+        for (tag, old, new) in [("drop", true, false), ("add", false, true)] {
+            let got = write_paths(&session, &plain, tag, (old, body('a')), (new, body('b'))).await;
+            assert_all_refused(&plain, tag, &got, &[RETENTION_REFUSED, CONTENT_REFUSED]).await;
+        }
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retention_gates_content_rule_without_retention_and_on_create() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        ts.create_local_repository("main").await;
+        ts.create_local_repository("other").await;
+        let session = Session {
+            api: ts.api().await,
+            ts: &ts,
+        };
+        let plain = Token::new(&ts, &["policies:read", "policies:write"]).await;
+        let what = backend.name();
+
+        for (i, j) in [
+            ('a', 'b'),
+            ('a', 'd'),
+            ('a', 'g'),
+            ('a', 'h'),
+            ('a', 'm'),
+            ('j', 'k'),
+        ] {
+            let (old, new) = ((false, body(i)), (false, body(j)));
+            assert!(!oracle(old, new), "({i}0,{j}0)");
+            let tag = format!("{i}0-{j}0");
+            let got = write_paths(&session, &plain, &tag, old, new).await;
+            assert_eq!(
+                got.each_ref().map(|g| g.0),
+                [200; 3],
+                "[{what}] ({tag}) apply dry-run, PUT, apply: {got:?}"
+            );
+        }
+
+        let before = policy_count(&ts).await;
+        let created = plain
+            .send(
+                reqwest::Method::POST,
+                "/api/v1/policies",
+                &json!({ "yaml": content_yaml("fresh", true, body('a')) }),
+            )
+            .await;
+        let applied = plain
+            .apply(content_yaml("fresh", true, body('a')), false)
+            .await;
+        for (path, (status, body)) in [("POST", &created), ("apply", &applied)] {
+            assert_eq!(*status, 403, "[{what}] create via {path}: {body}");
+            assert_eq!(body["message"], RETENTION_REFUSED, "[{what}] {path}");
+        }
+        assert_eq!(policy_count(&ts).await, before, "[{what}]");
+
+        session.create(content_yaml("stale", true, body('a'))).await;
+        let (status, body) = plain
+            .put("stale", content_yaml("stale", true, body('b')), 7)
+            .await;
+        assert_eq!(status, 409, "[{what}] {body}");
+        assert_eq!(body["code"], "policy_conflict", "[{what}]");
         ts.stop().await;
     }
 }

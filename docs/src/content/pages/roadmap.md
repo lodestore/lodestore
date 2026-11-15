@@ -29,7 +29,7 @@ The roadmap is public and lives in the repository, so it changes together with t
 
 ## Now
 
-The current release is about one guarantee: a host that has been taken over cannot erase or forge its backup history.
+The current release is about one guarantee: on S3-compatible storage, a host that has been taken over cannot erase or forge its backup history.
 
 - **The server checks every new backup.** After a job finishes, the server opens the new data the snapshot depends on and verifies that the snapshot resolves.
 - **Signed snapshot provenance.** Each snapshot carries a signed record of which host and job made it, and the latest snapshot is picked from those records.
