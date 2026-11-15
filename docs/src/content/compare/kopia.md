@@ -1,17 +1,17 @@
 ---
 title: Lodestore vs Kopia
 description: How Lodestore, a self-hosted backup server with agents, compares with Kopia, a snapshot backup tool with a command line and a graphical interface. Facts are taken from Kopia's own documentation.
-asOf: 2026-11-12
+asOf: 2026-11-15
 sources:
   - title: "Features"
     url: "https://kopia.io/docs/features/"
-    version: "page as of 2026-11-12"
+    version: "page as of 2026-11-15"
   - title: "Repository Server"
     url: "https://kopia.io/docs/repository-server/"
-    version: "page as of 2026-11-12"
+    version: "page as of 2026-11-15"
   - title: "Repositories"
     url: "https://kopia.io/docs/repositories/"
-    version: "page as of 2026-11-12"
+    version: "page as of 2026-11-15"
   - title: "Kopia release"
     url: "https://github.com/kopia/kopia/releases/tag/v0.23.1"
     version: "v0.23.1"
@@ -21,7 +21,7 @@ Kopia is a snapshot backup tool with a command-line interface and an official gr
 ## Why teams pick Lodestore
 
 - **Built around a fleet.** Schedules and retention are set on one server for every host. A web interface shows which hosts backed up and which did not, alerts cover failed or missing backups, offline hosts and failed checks, and you can find a file across the snapshots of every host.
-- **Hosts that cannot delete their own backups.** On S3-compatible storage the agent writes with a key that has no delete rights. Deletion is done by the server alone, with a two-phase cleanup that works with S3 Object Lock. See the [threat model](/docs/security/threat-model/#agent-credentials).
+- **Deletion only by the server.** On S3-compatible storage the agent writes with a key that has no delete rights. Deletion is done by the server alone, with a two-phase cleanup that works with S3 Object Lock, so no host needs a client with full access to the repository for maintenance. With Object Lock in COMPLIANCE mode, not even the server can remove locked data before its retention period ends. See the [threat model](/docs/security/threat-model/#agent-credentials).
 - **A short path to the first backup.** One server image and a one-line install per host; see the [Quickstart](/docs/quickstart/).
 
 ## At a glance
