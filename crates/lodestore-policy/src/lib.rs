@@ -134,7 +134,7 @@ pub struct Retention {
     pub keep_weekly: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_monthly: Option<i64>,
-    /// Also applies the rules to stdin snapshots that name this policy; they form the manual pool.
+    /// Also applies the rules to stdin snapshots that name this policy; they form a pool of their own, apart from scheduled and manual snapshots.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub include_stdin: bool,
 }
