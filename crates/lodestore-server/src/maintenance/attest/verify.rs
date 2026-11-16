@@ -30,6 +30,7 @@ use super::{
 use crate::catalog::retention::{after_backup, append_event};
 use crate::catalog::{self, JobLink, open_repository};
 use crate::db::now_ms;
+use crate::grpc::dispatch::messages::clip;
 use crate::state::AppState;
 
 pub const VERIFICATION_FAILED: &str = "verification_failed";
@@ -396,8 +397,9 @@ pub async fn fail_verification(
     reason: &str,
 ) -> anyhow::Result<()> {
     let message = format!(
-        "The server could not verify the data of this backup: {reason}. Its snapshot may not \
-         restore. Run the backup again; if it fails again, check the repository."
+        "The server could not verify the data of this backup: {}. Its snapshot may not \
+         restore. Run the backup again; if it fails again, check the repository.",
+        clip(reason)
     );
     let mut tx = state.db.pool.begin().await?;
     sqlx::query(

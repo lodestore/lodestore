@@ -884,3 +884,46 @@ async fn attest_verify_fails_job_with_foreign_policy_tag() {
         env.ts.stop().await;
     }
 }
+
+#[tokio::test]
+async fn attest_verify_clips_a_long_foreign_policy_tag_in_the_job_error() {
+    for backend in backends() {
+        let env = Env::new(&backend).await;
+        env.upgrade().await;
+        let (dir, _) = env.source("long-tag");
+        let (_, keys) = env.writer_keys().await;
+        let mut writer = Writer::connect(&env.store, keys).await.unwrap();
+        let out = writer
+            .backup(
+                &[dir],
+                BackupOptions {
+                    agent_id: Some(HOST.as_bytes().to_vec()),
+                    tags: vec![format!("policy={}", "x".repeat(100_000))],
+                    ..BackupOptions::default()
+                },
+                &|_| {},
+            )
+            .await
+            .expect("backup");
+        let snapshot_id = hex32(&out.snapshot_id);
+        env.job("j1", &snapshot_id, "pending").await;
+
+        env.verify("j1").await;
+
+        assert_eq!(
+            env.column("j1", "error_code").await.as_deref(),
+            Some("verification_failed"),
+            "{}",
+            backend.name()
+        );
+        let message = env.column("j1", "error_message").await.unwrap();
+        assert!(message.contains("tagged for policy"), "{}", backend.name());
+        assert!(
+            message.len() < 4096 + 256,
+            "{}: {}",
+            backend.name(),
+            message.len()
+        );
+        env.ts.stop().await;
+    }
+}
