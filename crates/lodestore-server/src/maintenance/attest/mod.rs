@@ -66,7 +66,8 @@ pub async fn ensure_upgraded(state: &AppState, repository_id: &str) -> anyhow::R
     Ok(())
 }
 
-/// Signs what a 0.1 catalog already tied to a host and a job. The snapshot
+/// Signs what a 0.1 catalog already tied to a host and a job, when the
+/// manifest names that host: 0.1 linked rows without checking the claim. The snapshot
 /// row is the tie: job rows are purged after 90 days, so a missing one does
 /// not count against it. The database flag is a cache: the signatures are
 /// additive, so a repeat after a crash only duplicates records, which
@@ -88,6 +89,7 @@ pub async fn ensure_provenance_backfilled(
          LEFT JOIN jobs j ON j.id = s.job_id JOIN agents a ON a.id = s.host_id \
          WHERE s.repository_id = $1 AND s.host_id IS NOT NULL AND s.job_id IS NOT NULL \
          AND s.unverified_reason IS NULL AND s.verified_at IS NULL \
+         AND s.agent_id_claim = s.host_id \
          AND (j.id IS NULL OR (j.state IN ('succeeded', 'warnings') \
          AND (j.verify_state IS NULL OR j.verify_state = 'verified'))) ORDER BY s.id",
     )

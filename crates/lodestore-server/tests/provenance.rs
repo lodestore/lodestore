@@ -914,3 +914,43 @@ async fn owner_mark_skips_a_row_linked_after_it_was_read() {
         c.ts.stop().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn provenance_backfill_skips_rows_claimed_by_another_host() {
+    for backend in backends() {
+        let c = Catalog::new(&backend).await;
+        let a = c.linked("a", None).await;
+        let f = c.write("foreign", Some("ghost-host")).await;
+        let b = c.write("blank", None).await;
+        for (label, id) in [("foreign", &f), ("blank", &b)] {
+            ingest_snapshot(c.ts.state(), &c.repo, id, None)
+                .await
+                .unwrap();
+            let job = format!("job-{label}");
+            c.job(&job, id, None).await;
+            sqlx::query("UPDATE snapshots SET job_id = $1, host_id = 'host-a' WHERE id = $2")
+                .bind(&job)
+                .bind(id)
+                .execute(c.pool())
+                .await
+                .unwrap();
+        }
+
+        let signed = ensure_provenance_backfilled(c.ts.state(), &c.repo)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            signed,
+            1,
+            "[{}] the 0.1 backfill must not sign a row whose manifest names another host or none",
+            backend.name()
+        );
+        let all = [a.clone(), f.clone(), b.clone()];
+        let set = provenance(&c.ts, &c.repo).await;
+        assert_eq!(ids(&set, &all), BTreeSet::from([a]));
+        assert_eq!(verified_columns(&c.ts, &f).await, (None, None));
+        assert_eq!(verified_columns(&c.ts, &b).await, (None, None));
+        c.ts.stop().await;
+    }
+}
