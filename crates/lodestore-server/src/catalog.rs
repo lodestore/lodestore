@@ -213,12 +213,49 @@ async fn bind_host(
     }
 }
 
+struct JobBinding {
+    policy_name: Option<String>,
+    stdin_name: Option<String>,
+}
+
+async fn job_binding(state: &AppState, job_id: &str) -> anyhow::Result<JobBinding> {
+    let row = sqlx::query("SELECT policy_name, stdin_name FROM jobs WHERE id = $1")
+        .bind(job_id)
+        .fetch_optional(&state.db.pool)
+        .await?;
+    Ok(match row {
+        Some(row) => JobBinding {
+            policy_name: row.try_get("policy_name")?,
+            stdin_name: row.try_get("stdin_name")?,
+        },
+        None => JobBinding {
+            policy_name: None,
+            stdin_name: None,
+        },
+    })
+}
+
+fn check_policy_tags(tags: &[String], job: &JobBinding) -> Result<(), LinkRefused> {
+    let mismatch = tags
+        .iter()
+        .filter_map(|t| t.strip_prefix("policy="))
+        .find(|tagged| Some(*tagged) != job.policy_name.as_deref());
+    match mismatch {
+        Some(tagged) => Err(LinkRefused::Policy {
+            tagged: tagged.to_string(),
+            job: job.policy_name.clone(),
+        }),
+        None => Ok(()),
+    }
+}
+
 async fn insert_snapshot(
     state: &AppState,
     repository_id: &str,
     id: &[u8; 32],
     snapshot: &pb::Snapshot,
     link: Option<&JobLink<'_>>,
+    binding: Option<&JobBinding>,
     received: Option<i64>,
 ) -> anyhow::Result<bool> {
     let discovered = now_ms();
@@ -256,8 +293,14 @@ async fn insert_snapshot(
     )
     .bind(serde_json::to_string(&paths)?)
     .bind(serde_json::to_string(&snapshot.tags)?)
-    .bind(tag_value(&snapshot.tags, "policy"))
-    .bind(tag_value(&snapshot.tags, "stdin"))
+    .bind(match binding {
+        Some(binding) => binding.policy_name.as_deref(),
+        None => tag_value(&snapshot.tags, "policy"),
+    })
+    .bind(match binding {
+        Some(binding) => binding.stdin_name.as_deref(),
+        None => tag_value(&snapshot.tags, "stdin"),
+    })
     .bind(link.map(|l| l.job_id))
     .bind(parent)
     .bind(i64::from(snapshot.incomplete))
@@ -294,11 +337,18 @@ pub async fn ingest_snapshot(
     }
     let source = open_repository(state, repository_id).await?;
     let snapshot = read_snapshot(&source, &id).await?;
+    let binding = match &link {
+        Some(link) => Some(job_binding(state, link.job_id).await?),
+        None => None,
+    };
     if let Some(link) = &link
         && std::str::from_utf8(&snapshot.agent_id)
             .is_ok_and(|claim| !claim.is_empty() && claim != link.host_id)
     {
-        return Err(LinkRefused.into());
+        return Err(LinkRefused::Foreign.into());
+    }
+    if let Some(binding) = &binding {
+        check_policy_tags(&snapshot.tags, binding)?;
     }
     let received = source
         .store
@@ -314,6 +364,7 @@ pub async fn ingest_snapshot(
         &id,
         &snapshot,
         link.as_ref(),
+        binding.as_ref(),
         received,
     )
     .await?;
@@ -324,8 +375,22 @@ pub async fn ingest_snapshot(
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("the snapshot belongs to another host or job")]
-pub struct LinkRefused;
+pub enum LinkRefused {
+    #[error("the snapshot belongs to another host or job")]
+    Foreign,
+    #[error(
+        "the snapshot is tagged for policy \"{tagged}\", but its job has {}",
+        policy_of(job)
+    )]
+    Policy { tagged: String, job: Option<String> },
+}
+
+fn policy_of(job: &Option<String>) -> String {
+    match job {
+        Some(job) => format!("policy \"{job}\""),
+        None => "no policy".to_string(),
+    }
+}
 
 async fn link_snapshot(
     state: &AppState,
@@ -347,7 +412,7 @@ async fn link_snapshot(
     .execute(&state.db.pool)
     .await?;
     if done.rows_affected() == 0 {
-        return Err(LinkRefused.into());
+        return Err(LinkRefused::Foreign.into());
     }
     Ok(())
 }
@@ -653,7 +718,7 @@ async fn read_one(
     match read_snapshot(source, &id).await {
         Ok(snapshot) => {
             let inserted =
-                insert_snapshot(state, repository_id, &id, &snapshot, None, received).await?;
+                insert_snapshot(state, repository_id, &id, &snapshot, None, None, received).await?;
             state.catalog.update(repository_id, |s| {
                 s.read += 1;
                 s.added += u64::from(inserted);

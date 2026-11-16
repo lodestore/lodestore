@@ -25,6 +25,7 @@ const MAX_REPORTS: usize = 256;
 /// races ahead of the previous job's `JobFinished` is never refused.
 const MAX_OPEN_CLI_JOBS: i64 = 8;
 const INGEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const SNAPSHOT_POLICY_MISMATCH: &str = "snapshot_policy_mismatch";
 
 pub(crate) fn clip(text: &str) -> String {
     let mut end = text.len().min(MAX_TEXT);
@@ -451,14 +452,14 @@ async fn ingest_before_finish(
     agent_id: &str,
     job_id: &str,
     snapshot_id: &str,
-) -> anyhow::Result<Option<String>> {
+) -> anyhow::Result<(Option<String>, Option<String>)> {
     let Some(id) = parse_hex32(snapshot_id) else {
         tracing::warn!(
             agent_id,
             job_id,
             "a finished job reported a malformed snapshot id"
         );
-        return Ok(None);
+        return Ok((None, None));
     };
     let snapshot_id = hex32(&id);
     let active = sqlx::query(
@@ -470,7 +471,7 @@ async fn ingest_before_finish(
     .fetch_optional(&state.db.pool)
     .await?;
     let Some(row) = active else {
-        return Ok(Some(snapshot_id));
+        return Ok((Some(snapshot_id), None));
     };
     let repository: String = row.try_get("repository_id")?;
     let link = JobLink {
@@ -484,19 +485,32 @@ async fn ingest_before_finish(
     .await
     .unwrap_or_else(|_| Err(anyhow::anyhow!("reading the snapshot timed out")));
     match ingested {
-        Err(error) if error.is::<catalog::LinkRefused>() => {
-            tracing::warn!(
-                job_id,
-                snapshot_id,
-                "a finished job reported a snapshot it does not own"
-            );
-            Ok(None)
-        }
-        Err(error) => {
-            tracing::warn!(%error, job_id, snapshot_id, "could not read the snapshot of a finished job");
-            Ok(Some(snapshot_id))
-        }
-        Ok(_) => Ok(Some(snapshot_id)),
+        Err(error) => match error.downcast_ref::<catalog::LinkRefused>() {
+            Some(catalog::LinkRefused::Policy { .. }) => {
+                tracing::warn!(
+                    job_id,
+                    snapshot_id,
+                    %error,
+                    "a finished job reported a snapshot tagged for another policy"
+                );
+                let message =
+                    format!("The server did not accept the snapshot of this job: {error}.");
+                Ok((None, Some(clip(&message))))
+            }
+            Some(catalog::LinkRefused::Foreign) => {
+                tracing::warn!(
+                    job_id,
+                    snapshot_id,
+                    "a finished job reported a snapshot it does not own"
+                );
+                Ok((None, None))
+            }
+            None => {
+                tracing::warn!(%error, job_id, snapshot_id, "could not read the snapshot of a finished job");
+                Ok((Some(snapshot_id), None))
+            }
+        },
+        Ok(_) => Ok((Some(snapshot_id), None)),
     }
 }
 
@@ -549,11 +563,21 @@ async fn apply_finished(
         .map(|p| serde_json::to_string(&p))
         .transpose()?;
     let reported = non_empty(&f.snapshot_id).filter(|_| !is_restore);
-    let snapshot_id = match reported {
+    let (snapshot_id, refusal) = match reported {
         Some(reported) => ingest_before_finish(state, agent_id, job_id, &reported).await?,
-        None => None,
+        None => (None, None),
     };
-    let outcome = outcome_state(f.outcome);
+    let outcome = if refusal.is_some() {
+        "failed"
+    } else {
+        outcome_state(f.outcome)
+    };
+    let error_code = if refusal.is_some() {
+        Some(SNAPSHOT_POLICY_MISMATCH.to_string())
+    } else {
+        non_empty(&f.error_code)
+    };
+    let error_message = refusal.clone().or_else(|| non_empty(&f.error_message));
     let verify_state =
         (snapshot_id.is_some() && matches!(outcome, "succeeded" | "warnings")).then_some("pending");
     let done = sqlx::query(
@@ -570,8 +594,8 @@ async fn apply_finished(
     .bind(i64::from(f.incomplete))
     .bind(clamp(f.errors_total))
     .bind(clamp(f.warnings_total))
-    .bind(non_empty(&f.error_code))
-    .bind(non_empty(&f.error_message))
+    .bind(&error_code)
+    .bind(&error_message)
     .bind(detail)
     .bind(if f.finished_at_ms > 0 {
         f.finished_at_ms
@@ -598,6 +622,18 @@ async fn apply_finished(
     }
     state.registry.live.remove(job_id);
     state.registry.clear_issued(job_id);
+    if let Some(message) = &refusal
+        && let Err(error) = crate::catalog::retention::append_event(
+            state,
+            job_id,
+            "error",
+            SNAPSHOT_POLICY_MISMATCH,
+            message,
+        )
+        .await
+    {
+        tracing::warn!(%error, job_id, "writing a job log entry failed");
+    }
     Ok(true)
 }
 
