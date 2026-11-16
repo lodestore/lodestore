@@ -10,17 +10,19 @@ mod common;
 
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use adv_support::attacker_keys;
-use common::fake_agent::{Fake, Host, finished, is_ack};
-use common::{AgentEnv, Backend, TestServer};
+use common::fake_agent::{Fake, Host, finished, is_ack, report};
+use common::{AgentEnv, Backend, TestServer, wait_until};
 use lodestore_format::index::hex32;
 use lodestore_format::repo::Repository;
 use lodestore_format::store::LocalFsStore;
 use lodestore_format::writer::{BackupOptions, Writer};
 use lodestore_policy::jiff::Timestamp;
 use lodestore_proto::agent::v1::agent_message::Body as AgentBody;
-use lodestore_proto::agent::v1::{JobOutcome, JobSpec};
+use lodestore_proto::agent::v1::server_message::Body as ServerBody;
+use lodestore_proto::agent::v1::{JobCreated, JobOutcome, JobReportState, JobSpec};
 use lodestore_server::db::now_ms;
 use lodestore_server::schedule::tick;
 use prost::Message;
@@ -147,6 +149,17 @@ async fn report_finished(
     assert_eq!(fake.recv(is_ack).await, job);
 }
 
+async fn hang_up(fake: Fake, ts: &TestServer, host: &str) {
+    drop(fake);
+    assert!(
+        wait_until(Duration::from_secs(10), || async {
+            !ts.state().registry.is_online(host)
+        })
+        .await,
+        "the server still counts the host as online"
+    );
+}
+
 async fn catalog_ids(pool: &AnyPool) -> BTreeSet<String> {
     sqlx::query("SELECT id FROM snapshots")
         .fetch_all(pool)
@@ -256,7 +269,7 @@ async fn planted_tag_scenario(
     for job in &jobs {
         env.wait_job_settled(job).await;
     }
-    drop(fake);
+    hang_up(fake, server(&env, standalone), &env.host).await;
 
     env.start_agent().await;
     match pool_kind {
@@ -392,7 +405,7 @@ async fn adv_snapshot_of_an_unknown_host_is_not_linked_into_a_scheduled_retentio
     let mut fake = Fake::connect(&ts, &host, vec![]).await;
     report_finished(&mut fake, pool, &env.host, "atk", "p", "schedule", &victim).await;
     env.wait_job("atk").await;
-    drop(fake);
+    hang_up(fake, &ts, &env.host).await;
     env.start_agent().await;
     scheduled_backup(&ts, &env, &data, 4, "2026-06-01T10:20:10Z").await;
 
@@ -409,4 +422,236 @@ async fn adv_snapshot_of_an_unknown_host_is_not_linked_into_a_scheduled_retentio
     assert_eq!(linked, 0);
     env.stop().await;
     ts.stop().await;
+}
+
+const KEEP_THREE_WITH_STDIN: &str = "  retention:\n    keepLast: 3\n    includeStdin: true\n";
+
+async fn wait_job_exists(env: &AgentEnv, id: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if env.api.get(&format!("/api/v1/jobs/{id}")).await.status() == 200 {
+            return;
+        }
+        assert!(Instant::now() < deadline, "job {id} was not recorded");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn cli_job(fake: &Fake, env: &AgentEnv, id: &str, policy: &str, data: &Path) {
+    fake.send(AgentBody::JobCreated(JobCreated {
+        job_id: id.to_string(),
+        spec: Some(JobSpec {
+            policy_name: policy.to_string(),
+            stdin_name: "app.dump".to_string(),
+            paths: vec![data.display().to_string()],
+            ..Default::default()
+        }),
+        caller_uid: 0,
+        caller_gid: 0,
+        created_at_ms: now_ms(),
+    }))
+    .await;
+    wait_job_exists(env, id).await;
+}
+
+async fn finish_cli(fake: &mut Fake, env: &AgentEnv, id: &str, snapshot: &str) -> Value {
+    fake.send(AgentBody::JobFinished(finished(
+        id,
+        JobOutcome::Succeeded,
+        snapshot,
+    )))
+    .await;
+    assert_eq!(fake.recv(is_ack).await, id);
+    env.wait_job_settled(id).await
+}
+
+async fn relabel(env: &AgentEnv, value: &str) {
+    let response = env
+        .api
+        .put(
+            &format!("/api/v1/hosts/{}/labels", env.host),
+            &json!({ "labels": [{ "key": "agent", "value": value }] }),
+        )
+        .await;
+    assert_eq!(response.status(), 200);
+}
+
+async fn stdin_pool_scenario(relabel_before_create: bool) {
+    let mut env = AgentEnv::start(&Backend::Sqlite).await;
+    let data = env.work.path().join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    create_policy(
+        &env.api,
+        &env.repo_name,
+        &env.hostname,
+        "p",
+        &data,
+        KEEP_THREE_WITH_STDIN,
+    )
+    .await;
+    env.stop_agent().await;
+    let host = Host {
+        id: env.host.clone(),
+        paths: env.paths.clone(),
+    };
+    let mut fake = Fake::connect(env.ts(), &host, vec![]).await;
+
+    let mut honest = Vec::new();
+    for i in 0..PLANTED {
+        let snapshot = plant(env.ts(), &env, &data, "p", i).await;
+        let id = format!("honest-{i}");
+        cli_job(&fake, &env, &id, "p", &data).await;
+        let settled = finish_cli(&mut fake, &env, &id, &snapshot).await;
+        assert!(
+            settled["state"] == "succeeded" || settled["state"] == "warnings",
+            "{settled}"
+        );
+        honest.push(snapshot);
+    }
+
+    let ids: Vec<String> = (0..PLANTED).map(|i| format!("cli-{i}")).collect();
+    let mut snapshots = Vec::new();
+    if relabel_before_create {
+        relabel(&env, "elsewhere").await;
+        for (i, id) in ids.iter().enumerate() {
+            snapshots.push(plant(env.ts(), &env, &data, "p", 10 + i).await);
+            cli_job(&fake, &env, id, "p", &data).await;
+            finish_cli(&mut fake, &env, id, &snapshots[i]).await;
+        }
+    } else {
+        for id in &ids {
+            cli_job(&fake, &env, id, "p", &data).await;
+            let created = env.json(&format!("/api/v1/jobs/{id}")).await;
+            assert_eq!(created["policy_name"], "p", "{created}");
+        }
+        relabel(&env, "elsewhere").await;
+        for (i, id) in ids.iter().enumerate() {
+            snapshots.push(plant(env.ts(), &env, &data, "p", 10 + i).await);
+            finish_cli(&mut fake, &env, id, &snapshots[i]).await;
+        }
+    }
+
+    let catalog = catalog_ids(&env.ts().state().db.pool).await;
+    for snapshot in &honest {
+        assert!(
+            catalog.contains(snapshot),
+            "retention of policy p must not run from a CLI job of a host it no longer selects"
+        );
+    }
+    for id in &ids {
+        let settled = env.json(&format!("/api/v1/jobs/{id}")).await;
+        assert_eq!(settled["state"], "failed", "{settled}");
+        assert_eq!(
+            settled["error_code"], "snapshot_policy_mismatch",
+            "{settled}"
+        );
+        assert!(settled["policy_name"].is_null(), "{settled}");
+    }
+    drop(fake);
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adv_cli_job_naming_a_policy_that_left_the_host_does_not_run_its_retention() {
+    stdin_pool_scenario(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adv_cli_job_whose_policy_left_the_host_before_it_finished_does_not_run_its_retention() {
+    stdin_pool_scenario(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adv_reconnect_flood_of_cli_jobs_without_a_stream_does_not_evict_run_now_backups() {
+    let mut env = AgentEnv::start(&Backend::Sqlite).await;
+    let data = env.work.path().join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    create_policy(
+        &env.api,
+        &env.repo_name,
+        &env.hostname,
+        "p",
+        &data,
+        KEEP_THREE,
+    )
+    .await;
+    let mut real = Vec::new();
+    for n in 1..=3 {
+        real.push(real_backup(&env, "p", &data, n).await);
+    }
+
+    env.stop_agent().await;
+    let mut planted = Vec::new();
+    let mut reports = Vec::new();
+    for i in 0..PLANTED {
+        let snapshot = plant(env.ts(), &env, &data, "p", i).await;
+        let id = format!("cli-flood-{i}");
+        let mut r = report(&id, JobReportState::Finished);
+        r.created = Some(JobCreated {
+            job_id: id.clone(),
+            spec: Some(JobSpec {
+                policy_name: "p".to_string(),
+                paths: vec![data.display().to_string()],
+                ..Default::default()
+            }),
+            caller_uid: 0,
+            caller_gid: 0,
+            created_at_ms: now_ms(),
+        });
+        r.finished = Some(finished(&id, JobOutcome::Succeeded, &snapshot));
+        reports.push(r);
+        planted.push((id, snapshot));
+    }
+    let host = Host {
+        id: env.host.clone(),
+        paths: env.paths.clone(),
+    };
+    let mut fake = Fake::connect(env.ts(), &host, reports).await;
+    let seen = fake.drain(Duration::from_millis(1500)).await;
+    for (id, _) in &planted {
+        if env.api.get(&format!("/api/v1/jobs/{id}")).await.status() == 200 {
+            env.wait_job_settled(id).await;
+        }
+    }
+    hang_up(fake, env.ts(), &env.host).await;
+
+    env.start_agent().await;
+    real.push(real_backup(&env, "p", &data, 4).await);
+
+    let pool = &env.ts().state().db.pool;
+    let catalog = catalog_ids(pool).await;
+    let surviving: BTreeSet<String> = real
+        .iter()
+        .filter(|id| catalog.contains(*id))
+        .cloned()
+        .collect();
+    let expected: BTreeSet<String> = real[1..].iter().cloned().collect();
+    assert_eq!(
+        surviving, expected,
+        "a reconnect flood of CLI jobs without a stream must not evict run-now backups"
+    );
+    for (id, snapshot) in &planted {
+        assert!(
+            seen.iter()
+                .any(|b| matches!(b, ServerBody::JobForget(f) if &f.job_id == id)),
+            "{id} was not forgotten"
+        );
+        for (sql, what) in [
+            ("SELECT COUNT(*) AS n FROM jobs WHERE id = $1", "a job row"),
+            (
+                "SELECT COUNT(*) AS n FROM snapshots WHERE job_id = $1",
+                "a linked snapshot",
+            ),
+        ] {
+            let n: i64 = sqlx::query(sql)
+                .bind(id)
+                .fetch_one(pool)
+                .await
+                .unwrap()
+                .try_get("n")
+                .unwrap();
+            assert_eq!(n, 0, "{id} must not leave {what} ({snapshot})");
+        }
+    }
+    env.stop().await;
 }

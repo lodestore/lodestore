@@ -278,7 +278,7 @@ async fn insert_snapshot(
          warnings_total, stats_json, agent_id_claim, discovered_at, received_at, received_exact, \
          origin) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, \
-         $18, $19, (SELECT CASE WHEN j.stdin_name IS NOT NULL THEN 'stdin' ELSE j.origin END \
+         $18, $19, (SELECT CASE WHEN j.stdin_name IS NOT NULL OR j.source = 'cli' THEN 'stdin' ELSE j.origin END \
          FROM jobs j WHERE j.id = $10)) \
          ON CONFLICT (id) DO NOTHING",
     )
@@ -412,7 +412,7 @@ async fn link_snapshot(
         "UPDATE snapshots SET job_id = $1, host_id = $2, policy_name = $5, stdin_name = $6, \
          verified_at = CASE WHEN job_id IS NULL THEN NULL ELSE verified_at END, \
          verified_by = CASE WHEN job_id IS NULL THEN NULL ELSE verified_by END, \
-         origin = (SELECT CASE WHEN j.stdin_name IS NOT NULL THEN 'stdin' ELSE j.origin END \
+         origin = (SELECT CASE WHEN j.stdin_name IS NOT NULL OR j.source = 'cli' THEN 'stdin' ELSE j.origin END \
          FROM jobs j WHERE j.id = $1) \
          WHERE id = $3 AND repository_id = $4 \
          AND (job_id IS NULL OR job_id = $1) AND (host_id IS NULL OR host_id = $2)",
