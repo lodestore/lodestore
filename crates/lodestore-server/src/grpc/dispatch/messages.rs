@@ -463,7 +463,8 @@ async fn ingest_before_finish(
     };
     let snapshot_id = hex32(&id);
     let active = sqlx::query(
-        "SELECT a.repository_id FROM jobs j JOIN agents a ON a.id = j.host_id \
+        "SELECT a.repository_id, j.source, j.policy_name FROM jobs j \
+         JOIN agents a ON a.id = j.host_id \
          WHERE j.id = $1 AND j.host_id = $2 AND j.state IN ('queued', 'assigned', 'running')",
     )
     .bind(job_id)
@@ -474,6 +475,30 @@ async fn ingest_before_finish(
         return Ok((Some(snapshot_id), None));
     };
     let repository: String = row.try_get("repository_id")?;
+    let source: String = row.try_get("source")?;
+    let policy_name: Option<String> = row.try_get("policy_name")?;
+    if source == "cli"
+        && let Some(name) = policy_name
+    {
+        let checked = crate::policies::policy_id_for_host(state, &name, agent_id).await;
+        if !matches!(checked, Ok(Some(_))) {
+            tracing::warn!(
+                agent_id,
+                job_id,
+                policy = %clip(&name),
+                error = ?checked.as_ref().err(),
+                "a CLI job finished after its policy stopped selecting this host; recording it without a policy"
+            );
+            sqlx::query(
+                "UPDATE jobs SET policy_id = NULL, policy_name = NULL \
+                 WHERE id = $1 AND host_id = $2 AND source = 'cli'",
+            )
+            .bind(job_id)
+            .bind(agent_id)
+            .execute(&state.db.pool)
+            .await?;
+        }
+    }
     let link = JobLink {
         job_id,
         host_id: agent_id,

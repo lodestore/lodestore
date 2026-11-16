@@ -554,3 +554,8 @@ async fn stdin_pool_scenario(relabel_before_create: bool) {
 async fn adv_cli_job_naming_a_policy_that_left_the_host_does_not_run_its_retention() {
     stdin_pool_scenario(true).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adv_cli_job_whose_policy_left_the_host_before_it_finished_does_not_run_its_retention() {
+    stdin_pool_scenario(false).await;
+}
