@@ -334,6 +334,17 @@ impl Api {
             .expect("POST request")
     }
 
+    pub async fn put(&self, path: &str, body: &Value) -> reqwest::Response {
+        self.client
+            .put(format!("{}{path}", self.base))
+            .header("cookie", &self.cookie)
+            .header("x-csrf-token", &self.csrf)
+            .json(body)
+            .send()
+            .await
+            .expect("PUT request")
+    }
+
     pub async fn join_token(&self, repository_id: &str, labels: Value) -> String {
         let response = self
             .post(

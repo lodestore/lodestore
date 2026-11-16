@@ -416,6 +416,27 @@ pub async fn policy_for_rerun(
     Ok(Some(row.policy))
 }
 
+pub(crate) async fn policy_id_for_host(
+    state: &AppState,
+    name: &str,
+    host_id: &str,
+) -> Result<Option<String>, ApiError> {
+    let Some(row) = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "{POLICY_SELECT} WHERE p.name = $1"
+    )))
+    .bind(name)
+    .fetch_optional(&state.db.pool)
+    .await?
+    else {
+        return Ok(None);
+    };
+    let row = policy_from_row(&row)?;
+    let host = host_agent(state, host_id).await?;
+    Ok(host
+        .applies(&row.repository_id, &row.policy.spec.selector)
+        .then_some(row.id))
+}
+
 async fn all_policies(state: &AppState) -> Result<Vec<PolicyRow>, ApiError> {
     sqlx::query(sqlx::AssertSqlSafe(format!(
         "{POLICY_SELECT} ORDER BY p.name"

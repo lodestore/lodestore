@@ -677,17 +677,19 @@ async fn insert_cli_job(
     let policy_id = if spec.policy_name.is_empty() {
         None
     } else {
-        sqlx::query(
-            "SELECT p.id FROM policies p JOIN agents a ON a.repository_id = p.repository_id \
-             WHERE p.name = $1 AND a.id = $2",
-        )
-        .bind(&spec.policy_name)
-        .bind(agent_id)
-        .fetch_optional(&state.db.pool)
-        .await?
-        .map(|row| row.try_get::<String, _>("id"))
-        .transpose()?
+        let checked = crate::policies::policy_id_for_host(state, &spec.policy_name, agent_id).await;
+        if !matches!(checked, Ok(Some(_))) {
+            tracing::warn!(
+                agent_id,
+                job_id,
+                policy = %clip(&spec.policy_name),
+                error = ?checked.as_ref().err(),
+                "a CLI job names a policy that does not select this host; recording it without a policy"
+            );
+        }
+        checked.ok().flatten()
     };
+    let policy_name = policy_id.as_ref().map(|_| spec.policy_name.clone());
     let at = if created.created_at_ms > 0 {
         created.created_at_ms
     } else {
@@ -703,7 +705,7 @@ async fn insert_cli_job(
         .bind(job_id)
         .bind(agent_id)
         .bind(&policy)
-        .bind(non_empty(&spec.policy_name))
+        .bind(&policy_name)
         .bind(non_empty(&spec.stdin_name))
         .bind(spec.encode_to_vec())
         .bind(at)
