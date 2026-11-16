@@ -225,9 +225,9 @@ async fn ensure_catalog_row(
     .await
     {
         Ok(_) => Ok(None),
-        Err(error) if error.is::<catalog::LinkRefused>() => Ok(Some(Verdict::Failed(
-            "the snapshot belongs to another host or job".into(),
-        ))),
+        Err(error) if error.is::<catalog::LinkRefused>() => {
+            Ok(Some(Verdict::Failed(error.to_string())))
+        }
         Err(error) => match error.downcast_ref::<lodestore_format::Error>() {
             Some(inner) if is_data_error(inner) => Ok(Some(Verdict::Failed(inner.to_string()))),
             _ => Ok(Some(Verdict::Retry(format!("{error:#}")))),

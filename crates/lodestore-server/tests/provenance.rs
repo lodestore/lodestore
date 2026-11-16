@@ -18,13 +18,14 @@ use lodestore_format::provenance::{ProvenanceSet, Signer};
 use lodestore_format::repo::Repository;
 use lodestore_format::store::{BlobStore, LocalFsStore};
 use lodestore_format::writer::{BackupOptions, Writer};
+use lodestore_server::catalog::retention::run_for_pair;
 use lodestore_server::catalog::{
     JobLink, LinkRefused, ingest_snapshot, open_repository, sync_repository,
 };
 use lodestore_server::db::now_ms;
 use lodestore_server::maintenance::attest::verify::verify_then_retain;
 use lodestore_server::maintenance::attest::{
-    ensure_provenance_backfilled, ensure_upgraded, resume_interrupted,
+    ensure_provenance_backfilled, ensure_upgraded, mark_owner_signed, resume_interrupted,
 };
 use serde_json::{Value, json};
 use sqlx::Row;
@@ -258,7 +259,7 @@ impl Catalog {
         .unwrap();
     }
 
-    async fn attacker_job(&self, id: &str, policy: &str) {
+    async fn policy_job(&self, id: &str, policy: &str) {
         sqlx::query(
             "INSERT INTO jobs (id, host_id, policy_name, source, state, spec, queued_at, origin) \
              VALUES ($1, 'host-a', $2, 'manual', 'succeeded', $3, $4, 'schedule')",
@@ -742,7 +743,7 @@ async fn owner_verified_snapshot_of_another_host_is_not_linked_into_a_job() {
     for backend in backends() {
         let c = Catalog::new(&backend).await;
         let x = owner_verified_row(&c, "victim", &["policy=p"]).await;
-        c.attacker_job("atk", "p").await;
+        c.policy_job("atk", "p").await;
 
         let result = ingest_snapshot(
             c.ts.state(),
@@ -790,6 +791,125 @@ async fn owner_verified_snapshot_of_another_host_is_not_linked_into_a_job() {
             row.try_get::<Option<String>, _>("host_id")
                 .unwrap()
                 .is_none()
+        );
+        c.ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn owner_signature_does_not_verify_a_snapshot_linked_to_a_job_of_another_host() {
+    for backend in backends() {
+        let c = Catalog::new(&backend).await;
+        let policy = lodestore_policy::parse_yaml(
+            "apiVersion: lodestore.io/v1alpha1\nkind: BackupPolicy\nmetadata:\n  name: p\n\
+             spec:\n  repository: main\n  selector:\n    hosts: [host-a]\n  paths: [/etc]\n  \
+             retention:\n    keepLast: 1\n",
+        )
+        .unwrap();
+        let y = c.write_tagged("victim", None, &["policy=p"]).await;
+        owner_sign(&c, &y, now_secs(), 0).await;
+        sync_repository(c.ts.state(), &c.repo).await.unwrap();
+        c.policy_job("atk-2", "p").await;
+        let link = JobLink {
+            job_id: "atk-2",
+            host_id: "host-a",
+        };
+        ingest_snapshot(c.ts.state(), &c.repo, &y, Some(link))
+            .await
+            .unwrap();
+        assert_eq!(verified_columns(&c.ts, &y).await, (None, None));
+
+        for n in 1..=3 {
+            let real = c
+                .write_tagged(&format!("real-{n}"), Some("host-a"), &["policy=p"])
+                .await;
+            let job = format!("real-{n}");
+            c.policy_job(&job, "p").await;
+            let link = JobLink {
+                job_id: &job,
+                host_id: "host-a",
+            };
+            ingest_snapshot(c.ts.state(), &c.repo, &real, Some(link))
+                .await
+                .unwrap();
+            sqlx::query(
+                "UPDATE snapshots SET verified_at = $1, verified_by = 'server' WHERE id = $2",
+            )
+            .bind(now_ms())
+            .bind(&real)
+            .execute(c.pool())
+            .await
+            .unwrap();
+        }
+        sync_repository(c.ts.state(), &c.repo).await.unwrap();
+
+        assert_eq!(
+            verified_columns(&c.ts, &y).await,
+            (None, None),
+            "[{}] an owner signature must not verify a snapshot that another host's job claimed",
+            backend.name()
+        );
+        run_for_pair(c.ts.state(), &policy, "host-a", "real-3")
+            .await
+            .unwrap();
+        let kept: i64 = sqlx::query("SELECT COUNT(*) AS n FROM snapshots WHERE id = $1")
+            .bind(&y)
+            .fetch_one(c.pool())
+            .await
+            .unwrap()
+            .try_get("n")
+            .unwrap();
+        assert_eq!(kept, 1, "[{}]", backend.name());
+        c.ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn owner_mark_skips_a_row_linked_after_it_was_read() {
+    for backend in backends() {
+        let c = Catalog::new(&backend).await;
+        let y = c.write_tagged("stale", None, &[]).await;
+        ingest_snapshot(c.ts.state(), &c.repo, &y, None)
+            .await
+            .unwrap();
+        c.policy_job("atk-3", "p").await;
+        let link = JobLink {
+            job_id: "atk-3",
+            host_id: "host-a",
+        };
+        ingest_snapshot(c.ts.state(), &c.repo, &y, Some(link))
+            .await
+            .unwrap();
+
+        let marked = mark_owner_signed(c.ts.state(), &y, &c.repo, now_ms())
+            .await
+            .unwrap();
+
+        assert!(
+            !marked,
+            "[{}] an owner mark must not verify a row that a job of another host linked after the sync read it",
+            backend.name()
+        );
+        assert_eq!(verified_columns(&c.ts, &y).await, (None, None));
+
+        let z = c.write("free", None).await;
+        ingest_snapshot(c.ts.state(), &c.repo, &z, None)
+            .await
+            .unwrap();
+        assert!(
+            mark_owner_signed(c.ts.state(), &z, &c.repo, now_ms())
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            verified_columns(&c.ts, &z).await.1.as_deref(),
+            Some("owner")
+        );
+        let w = c.linked("own", None).await;
+        assert!(
+            mark_owner_signed(c.ts.state(), &w, &c.repo, now_ms())
+                .await
+                .unwrap()
         );
         c.ts.stop().await;
     }
