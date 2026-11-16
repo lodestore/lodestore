@@ -236,6 +236,15 @@ async fn job_binding(state: &AppState, job_id: &str) -> anyhow::Result<JobBindin
 }
 
 fn check_policy_tags(tags: &[String], job: &JobBinding) -> Result<(), LinkRefused> {
+    if let Some(stream) = &job.stdin_name
+        && !tags
+            .iter()
+            .any(|t| t.strip_prefix("stdin=") == Some(stream.as_str()))
+    {
+        return Err(LinkRefused::Stream {
+            job: stream.clone(),
+        });
+    }
     let mismatch = tags
         .iter()
         .filter_map(|t| t.strip_prefix("policy="))
@@ -392,6 +401,8 @@ pub enum LinkRefused {
         policy_of(job)
     )]
     Policy { tagged: String, job: Option<String> },
+    #[error("the snapshot is not a stream named \"{job}\", as its job is")]
+    Stream { job: String },
 }
 
 fn policy_of(job: &Option<String>) -> String {

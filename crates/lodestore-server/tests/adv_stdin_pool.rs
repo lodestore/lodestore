@@ -85,7 +85,11 @@ async fn plant(env: &AgentEnv, data: &Path, i: usize) -> String {
     let options = BackupOptions {
         hostname: Some(env.hostname.as_bytes().to_vec()),
         agent_id: Some(env.host.as_bytes().to_vec()),
-        tags: vec![format!("policy={POLICY}"), format!("planted-{i}")],
+        tags: vec![
+            format!("policy={POLICY}"),
+            format!("planted-{i}"),
+            "stdin=app.dump".to_string(),
+        ],
         ..Default::default()
     };
     let outcome = writer

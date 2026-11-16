@@ -741,6 +741,7 @@ enum Expect {
     Bound(Option<&'static str>, Option<&'static str>),
     Foreign,
     Policy,
+    Stream,
 }
 
 struct Case {
@@ -762,22 +763,37 @@ fn binding_cases() -> Vec<Case> {
     let untagged = [
         Expect::Bound(None, None),
         Expect::Bound(Some("J"), None),
-        Expect::Bound(Some("J"), Some("app.dump")),
+        Expect::Stream,
     ];
     let own = [
         Expect::Policy,
         Expect::Bound(Some("J"), None),
+        Expect::Stream,
+    ];
+    let foreign = [Expect::Policy, Expect::Policy, Expect::Stream];
+    let stream = [
+        Expect::Bound(None, None),
+        Expect::Bound(Some("J"), None),
         Expect::Bound(Some("J"), Some("app.dump")),
     ];
-    let tag_sets: [(&[&str], [Expect; 3]); 8] = [
+    let own_stream = [
+        Expect::Policy,
+        Expect::Bound(Some("J"), None),
+        Expect::Bound(Some("J"), Some("app.dump")),
+    ];
+    let tag_sets: [(&[&str], [Expect; 3]); 12] = [
         (&[], untagged),
         (&["policy=J"], own),
-        (&["policy=O"], [Expect::Policy; 3]),
-        (&["policy=J", "policy=O"], [Expect::Policy; 3]),
+        (&["policy=O"], foreign),
+        (&["policy=J", "policy=O"], foreign),
         (&["stdin=x"], untagged),
-        (&["policy="], [Expect::Policy; 3]),
+        (&["policy="], foreign),
         (&["policy=J", "policy=J"], own),
         (&["policyx=J"], untagged),
+        (&["stdin=app.dump"], stream),
+        (&["policy=J", "stdin=app.dump"], own_stream),
+        (&["policy=O", "stdin=app.dump"], [Expect::Policy; 3]),
+        (&["stdin=app.dumpx"], untagged),
     ];
     let mut cases = Vec::new();
     for (tags, expected) in tag_sets {
@@ -884,6 +900,7 @@ async fn link_outcome(
             match error.downcast_ref::<LinkRefused>() {
                 Some(LinkRefused::Foreign) => Err(Expect::Foreign),
                 Some(LinkRefused::Policy { .. }) => Err(Expect::Policy),
+                Some(LinkRefused::Stream { .. }) => Err(Expect::Stream),
                 None => panic!("not a refusal: {error:#}"),
             }
         }
@@ -899,7 +916,7 @@ async fn catalog_policy_binding_same_on_both_paths() {
         let a = enroll(&ts, &api, &repo, "host-a", "a").await;
         let b = enroll(&ts, &api, &repo, "host-b", "b").await;
         let cases = binding_cases();
-        assert_eq!(cases.len(), 29);
+        assert_eq!(cases.len(), 41);
 
         let write = |n: usize, case: &Case, path: &str| {
             let mut tags: Vec<String> = case.tags.iter().map(|t| t.to_string()).collect();

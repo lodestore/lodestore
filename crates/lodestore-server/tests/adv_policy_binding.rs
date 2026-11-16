@@ -97,6 +97,15 @@ async fn open_repository(ts: &TestServer) -> (LocalFsStore, Repository) {
 }
 
 async fn plant(ts: &TestServer, env: &AgentEnv, data: &Path, policy: &str, i: usize) -> String {
+    let tags = vec![
+        format!("policy={policy}"),
+        format!("planted-{i}"),
+        "stdin=app.dump".to_string(),
+    ];
+    write_snapshot(ts, env, data, tags).await
+}
+
+async fn write_snapshot(ts: &TestServer, env: &AgentEnv, data: &Path, tags: Vec<String>) -> String {
     let (store, repo) = open_repository(ts).await;
     let mut writer = Writer::new(&store, attacker_keys(&repo), repo.config())
         .await
@@ -104,7 +113,7 @@ async fn plant(ts: &TestServer, env: &AgentEnv, data: &Path, policy: &str, i: us
     let options = BackupOptions {
         hostname: Some(env.hostname.as_bytes().to_vec()),
         agent_id: Some(env.host.as_bytes().to_vec()),
-        tags: vec![format!("policy={policy}"), format!("planted-{i}")],
+        tags,
         ..Default::default()
     };
     let outcome = writer
@@ -653,5 +662,60 @@ async fn adv_reconnect_flood_of_cli_jobs_without_a_stream_does_not_evict_run_now
             assert_eq!(n, 0, "{id} must not leave {what} ({snapshot})");
         }
     }
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adv_cli_stream_job_cannot_pull_a_backup_of_its_host_into_the_stdin_pool() {
+    let mut env = AgentEnv::start(&Backend::Sqlite).await;
+    let data = env.work.path().join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    create_policy(
+        &env.api,
+        &env.repo_name,
+        &env.hostname,
+        "p",
+        &data,
+        KEEP_THREE_WITH_STDIN,
+    )
+    .await;
+    std::fs::write(data.join("file.txt"), b"the host's real data").unwrap();
+    let victim = write_snapshot(env.ts(), &env, &data, vec!["policy=p".to_string()]).await;
+    sync_catalog(&env).await;
+    assert!(
+        catalog_ids(&env.ts().state().db.pool)
+            .await
+            .contains(&victim)
+    );
+
+    env.stop_agent().await;
+    let host = Host {
+        id: env.host.clone(),
+        paths: env.paths.clone(),
+    };
+    let mut fake = Fake::connect(env.ts(), &host, vec![]).await;
+    cli_job(&fake, &env, "atk", "p", &data).await;
+    let settled = finish_cli(&mut fake, &env, "atk", &victim).await;
+    assert_eq!(settled["state"], "failed", "{settled}");
+    for i in 0..PLANTED {
+        let snapshot = plant(env.ts(), &env, &data, "p", i).await;
+        let id = format!("stream-{i}");
+        cli_job(&fake, &env, &id, "p", &data).await;
+        finish_cli(&mut fake, &env, &id, &snapshot).await;
+    }
+
+    let pool = &env.ts().state().db.pool;
+    assert!(
+        catalog_ids(pool).await.contains(&victim),
+        "a CLI stream job must not pull a backup that is not its stream into the stdin pool"
+    );
+    let linked: i64 = sqlx::query("SELECT COUNT(*) AS n FROM snapshots WHERE job_id = 'atk'")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+        .try_get("n")
+        .unwrap();
+    assert_eq!(linked, 0);
+    drop(fake);
     env.stop().await;
 }
