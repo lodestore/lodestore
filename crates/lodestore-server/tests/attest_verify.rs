@@ -835,3 +835,52 @@ async fn attest_verify_fails_job_deduped_against_shard_of_missing_pack() {
         env.ts.stop().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn attest_verify_fails_job_with_foreign_policy_tag() {
+    for backend in backends() {
+        let env = Env::new(&backend).await;
+        env.upgrade().await;
+        let (dir, _) = env.source("foreign-tag");
+        let (_, keys) = env.writer_keys().await;
+        let mut writer = Writer::connect(&env.store, keys).await.unwrap();
+        let out = writer
+            .backup(
+                &[dir],
+                BackupOptions {
+                    agent_id: Some(HOST.as_bytes().to_vec()),
+                    tags: vec!["policy=other".to_string()],
+                    ..BackupOptions::default()
+                },
+                &|_| {},
+            )
+            .await
+            .expect("backup");
+        let snapshot_id = hex32(&out.snapshot_id);
+        env.job("j1", &snapshot_id, "pending").await;
+
+        env.verify("j1").await;
+
+        assert_eq!(env.column("j1", "state").await.as_deref(), Some("failed"));
+        assert_eq!(
+            env.column("j1", "verify_state").await.as_deref(),
+            Some("failed"),
+            "{}",
+            backend.name()
+        );
+        assert_eq!(
+            env.column("j1", "error_code").await.as_deref(),
+            Some("verification_failed")
+        );
+        let message = env.column("j1", "error_message").await.unwrap();
+        assert!(message.contains("tagged for policy"), "{message}");
+        let linked: i64 = sqlx::query("SELECT COUNT(*) AS n FROM snapshots WHERE job_id = 'j1'")
+            .fetch_one(env.pool())
+            .await
+            .unwrap()
+            .try_get("n")
+            .unwrap();
+        assert_eq!(linked, 0);
+        env.ts.stop().await;
+    }
+}
