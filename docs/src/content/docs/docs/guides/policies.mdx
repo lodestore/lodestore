@@ -90,16 +90,17 @@ Counts are whole numbers of 1 or more. A snapshot is kept if any rule keeps it. 
 
 ### Scheduled and manual snapshots
 
-The snapshots of a policy on a host form two pools, and the rules above apply to each pool on its own:
+The snapshots of a policy on a host form up to three pools, and the rules above apply to each pool on its own:
 
 - **Scheduled**: backups started by the schedule, including catch-up backups.
 - **Manual**: backups started by hand, from the web interface, `lode server policies run`, `lode server jobs run` or the API.
+- **Stdin**: snapshots of `lode backup --stdin --policy NAME` through the agent, only when the policy sets `includeStdin` (see below).
 
 A series of manual runs therefore rotates only the manual snapshots and never touches the scheduled history. A manual backup taken before a risky change stays until later manual backups push it out of the rules. Snapshots that were made before the server recorded how they started, and whose job records the server had already deleted (jobs are kept for 90 days), count as scheduled.
 
 ### Stdin snapshots
 
-A snapshot made with `lode backup --stdin --policy NAME` is outside retention by default: it takes no slot in any rule and is never forgotten, like a stdin snapshot without a policy. It also does not count as the last successful backup of the policy for alerts and metrics. To let retention rotate them, set `includeStdin: true` under `retention`; they then join the manual pool. Setting it needs the `snapshots:delete` scope for a token, like any other retention change. Clearing every retention rule in the policy form also turns `includeStdin` off, so rules added again in the same session do not bring it back.
+A snapshot made with `lode backup --stdin --policy NAME` is outside retention by default: it takes no slot in any rule and is never forgotten, like a stdin snapshot without a policy. It also does not count as the last successful backup of the policy for alerts and metrics. The name `NAME` must be a policy that selects the host, both when the stream starts and when it ends; otherwise the job fails on the server with `snapshot_policy_mismatch` and the snapshot is not counted under that policy. To let retention rotate them, set `includeStdin: true` under `retention`; they then form a pool of their own and push out neither manual nor scheduled snapshots. Setting it needs the `snapshots:delete` scope for a token, like any other retention change. Clearing every retention rule in the policy form also turns `includeStdin` off, so rules added again in the same session do not bring it back.
 
 ```yaml
   retention:
