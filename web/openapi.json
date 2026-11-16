@@ -12449,7 +12449,7 @@
         "properties": {
           "includeStdin": {
             "type": "boolean",
-            "description": "Also applies the rules to stdin snapshots that name this policy; they form the manual pool."
+            "description": "Also applies the rules to stdin snapshots that name this policy; they form a pool of their own, apart from scheduled and manual snapshots."
           },
           "keepDaily": {
             "type": [

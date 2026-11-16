@@ -66,6 +66,7 @@ pub struct RetentionPlan {
 enum Pool {
     Scheduled,
     Manual,
+    Stdin,
 }
 
 struct PairRow {
@@ -127,7 +128,9 @@ fn pair_row(r: &sqlx::any::AnyRow, include_stdin: bool) -> anyhow::Result<Option
     if is_stdin && !include_stdin {
         return Ok(None);
     }
-    let pool = if is_stdin || origin.as_deref() == Some("manual") {
+    let pool = if is_stdin {
+        Pool::Stdin
+    } else if origin.as_deref() == Some("manual") {
         Pool::Manual
     } else {
         Pool::Scheduled
@@ -163,7 +166,7 @@ fn decide(policy: &BackupPolicy, rules: &Retention, rows: &[&PairRow]) -> Vec<De
             .collect();
     }
     let timezone = timezone_of(&policy.spec);
-    let mut decisions: Vec<Decision> = [Pool::Scheduled, Pool::Manual]
+    let mut decisions: Vec<Decision> = [Pool::Scheduled, Pool::Manual, Pool::Stdin]
         .into_iter()
         .flat_map(|pool| {
             let candidates: Vec<Candidate> = rows
