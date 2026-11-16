@@ -18,7 +18,9 @@ use lodestore_format::provenance::{ProvenanceSet, Signer};
 use lodestore_format::repo::Repository;
 use lodestore_format::store::{BlobStore, LocalFsStore};
 use lodestore_format::writer::{BackupOptions, Writer};
-use lodestore_server::catalog::{JobLink, ingest_snapshot, open_repository, sync_repository};
+use lodestore_server::catalog::{
+    JobLink, LinkRefused, ingest_snapshot, open_repository, sync_repository,
+};
 use lodestore_server::db::now_ms;
 use lodestore_server::maintenance::attest::verify::verify_then_retain;
 use lodestore_server::maintenance::attest::{
@@ -221,6 +223,10 @@ impl Catalog {
     }
 
     async fn write(&self, label: &str, agent: Option<&str>) -> String {
+        self.write_tagged(label, agent, &[]).await
+    }
+
+    async fn write_tagged(&self, label: &str, agent: Option<&str>, tags: &[&str]) -> String {
         let store = store(&self.ts);
         let repo = Repository::open(&store, PASSWORD).await.unwrap();
         let keys = repo.read_keys().write_keys(repo.config_hash());
@@ -230,6 +236,7 @@ impl Catalog {
         std::fs::write(data.join("f.txt"), format!("content of {label}")).unwrap();
         let options = BackupOptions {
             agent_id: agent.map(|a| a.as_bytes().to_vec()),
+            tags: tags.iter().map(|t| t.to_string()).collect(),
             ..BackupOptions::default()
         };
         let out = writer.backup(&[data], options, &|_| {}).await.unwrap();
@@ -246,6 +253,20 @@ impl Catalog {
         .bind(now_ms())
         .bind(snapshot)
         .bind(verify_state)
+        .execute(self.pool())
+        .await
+        .unwrap();
+    }
+
+    async fn attacker_job(&self, id: &str, policy: &str) {
+        sqlx::query(
+            "INSERT INTO jobs (id, host_id, policy_name, source, state, spec, queued_at, origin) \
+             VALUES ($1, 'host-a', $2, 'manual', 'succeeded', $3, $4, 'schedule')",
+        )
+        .bind(id)
+        .bind(policy)
+        .bind(Vec::<u8>::new())
+        .bind(now_ms())
         .execute(self.pool())
         .await
         .unwrap();
@@ -679,6 +700,97 @@ async fn provenance_reconcile_marks_owner_signed() {
         let (at, by) = verified_columns(&c.ts, &snapshot).await;
         assert!(at.is_some(), "[{}]", backend.name());
         assert_eq!(by.as_deref(), Some("owner"));
+        c.ts.stop().await;
+    }
+}
+
+fn now_secs() -> i64 {
+    i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    )
+    .unwrap()
+}
+
+async fn owner_verified_row(c: &Catalog, label: &str, tags: &[&str]) -> String {
+    let snapshot = c.write_tagged(label, Some("ghost-host"), tags).await;
+    owner_sign(c, &snapshot, now_secs(), 0).await;
+    sync_repository(c.ts.state(), &c.repo).await.unwrap();
+    let row = sqlx::query("SELECT host_id, verified_by FROM snapshots WHERE id = $1")
+        .bind(&snapshot)
+        .fetch_one(c.pool())
+        .await
+        .unwrap();
+    assert!(
+        row.try_get::<Option<String>, _>("host_id")
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        row.try_get::<Option<String>, _>("verified_by")
+            .unwrap()
+            .as_deref(),
+        Some("owner")
+    );
+    snapshot
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn owner_verified_snapshot_of_another_host_is_not_linked_into_a_job() {
+    for backend in backends() {
+        let c = Catalog::new(&backend).await;
+        let x = owner_verified_row(&c, "victim", &["policy=p"]).await;
+        c.attacker_job("atk", "p").await;
+
+        let result = ingest_snapshot(
+            c.ts.state(),
+            &c.repo,
+            &x,
+            Some(JobLink {
+                job_id: "atk",
+                host_id: "host-a",
+            }),
+        )
+        .await;
+
+        let pooled: i64 = sqlx::query(
+            "SELECT COUNT(*) AS n FROM snapshots WHERE id = $1 AND host_id = 'host-a' \
+             AND policy_name = 'p' AND job_id IS NOT NULL AND verified_at IS NOT NULL",
+        )
+        .bind(&x)
+        .fetch_one(c.pool())
+        .await
+        .unwrap()
+        .try_get("n")
+        .unwrap();
+        assert_eq!(
+            pooled,
+            0,
+            "[{}] a host-less owner-verified snapshot must not join the pool of another host's job",
+            backend.name()
+        );
+        let error = result.unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<LinkRefused>(),
+            Some(LinkRefused::Foreign)
+        ));
+        let row = sqlx::query("SELECT job_id, host_id FROM snapshots WHERE id = $1")
+            .bind(&x)
+            .fetch_one(c.pool())
+            .await
+            .unwrap();
+        assert!(
+            row.try_get::<Option<String>, _>("job_id")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            row.try_get::<Option<String>, _>("host_id")
+                .unwrap()
+                .is_none()
+        );
         c.ts.stop().await;
     }
 }

@@ -323,15 +323,24 @@ pub async fn ingest_snapshot(
     link: Option<JobLink<'_>>,
 ) -> anyhow::Result<bool> {
     let id = parse_hex32(snapshot_id).context("snapshot id must be 64 hex characters")?;
-    let known = sqlx::query("SELECT 1 FROM snapshots WHERE id = $1 AND repository_id = $2")
-        .bind(hex32(&id))
-        .bind(repository_id)
-        .fetch_optional(&state.db.pool)
-        .await?
-        .is_some();
-    if known {
+    let known = sqlx::query(
+        "SELECT tags_json, agent_id_claim FROM snapshots WHERE id = $1 AND repository_id = $2",
+    )
+    .bind(hex32(&id))
+    .bind(repository_id)
+    .fetch_optional(&state.db.pool)
+    .await?;
+    if let Some(known) = known {
         if let Some(link) = &link {
-            link_snapshot(state, repository_id, &id, link).await?;
+            let claim: Option<String> = known.try_get("agent_id_claim")?;
+            if claim.is_some_and(|claim| !claim.is_empty() && claim != link.host_id) {
+                return Err(LinkRefused::Foreign.into());
+            }
+            let tags: Vec<String> =
+                serde_json::from_str(&known.try_get::<String, _>("tags_json")?)?;
+            let binding = job_binding(state, link.job_id).await?;
+            check_policy_tags(&tags, &binding)?;
+            link_snapshot(state, repository_id, &id, link, &binding).await?;
         }
         return Ok(false);
     }
@@ -368,8 +377,8 @@ pub async fn ingest_snapshot(
         received,
     )
     .await?;
-    if !inserted && let Some(link) = &link {
-        link_snapshot(state, repository_id, &id, link).await?;
+    if !inserted && let (Some(link), Some(binding)) = (&link, &binding) {
+        link_snapshot(state, repository_id, &id, link, binding).await?;
     }
     Ok(inserted)
 }
@@ -397,9 +406,12 @@ async fn link_snapshot(
     repository_id: &str,
     id: &[u8; 32],
     link: &JobLink<'_>,
+    binding: &JobBinding,
 ) -> anyhow::Result<()> {
     let done = sqlx::query(
-        "UPDATE snapshots SET job_id = $1, host_id = $2, \
+        "UPDATE snapshots SET job_id = $1, host_id = $2, policy_name = $5, stdin_name = $6, \
+         verified_at = CASE WHEN job_id IS NULL THEN NULL ELSE verified_at END, \
+         verified_by = CASE WHEN job_id IS NULL THEN NULL ELSE verified_by END, \
          origin = (SELECT CASE WHEN j.stdin_name IS NOT NULL THEN 'stdin' ELSE j.origin END \
          FROM jobs j WHERE j.id = $1) \
          WHERE id = $3 AND repository_id = $4 \
@@ -409,6 +421,8 @@ async fn link_snapshot(
     .bind(link.host_id)
     .bind(hex32(id))
     .bind(repository_id)
+    .bind(binding.policy_name.as_deref())
+    .bind(binding.stdin_name.as_deref())
     .execute(&state.db.pool)
     .await?;
     if done.rows_affected() == 0 {

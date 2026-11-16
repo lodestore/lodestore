@@ -330,3 +330,83 @@ async fn adv_snapshot_tagged_for_another_policy_does_not_enter_its_scheduled_ret
     planted_tag_scenario(env, Some(&ts), Pool::Scheduled, false).await;
     ts.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adv_known_snapshot_tagged_for_another_policy_is_not_linked_into_its_retention() {
+    let env = AgentEnv::start(&Backend::Sqlite).await;
+    planted_tag_scenario(env, None, Pool::Manual, true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adv_snapshot_of_an_unknown_host_is_not_linked_into_a_scheduled_retention() {
+    let ts = TestServer::start_with(&Backend::Sqlite, |c| c.schedule_tick_secs = 0).await;
+    let repo = ts.create_local_repository("main").await;
+    let mut env = AgentEnv::start_on(&ts, &repo, "main", "host-a").await;
+    let data = env.work.path().join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    create_policy(
+        &env.api,
+        &env.repo_name,
+        &env.hostname,
+        "p",
+        &data,
+        &format!("{SCHEDULE}{KEEP_THREE}"),
+    )
+    .await;
+    tick(ts.state(), "2026-06-01T10:02:00Z".parse().unwrap())
+        .await
+        .unwrap();
+
+    let victim_data = env.work.path().join("victim");
+    std::fs::create_dir_all(&victim_data).unwrap();
+    std::fs::write(victim_data.join("file.txt"), b"data of another host").unwrap();
+    let (store, opened) = open_repository(&ts).await;
+    let keys = opened.read_keys().write_keys(opened.config_hash());
+    let mut writer = Writer::new(&store, keys, opened.config()).await.unwrap();
+    let options = BackupOptions {
+        hostname: Some(b"laptop".to_vec()),
+        agent_id: Some(b"ghost-host".to_vec()),
+        tags: vec!["policy=p".to_string()],
+        ..Default::default()
+    };
+    let victim = hex32(
+        &writer
+            .backup(&[victim_data], options, &|_| {})
+            .await
+            .unwrap()
+            .snapshot_id,
+    );
+    sync_catalog(&env).await;
+    let pool = &ts.state().db.pool;
+    assert!(catalog_ids(pool).await.contains(&victim));
+
+    for n in 1..=3 {
+        let slot = format!("2026-06-01T10:{:02}:10Z", 5 * n);
+        scheduled_backup(&ts, &env, &data, n, &slot).await;
+    }
+    env.stop_agent().await;
+    let host = Host {
+        id: env.host.clone(),
+        paths: env.paths.clone(),
+    };
+    let mut fake = Fake::connect(&ts, &host, vec![]).await;
+    report_finished(&mut fake, pool, &env.host, "atk", "p", "schedule", &victim).await;
+    env.wait_job("atk").await;
+    drop(fake);
+    env.start_agent().await;
+    scheduled_backup(&ts, &env, &data, 4, "2026-06-01T10:20:10Z").await;
+
+    assert!(
+        catalog_ids(pool).await.contains(&victim),
+        "a snapshot of an unknown host must not be forgotten by the retention of an attacker's job"
+    );
+    let linked: i64 = sqlx::query("SELECT COUNT(*) AS n FROM snapshots WHERE job_id = 'atk'")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+        .try_get("n")
+        .unwrap();
+    assert_eq!(linked, 0);
+    env.stop().await;
+    ts.stop().await;
+}
