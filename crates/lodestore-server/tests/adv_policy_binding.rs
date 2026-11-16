@@ -13,7 +13,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use adv_support::attacker_keys;
-use common::fake_agent::{Fake, Host, finished, is_ack};
+use common::fake_agent::{Fake, Host, finished, is_ack, report};
 use common::{AgentEnv, Backend, TestServer, wait_until};
 use lodestore_format::index::hex32;
 use lodestore_format::repo::Repository;
@@ -21,7 +21,8 @@ use lodestore_format::store::LocalFsStore;
 use lodestore_format::writer::{BackupOptions, Writer};
 use lodestore_policy::jiff::Timestamp;
 use lodestore_proto::agent::v1::agent_message::Body as AgentBody;
-use lodestore_proto::agent::v1::{JobCreated, JobOutcome, JobSpec};
+use lodestore_proto::agent::v1::server_message::Body as ServerBody;
+use lodestore_proto::agent::v1::{JobCreated, JobOutcome, JobReportState, JobSpec};
 use lodestore_server::db::now_ms;
 use lodestore_server::schedule::tick;
 use prost::Message;
@@ -558,4 +559,99 @@ async fn adv_cli_job_naming_a_policy_that_left_the_host_does_not_run_its_retenti
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn adv_cli_job_whose_policy_left_the_host_before_it_finished_does_not_run_its_retention() {
     stdin_pool_scenario(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adv_reconnect_flood_of_cli_jobs_without_a_stream_does_not_evict_run_now_backups() {
+    let mut env = AgentEnv::start(&Backend::Sqlite).await;
+    let data = env.work.path().join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    create_policy(
+        &env.api,
+        &env.repo_name,
+        &env.hostname,
+        "p",
+        &data,
+        KEEP_THREE,
+    )
+    .await;
+    let mut real = Vec::new();
+    for n in 1..=3 {
+        real.push(real_backup(&env, "p", &data, n).await);
+    }
+
+    env.stop_agent().await;
+    let mut planted = Vec::new();
+    let mut reports = Vec::new();
+    for i in 0..PLANTED {
+        let snapshot = plant(env.ts(), &env, &data, "p", i).await;
+        let id = format!("cli-flood-{i}");
+        let mut r = report(&id, JobReportState::Finished);
+        r.created = Some(JobCreated {
+            job_id: id.clone(),
+            spec: Some(JobSpec {
+                policy_name: "p".to_string(),
+                paths: vec![data.display().to_string()],
+                ..Default::default()
+            }),
+            caller_uid: 0,
+            caller_gid: 0,
+            created_at_ms: now_ms(),
+        });
+        r.finished = Some(finished(&id, JobOutcome::Succeeded, &snapshot));
+        reports.push(r);
+        planted.push((id, snapshot));
+    }
+    let host = Host {
+        id: env.host.clone(),
+        paths: env.paths.clone(),
+    };
+    let mut fake = Fake::connect(env.ts(), &host, reports).await;
+    let seen = fake.drain(Duration::from_millis(1500)).await;
+    for (id, _) in &planted {
+        if env.api.get(&format!("/api/v1/jobs/{id}")).await.status() == 200 {
+            env.wait_job_settled(id).await;
+        }
+    }
+    hang_up(fake, env.ts(), &env.host).await;
+
+    env.start_agent().await;
+    real.push(real_backup(&env, "p", &data, 4).await);
+
+    let pool = &env.ts().state().db.pool;
+    let catalog = catalog_ids(pool).await;
+    let surviving: BTreeSet<String> = real
+        .iter()
+        .filter(|id| catalog.contains(*id))
+        .cloned()
+        .collect();
+    let expected: BTreeSet<String> = real[1..].iter().cloned().collect();
+    assert_eq!(
+        surviving, expected,
+        "a reconnect flood of CLI jobs without a stream must not evict run-now backups"
+    );
+    for (id, snapshot) in &planted {
+        assert!(
+            seen.iter()
+                .any(|b| matches!(b, ServerBody::JobForget(f) if &f.job_id == id)),
+            "{id} was not forgotten"
+        );
+        for (sql, what) in [
+            ("SELECT COUNT(*) AS n FROM jobs WHERE id = $1", "a job row"),
+            (
+                "SELECT COUNT(*) AS n FROM snapshots WHERE job_id = $1",
+                "a linked snapshot",
+            ),
+        ] {
+            let n: i64 = sqlx::query(sql)
+                .bind(id)
+                .fetch_one(pool)
+                .await
+                .unwrap()
+                .try_get("n")
+                .unwrap();
+            assert_eq!(n, 0, "{id} must not leave {what} ({snapshot})");
+        }
+    }
+    env.stop().await;
 }

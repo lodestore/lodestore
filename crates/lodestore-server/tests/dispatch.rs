@@ -912,6 +912,51 @@ async fn dispatch_cli_job_keeps_only_a_policy_that_selects_the_host() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dispatch_cli_job_without_a_stream_is_refused() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let pool = &ts.state().db.pool;
+        let without_stream = |id: &str| {
+            let mut created = cli_created(id);
+            created.spec.as_mut().unwrap().stdin_name.clear();
+            created
+        };
+
+        let host = enroll(&ts, &api, &repo, "host-a").await;
+        let mut agent = Fake::connect(&ts, &host, vec![]).await;
+        agent
+            .send(AgentBody::JobCreated(without_stream("no-stream")))
+            .await;
+        agent
+            .send(AgentBody::JobCreated(cli_created("stream")))
+            .await;
+        wait_state(pool, "stream", "running").await;
+        let seen = agent.drain(Duration::from_millis(1000)).await;
+        assert_eq!(forgotten(&seen), vec!["no-stream".to_string()]);
+        assert_eq!(
+            state_of(pool, "no-stream").await,
+            "<missing>",
+            "[{}]",
+            backend.name()
+        );
+        drop(agent);
+
+        let host = enroll(&ts, &api, &repo, "host-b").await;
+        let mut r = report("reported", JobReportState::Finished);
+        r.created = Some(without_stream("reported"));
+        r.finished = Some(finished("reported", JobOutcome::Warnings, ""));
+        let mut agent = Fake::connect(&ts, &host, vec![r]).await;
+        let seen = agent.drain(Duration::from_millis(1500)).await;
+        assert_eq!(forgotten(&seen), vec!["reported".to_string()]);
+        assert_eq!(state_of(pool, "reported").await, "<missing>");
+        drop(agent);
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn adv_cli_job_flood_is_capped() {
     for backend in backends() {
         let ts = TestServer::start(&backend).await;

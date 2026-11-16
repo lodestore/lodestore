@@ -673,6 +673,22 @@ async fn insert_cli_job(
         tracing::warn!(agent_id, "an agent reported a job with a malformed id");
         return Ok(false);
     }
+    let spec = created.spec.clone().unwrap_or_default();
+    if spec.stdin_name.is_empty() {
+        tracing::warn!(
+            agent_id,
+            job_id,
+            "an agent reported a CLI job without a stream name; telling it to forget the job"
+        );
+        send(
+            state,
+            agent_id,
+            ServerBody::JobForget(JobForget {
+                job_id: job_id.to_string(),
+            }),
+        );
+        return Ok(false);
+    }
     if !finished {
         let open: i64 = sqlx::query(
             "SELECT COUNT(*) FROM jobs WHERE host_id = $1 AND source = 'cli' \
@@ -698,7 +714,6 @@ async fn insert_cli_job(
             return Ok(false);
         }
     }
-    let spec = created.spec.clone().unwrap_or_default();
     let policy_id = if spec.policy_name.is_empty() {
         None
     } else {
