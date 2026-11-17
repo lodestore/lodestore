@@ -1,11 +1,17 @@
 //! Canonical source keys: one spelling per identity, no two identities on one
 //! key, and nothing outside the canonical form parses.
 
+use crate::gc_support;
+
+use gc_support::Fx;
+
 use lodestore_format::Error;
 use lodestore_format::pb;
+use lodestore_format::reader::Reader;
 use lodestore_format::source::{
     self, MAX_META_ENTRIES, MAX_META_KEY_LEN, MAX_META_VALUE_LEN, Meta, SourceKey, SourceType,
 };
+use lodestore_format::writer::BackupOptions;
 use proptest::prelude::*;
 
 const UUID_A: &str = "0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d";
@@ -307,6 +313,41 @@ fn source_labels() {
             &SourceKey::postgres_wal(7).unwrap(),
             &meta(&[("database", "a")])
         ),
+        None
+    );
+}
+
+#[tokio::test]
+async fn writer_records_the_claimed_source() {
+    let fx = Fx::new().await;
+    let key = SourceKey::proxmox_vm("pve1", UUID_A).unwrap();
+    let meta = Meta::from([("vmid".into(), "101".into())]);
+    let claimed = source::encode(&key, &meta).unwrap();
+    assert!(claimed.is_some());
+
+    let mut w = fx.open_writer().await;
+    let src = fx.make_src("claimed", &[("f", 1, 1000)]);
+    let options = BackupOptions {
+        source: claimed.clone(),
+        ..Default::default()
+    };
+    let with = w.backup(&[src], options, &|_| {}).await.unwrap();
+    let src = fx.make_src("plain", &[("f", 2, 1000)]);
+    let without = w
+        .backup(&[src], BackupOptions::default(), &|_| {})
+        .await
+        .unwrap();
+
+    let reader =
+        Reader::open(&fx.store, fx.repo.read_keys().duplicate(), fx.repo.config()).unwrap();
+    let recorded = reader.snapshot(&with.snapshot_id).await.unwrap();
+    assert_eq!(recorded.source, claimed);
+    assert_eq!(
+        source::decode(recorded.source.as_ref()).unwrap(),
+        (key, meta)
+    );
+    assert_eq!(
+        reader.snapshot(&without.snapshot_id).await.unwrap().source,
         None
     );
 }
