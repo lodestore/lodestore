@@ -22,6 +22,8 @@ cargo tree -i openssl-sys
 
 The last command must report that `openssl-sys` did not match any packages: Lodestore uses rustls with aws-lc-rs and no OpenSSL. Do not add `native-tls` or `ring`.
 
+The integration tests of a crate are modules of one binary, `crates/<crate>/tests/it/main.rs`: a new test file goes in `tests/it/` and needs a `mod <name>;` line in `main.rs`, and its tests are named `<name>::<test>`.
+
 Tests that talk to S3 download a pinned MinIO release and check its sha256; they need network access the first time. Tests that need root, extended attributes or systemd are marked `#[ignore]` and run with `scripts/test-linux.sh --root` on a Linux machine. Tests against PostgreSQL run with `scripts/test-postgres.sh`.
 
 The web interface and the documentation:
@@ -103,7 +105,7 @@ By submitting a change you agree that it is licensed under the [License](#licens
 The repository format is frozen by committed data, because a silent change to chunk boundaries or encoding breaks deduplication and old repositories.
 
 - Do not change the chunker, the encoding, the key derivation or the ciphers casually. `fastcdc` is pinned to an exact version for this reason.
-- A change that alters any output must update the golden vectors in `crates/lodestore-format/tests/vectors.rs` deliberately, and explain in the pull request why the change is needed.
+- A change that alters any output must update the golden vectors in `crates/lodestore-format/tests/it/vectors.rs` deliberately, and explain in the pull request why the change is needed.
 - Files under `crates/lodestore-format/tests/fixtures/v1` may only be added to, never modified, deleted or renamed; CI enforces this with `scripts/check-fixtures-append-only.sh`. A format change that old repositories cannot survive ships as `format_version` 2 with its own fixtures next to the old ones.
 
 ## License
