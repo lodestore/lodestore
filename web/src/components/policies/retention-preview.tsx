@@ -354,7 +354,7 @@ function InstanceRow({
 	return (
 		<Collapsible asChild>
 			<TableBody>
-				<TableRow>
+				<TableRow className="h-12">
 					<TableCell className="max-w-0 min-w-40">
 						<CollapsibleTrigger asChild>
 							<button
