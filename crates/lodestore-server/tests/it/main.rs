@@ -84,6 +84,7 @@ mod restore_s3;
 mod restore_scopes;
 mod retention;
 mod retention_gates;
+mod retention_instances;
 mod retention_pools;
 mod retention_s3;
 mod schedule;

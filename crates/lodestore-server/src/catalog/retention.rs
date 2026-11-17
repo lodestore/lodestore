@@ -46,6 +46,9 @@ pub struct PlanItem {
     pub received_at_ms: i64,
     pub time_ms: i64,
     pub suspicious: bool,
+    pub source_type: String,
+    pub source_ref: String,
+    pub source_label: Option<String>,
     pub keep: bool,
     pub reasons: Vec<Rule>,
 }
@@ -62,11 +65,11 @@ pub struct RetentionPlan {
     pub hosts: Vec<HostPlan>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum Pool {
     Scheduled,
     Manual,
-    Stdin,
+    Stdin(String),
 }
 
 struct PairRow {
@@ -75,16 +78,21 @@ struct PairRow {
     hostname: String,
     time_ms: i64,
     exact: bool,
+    source_type: String,
+    source_ref: String,
+    source_label: Option<String>,
     candidate: Candidate,
 }
 
 const PAIRS_SQL: &str = "SELECT s.id, s.host_id, a.hostname, s.time_ms, s.received_at, \
-     s.received_exact, s.suspicious, s.incomplete, s.origin, s.stdin_name FROM snapshots s \
+     s.received_exact, s.suspicious, s.incomplete, s.origin, s.stdin_name, \
+     s.source_type, s.source_ref, s.source_label FROM snapshots s \
      JOIN agents a ON a.id = s.host_id \
      WHERE s.policy_name = $1 AND s.repository_id = $2 AND s.job_id IS NOT NULL \
      AND s.verified_at IS NOT NULL";
 const HOST_SQL: &str = "SELECT s.id, s.host_id, a.hostname, s.time_ms, s.received_at, \
-     s.received_exact, s.suspicious, s.incomplete, s.origin, s.stdin_name FROM snapshots s \
+     s.received_exact, s.suspicious, s.incomplete, s.origin, s.stdin_name, \
+     s.source_type, s.source_ref, s.source_label FROM snapshots s \
      JOIN agents a ON a.id = s.host_id \
      WHERE s.policy_name = $1 AND s.repository_id = $2 AND s.host_id = $3 \
      AND s.job_id IS NOT NULL AND s.verified_at IS NOT NULL";
@@ -129,7 +137,7 @@ fn pair_row(r: &sqlx::any::AnyRow, include_stdin: bool) -> anyhow::Result<Option
         return Ok(None);
     }
     let pool = if is_stdin {
-        Pool::Stdin
+        Pool::Stdin(stdin_name.unwrap_or_default())
     } else if origin.as_deref() == Some("manual") {
         Pool::Manual
     } else {
@@ -141,6 +149,9 @@ fn pair_row(r: &sqlx::any::AnyRow, include_stdin: bool) -> anyhow::Result<Option
         hostname: r.try_get("hostname")?,
         time_ms: r.try_get("time_ms")?,
         exact: r.try_get::<i64, _>("received_exact")? != 0,
+        source_type: r.try_get("source_type")?,
+        source_ref: r.try_get("source_ref")?,
+        source_label: r.try_get("source_label")?,
         candidate: Candidate {
             id: r.try_get("id")?,
             received_at_ms: r.try_get("received_at")?,
@@ -155,28 +166,36 @@ fn times_unconfirmed(rows: &[&PairRow]) -> bool {
 }
 
 fn decide(policy: &BackupPolicy, rules: &Retention, rows: &[&PairRow]) -> Vec<Decision> {
-    if times_unconfirmed(rows) {
-        return rows
-            .iter()
-            .map(|r| Decision {
+    let timezone = timezone_of(&policy.spec);
+    let mut instances: BTreeMap<&str, Vec<&PairRow>> = BTreeMap::new();
+    for row in rows {
+        instances
+            .entry(row.source_ref.as_str())
+            .or_default()
+            .push(row);
+    }
+    let mut decisions: Vec<Decision> = Vec::new();
+    let mut unconfirmed: Vec<Decision> = Vec::new();
+    for instance in instances.values() {
+        if times_unconfirmed(instance) {
+            unconfirmed.extend(instance.iter().map(|r| Decision {
                 id: r.candidate.id.clone(),
                 keep: true,
                 reasons: Vec::new(),
-            })
-            .collect();
+            }));
+            continue;
+        }
+        let mut pools: BTreeMap<&Pool, Vec<Candidate>> = BTreeMap::new();
+        for row in instance {
+            pools
+                .entry(&row.pool)
+                .or_default()
+                .push(row.candidate.clone());
+        }
+        for candidates in pools.values() {
+            decisions.extend(evaluate(rules, &timezone, candidates));
+        }
     }
-    let timezone = timezone_of(&policy.spec);
-    let mut decisions: Vec<Decision> = [Pool::Scheduled, Pool::Manual, Pool::Stdin]
-        .into_iter()
-        .flat_map(|pool| {
-            let candidates: Vec<Candidate> = rows
-                .iter()
-                .filter(|r| r.pool == pool)
-                .map(|r| r.candidate.clone())
-                .collect();
-            evaluate(rules, &timezone, &candidates)
-        })
-        .collect();
     let received: BTreeMap<&str, i64> = rows
         .iter()
         .map(|r| (r.candidate.id.as_str(), r.candidate.received_at_ms))
@@ -186,6 +205,7 @@ fn decide(policy: &BackupPolicy, rules: &Retention, rows: &[&PairRow]) -> Vec<De
             .cmp(&received[a.id.as_str()])
             .then_with(|| a.id.cmp(&b.id))
     });
+    decisions.extend(unconfirmed);
     decisions
 }
 
@@ -223,6 +243,9 @@ pub async fn plan_policy(
                         received_at_ms: row.candidate.received_at_ms,
                         time_ms: row.time_ms,
                         suspicious: row.candidate.suspicious,
+                        source_type: row.source_type.clone(),
+                        source_ref: row.source_ref.clone(),
+                        source_label: row.source_label.clone(),
                         keep: d.keep,
                         reasons: d.reasons,
                         id: d.id,
@@ -522,3 +545,6 @@ async fn apply(state: &AppState, job_id: &str) -> anyhow::Result<bool> {
     let outcome = run_for_pair(state, &policy, &host_id, job_id).await?;
     Ok(!outcome.postponed)
 }
+
+#[cfg(test)]
+mod differential;
