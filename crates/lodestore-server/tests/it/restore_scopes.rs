@@ -352,3 +352,36 @@ async fn job_rows(ts: &TestServer) -> i64 {
         .unwrap()
         .get("n")
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restore_scopes_guest_and_db_tokens_cannot_restore_files() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        for scope in [
+            "restore:guest",
+            "restore:guest-in-place",
+            "restore:db",
+            "restore:db-in-place",
+        ] {
+            let client = token(&api, &[scope]).await;
+            for in_place in [false, true] {
+                let got = post(
+                    &client,
+                    &ts,
+                    "/api/v1/restores",
+                    restore_body(in_place, false),
+                )
+                .await;
+                assert_refused(
+                    got,
+                    NEEDS_WRITE,
+                    &format!("{scope} in_place={in_place} [{}]", backend.name()),
+                );
+            }
+        }
+        let jobs = job_rows(&ts).await;
+        assert_eq!(jobs, 0, "[{}]", backend.name());
+        ts.stop().await;
+    }
+}
