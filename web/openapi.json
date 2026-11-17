@@ -2082,6 +2082,15 @@
               "format": "int64",
               "minimum": 0
             }
+          },
+          {
+            "name": "source_type",
+            "in": "query",
+            "description": "Only snapshots of this source type: files, proxmox-vm, proxmox-ct, postgres, postgres-wal or mysql.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -2097,6 +2106,16 @@
           },
           "404": {
             "description": "Unknown host",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unknown source type",
             "content": {
               "application/json": {
                 "schema": {
@@ -5398,6 +5417,24 @@
               "format": "int32",
               "minimum": 0
             }
+          },
+          {
+            "name": "source_type",
+            "in": "query",
+            "description": "Only snapshots of this source type: files, proxmox-vm, proxmox-ct, postgres, postgres-wal or mysql.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "source",
+            "in": "query",
+            "description": "Canonical source instance key; narrows the list and latest_verified_id to that instance on this host. The same key on another host, as after a migration, is another instance.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -5422,7 +5459,7 @@
             }
           },
           "422": {
-            "description": "Missing host, bad cursor or limit",
+            "description": "Missing host, bad cursor or limit, unknown source type or key, or a key that does not match the type",
             "content": {
               "application/json": {
                 "schema": {
@@ -5503,7 +5540,7 @@
             }
           },
           "422": {
-            "description": "The selection, destination or host is not valid",
+            "description": "The selection, destination or host is not valid, or the snapshot is not a files backup",
             "content": {
               "application/json": {
                 "schema": {
@@ -12443,7 +12480,7 @@
               "string",
               "null"
             ],
-            "description": "Id of the newest signed snapshot of the host by server time, whatever the page; null when the host has none."
+            "description": "Id of the newest signed snapshot of the requested source type or instance by server time, whatever the page; files by default; never a WAL batch; null when there is none."
           },
           "next": {
             "type": [
@@ -13368,6 +13405,7 @@
           "warnings_total",
           "stats",
           "received_at",
+          "source_type",
           "policy_deleted"
         ],
         "properties": {
@@ -13415,6 +13453,17 @@
           "received_at": {
             "type": "integer",
             "format": "int64"
+          },
+          "source_label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Human label of the source instance, taken from the signed source; null for `files`."
+          },
+          "source_type": {
+            "type": "string",
+            "description": "What the snapshot backs up: `files`, `proxmox-vm`, `proxmox-ct`, `postgres`, `postgres-wal` or `mysql`."
           },
           "stats": {
             "$ref": "#/components/schemas/SnapshotStatsDto"
@@ -13472,7 +13521,8 @@
           "items",
           "total",
           "page",
-          "page_size"
+          "page_size",
+          "source_counts"
         ],
         "properties": {
           "items": {
@@ -13490,6 +13540,13 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          },
+          "source_counts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SourceCount"
+            },
+            "description": "Snapshot counts of the host by source type, in the order files, proxmox-vm, proxmox-ct, postgres, postgres-wal, mysql; only types the host has. Not narrowed by `source_type`."
           },
           "total": {
             "type": "integer",
@@ -13656,6 +13713,23 @@
           }
         ],
         "description": "The `type` selects the variant and the other fields of the block sit next to it."
+      },
+      "SourceCount": {
+        "type": "object",
+        "required": [
+          "source_type",
+          "count"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "source_type": {
+            "type": "string"
+          }
+        }
       },
       "StartRollout": {
         "type": "object",

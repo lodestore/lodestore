@@ -64,6 +64,8 @@ function makeSnapshot(over: Partial<SnapshotItem> = {}): SnapshotItem {
 		policy_deleted: false,
 		received_at: Date.now() - 7_100_000,
 		verified_by: "server",
+		source_type: "files",
+		source_label: null,
 		incomplete: false,
 		errors_total: 0,
 		warnings_total: 0,

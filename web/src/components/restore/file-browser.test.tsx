@@ -87,6 +87,8 @@ function snapshot(id: string, time: number): RestoreSnapshot {
 		policy_deleted: false,
 		received_at: time,
 		verified_by: "server",
+		source_type: "files",
+		source_label: null,
 		tags: [],
 		warnings_total: 0,
 		errors_total: 0,

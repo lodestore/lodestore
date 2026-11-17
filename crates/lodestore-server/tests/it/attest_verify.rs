@@ -14,7 +14,8 @@ use lodestore_format::crypto::{BLOB_TYPE_DATA, BlobId, Entropy};
 use lodestore_format::index::{hex32, index_object_key, open_shard, parse_hex32};
 use lodestore_format::pack::pack_object_key;
 use lodestore_format::pb;
-use lodestore_format::provenance::ProvenanceSet;
+use lodestore_format::provenance::{LatestScope, ProvenanceSet};
+use lodestore_format::reader::Reader;
 use lodestore_format::repo::Repository;
 use lodestore_format::snapshot::snapshot_object_key;
 use lodestore_format::source::{self, Meta, SourceKey};
@@ -1156,6 +1157,90 @@ async fn attest_verify_refuses_a_claim_found_by_a_catalog_sync_first() {
         let (_, source_ref, _, verified) = env.catalog_source(&snapshot_id).await;
         assert_eq!(source_ref, GUEST_A, "[{}]", backend.name());
         assert!(!verified);
+        env.ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn attest_verify_latest_of_an_instance_agrees_with_lode() {
+    for backend in backends() {
+        let env = Env::new(&backend).await;
+        // The default policy keeps one snapshot and would forget the older ones being compared.
+        sqlx::query("DELETE FROM policies")
+            .execute(env.pool())
+            .await
+            .unwrap();
+        env.upgrade().await;
+        let order = [
+            Some(GUEST_A),
+            None,
+            Some(GUEST_B),
+            Some(GUEST_A),
+            Some(GUEST_B),
+            None,
+            Some(GUEST_B),
+            Some(GUEST_A),
+        ];
+        for (n, key) in order.into_iter().enumerate() {
+            let label = format!("agree-{n}");
+            let snapshot_id = env.snapshot_claiming(&label, key.and_then(claim)).await;
+            let job = format!("j{n}");
+            match key {
+                Some(key) => env.job_of_source(&job, &snapshot_id, key, None).await,
+                None => env.job(&job, &snapshot_id, "pending").await,
+            }
+            env.verify(&job).await;
+            assert_eq!(
+                env.column(&job, "verify_state").await.as_deref(),
+                Some("verified"),
+                "{label} [{}]",
+                backend.name()
+            );
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+
+        let source = open_repository(env.ts.state(), &env.repo).await.unwrap();
+        let reader = Reader::open(source.store, source.keys, &source.config).unwrap();
+        let api = env.ts.api().await;
+        let server_latest = |query: String| {
+            let api = &api;
+            async move {
+                let page: Value = api
+                    .get(&format!("/api/v1/restore/snapshots?host={HOST}{query}"))
+                    .await
+                    .json()
+                    .await
+                    .unwrap();
+                page["latest_verified_id"].as_str().unwrap().to_string()
+            }
+        };
+        for key in [GUEST_A, GUEST_B] {
+            let scope = LatestScope::Instance(SourceKey::parse(key).unwrap());
+            let lode = hex32(
+                &reader
+                    .resolve_latest_in(false, &scope)
+                    .await
+                    .unwrap()
+                    .entry
+                    .id,
+            );
+            let server = server_latest(format!("&source={}", key.replace('/', "%2F"))).await;
+            assert_eq!(server, lode, "instance {key} [{}]", backend.name());
+        }
+        let lode = hex32(
+            &reader
+                .resolve_latest_in(false, &LatestScope::Files)
+                .await
+                .unwrap()
+                .entry
+                .id,
+        );
+        assert_eq!(
+            server_latest(String::new()).await,
+            lode,
+            "files [{}]",
+            backend.name()
+        );
         env.ts.stop().await;
     }
 }

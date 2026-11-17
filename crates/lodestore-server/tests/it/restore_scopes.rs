@@ -385,3 +385,68 @@ async fn restore_scopes_guest_and_db_tokens_cannot_restore_files() {
         ts.stop().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restore_scopes_files_restore_refuses_other_sources() {
+    const STATS: &str = r#"{"files_new":0,"files_changed":0,"files_unchanged":0,"dirs":0,"bytes_total":0,"bytes_read":0,"bytes_added":0}"#;
+    const REFUSED: &str = "This snapshot is a proxmox-vm backup and cannot be restored as files.";
+    for backend in backends() {
+        let name = backend.name();
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let host = enrolled_host(&ts, &api, CAPS_ROOTS).await;
+        let repo: String = sqlx::query("SELECT id FROM repositories")
+            .fetch_one(&ts.state().db.pool)
+            .await
+            .unwrap()
+            .get("id");
+        for (id, source_type, source_ref) in [
+            (
+                '1',
+                "proxmox-vm",
+                "proxmox-vm/pve1/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            ),
+            ('2', "files", ""),
+        ] {
+            sqlx::query(
+                "INSERT INTO snapshots (id, repository_id, host_id, hostname, time_ms, \
+                 paths_json, tags_json, incomplete, errors_total, warnings_total, stats_json, \
+                 discovered_at, received_at, received_exact, verified_at, verified_by, \
+                 source_type, source_ref) \
+                 VALUES ($1, $2, $3, 'inserted', 1, '[]', '[]', 0, 0, 0, $4, 1, 1, 1, 1, \
+                 'server', $5, $6)",
+            )
+            .bind(id.to_string().repeat(64))
+            .bind(&repo)
+            .bind(&host)
+            .bind(STATS)
+            .bind(source_type)
+            .bind(source_ref)
+            .execute(&ts.state().db.pool)
+            .await
+            .unwrap();
+        }
+        let client = token(&api, &["restore:host"]).await;
+        let mut body = restore_body(false, false);
+        body["target_host_id"] = json!(host);
+
+        body["snapshot_id"] = json!("1".repeat(64));
+        let (status, _, message) = code_and_message(Some(&client), &ts, &api, body.clone()).await;
+        assert_eq!((status, message.as_str()), (422, REFUSED), "token [{name}]");
+        let (status, _, message) = code_and_message(None, &ts, &api, body.clone()).await;
+        assert_eq!(
+            (status, message.as_str()),
+            (422, REFUSED),
+            "session [{name}]"
+        );
+        assert_eq!(job_rows(&ts).await, 0, "[{name}]");
+
+        body["snapshot_id"] = json!("2".repeat(64));
+        let (status, _, message) = code_and_message(Some(&client), &ts, &api, body).await;
+        assert!(
+            status != 403 && !message.contains("cannot be restored as files"),
+            "files snapshot [{name}]: {status} {message}"
+        );
+        ts.stop().await;
+    }
+}
