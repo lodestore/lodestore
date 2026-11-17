@@ -22,8 +22,8 @@ use lodestore_format::store::{BlobStore, LocalFsStore, put_named};
 use lodestore_format::verify_snapshot::snapshot_index_refs;
 use lodestore_format::writer::{BackupOptions, Writer};
 use lodestore_server::alerts::inputs::gather;
-use lodestore_server::catalog::open_repository;
 use lodestore_server::catalog::retention::{after_backup, plan_policy};
+use lodestore_server::catalog::{open_repository, sync_repository};
 use lodestore_server::db::now_ms;
 use lodestore_server::maintenance::attest::verify::{SWEEP, verify_then_retain};
 use lodestore_server::maintenance::attest::{
@@ -1086,6 +1086,76 @@ async fn attest_verify_refuses_a_snapshot_naming_another_guest() {
 
         env.assert_refused_as_foreign_source("j1", &snapshot_id)
             .await;
+        env.ts.stop().await;
+    }
+}
+
+const PG_A: &str = "postgres/7300000000000000001/16384";
+const PG_B: &str = "postgres/7300000000000000002/16384";
+
+/// One job naming `job_key`, one snapshot claiming `claimed`: the job must fail unsigned.
+async fn refuses(label: &str, job_key: &str, claimed: Option<pb::Source>) {
+    for backend in backends() {
+        let env = Env::new(&backend).await;
+        env.upgrade().await;
+        let snapshot_id = env.snapshot_claiming(label, claimed.clone()).await;
+        env.job_of_source("j1", &snapshot_id, job_key, None).await;
+
+        env.verify("j1").await;
+
+        env.assert_refused_as_foreign_source("j1", &snapshot_id)
+            .await;
+        env.ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn attest_verify_refuses_a_snapshot_naming_another_postgres_cluster() {
+    refuses("pg", PG_A, claim(PG_B)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn attest_verify_refuses_a_files_snapshot_for_a_guest_job() {
+    refuses("files-for-guest", GUEST_A, None).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn attest_verify_refuses_a_guest_claim_in_a_files_job() {
+    refuses("guest-in-files", "", claim(GUEST_A)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn attest_verify_refuses_an_invalid_source_claim() {
+    refuses("short-key", GUEST_A, claim("proxmox-vm/pve1")).await;
+    let crowded = pb::Source {
+        key: GUEST_A.to_string(),
+        meta: (0..33)
+            .map(|n| pb::SourceMeta {
+                key: format!("k{n:02}"),
+                value: "v".to_string(),
+            })
+            .collect(),
+    };
+    refuses("crowded", GUEST_A, Some(crowded)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn attest_verify_refuses_a_claim_found_by_a_catalog_sync_first() {
+    for backend in backends() {
+        let env = Env::new(&backend).await;
+        env.upgrade().await;
+        let snapshot_id = env.snapshot_claiming("synced", claim(GUEST_B)).await;
+        sync_repository(env.ts.state(), &env.repo).await.unwrap();
+        env.job_of_source("j1", &snapshot_id, GUEST_A, Some(r#"{"vmid":"101"}"#))
+            .await;
+
+        env.verify("j1").await;
+
+        env.assert_refused_as_foreign_source("j1", &snapshot_id)
+            .await;
+        let (_, source_ref, _, verified) = env.catalog_source(&snapshot_id).await;
+        assert_eq!(source_ref, GUEST_A, "[{}]", backend.name());
+        assert!(!verified);
         env.ts.stop().await;
     }
 }
