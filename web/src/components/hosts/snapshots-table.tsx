@@ -80,6 +80,9 @@ const FROM_1040 = "hidden @min-[1040px]:table-cell";
 const SOURCE_FLEX =
 	"w-full max-w-0 @min-[680px]:w-auto @min-[680px]:max-w-none";
 const PAD = "px-2 @min-[680px]:px-4";
+const PAD_STATUS = "px-1 @min-[680px]:px-4";
+const STATUS_ICON =
+	"[&_[data-status]>span]:sr-only @min-[680px]:[&_[data-status]>span]:not-sr-only";
 
 const source = (snapshot: SnapshotItem) =>
 	snapshot.policy_name ??
@@ -219,8 +222,8 @@ function SkeletonRows() {
 			<TableCell className={cn("px-4", FROM_1040)}>
 				<Skeleton className="h-4 w-12" />
 			</TableCell>
-			<TableCell className={cn("px-4", FROM_680)}>
-				<Skeleton className="h-4 w-16" />
+			<TableCell className={PAD_STATUS}>
+				<Skeleton className="h-4 w-6 @min-[680px]:w-16" />
 			</TableCell>
 			<TableCell className={PAD}>
 				<Skeleton className="h-8 w-36" />
@@ -393,8 +396,10 @@ export function SnapshotsTable({ host }: { host: HostDetail }) {
 								<TableHead className={cn("px-4 text-right", showFiles)}>
 									{copy.snapshots.columns.files}
 								</TableHead>
-								<TableHead className={cn("px-4", FROM_680)}>
-									{copy.snapshots.columns.status}
+								<TableHead className={PAD_STATUS}>
+									<span className="sr-only @min-[680px]:not-sr-only">
+										{copy.snapshots.columns.status}
+									</span>
 								</TableHead>
 								<TableHead className={PAD}>
 									<span className="sr-only">
@@ -474,8 +479,13 @@ export function SnapshotsTable({ host }: { host: HostDetail }) {
 										>
 											{formatCount(fileTotal(snapshot))}
 										</TableCell>
-										<TableCell className={cn("px-4", FROM_680)}>
-											<div className="flex flex-wrap items-center gap-1">
+										<TableCell className={PAD_STATUS}>
+											<div
+												className={cn(
+													"flex flex-wrap items-center gap-1",
+													STATUS_ICON,
+												)}
+											>
 												<ProvenanceBadge snapshot={snapshot} />
 												{snapshot.suspicious && (
 													<SuspiciousBadge snapshot={snapshot} />
