@@ -3,7 +3,7 @@
 //! first release are used (REST, the agent's own gRPC session, the bucket),
 //! so the scenarios run unchanged against that release.
 
-#[path = "../../lodestore-format/tests/adv_support/mod.rs"]
+#[path = "../../lodestore-format/tests/it/adv_support/mod.rs"]
 mod adv_support;
 mod common;
 

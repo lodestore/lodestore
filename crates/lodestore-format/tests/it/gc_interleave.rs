@@ -1,7 +1,7 @@
 //! Backups and garbage collection steps in every order the protocol allows:
 //! whatever the order, every snapshot in the bucket restores afterwards.
 
-mod gc_support;
+use crate::gc_support;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;

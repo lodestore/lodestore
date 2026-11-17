@@ -3,7 +3,7 @@
 //! path of a job is used, with the real agent, and only fields the first
 //! release has.
 
-#[path = "../../lodestore-format/tests/adv_support/mod.rs"]
+#[path = "../../lodestore-format/tests/it/adv_support/mod.rs"]
 mod adv_support;
 mod common;
 

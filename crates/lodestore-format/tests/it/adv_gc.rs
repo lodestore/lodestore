@@ -1,10 +1,9 @@
 //! A host with writer credentials forges index shards; a full collection must
 //! neither delete data a snapshot needs nor stop.
 
-mod adv_support;
-mod gc_support;
-#[path = "adv_support/planted.rs"]
-mod planted;
+use crate::adv_support;
+use crate::gc_support;
+use crate::planted;
 
 use std::collections::BTreeSet;
 

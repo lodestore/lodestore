@@ -1,8 +1,8 @@
 //! A host with writer credentials plants a shard that names the real packs
 //! with wrong offsets and lists first; every snapshot still restores.
 
-mod adv_support;
-mod gc_support;
+use crate::adv_support;
+use crate::gc_support;
 
 use std::collections::HashSet;
 

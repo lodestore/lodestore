@@ -3,7 +3,7 @@
 //! sees it, must stay on the agent's real backup. Only the public path of a
 //! job is used, so the scenario runs unchanged against the first release.
 
-#[path = "../../lodestore-format/tests/adv_support/mod.rs"]
+#[path = "../../lodestore-format/tests/it/adv_support/mod.rs"]
 mod adv_support;
 mod common;
 

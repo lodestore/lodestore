@@ -1,7 +1,7 @@
 //! Every writer of index shards cuts them by size, and the collector rewrites
 //! a shard written before the limit into shards under it.
 
-mod gc_support;
+use crate::gc_support;
 
 use std::collections::HashSet;
 

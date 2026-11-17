@@ -28,7 +28,7 @@ const LOW_KDF: KdfCost = KdfCost {
     parallelism: 1,
 };
 
-mod adv_support;
+use crate::adv_support;
 
 const BIG: usize = 300_000;
 

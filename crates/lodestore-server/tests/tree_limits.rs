@@ -1,5 +1,5 @@
 mod common;
-#[path = "../../lodestore-format/tests/tree_support/mod.rs"]
+#[path = "../../lodestore-format/tests/it/tree_support/mod.rs"]
 mod tree_support;
 
 use std::io::Read;

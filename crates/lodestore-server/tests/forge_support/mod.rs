@@ -3,7 +3,7 @@
 //! A holder of the repository's writer keys plants a snapshot that names a
 //! live agent's host. Only the first release's public API is used.
 
-#[path = "../../../lodestore-format/tests/adv_support/mod.rs"]
+#[path = "../../../lodestore-format/tests/it/adv_support/mod.rs"]
 mod adv_support;
 
 use adv_support::attacker_keys;

@@ -4,7 +4,7 @@
 
 mod adv_support;
 mod common;
-#[path = "../../lodestore-format/tests/adv_support/mod.rs"]
+#[path = "../../lodestore-format/tests/it/adv_support/mod.rs"]
 mod planted;
 
 use std::path::{Path, PathBuf};

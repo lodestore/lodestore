@@ -2,8 +2,8 @@
 //! later backup will need; once the server has upgraded the repository the
 //! writer must not trust it.
 
-mod adv_support;
-mod gc_support;
+use crate::adv_support;
+use crate::gc_support;
 
 use std::collections::HashSet;
 use std::fs;

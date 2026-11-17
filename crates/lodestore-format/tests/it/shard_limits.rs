@@ -1,10 +1,9 @@
 //! Index shards are held whole in memory, so the size of one is checked
 //! before it is downloaded.
 
-mod adv_support;
-mod gc_support;
-#[path = "adv_support/planted.rs"]
-mod planted;
+use crate::adv_support;
+use crate::gc_support;
+use crate::planted;
 
 use std::collections::HashSet;
 use std::fs;

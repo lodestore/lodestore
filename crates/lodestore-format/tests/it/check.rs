@@ -1,6 +1,6 @@
 //! The repository checks against small repositories in temporary folders.
 
-mod gc_support;
+use crate::gc_support;
 
 use std::fs;
 use std::path::Path;

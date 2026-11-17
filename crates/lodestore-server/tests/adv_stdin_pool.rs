@@ -5,7 +5,7 @@
 //! does not exist there, so on that release the scenario fails at policy
 //! creation (422).
 
-#[path = "../../lodestore-format/tests/adv_support/mod.rs"]
+#[path = "../../lodestore-format/tests/it/adv_support/mod.rs"]
 mod adv_support;
 mod common;
 

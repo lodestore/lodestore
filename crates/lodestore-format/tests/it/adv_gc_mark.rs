@@ -1,10 +1,9 @@
 //! A host with writer credentials plants index shards; the collector's view
 //! of what is live must not change.
 
-mod adv_support;
-mod gc_support;
-#[path = "adv_support/planted.rs"]
-mod planted;
+use crate::adv_support;
+use crate::gc_support;
+use crate::planted;
 
 use adv_support::{attacker_keys, forge_offsets, open_all_shards, plant_shard};
 use gc_support::Fx;

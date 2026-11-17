@@ -4,7 +4,7 @@
 //! finish. Only the API of the first release is used, so the scenario can run
 //! against that release unchanged.
 
-#[path = "../../lodestore-format/tests/adv_support/mod.rs"]
+#[path = "../../lodestore-format/tests/it/adv_support/mod.rs"]
 mod adv_support;
 mod common;
 mod gc_support;

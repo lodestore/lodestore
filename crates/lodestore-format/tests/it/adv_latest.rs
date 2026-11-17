@@ -1,8 +1,8 @@
 //! A host with writer credentials plants a snapshot that claims to be the
 //! newest; `latest` must not follow the manifest it wrote.
 
-mod adv_support;
-mod gc_support;
+use crate::adv_support;
+use crate::gc_support;
 
 use std::time::{Duration, SystemTime};
 

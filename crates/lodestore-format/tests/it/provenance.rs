@@ -1,8 +1,8 @@
 //! Which snapshot is `latest` when a host with writer keys can plant
 //! snapshots with any time it likes, and which snapshots count as signed.
 
-mod adv_support;
-mod gc_support;
+use crate::adv_support;
+use crate::gc_support;
 
 use std::ops::Range;
 

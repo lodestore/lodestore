@@ -1,9 +1,8 @@
 //! Objects of a bucket are read with ranged reads bounded by the size the
 //! listing showed or by the limit of their kind, never downloaded whole.
 
-mod gc_support;
-#[path = "adv_support/planted.rs"]
-mod planted;
+use crate::gc_support;
+use crate::planted;
 
 use std::collections::HashSet;
 use std::ops::Range;

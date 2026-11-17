@@ -26,10 +26,9 @@ use lodestore_format::tree::{
 };
 use lodestore_format::writer::Writer;
 
-mod adv_support;
-#[path = "adv_support/planted.rs"]
-mod planted;
-mod tree_support;
+use crate::adv_support;
+use crate::planted;
+use crate::tree_support;
 
 use adv_support::{attacker_keys, open_all_shards, plant_shard, plant_shard_where};
 use lodestore_format::pack::{ENTRY_LEN, pack_object_key, parse_entries};

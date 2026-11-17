@@ -1,7 +1,7 @@
 //! Repack, verify, compact and sweep over a real repository in a folder.
 
-mod adv_support;
-mod gc_support;
+use crate::adv_support;
+use crate::gc_support;
 
 use std::collections::{BTreeSet, HashSet};
 use std::fs;

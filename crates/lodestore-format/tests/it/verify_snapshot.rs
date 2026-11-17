@@ -1,8 +1,8 @@
 //! The server proves a new snapshot by opening frames: a shard is believed
 //! only after `verify_shard`, and a snapshot resolves only through such shards.
 
-mod adv_support;
-mod gc_support;
+use crate::adv_support;
+use crate::gc_support;
 
 use std::collections::HashSet;
 use std::fs;

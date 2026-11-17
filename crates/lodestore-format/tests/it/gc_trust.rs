@@ -1,8 +1,8 @@
 //! Compaction and index rebuild keep the line between what the server vouches
 //! for and what a host with writer credentials could have written.
 
-mod adv_support;
-mod gc_support;
+use crate::adv_support;
+use crate::gc_support;
 
 use std::collections::{BTreeSet, HashSet};
 

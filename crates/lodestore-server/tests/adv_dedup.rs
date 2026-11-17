@@ -4,7 +4,7 @@
 //! a job is used, with the real agent, so the scenarios run unchanged against
 //! the first release.
 
-#[path = "../../lodestore-format/tests/adv_support/mod.rs"]
+#[path = "../../lodestore-format/tests/it/adv_support/mod.rs"]
 mod adv_support;
 mod common;
 

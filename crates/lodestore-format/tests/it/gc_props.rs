@@ -1,5 +1,5 @@
-mod adv_support;
-mod gc_support;
+use crate::adv_support;
+use crate::gc_support;
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashSet};

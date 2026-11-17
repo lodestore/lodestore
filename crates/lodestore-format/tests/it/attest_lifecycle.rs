@@ -1,7 +1,7 @@
 //! Attestation lifecycle: upgrading a repository written before attestations
 //! existed, resuming an interrupted upgrade, and consolidating the objects.
 
-mod gc_support;
+use crate::gc_support;
 
 use std::collections::{BTreeSet, HashSet};
 use std::ffi::OsStr;
