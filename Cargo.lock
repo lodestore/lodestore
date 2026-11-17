@@ -2228,6 +2228,7 @@ dependencies = [
  "tokio-util",
  "toml",
  "tracing-subscriber",
+ "yaml_serde",
  "zeroize",
 ]
 

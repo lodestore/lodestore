@@ -1,0 +1,14 @@
+apiVersion: lodestore.io/v1alpha1
+kind: BackupPolicy
+metadata:
+  name: etc-and-home
+spec:
+  repository: main
+  selector:
+    matchLabels: {}
+  paths:
+  - /etc
+  - /home
+  exclude:
+  - '**/.cache'
+  - '**/node_modules'

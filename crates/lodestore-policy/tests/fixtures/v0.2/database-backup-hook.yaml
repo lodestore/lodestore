@@ -1,0 +1,21 @@
+apiVersion: lodestore.io/v1alpha1
+kind: BackupPolicy
+metadata:
+  name: postgres-nightly
+spec:
+  repository: main
+  selector:
+    matchLabels:
+      role: db
+  paths:
+  - /var/backups/postgres
+  hooks:
+    before:
+    - script: pg-dump.sh
+      args: [app]
+      timeout: 30m
+  schedule:
+    cron: 30 2 * * *
+  retention:
+    keepDaily: 7
+    keepWeekly: 4

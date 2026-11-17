@@ -236,7 +236,7 @@ describe("Policy editor tabs", () => {
 	it("validates form edits after a pause and shows the server YAML", async () => {
 		const requests = mockValidate((body) =>
 			validResponse({
-				yaml: `paths: ${body.policy?.spec.paths.join(",")}\n`,
+				yaml: `paths: ${body.policy?.spec.paths?.join(",")}\n`,
 			}),
 		);
 		const user = await openNew();
@@ -263,7 +263,7 @@ describe("Policy editor tabs", () => {
 	it("never opens the YAML tab with a document older than the form", async () => {
 		mockValidate((body) =>
 			validResponse({
-				yaml: `paths: ${body.policy?.spec.paths.join(",")}\n`,
+				yaml: `paths: ${body.policy?.spec.paths?.join(",")}\n`,
 			}),
 		);
 		const user = await openNew();
@@ -279,7 +279,7 @@ describe("Policy editor tabs", () => {
 
 	it("stays on the form when it is invalid and says why", async () => {
 		mockValidate((body) =>
-			body.policy?.spec.paths.some((p) => !p.startsWith("/"))
+			body.policy?.spec.paths?.some((p) => !p.startsWith("/"))
 				? {
 						valid: false,
 						errors: [{ path: "spec.paths[0]", message: "Bad path." }],
@@ -365,7 +365,7 @@ describe("Policy editor tabs", () => {
 
 	it("shows field errors under the field", async () => {
 		mockValidate((body) =>
-			body.policy?.spec.paths.some((p) => !p.startsWith("/"))
+			body.policy?.spec.paths?.some((p) => !p.startsWith("/"))
 				? {
 						valid: false,
 						errors: [
@@ -503,7 +503,7 @@ describe("Split policy editor", () => {
 	it("form edit rewrites yaml after debounce", async () => {
 		const requests = mockValidate((body) =>
 			validResponse({
-				yaml: `paths: ${body.policy?.spec.paths.join(",")}\n`,
+				yaml: `paths: ${body.policy?.spec.paths?.join(",")}\n`,
 			}),
 		);
 		const user = await openNew();
@@ -539,7 +539,7 @@ describe("Split policy editor", () => {
 
 	it("sync status announces state", async () => {
 		mockValidate((body) =>
-			body.policy?.spec.paths.some((p) => !p.startsWith("/"))
+			body.policy?.spec.paths?.some((p) => !p.startsWith("/"))
 				? {
 						valid: false,
 						errors: [{ path: "spec.paths[0]", message: "Bad path." }],
@@ -619,7 +619,7 @@ describe("Split editor states", () => {
 
 	it("invalid form keeps last valid yaml", async () => {
 		mockValidate((body) =>
-			body.policy?.spec.paths.some((p) => !p.startsWith("/"))
+			body.policy?.spec.paths?.some((p) => !p.startsWith("/"))
 				? {
 						valid: false,
 						errors: [{ path: "spec.paths[0]", message: "Bad path." }],

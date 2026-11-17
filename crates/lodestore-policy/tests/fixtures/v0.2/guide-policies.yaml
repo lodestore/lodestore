@@ -1,0 +1,27 @@
+apiVersion: lodestore.io/v1alpha1
+kind: BackupPolicy
+metadata:
+  name: etc-and-home
+spec:
+  repository: main
+  paths:
+  - /etc
+  - /home
+  schedule:
+    cron: 30 2 * * *
+    timezone: Europe/Kyiv
+    jitter: 15m
+    catchUpWindow: 24h
+  retention:
+    keepLast: 3
+    keepDaily: 7
+    keepWeekly: 4
+    keepMonthly: 6
+  limits:
+    uploadRate: 50MiB/s
+    nice: 10
+    ioniceClass: best-effort
+    ioniceLevel: 4
+    maxRuntime: 12h
+  alerts:
+    maxAge: 36h

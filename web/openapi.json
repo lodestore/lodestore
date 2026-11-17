@@ -8297,6 +8297,24 @@
           }
         }
       },
+      "DatabaseSource": {
+        "type": "object",
+        "properties": {
+          "databases": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "excludeDatabases": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
       "DeletedSnapshot": {
         "type": "object",
         "required": [
@@ -8580,6 +8598,10 @@
             }
           }
         }
+      },
+      "FilesSource": {
+        "type": "object",
+        "additionalProperties": false
       },
       "FindFieldErrors": {
         "type": "object",
@@ -11616,8 +11638,7 @@
       "PolicySpec": {
         "type": "object",
         "required": [
-          "repository",
-          "paths"
+          "repository"
         ],
         "properties": {
           "alerts": {
@@ -11686,6 +11707,16 @@
           },
           "selector": {
             "$ref": "#/components/schemas/Selector"
+          },
+          "source": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Source"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "additionalProperties": false
@@ -11890,6 +11921,32 @@
             ]
           }
         }
+      },
+      "ProxmoxGuests": {
+        "type": "object",
+        "properties": {
+          "pool": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "vmids": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        },
+        "additionalProperties": false
       },
       "QueueReason": {
         "type": "string",
@@ -13485,6 +13542,116 @@
             "minimum": 0
           }
         }
+      },
+      "Source": {
+        "oneOf": [
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/FilesSource"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "files"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ProxmoxGuests"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "proxmox-vm"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ProxmoxGuests"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "proxmox-ct"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/DatabaseSource"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "postgres"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/DatabaseSource"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "mysql"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        ],
+        "description": "The `type` selects the variant and the other fields of the block sit next to it."
       },
       "StartRollout": {
         "type": "object",
