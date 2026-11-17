@@ -32,8 +32,8 @@ pub enum Source {
     Mysql(DatabaseSource),
 }
 
-/// A newtype over an empty struct rather than a unit variant: a unit variant of
-/// an internally tagged enum silently drops unknown fields.
+// A newtype over an empty struct rather than a unit variant: a unit variant of
+// an internally tagged enum silently drops unknown fields.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

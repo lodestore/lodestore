@@ -164,7 +164,7 @@ export function draftFromPolicy(policy: BackupPolicy): PolicyDraft {
 		hostMode: hosts.length > 0 ? "list" : "labels",
 		labels: labels.length > 0 ? labels : [BLANK_LABEL],
 		hosts,
-		paths: spec.paths,
+		paths: spec.paths ?? [],
 		exclude: (spec.exclude ?? []).join("\n"),
 		oneFileSystem: spec.oneFileSystem ?? false,
 		excludeCaches: spec.excludeCaches ?? false,
