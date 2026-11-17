@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 64094d482a83f927afcc32d3a6d8fededfc09155f93ddc51788e52b473e4af41 # shrinks to specs = [Spec { pool: 0, hours: 0, exact: false, suspicious: false, incomplete: false }, Spec { pool: 0, hours: 0, exact: false, suspicious: false, incomplete: false }, Spec { pool: 0, hours: 1, exact: false, suspicious: false, incomplete: false }], force_exact = false, name = None, rules = Retention { keep_last: None, keep_within: None, keep_daily: None, keep_weekly: None, keep_monthly: None, include_stdin: true }, zone = "UTC"

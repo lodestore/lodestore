@@ -175,9 +175,10 @@ fn decide(policy: &BackupPolicy, rules: &Retention, rows: &[&PairRow]) -> Vec<De
             .push(row);
     }
     let mut decisions: Vec<Decision> = Vec::new();
+    let mut unconfirmed: Vec<Decision> = Vec::new();
     for instance in instances.values() {
         if times_unconfirmed(instance) {
-            decisions.extend(instance.iter().map(|r| Decision {
+            unconfirmed.extend(instance.iter().map(|r| Decision {
                 id: r.candidate.id.clone(),
                 keep: true,
                 reasons: Vec::new(),
@@ -204,6 +205,7 @@ fn decide(policy: &BackupPolicy, rules: &Retention, rows: &[&PairRow]) -> Vec<De
             .cmp(&received[a.id.as_str()])
             .then_with(|| a.id.cmp(&b.id))
     });
+    decisions.extend(unconfirmed);
     decisions
 }
 
@@ -543,3 +545,6 @@ async fn apply(state: &AppState, job_id: &str) -> anyhow::Result<bool> {
     let outcome = run_for_pair(state, &policy, &host_id, job_id).await?;
     Ok(!outcome.postponed)
 }
+
+#[cfg(test)]
+mod differential;
