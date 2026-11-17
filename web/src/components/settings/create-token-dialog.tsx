@@ -227,6 +227,24 @@ function CreateTokenBody({
 									{text.dialog.writesOverHost}
 								</Badge>
 							)}
+							{scope === Scope["restore:guest"] && (
+								<Badge variant="outline" className="text-warning">
+									<TriangleAlert aria-hidden />
+									{text.dialog.rootOnNode}
+								</Badge>
+							)}
+							{scope === Scope["restore:guest-in-place"] && (
+								<Badge variant="outline" className="text-warning">
+									<TriangleAlert aria-hidden />
+									{text.dialog.writesOverGuest}
+								</Badge>
+							)}
+							{scope === Scope["restore:db-in-place"] && (
+								<Badge variant="outline" className="text-warning">
+									<TriangleAlert aria-hidden />
+									{text.dialog.writesOverDatabase}
+								</Badge>
+							)}
 							{scope === Scope["hooks:write"] && (
 								<Badge variant="outline" className="text-warning">
 									<TriangleAlert aria-hidden />
