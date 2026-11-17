@@ -12,6 +12,7 @@ use crate::error::{Error, Result};
 use crate::keys::ReadKeys;
 use crate::pb;
 use crate::snapshot::SnapshotEntry;
+use crate::source::{self, SourceKey};
 
 pub const FUTURE_TOLERANCE_MS: i64 = 600_000;
 
@@ -102,6 +103,23 @@ impl ProvenanceSet {
 
     pub fn contains(&self, id: &BlobId) -> bool {
         self.records.contains_key(id)
+    }
+
+    /// The source of a snapshot, from its signed record only; the manifest's
+    /// own claim never counts. No record, or a record without the field, is
+    /// `files`.
+    pub fn source_of(&self, id: &BlobId) -> SourceKey {
+        self.records
+            .get(id)
+            .and_then(|r| source::decode(r.source.as_ref()).ok())
+            .map_or_else(SourceKey::files, |(key, _)| key)
+    }
+
+    /// What a person calls the instance of a signed snapshot, if the record
+    /// says enough.
+    pub fn label_of(&self, id: &BlobId) -> Option<String> {
+        let (key, meta) = source::decode(self.records.get(id)?.source.as_ref()).ok()?;
+        source::label(&key, &meta)
     }
 
     pub fn signer(&self, id: &BlobId) -> Option<Signer> {
@@ -200,14 +218,53 @@ fn newest_of<'a>(
     best.map(|(_, id)| (count, id))
 }
 
-/// Picks `latest`. `expect_upgraded` is true for a caller that knows the
-/// repository carried server signatures before; with no MAC-valid attestation
-/// left it then refuses instead of falling back to the legacy order.
+/// The snapshots `latest` chooses among.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LatestScope {
+    /// Snapshots of files only.
+    Files,
+    /// The snapshots of one source instance, whichever host wrote them.
+    Instance(SourceKey),
+}
+
+impl LatestScope {
+    /// A WAL batch is not a point in time and is never `latest`.
+    fn admits(&self, source: &SourceKey) -> bool {
+        match self {
+            LatestScope::Files => source.is_files(),
+            LatestScope::Instance(key) => source == key && !key.kind().is_wal_batch(),
+        }
+    }
+}
+
+/// Picks `latest`. Only files snapshots count; another source needs
+/// [`pick_latest_in`].
 pub fn pick_latest(
     entries: Vec<SnapshotEntry>,
     provenance: &ProvenanceSet,
     now_ms: i64,
     expect_upgraded: bool,
+) -> Result<LatestPick> {
+    pick_latest_in(
+        entries,
+        provenance,
+        now_ms,
+        expect_upgraded,
+        &LatestScope::Files,
+    )
+}
+
+/// Picks `latest` inside `scope`. `expect_upgraded` is true for a caller that
+/// knows the repository carried server signatures before; with no MAC-valid
+/// attestation left it then refuses instead of falling back to the legacy
+/// order. Without signatures nothing names a source, so an instance finds
+/// nothing and `files` skips the snapshots whose manifest claims another one.
+pub fn pick_latest_in(
+    entries: Vec<SnapshotEntry>,
+    provenance: &ProvenanceSet,
+    now_ms: i64,
+    expect_upgraded: bool,
+    scope: &LatestScope,
 ) -> Result<LatestPick> {
     if entries.is_empty() {
         return Err(Error::InvalidInput(
@@ -217,6 +274,26 @@ pub fn pick_latest(
     if expect_upgraded && !provenance.attested_any() {
         return Err(Error::InvalidInput(ATTESTATIONS_MISSING.into()));
     }
+    let entries = if provenance.attested_any() {
+        entries
+    } else {
+        if matches!(scope, LatestScope::Instance(_)) {
+            return Err(Error::InvalidInput(NO_VERIFIED_SNAPSHOT.into()));
+        }
+        let claims = |e: &SnapshotEntry| {
+            e.snapshot
+                .source
+                .as_ref()
+                .is_some_and(|s| !s.key.is_empty())
+        };
+        let entries: Vec<_> = entries.into_iter().filter(|e| !claims(e)).collect();
+        if entries.is_empty() {
+            return Err(Error::InvalidInput(
+                "the repository has no snapshots".into(),
+            ));
+        }
+        entries
+    };
     let limit = now_ms.saturating_add(FUTURE_TOLERANCE_MS);
     let mut warnings = Vec::new();
 
@@ -224,7 +301,7 @@ pub fn pick_latest(
         let key = |e: &SnapshotEntry| provenance.stored_order(e);
         let (kept, future): (Vec<&SnapshotEntry>, Vec<&SnapshotEntry>) = entries
             .iter()
-            .filter(|e| provenance.contains(&e.id))
+            .filter(|e| provenance.contains(&e.id) && scope.admits(&provenance.source_of(&e.id)))
             .partition(|e| key(e).0 <= limit);
         if kept.is_empty() && !future.is_empty() {
             return Err(Error::InvalidInput(ALL_SIGNED_STORED_IN_FUTURE.into()));

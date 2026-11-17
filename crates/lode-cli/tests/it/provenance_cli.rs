@@ -8,6 +8,7 @@ use lodestore_format::crypto::{BlobId, Entropy};
 use lodestore_format::index::parse_hex32;
 use lodestore_format::pb;
 use lodestore_format::repo::Repository;
+use lodestore_format::source::{self, Meta, SourceKey};
 use lodestore_format::store::LocalFsStore;
 use lodestore_format::writer::{BackupOptions, Writer};
 
@@ -380,4 +381,141 @@ async fn cli_backup_refuses_when_attestations_vanish() {
         );
         assert_eq!(repo_files(&fx.repo), before, "{args:?} wrote to the bucket");
     }
+}
+
+const GUEST: &str = "proxmox-vm/pve1/0b6f1a2c-3d4e-4f50-8a9b-1c2d3e4f5a6b";
+
+fn from_source(
+    mut r: pb::ProvenanceRecord,
+    key: &str,
+    meta: &[(&str, &str)],
+) -> pb::ProvenanceRecord {
+    let key = SourceKey::parse(key).unwrap();
+    let meta: Meta = meta
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+        .collect();
+    r.source = source::encode(&key, &meta).unwrap();
+    r
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cli_latest_of_a_source_instance() {
+    let fx = fixture();
+    let dirs: Vec<PathBuf> = (1..=4)
+        .map(|i| {
+            let dir = fx.src.with_file_name(format!("d{i}"));
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::write(dir.join(format!("marker{i}")), b"x").unwrap();
+            dir.canonicalize().unwrap()
+        })
+        .collect();
+    let ids: Vec<BlobId> = dirs.iter().map(|d| backup(&fx.repo, d)).collect();
+    sign(
+        &fx.repo,
+        &[
+            record(ids[0], "h1", "job"),
+            from_source(record(ids[1], "h1", "job"), GUEST, &[]),
+            from_source(record(ids[2], "h1", "job"), GUEST, &[]),
+            from_source(record(ids[3], "h2", "job"), GUEST, &[]),
+        ],
+    )
+    .await;
+
+    let spec = format!("latest@{GUEST}");
+    let listed = stdout_of(lode(&fx.repo).args(["ls", &spec]));
+    assert!(listed.contains("marker4"), "{listed}");
+    assert!(!listed.contains("marker3"), "{listed}");
+
+    let path = dirs[3].to_str().unwrap();
+    let narrowed = stdout_of(lode(&fx.repo).args(["ls", &format!("{spec}:{path}")]));
+    assert!(narrowed.contains("marker4"), "{narrowed}");
+
+    let files = stdout_of(lode(&fx.repo).args(["ls", "latest"]));
+    assert!(
+        files.contains("marker1") && !files.contains("marker4"),
+        "{files}"
+    );
+    let files = stdout_of(lode(&fx.repo).args(["ls", &format!("latest:{}", dirs[0].display())]));
+    assert!(files.contains("marker1"), "{files}");
+
+    lode(&fx.repo)
+        .args(["ls", "latest@bogus"])
+        .assert()
+        .failure()
+        .code(2);
+}
+
+async fn claiming_backup(repo: &Path, src: &Path, claim: &str) -> BlobId {
+    let store = LocalFsStore::new(repo.to_path_buf());
+    let repository = Repository::open(&store, PASSWORD.as_bytes()).await.unwrap();
+    let keys = repository.read_keys().write_keys(repository.config_hash());
+    let mut writer = Writer::new(&store, keys, repository.config())
+        .await
+        .unwrap();
+    let key = SourceKey::parse(claim).unwrap();
+    let options = BackupOptions {
+        source: source::encode(&key, &Meta::new()).unwrap(),
+        ..Default::default()
+    };
+    writer
+        .backup(&[src.to_path_buf()], options, &|_| {})
+        .await
+        .unwrap()
+        .snapshot_id
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cli_snapshots_filter_by_signed_source_type() {
+    let fx = fixture();
+    let second = fx.src.with_file_name("second");
+    std::fs::create_dir(&second).unwrap();
+    std::fs::write(second.join("f"), b"second").unwrap();
+    let first = backup(&fx.repo, &fx.src);
+    let vm = backup(&fx.repo, &second);
+    let claimed = claiming_backup(&fx.repo, &fx.forged_src, GUEST).await;
+    sign(
+        &fx.repo,
+        &[
+            record(first, "host", "job"),
+            from_source(
+                record(vm, "host", "job"),
+                GUEST,
+                &[("vmid", "101"), ("name", "web")],
+            ),
+        ],
+    )
+    .await;
+
+    let list = |args: &[&str]| -> Vec<serde_json::Value> {
+        let mut cmd = lode(&fx.repo);
+        let out = stdout_of(cmd.args(["snapshots", "--json"]).args(args));
+        let doc: serde_json::Value = serde_json::from_str(out.lines().next().unwrap()).unwrap();
+        doc["snapshots"].as_array().unwrap().clone()
+    };
+    let hex = lodestore_format::index::hex32;
+    let only_vm = list(&["--source-type", "proxmox-vm"]);
+    assert_eq!(only_vm.len(), 1);
+    assert_eq!(only_vm[0]["id"], hex(&vm).as_str());
+    assert_eq!(only_vm[0]["source_type"], "proxmox-vm");
+    assert_eq!(only_vm[0]["source_label"], "VM 101 · web");
+
+    let mut files: Vec<_> = list(&["--source-type", "files"])
+        .iter()
+        .map(|s| s["id"].as_str().unwrap().to_owned())
+        .collect();
+    files.sort();
+    let mut want = vec![hex(&first), hex(&claimed)];
+    want.sort();
+    assert_eq!(files, want, "an unsigned claim counted as a guest");
+
+    let all = list(&[]);
+    assert_eq!(all.len(), 3);
+    assert!(all.iter().all(|s| s["source_type"].is_string()));
+
+    lode(&fx.repo)
+        .args(["snapshots", "--source-type", "oracle"])
+        .assert()
+        .failure()
+        .code(2);
 }

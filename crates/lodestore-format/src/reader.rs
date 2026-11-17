@@ -26,7 +26,7 @@ use crate::index::{
 use crate::keys::ReadKeys;
 use crate::pack::{HEADER_OVERHEAD, PACK_PREFIX_LEN, decompress, open_prefix, pack_object_key};
 use crate::pb;
-use crate::provenance::{LatestPick, ProvenanceSet, pick_latest};
+use crate::provenance::{LatestPick, LatestScope, ProvenanceSet, pick_latest_in};
 use crate::selection::Selection;
 use crate::snapshot::{
     MAX_SNAPSHOT_SIZE, SnapshotEntry, SnapshotList, TreeSource, list_snapshots, open_snapshot,
@@ -350,13 +350,29 @@ impl<S: BlobStore> Reader<S> {
     /// `expect_upgraded` is true for a caller that knows the repository
     /// carried server signatures before.
     pub async fn resolve_latest(&self, expect_upgraded: bool) -> Result<LatestPick> {
+        self.resolve_latest_in(expect_upgraded, &LatestScope::Files)
+            .await
+    }
+
+    /// `latest` inside `scope`: files, or one source instance on any host.
+    pub async fn resolve_latest_in(
+        &self,
+        expect_upgraded: bool,
+        scope: &LatestScope,
+    ) -> Result<LatestPick> {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .ok()
             .and_then(|d| i64::try_from(d.as_millis()).ok())
             .unwrap_or(0);
         let entries = self.list_snapshots().await?.entries;
-        pick_latest(entries, &self.provenance().await?, now_ms, expect_upgraded)
+        pick_latest_in(
+            entries,
+            &self.provenance().await?,
+            now_ms,
+            expect_upgraded,
+            scope,
+        )
     }
 
     /// Finds a snapshot by `latest`, its full id or a unique hex prefix.
