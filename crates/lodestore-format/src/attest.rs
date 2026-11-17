@@ -304,6 +304,8 @@ pub fn open_provenance(keys: &ReadKeys, sealed: &[u8]) -> Result<pb::ProvenanceR
     if record.snapshot_id.len() != 32 {
         return Err(Error::corrupt("provenance", "snapshot id must be 32 bytes"));
     }
+    crate::source::decode(record.source.as_ref())
+        .map_err(|e| Error::corrupt("provenance", format!("invalid source: {e}")))?;
     Ok(record)
 }
 

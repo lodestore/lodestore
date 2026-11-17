@@ -6,14 +6,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use bytes::Bytes;
 use lodestore_format::attest::{
-    ATTEST_FRAME_V1, ATTEST_PREFIX, MARKER_LEGACY_SHARDS, MAX_ATTEST_SIZE, attest_key,
+    ATTEST_FRAME_V1, ATTEST_PREFIX, AttestedSet, MARKER_LEGACY_SHARDS, MAX_ATTEST_SIZE, attest_key,
     open_attestation, open_provenance, peek_attestation, peek_attestations, put_attestation,
     read_attestations, read_attestations_complete, seal_attestation, seal_provenance,
 };
-use lodestore_format::crypto::{Entropy, attest_mac};
+use lodestore_format::crypto::{BlobId, Entropy, attest_mac};
 use lodestore_format::keys::{MasterKey, ReadKeys};
 use lodestore_format::locks::{new_lock_id, read_gc_locks, read_writer_locks};
 use lodestore_format::pb;
+use lodestore_format::provenance::ProvenanceSet;
+use lodestore_format::source::{self, Meta, SourceKey};
 use lodestore_format::store::{BlobError, BlobStore, ListEntry, LocalFsStore};
 use prost::Message;
 use rand_chacha::ChaCha20Rng;
@@ -462,18 +464,77 @@ fn provenance_record_carries_a_source() {
             key: "proxmox-vm/pve1/0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d".into(),
             meta: vec![
                 pb::SourceMeta {
-                    key: "vmid".into(),
-                    value: "101".into(),
-                },
-                pb::SourceMeta {
                     key: "name".into(),
                     value: "web".into(),
+                },
+                pb::SourceMeta {
+                    key: "vmid".into(),
+                    value: "101".into(),
                 },
             ],
         }),
     };
     let sealed = seal_provenance(&keys, &record, &mut entropy(4)).unwrap();
     assert_eq!(open_provenance(&keys, &sealed).unwrap(), record);
+}
+
+fn source_record(source: Option<pb::Source>) -> pb::ProvenanceRecord {
+    pb::ProvenanceRecord {
+        snapshot_id: vec![5; 32],
+        host_id: "host-1".into(),
+        hostname: "pve1".into(),
+        job_id: "job-9".into(),
+        verified_at: Some(pb::Timestamp {
+            seconds: 1_700_000_000,
+            nanos: 7,
+        }),
+        source,
+    }
+}
+
+#[test]
+fn record_with_a_guest_source_opens() {
+    let keys = keys();
+    let key = SourceKey::proxmox_vm("pve1", "0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d").unwrap();
+    let meta = Meta::from([("name".into(), "web".into()), ("vmid".into(), "101".into())]);
+    let record = source_record(source::encode(&key, &meta).unwrap());
+    let sealed = seal_provenance(&keys, &record, &mut entropy(4)).unwrap();
+    let opened = open_provenance(&keys, &sealed).unwrap();
+    assert_eq!(source::decode(opened.source.as_ref()).unwrap(), (key, meta));
+}
+
+#[test]
+fn record_with_an_invalid_source_is_unreadable() {
+    let keys = keys();
+    let id = BlobId::try_from([5u8; 32].as_slice()).unwrap();
+    for bad in [
+        "proxmox-vm/pve1",
+        "oracle/x",
+        "proxmox-ct/pve1/105",
+        "files",
+        "mysql/0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d/a%2fb",
+    ] {
+        let record = source_record(Some(pb::Source {
+            key: bad.into(),
+            meta: Vec::new(),
+        }));
+        let sealed = seal_provenance(&keys, &record, &mut entropy(4)).unwrap();
+        assert!(
+            matches!(
+                open_provenance(&keys, &sealed),
+                Err(lodestore_format::Error::Corrupt { .. })
+            ),
+            "{bad} opened"
+        );
+        let attested = AttestedSet {
+            sealed_provenance: vec![sealed],
+            objects: vec!["locks/attest-x".into()],
+            ..Default::default()
+        };
+        let set = ProvenanceSet::from_attested(&attested, &keys);
+        assert_eq!(set.unreadable(), 1, "{bad}");
+        assert!(!set.contains(&id), "{bad}");
+    }
 }
 
 #[test]

@@ -1,0 +1,149 @@
+{
+  "encoded": {
+    "database": "0a22706f7374677265732f373330303030303030303030303030303030312f3136333834120f0a086461746162617365120361707012160a0e7365727665725f76657273696f6e120431362e34",
+    "guest": "0a3470726f786d6f782d766d2f707665312f30623163326433652d346635302d346136622d386337642d396530663161326233633464120e0a046e616d6512067765622d3031120b0a04766d69641203313031"
+  },
+  "keys": [
+    {
+      "input": "files",
+      "key": ""
+    },
+    {
+      "input": "proxmox_vm(pve1, VM_A)",
+      "key": "proxmox-vm/pve1/0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d"
+    },
+    {
+      "input": "proxmox_vm(pve1, VM_B): the same VMID 101 with another uuid is another instance",
+      "key": "proxmox-vm/pve1/7f3e9a10-2b4c-4d5e-8f60-a1b2c3d4e5f6"
+    },
+    {
+      "input": "proxmox_ct(pve1, CT)",
+      "key": "proxmox-ct/pve1/c0ffee00-1234-4abc-8def-0123456789ab"
+    },
+    {
+      "input": "proxmox_vm(my cluster/1, VM_A)",
+      "key": "proxmox-vm/my%20cluster%2F1/0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d"
+    },
+    {
+      "input": "postgres(7300000000000000001, 16384)",
+      "key": "postgres/7300000000000000001/16384"
+    },
+    {
+      "input": "postgres(7300000000000000001, 16385): another database of the cluster",
+      "key": "postgres/7300000000000000001/16385"
+    },
+    {
+      "input": "postgres(18446744073709551615, 4294967295)",
+      "key": "postgres/18446744073709551615/4294967295"
+    },
+    {
+      "input": "postgres_wal(7300000000000000001)",
+      "key": "postgres-wal/7300000000000000001"
+    },
+    {
+      "input": "mysql(MYSQL, shop)",
+      "key": "mysql/5d0c4a1e-9b2f-4e7a-a6c3-18f2d4b7e9a0/shop"
+    },
+    {
+      "input": "mysql(MYSQL, a/b)",
+      "key": "mysql/5d0c4a1e-9b2f-4e7a-a6c3-18f2d4b7e9a0/a%2Fb"
+    },
+    {
+      "input": "mysql(MYSQL, 100%)",
+      "key": "mysql/5d0c4a1e-9b2f-4e7a-a6c3-18f2d4b7e9a0/100%25"
+    },
+    {
+      "input": "mysql(MYSQL, ü)",
+      "key": "mysql/5d0c4a1e-9b2f-4e7a-a6c3-18f2d4b7e9a0/%C3%BC"
+    },
+    {
+      "input": "mysql(MYSQL, x y)",
+      "key": "mysql/5d0c4a1e-9b2f-4e7a-a6c3-18f2d4b7e9a0/x%20y"
+    }
+  ],
+  "labels": [
+    {
+      "key": "proxmox-vm/pve1/0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d",
+      "label": "VM 101 · web-01",
+      "meta": {
+        "name": "web-01",
+        "vmid": "101"
+      }
+    },
+    {
+      "key": "proxmox-vm/pve1/0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d",
+      "label": "VM 101",
+      "meta": {
+        "vmid": "101"
+      }
+    },
+    {
+      "key": "proxmox-vm/pve1/0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d",
+      "label": null,
+      "meta": {
+        "name": "web-01"
+      }
+    },
+    {
+      "key": "proxmox-ct/pve1/c0ffee00-1234-4abc-8def-0123456789ab",
+      "label": "CT 105 · dns",
+      "meta": {
+        "name": "dns",
+        "vmid": "105"
+      }
+    },
+    {
+      "key": "postgres/7300000000000000001/16384",
+      "label": "app · PostgreSQL 16",
+      "meta": {
+        "database": "app",
+        "server_version": "16.4"
+      }
+    },
+    {
+      "key": "mysql/5d0c4a1e-9b2f-4e7a-a6c3-18f2d4b7e9a0/shop",
+      "label": "shop · MySQL 8",
+      "meta": {
+        "server_version": "8.4.2"
+      }
+    },
+    {
+      "key": "postgres-wal/7300000000000000001",
+      "label": null,
+      "meta": {
+        "database": "app"
+      }
+    },
+    {
+      "key": "",
+      "label": null,
+      "meta": {}
+    }
+  ],
+  "rejected": {
+    "files": "invalid input: source: the files key is empty",
+    "mysql/0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d/%41": "invalid input: source: segment is not in canonical percent-encoding",
+    "mysql/0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d/%FF": "invalid input: source: segment is not UTF-8",
+    "mysql/0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d/a%2fb": "invalid input: source: segment is not in canonical percent-encoding",
+    "mysql/0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d/a%4": "invalid input: source: truncated percent escape",
+    "oracle/x": "invalid input: source: unknown source type",
+    "postgres-wal/1/2": "invalid input: source: wrong number of segments for the source type",
+    "postgres/0/1": "invalid input: source: number must be decimal, non-zero, without leading zeros",
+    "postgres/01/1": "invalid input: source: number must be decimal, non-zero, without leading zeros",
+    "postgres/1/0": "invalid input: source: number must be decimal, non-zero, without leading zeros",
+    "postgres/18446744073709551616/1": "invalid input: source: number is out of range",
+    "proxmox-ct/pve1/0B1C2D3E-4F50-4A6B-8C7D-9E0F1A2B3C4D": "invalid input: source: a guest is identified by its lower-case uuid",
+    "proxmox-ct/pve1/105": "invalid input: source: a guest is identified by its lower-case uuid",
+    "proxmox-ct/pve1/web-ct": "invalid input: source: a guest is identified by its lower-case uuid",
+    "proxmox-vm/pve1": "invalid input: source: wrong number of segments for the source type",
+    "proxmox-vm/pve1/0B1C2D3E-4F50-4A6B-8C7D-9E0F1A2B3C4D": "invalid input: source: a guest is identified by its lower-case uuid",
+    "proxmox-vm/pve1/101": "invalid input: source: a guest is identified by its lower-case uuid"
+  },
+  "sealed": {
+    "master": "0101010101010101010101010101010101010101010101010101010101010101",
+    "record_chacha20_seed": 18,
+    "record_plaintext": "0a203333333333333333333333333333333333333333333333333333333333333333120e766563746f722d686f73742d69641a0b766563746f722d686f7374220a766563746f722d6a6f622a060880e2cfaa06324d0a22706f7374677265732f373330303030303030303030303030303030312f3136333834120f0a086461746162617365120361707012160a0e7365727665725f76657273696f6e120431362e34",
+    "repo_id": "01010101010101010101010101010101",
+    "sealed_record": "e97734b922a9cbca9bee20ceab01aea3a575f460a30c727a1341a09c0c1a635d8ccebee9cb1d9d9cfa8cafc2c2d6e96e9f3e2bb01d9f20ccab82dabb61563e7a1b5994b0b56c1e40e89d8431e3e813775b43eaa4e835511dc8e06bfe99d7994fc79b2879d7ca228875dc9864f7687e5d8944655bf8471fd1d54612e1af0add27a3bcfc2a97033c217272ef608c800c8e157fdf0bb5fe35dfbcef089c452d998c8c8e308514dd91179fc6124056031d313a930f47d02300e39d80a537a68e95862b2e11b111c034faf8bc"
+  }
+}

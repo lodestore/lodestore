@@ -286,6 +286,18 @@ pub fn try_seeds(fixtures: &Path) -> Result<Seeds, String> {
         out.push(("provenance_open", record));
     }
 
+    let source = vectors(fixtures, "source-vectors.json")?;
+    let encoded = source
+        .split_once("\"encoded\"")
+        .and_then(|(_, rest)| rest.split_once('}'))
+        .map(|(section, _)| section)
+        .ok_or("source-vectors.json has no encoded section")?;
+    for field in ["guest", "database"] {
+        for claimed in hex_fields(encoded, field)? {
+            out.push(("source_decode", claimed));
+        }
+    }
+
     let mut reader = Reader::open(&store, repo.read_keys().duplicate(), repo.config())
         .map_err(|e| format!("open a reader: {e}"))?;
     let mut pending = Vec::new();
