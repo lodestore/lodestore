@@ -69,9 +69,13 @@ const route = getRouteApi("/_app/hosts/$id");
 
 const SHORT_ID = 8;
 const ALL = "all";
+const SOURCE_CAP = "max-w-36 @min-[840px]:max-w-48";
+const SOURCE_CAP_MIXED =
+	"max-w-28 @min-[680px]:max-w-36 @min-[1040px]:max-w-48";
 const REFRESH_MS = 15_000;
 const SHOW_CONTENTS = "hidden @min-[680px]:table-cell";
 const SHOW_FILES = "hidden @min-[840px]:table-cell";
+const SHOW_FILES_WIDE = "hidden @min-[1040px]:table-cell";
 
 const source = (snapshot: SnapshotItem) =>
 	snapshot.policy_name ??
@@ -145,7 +149,12 @@ function SourceTypeFilter({
 							value={type}
 							className="gap-2 px-4 font-normal data-[state=on]:bg-primary-subtle data-[state=on]:font-semibold data-[state=on]:text-primary-strong"
 						>
-							{Icon && <Icon aria-hidden className="text-muted-foreground" />}
+							{Icon && (
+								<Icon
+									aria-hidden
+									className="hidden text-muted-foreground @min-[840px]:block"
+								/>
+							)}
 							{type === ALL ? copy.snapshots.filter.all : sourceTypeLabel(type)}
 							<span className="font-normal text-muted-foreground tabular-nums group-data-[state=on]/toggle:font-semibold group-data-[state=on]/toggle:text-primary-strong">
 								{count}
@@ -245,6 +254,8 @@ export function SnapshotsTable({ host }: { host: HostDetail }) {
 
 	const counts = data?.source_counts ?? [];
 	const several = counts.length > 1;
+	const pad = several ? "px-2 @min-[680px]:px-4" : "px-4";
+	const showFiles = several ? SHOW_FILES_WIDE : SHOW_FILES;
 
 	function selectType(next: SourceType | undefined) {
 		setPage(1);
@@ -291,31 +302,38 @@ export function SnapshotsTable({ host }: { host: HostDetail }) {
 
 	return (
 		<div className="flex flex-col gap-4 pt-4">
-			<div
-				className={cn(
-					"@container flex",
-					several
-						? "flex-col gap-4 @min-[680px]:flex-row @min-[680px]:items-center @min-[680px]:justify-between"
-						: "justify-end",
-				)}
-			>
-				{several && (
-					<SourceTypeFilter
-						counts={counts}
-						value={type}
-						onChange={selectType}
-					/>
-				)}
-				<Button
-					variant="outline"
-					size="sm"
-					className={cn(several && "self-start")}
-					disabled={sync.isPending}
-					onClick={checkStorage}
+			<div className="@container">
+				<div
+					className={cn(
+						"flex",
+						several
+							? "flex-col gap-4 @min-[680px]:flex-row @min-[680px]:flex-wrap @min-[680px]:items-center @min-[680px]:justify-between"
+							: "justify-end",
+					)}
 				>
-					{sync.isPending ? <Spinner /> : <RefreshCw aria-hidden />}
-					{sync.isPending ? copy.snapshots.syncing : copy.snapshots.syncCatalog}
-				</Button>
+					{several && (
+						<SourceTypeFilter
+							counts={counts}
+							value={type}
+							onChange={selectType}
+						/>
+					)}
+					<Button
+						variant="outline"
+						size="sm"
+						className={cn(
+							several &&
+								"self-start @min-[680px]:ml-auto @min-[680px]:self-center",
+						)}
+						disabled={sync.isPending}
+						onClick={checkStorage}
+					>
+						{sync.isPending ? <Spinner /> : <RefreshCw aria-hidden />}
+						{sync.isPending
+							? copy.snapshots.syncing
+							: copy.snapshots.syncCatalog}
+					</Button>
+				</div>
 			</div>
 
 			{data === undefined && query.isError && (
@@ -354,13 +372,13 @@ export function SnapshotsTable({ host }: { host: HostDetail }) {
 					<Table>
 						<TableHeader className="bg-muted">
 							<TableRow>
-								<TableHead className="px-4">
+								<TableHead className={pad}>
 									{copy.snapshots.columns.created}
 								</TableHead>
-								<TableHead className="px-4">
+								<TableHead className={pad}>
 									{copy.snapshots.columns.snapshot}
 								</TableHead>
-								<TableHead className="px-4">
+								<TableHead className={pad}>
 									{copy.snapshots.columns.source}
 								</TableHead>
 								<TableHead className={cn("px-4", SHOW_CONTENTS)}>
@@ -369,7 +387,7 @@ export function SnapshotsTable({ host }: { host: HostDetail }) {
 								<TableHead className={cn("px-4 text-right", SHOW_CONTENTS)}>
 									{copy.snapshots.columns.size}
 								</TableHead>
-								<TableHead className={cn("px-4 text-right", SHOW_FILES)}>
+								<TableHead className={cn("px-4 text-right", showFiles)}>
 									{copy.snapshots.columns.files}
 								</TableHead>
 								<TableHead className="px-4">
@@ -388,20 +406,20 @@ export function SnapshotsTable({ host }: { host: HostDetail }) {
 							) : (
 								data.items.map((snapshot) => (
 									<TableRow key={snapshot.id} className="h-12">
-										<TableCell className="px-4 text-sm">
+										<TableCell className={cn("text-sm", pad)}>
 											<RelativeTime value={new Date(snapshot.time)} />
 										</TableCell>
 										<TableCell
-											className="px-4 font-mono text-sm"
+											className={cn("font-mono text-sm", pad)}
 											title={snapshot.id}
 										>
 											{snapshot.id.slice(0, SHORT_ID)}
 										</TableCell>
-										<TableCell className="px-4 text-sm font-semibold">
+										<TableCell className={cn("text-sm font-semibold", pad)}>
 											<div
 												className={cn(
 													"flex flex-col items-start py-1",
-													several ? "gap-0" : "gap-1",
+													several ? cn("gap-0", SOURCE_CAP_MIXED) : "gap-1",
 												)}
 											>
 												{several && (
@@ -412,16 +430,17 @@ export function SnapshotsTable({ host }: { host: HostDetail }) {
 																snapshot.source_label ??
 																sourceTypeLabel(snapshot.source_type)
 															}
-															className="max-w-36 @min-[840px]:max-w-48"
+															className="min-w-0"
 														/>
 													</span>
 												)}
 												<Truncated
 													text={source(snapshot)}
-													className={cn(
-														"max-w-36 @min-[840px]:max-w-48",
-														several && "font-normal text-muted-foreground",
-													)}
+													className={
+														several
+															? "max-w-full font-normal text-muted-foreground"
+															: SOURCE_CAP
+													}
 												/>
 												{snapshot.policy_deleted && <PolicyDeletedBadge />}
 											</div>
@@ -443,7 +462,7 @@ export function SnapshotsTable({ host }: { host: HostDetail }) {
 										<TableCell
 											className={cn(
 												"px-4 text-right text-sm tabular-nums",
-												SHOW_FILES,
+												showFiles,
 											)}
 										>
 											{formatCount(fileTotal(snapshot))}
