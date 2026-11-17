@@ -1,5 +1,5 @@
 use lodestore_policy::{
-    BackupPolicy, IoniceClass, Problem, Selector, parse_yaml, to_yaml, validate,
+    BackupPolicy, IoniceClass, Problem, Selector, Source, parse_yaml, to_yaml, validate,
 };
 
 const QUICKSTART: &str = r#"apiVersion: lodestore.io/v1alpha1
@@ -488,4 +488,32 @@ fn policy_selector_host_list() {
         problem_paths(&bad),
         vec![Some("spec.selector.hosts[0]".to_string())]
     );
+}
+
+const PROXMOX_VM: &str = "apiVersion: lodestore.io/v1alpha2
+kind: BackupPolicy
+metadata:
+  name: vms
+spec:
+  repository: main
+  source:
+    type: proxmox-vm
+    vmids: [101, 102]
+";
+
+#[test]
+fn source_proxmox_vm_policy_validates() {
+    let policy = parse_yaml(PROXMOX_VM).unwrap();
+    assert!(matches!(policy.spec.source, Some(Source::ProxmoxVm(_))));
+    assert!(validate(&policy).is_empty());
+
+    let bad = PROXMOX_VM.replace("vmids: [101, 102]", "vmids: [101]\n    bogus: 1");
+    let found = parse_yaml(&bad).unwrap_err();
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(
+        found[0].path.as_deref().unwrap().starts_with("spec.source"),
+        "{found:?}"
+    );
+    assert!(found[0].message.contains("bogus"), "{found:?}");
+    assert_ne!((found[0].line, found[0].column), (Some(1), Some(1)));
 }

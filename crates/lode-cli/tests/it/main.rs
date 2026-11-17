@@ -16,6 +16,7 @@ mod find_server_cli;
 mod gc_cli;
 mod gc_writer_marker;
 mod keys;
+mod policy_validate;
 mod provenance_cli;
 mod rebuild_index;
 mod recovery;

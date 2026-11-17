@@ -11,11 +11,14 @@ use serde::{Deserialize, Serialize};
 mod duration;
 pub mod retention;
 pub mod schedule;
+pub mod source;
 
 pub use duration::{format_duration, format_size, parse_duration, parse_rate, parse_size};
 pub use jiff;
+pub use source::{DatabaseSource, FilesSource, ProxmoxGuests, Source};
 
 pub const API_VERSION: &str = "lodestore.io/v1alpha1";
+pub const API_VERSION_SOURCES: &str = "lodestore.io/v1alpha2";
 pub const KIND: &str = "BackupPolicy";
 
 const DEFAULT_TIMEOUT_SECS: u32 = 3600;
@@ -80,6 +83,13 @@ pub struct PolicySpec {
     pub repository: String,
     #[serde(default)]
     pub selector: Selector,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "source::deserialize"
+    )]
+    pub source: Option<Source>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub paths: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exclude: Vec<String>,
@@ -289,12 +299,14 @@ pub fn yaml_problem(error: &yaml_serde::Error) -> Problem {
             message = head.to_string();
         }
     }
-    let mut path = None;
-    if let Some((head, rest)) = message.split_once(": ")
+    let mut path: Option<String> = None;
+    // A deeper path may follow the one the YAML reader added (`spec: spec.source: …`).
+    while let Some((head, rest)) = message.split_once(": ")
         && head.starts_with(|c: char| c.is_ascii_alphabetic())
         && head
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '[' | ']' | '_' | '-'))
+        && path.as_deref().is_none_or(|p| head.starts_with(p))
     {
         path = Some(head.to_string());
         message = rest.to_string();
@@ -328,10 +340,10 @@ fn parse_timeout(text: &str) -> Option<u32> {
 
 pub fn validate(policy: &BackupPolicy) -> Vec<Problem> {
     let mut out = Vec::new();
-    if policy.api_version != API_VERSION {
+    if policy.api_version != API_VERSION && policy.api_version != API_VERSION_SOURCES {
         out.push(Problem::at(
             "apiVersion",
-            format!("Use apiVersion \"{API_VERSION}\"."),
+            format!("Use apiVersion \"{API_VERSION}\" or \"{API_VERSION_SOURCES}\"."),
         ));
     }
     if policy.kind != KIND {
@@ -349,7 +361,16 @@ pub fn validate(policy: &BackupPolicy) -> Vec<Problem> {
     }
     validate_labels(&spec.selector, &mut out);
     validate_hosts(&spec.selector, &mut out);
-    validate_paths(spec, &mut out);
+    if spec.source.is_some() && policy.api_version == API_VERSION {
+        out.push(Problem::at(
+            "spec.source",
+            format!("A source needs apiVersion \"{API_VERSION_SOURCES}\"."),
+        ));
+    }
+    source::validate_source(spec, &mut out);
+    if source::normalized(&spec.source).is_none() {
+        validate_paths(spec, &mut out);
+    }
     for (i, pattern) in spec.exclude.iter().enumerate() {
         if let Err(e) = PathMatcher::new([pattern]) {
             out.push(Problem::at(format!("spec.exclude[{i}]"), e.to_string()));

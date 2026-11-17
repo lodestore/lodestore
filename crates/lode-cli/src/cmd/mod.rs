@@ -7,6 +7,7 @@ mod find;
 mod gc;
 mod key;
 mod ls;
+mod policy;
 mod repo;
 mod restore;
 mod server;
@@ -62,6 +63,7 @@ pub fn run(cli: Cli) -> Result<u8> {
         Command::Apply(args) => {
             return rt.block_on(apply::run(args, profile.as_ref(), out));
         }
+        Command::Policy { command } => return policy::run(out, command),
         Command::Gc { server, args } => {
             let client = Client::resolve(server.server, profile.as_ref())?;
             return rt.block_on(gc::run(&client, out, args));
@@ -105,7 +107,10 @@ pub fn run(cli: Cli) -> Result<u8> {
                 target,
                 flags,
             } => restore::run(&url, &secret, out, &snapshot, &target, flags).await,
-            Command::Server { .. } | Command::Apply(_) | Command::Gc { .. } => {
+            Command::Server { .. }
+            | Command::Apply(_)
+            | Command::Policy { .. }
+            | Command::Gc { .. } => {
                 unreachable!("server commands return before this point")
             }
         }

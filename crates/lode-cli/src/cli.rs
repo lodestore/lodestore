@@ -135,6 +135,11 @@ pub enum Command {
     },
     /// Apply policy YAML files to a Lodestore server; exits 4 when --dry-run finds changes
     Apply(ApplyArgs),
+    /// Work with policy YAML files
+    Policy {
+        #[command(subcommand)]
+        command: PolicyCommand,
+    },
     /// Free storage space of a repository on a Lodestore server (same as `lode server gc`)
     Gc {
         #[command(flatten)]
@@ -196,6 +201,16 @@ pub enum GcCommand {
         /// Unlock without asking on a terminal
         #[arg(long)]
         yes: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PolicyCommand {
+    /// Check policy YAML files offline; exits 3 when a file has problems.
+    Validate {
+        /// Policy files; each may hold several YAML documents
+        #[arg(required = true, value_name = "FILE")]
+        files: Vec<PathBuf>,
     },
 }
 
