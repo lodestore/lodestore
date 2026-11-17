@@ -342,7 +342,8 @@ export function PolicyEditor({
 	}
 
 	const blocker = useBlocker({
-		shouldBlockFn: () => changed && !bypass.current,
+		shouldBlockFn: ({ current, next }) =>
+			changed && !bypass.current && current.pathname !== next.pathname,
 		enableBeforeUnload: () => changed && !bypass.current,
 		withResolver: true,
 	});
@@ -421,7 +422,7 @@ export function PolicyEditor({
 				</Tabs>
 			)}
 			{outerTab === "preview" && preview.data && (
-				<InstancePreview data={preview.data} />
+				<InstancePreview state={preview} rules={rules} changed={rulesChanged} />
 			)}
 			<div
 				className={cn(
@@ -474,6 +475,7 @@ export function PolicyEditor({
 												isNew={isNew}
 												hasRules={hasRetention(draft.retention)}
 												changed={rulesChanged}
+												onOpen={() => onPreviewTab?.("preview")}
 											/>
 										}
 									/>

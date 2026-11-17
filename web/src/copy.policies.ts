@@ -254,18 +254,46 @@ export const policies = {
 				"Saving does not delete anything by itself. Snapshots are forgotten after the next successful backup of each host.",
 			error:
 				"Couldn't calculate the preview. Check that the server is reachable, then retry.",
-			retry: "Retry loading",
+			retry: "Retry preview",
 			show: "Show snapshots to forget",
 			hide: "Hide snapshots to forget",
-			floor: (n: number) =>
+			floor: (n: number, unit = "host") =>
 				n === 1
-					? "1 more snapshot is kept: the two newest complete snapshots of each host are never forgotten."
-					: `${n} more snapshots are kept: the two newest complete snapshots of each host are never forgotten.`,
+					? `1 more snapshot is kept: the two newest complete snapshots of each ${unit} are never forgotten.`
+					: `${n} more snapshots are kept: the two newest complete snapshots of each ${unit} are never forgotten.`,
 			forgetOf: (forget: number, total: number) =>
 				`forget ${forget} of ${total}`,
 			notKept: "Not kept by any rule",
 			showAll: (n: number) => `Show all ${n} hosts`,
 			more: (n: number) => `and ${n} more`,
+			sourcesSummary: (
+				forget: string,
+				total: string,
+				sources: string,
+				hosts: string,
+			) => `Would forget ${forget} of ${total} in ${sources} on ${hosts}.`,
+			open: "Open preview",
+			unsavedRules: (rules: string) =>
+				`Calculated from the unsaved rules on the Policy tab: ${rules}.`,
+			rules: {
+				last: (n: number) => `keep last ${n}`,
+				within: (span: string) => `within ${span}`,
+				daily: (n: number) => `daily ${n}`,
+				weekly: (n: number) => `weekly ${n}`,
+				monthly: (n: number) => `monthly ${n}`,
+			},
+			hostFilter: "Host",
+			allHosts: "All hosts",
+			sorted: "Sorted by snapshots to forget",
+			showingSources: (from: number, to: number, total: string) =>
+				from === to
+					? `Showing ${from} of ${total}`
+					: `Showing ${from}\u2013${to} of ${total}`,
+			moreSnapshots: (n: number) =>
+				n === 1
+					? "and 1 more snapshot not listed"
+					: `and ${n} more snapshots not listed`,
+			expand: (label: string) => `Snapshots to forget in ${label}`,
 			tabCount: (n: number) => `forget ${n}`,
 			tabCountZero: "nothing to forget",
 			columns: {
