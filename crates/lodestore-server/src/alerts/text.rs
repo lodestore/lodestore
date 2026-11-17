@@ -17,14 +17,26 @@ pub fn alertname(kind: AlertType) -> &'static str {
         AlertType::RepositoryUnavailable => "LodestoreRepositoryUnavailable",
         AlertType::AgentSessionConflict => "LodestoreAgentSessionConflict",
         AlertType::AgentCertificateRejected => "LodestoreAgentCertificateRejected",
+        AlertType::SourceInstanceGone => "LodestoreSourceInstanceGone",
     }
 }
 
 pub fn title(c: &Candidate, now_ms: i64) -> String {
     let host = c.hostname.as_deref().unwrap_or("unknown host");
     match c.kind {
-        AlertType::BackupFailed => format!("Backup failed on {host}"),
-        AlertType::NoRecentBackup => format!("No recent backup on {host}"),
+        AlertType::BackupFailed => match c.facts.source_label.as_deref() {
+            Some(label) => format!("Backup of {label} failed on {host}"),
+            None => format!("Backup failed on {host}"),
+        },
+        AlertType::NoRecentBackup => match c.facts.source_label.as_deref() {
+            Some(label) => format!("No recent backup of {label} on {host}"),
+            None => format!("No recent backup on {host}"),
+        },
+        AlertType::SourceInstanceGone => format!(
+            "{} of {host} is no longer backed up by {}",
+            c.facts.source_label.as_deref().unwrap_or("A source"),
+            c.policy.as_deref().unwrap_or("unknown"),
+        ),
         AlertType::AgentOffline => format!("{host} is offline"),
         AlertType::AgentUpdateFailed => format!("Agent update failed on {host}"),
         AlertType::AgentSessionConflict => format!("Two live agent sessions for {host}"),
@@ -85,6 +97,17 @@ pub fn detail(c: &Candidate) -> String {
                 ),
                 None => last,
             }
+        }
+        AlertType::SourceInstanceGone => {
+            let last = c
+                .facts
+                .last_success_at
+                .map(|ms| format!(" Last success {}.", utc(ms)))
+                .unwrap_or_default();
+            format!(
+                "Policy {} no longer selects this source: it was deleted, replaced or left the selector.{last} Its snapshots stay under the retention rules; delete what you do not need by hand. This alert clears itself after a day.",
+                c.policy.as_deref().unwrap_or("unknown"),
+            )
         }
         AlertType::AgentOffline => match c.facts.last_seen_at {
             Some(ms) => format!("Last contact {}.", utc(ms)),
@@ -246,6 +269,38 @@ mod tests {
         assert_eq!(
             alertname(AlertType::AgentCertificateRejected),
             "LodestoreAgentCertificateRejected"
+        );
+    }
+
+    #[test]
+    fn source_instance_gone_texts() {
+        assert_eq!(
+            alertname(AlertType::SourceInstanceGone),
+            "LodestoreSourceInstanceGone"
+        );
+        let labelled = AlertFacts {
+            source_label: Some("VM 101 \u{b7} web".into()),
+            ..AlertFacts::default()
+        };
+        let (title, detail) = text(AlertType::SourceInstanceGone, labelled);
+        assert_eq!(
+            title,
+            "VM 101 \u{b7} web of web-1 is no longer backed up by daily"
+        );
+        assert!(detail.contains("no longer selects"), "{detail}");
+        let (title, _) = text(AlertType::SourceInstanceGone, AlertFacts::default());
+        assert_eq!(title, "A source of web-1 is no longer backed up by daily");
+        let overdue = AlertFacts {
+            source_label: Some("VM 101".into()),
+            ..AlertFacts::default()
+        };
+        assert_eq!(
+            text(AlertType::NoRecentBackup, overdue.clone()).0,
+            "No recent backup of VM 101 on web-1"
+        );
+        assert_eq!(
+            text(AlertType::BackupFailed, overdue).0,
+            "Backup of VM 101 failed on web-1"
         );
     }
 

@@ -6801,6 +6801,12 @@
               "string",
               "null"
             ]
+          },
+          "source_label": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -6893,7 +6899,8 @@
           "snapshot_quarantined",
           "repository_unavailable",
           "agent_session_conflict",
-          "agent_certificate_rejected"
+          "agent_certificate_rejected",
+          "source_instance_gone"
         ]
       },
       "Alerts": {

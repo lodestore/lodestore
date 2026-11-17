@@ -15,6 +15,13 @@ groups:
         annotations:
           summary: "No recent backup on {{ $labels.host }}"
           description: "Policy {{ $labels.policy }}: the last successful backup on {{ $labels.host }} is older than the policy allows."
+      - alert: LodestoreSourceInstanceGone
+        expr: lodestore_alerts_active{type="source_instance_gone"} > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "A policy no longer selects a source it backed up"
+          description: "A guest or database was deleted, replaced or left the policy selector. Its snapshots stay under the retention rules. The source and host are named in the alert in Lodestore; the alert clears itself after a day."
   - name: lodestore-agents
     rules:
       - alert: LodestoreAgentOffline

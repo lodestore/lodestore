@@ -3,6 +3,7 @@ use super::model::{AlertFacts, AlertType, CertKind, HostFacts, Severity, Thresho
 
 const DAY_MS: i64 = 86_400_000;
 pub const SECURITY_ALERT_WINDOW_MS: i64 = DAY_MS;
+const GONE_WINDOW_MS: i64 = DAY_MS;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Candidate {
@@ -47,7 +48,34 @@ pub fn evaluate(
 ) -> Vec<Candidate> {
     let mut out = Vec::new();
     for h in &inputs.hosts {
+        for pair in h.pairs.iter().filter(|p| !p.expected) {
+            if let Some(gone_at) = pair.gone_at_ms
+                && gone_at <= now_ms
+                && now_ms < gone_at + GONE_WINDOW_MS
+            {
+                out.push(Candidate {
+                    policy: Some(pair.policy.clone()),
+                    facts: AlertFacts {
+                        last_success_at: pair.last_success_ms,
+                        source_label: pair.source_label.clone(),
+                        ..AlertFacts::default()
+                    },
+                    ..Candidate::for_host(
+                        h,
+                        AlertType::SourceInstanceGone,
+                        format!(
+                            "source_instance_gone:{}:{}:{}",
+                            h.host_id, pair.policy, pair.source_ref
+                        ),
+                        Severity::Warning,
+                    )
+                });
+            }
+        }
         for pair in h.pairs.iter().filter(|p| p.expected) {
+            let label = (!pair.source_ref.is_empty())
+                .then(|| pair.source_label.clone())
+                .flatten();
             let suffix = match pair.source_ref.as_str() {
                 "" => String::new(),
                 instance => format!(":{instance}"),
@@ -57,6 +85,7 @@ pub fn evaluate(
                     policy: Some(pair.policy.clone()),
                     facts: AlertFacts {
                         error: Some(error.clone()),
+                        source_label: label.clone(),
                         ..AlertFacts::default()
                     },
                     ..Candidate::for_host(
@@ -73,6 +102,7 @@ pub fn evaluate(
                     facts: AlertFacts {
                         last_success_at: pair.last_success_ms,
                         limit_secs: pair.limit.map(|l| l.as_secs()),
+                        source_label: label,
                         ..AlertFacts::default()
                     },
                     ..Candidate::for_host(
@@ -436,6 +466,57 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn gone_instance_raises_one_event_for_a_day() {
+        let gone = |limit: Option<u64>, success_ago_h: Option<i64>, gone_at: Option<i64>| {
+            let mut p = pair(None, success_ago_h);
+            p.source_ref = "proxmox-vm/pve1/7".into();
+            p.source_label = Some("VM 101 \u{b7} web".into());
+            p.limit = limit.map(|h| Duration::from_secs(h * 3600));
+            p.expected = false;
+            p.gone_at_ms = gone_at;
+            p
+        };
+        let g = NOW - 30 * DAY_MS;
+        for limit in [None, Some(48)] {
+            for success in [None, Some(30 * 24), Some(1)] {
+                let p = gone(limit, success, Some(g));
+                for (at, raised) in [
+                    (g, true),
+                    (g + 23 * HOUR, true),
+                    (g + 24 * HOUR, false),
+                    (g + 25 * HOUR, false),
+                    (g - 1, false),
+                ] {
+                    let inputs = Inputs {
+                        hosts: vec![host(vec![p.clone()])],
+                        ..Inputs::default()
+                    };
+                    let out = evaluate(&inputs, at, at, &T);
+                    if raised {
+                        assert_eq!(
+                            keys(&out),
+                            ["source_instance_gone:h1:daily:proxmox-vm/pve1/7"],
+                            "{limit:?} {success:?} {at}"
+                        );
+                        assert_eq!(out[0].severity, Severity::Warning);
+                        assert_eq!(
+                            out[0].facts.source_label.as_deref(),
+                            Some("VM 101 \u{b7} web")
+                        );
+                    } else {
+                        assert!(out.is_empty(), "{out:?}");
+                    }
+                }
+            }
+        }
+        let inputs = Inputs {
+            hosts: vec![host(vec![gone(Some(48), Some(1), None)])],
+            ..Inputs::default()
+        };
+        assert!(evaluate(&inputs, NOW, NOW, &T).is_empty());
     }
 
     #[test]

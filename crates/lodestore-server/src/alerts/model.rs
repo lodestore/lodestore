@@ -151,6 +151,7 @@ pub enum AlertType {
     RepositoryUnavailable,
     AgentSessionConflict,
     AgentCertificateRejected,
+    SourceInstanceGone,
 }
 
 impl AlertType {
@@ -166,6 +167,7 @@ impl AlertType {
             AlertType::RepositoryUnavailable => "repository_unavailable",
             AlertType::AgentSessionConflict => "agent_session_conflict",
             AlertType::AgentCertificateRejected => "agent_certificate_rejected",
+            AlertType::SourceInstanceGone => "source_instance_gone",
         }
     }
 
@@ -181,6 +183,7 @@ impl AlertType {
             "repository_unavailable" => AlertType::RepositoryUnavailable,
             "agent_session_conflict" => AlertType::AgentSessionConflict,
             "agent_certificate_rejected" => AlertType::AgentCertificateRejected,
+            "source_instance_gone" => AlertType::SourceInstanceGone,
             _ => return None,
         })
     }
@@ -280,6 +283,8 @@ pub struct AlertFacts {
     pub ip: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_ip: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1396,3 +1396,79 @@ async fn alerts_gone_moment_clears_when_expected_again() {
         env.stop().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn alerts_gone_instance_opens_one_event() {
+    for backend in backends() {
+        let name = backend.name();
+        let env = Env::start(&backend).await;
+        let t0 = now_ms();
+        env.host("h1", "web-1").await;
+        env.policy("daily", "h1", DAILY).await;
+        env.snapshot("f1", "h1", "daily", t0 - MINUTE).await;
+        let guest = guests(1).remove(0);
+        env.guest_snapshot("g1", "h1", "daily", &guest, t0 - 30 * DAY)
+            .await;
+        let rows = |state: &'static str| {
+            let env = &env;
+            async move {
+                env.alerts(state)
+                    .await
+                    .into_iter()
+                    .filter(|a| a["type"] == "source_instance_gone")
+                    .map(|a| a["id"].as_str().unwrap().to_string())
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        env.tick(t0).await;
+        let first = rows("active").await;
+        assert_eq!(first.len(), 1, "[{name}]");
+        let stored: String =
+            sqlx::query("SELECT key FROM alerts WHERE type = 'source_instance_gone'")
+                .fetch_one(env.pool())
+                .await
+                .unwrap()
+                .try_get("key")
+                .unwrap();
+        assert_eq!(
+            stored,
+            format!("source_instance_gone:h1:daily:{guest}"),
+            "[{name}]"
+        );
+        for at in [t0 + HOUR, t0 + 23 * HOUR] {
+            env.tick(at).await;
+            assert_eq!(rows("active").await, first, "[{name}] {at}");
+        }
+
+        env.tick(t0 + 25 * HOUR).await;
+        assert!(rows("active").await.is_empty(), "[{name}]");
+        assert_eq!(rows("resolved").await, first, "[{name}]");
+        for at in [t0 + 2 * DAY, t0 + 30 * DAY] {
+            env.tick(at).await;
+            assert!(rows("active").await.is_empty(), "[{name}] {at}");
+            assert_eq!(rows("resolved").await, first, "[{name}] {at}");
+        }
+
+        sqlx::query("DELETE FROM policies WHERE name = 'daily'")
+            .execute(env.pool())
+            .await
+            .unwrap();
+        env.guest_policy("daily", "h1").await;
+        let t1 = t0 + 31 * DAY;
+        env.tick(t1).await;
+        assert!(env.gone_rows().await.is_empty(), "[{name}]");
+        assert!(rows("active").await.is_empty(), "[{name}]");
+
+        sqlx::query("DELETE FROM policies WHERE name = 'daily'")
+            .execute(env.pool())
+            .await
+            .unwrap();
+        env.policy("daily", "h1", DAILY).await;
+        env.tick(t1 + HOUR).await;
+        let second = rows("active").await;
+        assert_eq!(second.len(), 1, "[{name}]");
+        assert_ne!(second, first, "[{name}]");
+        env.stop().await;
+    }
+}
