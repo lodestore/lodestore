@@ -136,6 +136,7 @@ export const overview = {
 		showFewer: "Show fewer alerts",
 		unknownHost: "unknown host",
 		unknownPolicy: "unknown",
+		unknownSource: "A source",
 		unknownRepository: "unknown repository",
 		more: (n: number) => `and ${n} more. Use the API to list all alerts.`,
 		since: "Since ",
@@ -158,6 +159,8 @@ export const overview = {
 				`Two live agent sessions for ${host}`,
 			agentCertificateRejected: (host: string) =>
 				`Agent certificate refused for ${host}`,
+			sourceInstanceGone: (host: string, label: string, policy: string) =>
+				`${label} of ${host} is no longer backed up by ${policy}`,
 			expiresIn: (name: string, days: number) =>
 				`${name} expires in ${plural(days, "day")}`,
 			expired: (name: string) => `${name} has expired`,

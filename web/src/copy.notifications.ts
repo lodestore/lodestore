@@ -20,6 +20,7 @@ export const notifications = {
 		repository_unavailable: "Repository unavailable",
 		agent_session_conflict: "Agent session conflict",
 		agent_certificate_rejected: "Agent certificate rejected",
+		source_instance_gone: "Source no longer selected",
 	},
 	kinds: {
 		telegram: "Telegram",

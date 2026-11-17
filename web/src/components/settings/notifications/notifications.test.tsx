@@ -56,7 +56,7 @@ describe("notifications: tabs and list", () => {
 			within(row("from-yaml")).getByText("From server config"),
 		).toBeInTheDocument();
 		expect(within(row("from-yaml")).getByText("Failed")).toBeInTheDocument();
-		expect(within(row("from-yaml")).getByText("2 of 10")).toBeInTheDocument();
+		expect(within(row("from-yaml")).getByText("2 of 11")).toBeInTheDocument();
 		expect(within(row("quiet")).getByText("Never sent")).toBeInTheDocument();
 	});
 });
@@ -82,7 +82,7 @@ describe("notifications: webhook channel", () => {
 			settings: { url: "https://am.example.com/hook" },
 			secret: null,
 		});
-		expect(calls.created[0].alert_types).toHaveLength(10);
+		expect(calls.created[0].alert_types).toHaveLength(11);
 		expect(
 			(await screen.findAllByText("Channel saved.")).length,
 		).toBeGreaterThan(0);
@@ -216,6 +216,7 @@ describe("notifications: channel types", () => {
 			"Repository unavailable",
 			"Agent session conflict",
 			"Agent certificate rejected",
+			"Source no longer selected",
 		]) {
 			await user.click(screen.getByRole("checkbox", { name: label }));
 		}
