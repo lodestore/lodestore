@@ -505,3 +505,54 @@ async fn anomaly_runs_without_retention() {
         env.stop().await;
     }
 }
+
+const INSTANCE_A: (&str, &str) = (
+    "proxmox-vm",
+    "proxmox-vm/pve1/00000000-0000-0000-0000-00000000000a",
+);
+const INSTANCE_B: (&str, &str) = ("postgres", "postgres/7300000000000000001/16384");
+
+impl AgentEnv {
+    async fn set_source(&self, id: &str, (kind, source_ref): (&str, &str)) {
+        sqlx::query("UPDATE snapshots SET source_type = $1, source_ref = $2 WHERE id = $3")
+            .bind(kind)
+            .bind(source_ref)
+            .bind(id)
+            .execute(&self.ts().state().db.pool)
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn anomaly_baseline_does_not_mix_instances() {
+    for backend in backends() {
+        let env = AgentEnv::start(&backend).await;
+        env.seed_base(5, &usual()).await;
+        for n in 1..=5 {
+            env.set_source(&id(n), INSTANCE_A).await;
+        }
+        let small = stats(10, 0, GIB / 100, MIB);
+
+        let other = env.seed(9, r#"["/data"]"#, &small, false).await;
+        env.set_source(&other, INSTANCE_B).await;
+        assert!(
+            evaluate(env.ts().state(), &other).await.unwrap().is_none(),
+            "{}",
+            backend.name()
+        );
+        assert_eq!(
+            env.mark_of(&other)
+                .await
+                .try_get::<i64, _>("suspicious")
+                .unwrap(),
+            0
+        );
+
+        let same = env.seed(10, r#"["/data"]"#, &small, false).await;
+        env.set_source(&same, INSTANCE_A).await;
+        let reasons = evaluate(env.ts().state(), &same).await.unwrap().unwrap();
+        assert!(kinds(&reasons).contains(&ReasonKind::BytesDrop));
+        env.stop().await;
+    }
+}
