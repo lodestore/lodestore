@@ -59,10 +59,22 @@ pub enum Scope {
     RestoreHost,
     #[serde(rename = "restore:in-place")]
     RestoreInPlace,
+    /// Restores a guest of a source to a Proxmox node; this is root on that node.
+    #[serde(rename = "restore:guest")]
+    RestoreGuest,
+    /// Writes over the running guest; a session needs the password entered recently, as for restore:in-place.
+    #[serde(rename = "restore:guest-in-place")]
+    RestoreGuestInPlace,
+    /// Restores a database of a source to a new database.
+    #[serde(rename = "restore:db")]
+    RestoreDb,
+    /// Writes over the live database; a session needs the password entered recently, as for restore:in-place.
+    #[serde(rename = "restore:db-in-place")]
+    RestoreDbInPlace,
 }
 
 impl Scope {
-    pub const ALL: [Scope; 15] = [
+    pub const ALL: [Scope; 19] = [
         Scope::HostsRead,
         Scope::HostsWrite,
         Scope::AlertsWrite,
@@ -78,6 +90,10 @@ impl Scope {
         Scope::RestoreDownload,
         Scope::RestoreHost,
         Scope::RestoreInPlace,
+        Scope::RestoreGuest,
+        Scope::RestoreGuestInPlace,
+        Scope::RestoreDb,
+        Scope::RestoreDbInPlace,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -97,6 +113,10 @@ impl Scope {
             Scope::RestoreDownload => "restore:download",
             Scope::RestoreHost => "restore:host",
             Scope::RestoreInPlace => "restore:in-place",
+            Scope::RestoreGuest => "restore:guest",
+            Scope::RestoreGuestInPlace => "restore:guest-in-place",
+            Scope::RestoreDb => "restore:db",
+            Scope::RestoreDbInPlace => "restore:db-in-place",
         }
     }
 }
@@ -476,7 +496,7 @@ mod tests {
         assert_eq!(scope, Scope::MetricsRead);
         assert_eq!(scope.as_str(), "metrics:read");
         assert_eq!(serde_json::to_string(&scope).unwrap(), "\"metrics:read\"");
-        assert_eq!(Scope::ALL.len(), 15);
+        assert_eq!(Scope::ALL.len(), 19);
         let names: Vec<&str> = Scope::ALL.iter().map(|s| s.as_str()).collect();
         let at = names.iter().position(|n| *n == "metrics:read").unwrap();
         assert_eq!(names[at - 1], "jobs:run");
@@ -488,5 +508,26 @@ mod tests {
             let parsed: Scope = serde_json::from_str(&format!("\"{}\"", scope.as_str())).unwrap();
             assert_eq!(parsed, scope);
         }
+    }
+
+    #[test]
+    fn restore_scopes_are_independent() {
+        for (scope, name) in [
+            (Scope::RestoreGuest, "restore:guest"),
+            (Scope::RestoreGuestInPlace, "restore:guest-in-place"),
+            (Scope::RestoreDb, "restore:db"),
+            (Scope::RestoreDbInPlace, "restore:db-in-place"),
+        ] {
+            assert_eq!(scope.as_str(), name);
+            assert_eq!(
+                serde_json::from_str::<Scope>(&format!("\"{name}\"")).unwrap(),
+                scope
+            );
+            assert!(!<RestoreWrite as ScopeName>::SCOPES.contains(&scope));
+        }
+        assert_eq!(
+            <RestoreWrite as ScopeName>::SCOPES,
+            &[Scope::RestoreHost, Scope::RestoreInPlace]
+        );
     }
 }

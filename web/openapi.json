@@ -13011,7 +13011,11 @@
           "snapshots:delete",
           "restore:download",
           "restore:host",
-          "restore:in-place"
+          "restore:in-place",
+          "restore:guest",
+          "restore:guest-in-place",
+          "restore:db",
+          "restore:db-in-place"
         ]
       },
       "SearchDone": {

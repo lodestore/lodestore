@@ -31,6 +31,7 @@ use lodestore_proto::agent::v1::{
     JobOutcome, JobSpec, PlanChunks, PlanEnter, PlanEntry, PlanItem, PlanLeave, RestorePlanBatch,
     RestoreSpec, RestoreTotals,
 };
+use lodestore_proto::agent::v1::{DatabaseTarget, GuestTarget, restore_spec::Target};
 use prost::Message;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -176,6 +177,7 @@ impl Fx {
             in_place,
             conflict: conflict as i32,
             restore_owners: owners,
+            target: None,
         }
     }
 
@@ -1863,4 +1865,61 @@ async fn restore_runner_presigned_retries_5xx() {
     let f = finished_of(&msgs, &id).unwrap();
     assert_eq!(f.outcome, JobOutcome::Failed as i32, "{msgs:?}");
     assert_eq!(f.error_code, "restore_failed");
+}
+
+#[tokio::test]
+async fn restore_refuses_a_target_it_cannot_run() {
+    let fx = Fx::new().await;
+    let hub = fx.hub();
+    let ids = ids(&fx).await;
+    let planned = fx.plan(&["a/x"], 4, None).await;
+    let dest = fx.root.join("target");
+    for target in [
+        Target::Guest(GuestTarget {
+            node: "pve1".into(),
+            vmid: 9001,
+            in_place: false,
+        }),
+        Target::Database(DatabaseTarget {
+            database: "app".into(),
+            in_place: false,
+        }),
+    ] {
+        let id = fx.job_id();
+        let spec = RestoreSpec {
+            destination: String::new(),
+            target: Some(target.clone()),
+            ..fx.spec(
+                &dest,
+                ConflictPolicy::SkipExisting,
+                false,
+                false,
+                ids.k_id,
+                ids.repo_id,
+            )
+        };
+        let options = RestoreOptions {
+            root: dest.clone(),
+            allow_in_place: true,
+            ..options()
+        };
+        let msgs = run(
+            &hub,
+            &id,
+            spec,
+            MemPlan::new(&planned),
+            StoreFetcher::new(&fx),
+            options,
+        )
+        .await;
+        let f = finished_of(&msgs, &id).unwrap();
+        assert_eq!(f.outcome, JobOutcome::Failed as i32, "{target:?} {msgs:?}");
+        assert!(
+            f.error_message
+                .contains("the destination must be an absolute path"),
+            "{target:?} {}",
+            f.error_message
+        );
+    }
+    assert!(!dest.exists());
 }

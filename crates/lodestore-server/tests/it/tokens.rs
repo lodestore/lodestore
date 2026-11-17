@@ -684,3 +684,30 @@ async fn five_wrong_step_ups_end_the_session() {
         ts.stop().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tokens_accept_restore_scopes_by_source_type() {
+    let scopes = [
+        "restore:guest",
+        "restore:guest-in-place",
+        "restore:db",
+        "restore:db-in-place",
+    ];
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        create(&api, "by-source", &scopes, Value::Null).await;
+        let listed = list(&api, "").await;
+        let got: Vec<&str> = listed[0]["scopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s.as_str().unwrap())
+            .collect();
+        for scope in scopes {
+            assert!(got.contains(&scope), "{scope} missing [{}]", backend.name());
+        }
+        assert_eq!(got.len(), 4);
+        ts.stop().await;
+    }
+}
