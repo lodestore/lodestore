@@ -671,3 +671,64 @@ async fn retention_gates_content_rule_without_retention_and_on_create() {
         ts.stop().await;
     }
 }
+
+fn zoned(zone: Option<&str>, retention: bool) -> String {
+    let zone = zone.map_or(String::new(), |z| format!("    timezone: {z}\n"));
+    let retention = if retention {
+        "  retention:\n    keepLast: 3\n"
+    } else {
+        ""
+    };
+    format!(
+        "apiVersion: lodestore.io/v1alpha1\nkind: BackupPolicy\nmetadata:\n  name: db\n\
+         spec:\n  repository: main\n  selector:\n    matchLabels:\n      role: db\n  \
+         paths:\n    - /etc\n  schedule:\n    cron: \"{DAILY}\"\n    jitter: 0m\n{zone}{retention}"
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retention_gates_timezone_change_needs_snapshots_delete() {
+    for backend in backends() {
+        let what = backend.name();
+        let ts = TestServer::start(&backend).await;
+        ts.create_local_repository("main").await;
+        let session = Session {
+            api: ts.api().await,
+            ts: &ts,
+        };
+        session.create(zoned(Some("UTC"), true)).await;
+        let plain = Token::new(&ts, &["policies:read", "policies:write"]).await;
+        let full = Token::new(
+            &ts,
+            &["policies:read", "policies:write", "snapshots:delete"],
+        )
+        .await;
+        let refused = |got: &(u16, Value), tag: &str| {
+            assert_eq!(got.0, 403, "[{what}] {tag}: {}", got.1);
+            assert_eq!(got.1["message"], RETENTION_REFUSED, "[{what}] {tag}");
+        };
+
+        let kyiv = zoned(Some("Europe/Kyiv"), true);
+        refused(&plain.update(kyiv.clone(), 1).await, "update");
+        for dry_run in [true, false] {
+            refused(
+                &plain.apply(kyiv.clone(), dry_run).await,
+                &format!("apply dry_run={dry_run}"),
+            );
+        }
+        assert_eq!(plain.revision("db").await, 1, "[{what}] unchanged");
+
+        let got = plain.update(zoned(None, true), 1).await;
+        assert_eq!(got.0, 200, "[{what}] dropping UTC is no change: {}", got.1);
+        let got = full.update(kyiv, 2).await;
+        assert_eq!(got.0, 200, "[{what}] {}", got.1);
+
+        let got = full.update(zoned(Some("Europe/Kyiv"), false), 3).await;
+        assert_eq!(got.0, 200, "[{what}] {}", got.1);
+        let got = plain
+            .update(zoned(Some("America/New_York"), false), 4)
+            .await;
+        assert_eq!(got.0, 200, "[{what}] no retention: {}", got.1);
+        ts.stop().await;
+    }
+}

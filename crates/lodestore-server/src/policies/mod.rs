@@ -56,6 +56,21 @@ pub fn changes_retained_content(old: &BackupPolicy, new: &BackupPolicy) -> bool 
         || source::normalized(&old.source) != source::normalized(&new.source)
 }
 
+fn zone(policy: &BackupPolicy) -> &str {
+    policy
+        .spec
+        .schedule
+        .as_ref()
+        .and_then(|s| s.timezone.as_deref())
+        .unwrap_or("UTC")
+}
+
+/// Whether an edit changes the zone that day, week and month retention buckets are cut
+/// in. Another spelling of the same zone counts as a change: doubt goes to the gate.
+pub(crate) fn shifts_retention_buckets(old: &BackupPolicy, new: &BackupPolicy) -> bool {
+    (retention_of(old).is_some() || retention_of(new).is_some()) && zone(old) != zone(new)
+}
+
 /// A source this server version does not run is refused rather than stored: a stored
 /// policy that never produces a backup would still look protected.
 pub(crate) fn unsupported_source(policy: &BackupPolicy) -> Option<Problem> {
@@ -733,7 +748,7 @@ pub async fn get_policy(
     request_body = PolicyUpdate,
     responses(
         (status = 200, description = "The updated policy", body = PolicyDetail),
-        (status = 403, description = "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention, a more frequent cron, or a change of paths, exclude, oneFileSystem, excludeCaches or repository of a policy with retention. A session needs the password entered in the last 15 minutes for those changes (code step_up_required)", body = ErrorBody),
+        (status = 403, description = "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention, a more frequent cron, or a change of source, paths, exclude, oneFileSystem, excludeCaches, repository or schedule.timezone of a policy with retention. A session needs the password entered in the last 15 minutes for those changes (code step_up_required)", body = ErrorBody),
         (status = 404, description = "Unknown policy", body = ErrorBody),
         (status = 409, description = "The policy changed since base_revision (code policy_conflict)", body = ErrorBody),
         (status = 422, description = "Invalid policy or changed name", body = ErrorBody),
@@ -753,7 +768,9 @@ pub async fn update_policy(
     if current.revision != input.base_revision {
         return Err(policy_conflict(&name));
     }
-    if retention_of(&current.policy) != retention_of(&checked.policy) {
+    if retention_of(&current.policy) != retention_of(&checked.policy)
+        || shifts_retention_buckets(&current.policy, &checked.policy)
+    {
         auth.require_also_or_step_up(Scope::SnapshotsDelete, RETENTION_PURPOSE)?;
     }
     if retention_of(&checked.policy).is_some() && runs_more_often(&current.policy, &checked.policy)
