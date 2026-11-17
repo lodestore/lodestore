@@ -358,7 +358,7 @@ async fn retention_pools_stdin_never_forgotten() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn retention_pools_include_stdin_joins_manual_pool() {
+async fn retention_pools_include_stdin_has_its_own_pool() {
     for backend in backends() {
         let pools = Pools::start(&backend, "").await;
         pools.seed_pools(&["1", "2", "3"], &["a"], true).await;
@@ -386,7 +386,7 @@ async fn retention_pools_include_stdin_joins_manual_pool() {
                 ..keep_last(2)
             })
             .await;
-        assert_eq!(pools.forgotten(&on).await, set(&["1", "a", "d"]), "{name}");
+        assert_eq!(pools.forgotten(&on).await, set(&["1", "d"]), "{name}");
         pools.stop().await;
     }
 }

@@ -740,6 +740,17 @@ async fn dispatch_cancel_pushes_job_cancel() {
     }
 }
 
+async fn create_policy(api: &Api, name: &str, repository: &str, host_id: &str) {
+    let yaml = format!(
+        "apiVersion: lodestore.io/v1alpha1\nkind: BackupPolicy\nmetadata:\n  name: {name}\n\
+         spec:\n  repository: {repository}\n  selector:\n    hosts: [{host_id}]\n  paths: [/etc]\n"
+    );
+    let response = api
+        .post("/api/v1/policies", &serde_json::json!({ "yaml": yaml }))
+        .await;
+    assert_eq!(response.status(), 201, "policy {name}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn dispatch_cli_job_created() {
     for backend in backends() {
@@ -748,14 +759,10 @@ async fn dispatch_cli_job_created() {
         let repo = ts.create_local_repository("main").await;
         let host = enroll(&ts, &api, &repo, "host-a").await;
         let pool = &ts.state().db.pool;
-        sqlx::query(
-            "INSERT INTO policies (id, name, repository_id, yaml, spec_json, revision, created_at, updated_at) \
-             VALUES ('pol-1', 'etc', $1, '', '{}', 1, 0, 0)",
-        )
-        .bind(&repo)
-        .execute(pool)
-        .await
-        .unwrap();
+        create_policy(&api, "etc", "main", &host.id).await;
+        let policy_id = text(pool, "SELECT id FROM policies WHERE name = $1", "etc")
+            .await
+            .unwrap();
         let agent = Fake::connect(&ts, &host, vec![]).await;
 
         let created = |id: &str| {
@@ -777,7 +784,7 @@ async fn dispatch_cli_job_created() {
             text(pool, "SELECT policy_id FROM jobs WHERE id = $1", "cli-1")
                 .await
                 .as_deref(),
-            Some("pol-1"),
+            Some(policy_id.as_str()),
             "[{}]",
             backend.name()
         );
@@ -843,6 +850,110 @@ async fn open_cli_jobs(pool: &AnyPool, host: &str) -> i64 {
         host,
     )
     .await
+}
+
+async fn cli_policy_of(pool: &AnyPool, id: &str) -> (Option<String>, Option<String>) {
+    (
+        text(pool, "SELECT policy_id FROM jobs WHERE id = $1", id).await,
+        text(pool, "SELECT policy_name FROM jobs WHERE id = $1", id).await,
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dispatch_cli_job_keeps_only_a_policy_that_selects_the_host() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        ts.create_local_repository("other").await;
+        let host = enroll(&ts, &api, &repo, "host-a").await;
+        let other = enroll(&ts, &api, &repo, "host-b").await;
+        let pool = &ts.state().db.pool;
+        create_policy(&api, "etc", "main", &host.id).await;
+        create_policy(&api, "elsewhere", "main", &other.id).await;
+        create_policy(&api, "foreign", "other", &host.id).await;
+        let agent = Fake::connect(&ts, &host, vec![]).await;
+        let policy_id = text(pool, "SELECT id FROM policies WHERE name = $1", "etc")
+            .await
+            .unwrap();
+
+        let cases = [
+            ("etc", Some(("etc", policy_id.as_str()))),
+            ("elsewhere", None),
+            ("foreign", None),
+            ("nope", None),
+            ("", None),
+        ];
+        for (n, (policy, kept)) in cases.iter().enumerate() {
+            let id = format!("cli-{n}");
+            let mut created = cli_created(&id);
+            created.spec.as_mut().unwrap().policy_name = (*policy).to_string();
+            agent.send(AgentBody::JobCreated(created)).await;
+            wait_state(pool, &id, "running").await;
+            let want = kept.map(|(name, id)| (Some(id.to_string()), Some(name.to_string())));
+            assert_eq!(
+                cli_policy_of(pool, &id).await,
+                want.unwrap_or((None, None)),
+                "[{}] policy '{policy}'",
+                backend.name()
+            );
+            agent
+                .send(AgentBody::JobFinished(finished(
+                    &id,
+                    JobOutcome::Warnings,
+                    "",
+                )))
+                .await;
+            wait_state(pool, &id, "warnings").await;
+        }
+        drop(agent);
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dispatch_cli_job_without_a_stream_is_refused() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let pool = &ts.state().db.pool;
+        let without_stream = |id: &str| {
+            let mut created = cli_created(id);
+            created.spec.as_mut().unwrap().stdin_name.clear();
+            created
+        };
+
+        let host = enroll(&ts, &api, &repo, "host-a").await;
+        let mut agent = Fake::connect(&ts, &host, vec![]).await;
+        agent
+            .send(AgentBody::JobCreated(without_stream("no-stream")))
+            .await;
+        agent
+            .send(AgentBody::JobCreated(cli_created("stream")))
+            .await;
+        wait_state(pool, "stream", "running").await;
+        let seen = agent.drain(Duration::from_millis(1000)).await;
+        assert_eq!(forgotten(&seen), vec!["no-stream".to_string()]);
+        assert_eq!(
+            state_of(pool, "no-stream").await,
+            "<missing>",
+            "[{}]",
+            backend.name()
+        );
+        drop(agent);
+
+        let host = enroll(&ts, &api, &repo, "host-b").await;
+        let mut r = report("reported", JobReportState::Finished);
+        r.created = Some(without_stream("reported"));
+        r.finished = Some(finished("reported", JobOutcome::Warnings, ""));
+        let mut agent = Fake::connect(&ts, &host, vec![r]).await;
+        let seen = agent.drain(Duration::from_millis(1500)).await;
+        assert_eq!(forgotten(&seen), vec!["reported".to_string()]);
+        assert_eq!(state_of(pool, "reported").await, "<missing>");
+        drop(agent);
+        ts.stop().await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

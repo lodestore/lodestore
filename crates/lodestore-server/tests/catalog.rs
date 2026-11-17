@@ -8,7 +8,7 @@ use lodestore_format::repo::Repository;
 use lodestore_format::snapshot::{open_snapshot, seal_snapshot, snapshot_object_key};
 use lodestore_format::store::{LocalFsStore, put_named};
 use lodestore_format::writer::{BackupOptions, Writer};
-use lodestore_server::catalog::{JobLink, ingest_snapshot, sync_repository};
+use lodestore_server::catalog::{JobLink, LinkRefused, ingest_snapshot, sync_repository};
 use serde_json::{Value, json};
 use sqlx::Row;
 use std::task::Poll;
@@ -36,6 +36,16 @@ async fn enroll(ts: &TestServer, api: &Api, repo: &str, hostname: &str, dir: &st
 }
 
 async fn write_snapshot(ts: &TestServer, name: &str, hostname: &str, tags: &[&str]) -> String {
+    write_claimed(ts, name, hostname, None, tags).await
+}
+
+async fn write_claimed(
+    ts: &TestServer,
+    name: &str,
+    hostname: &str,
+    agent_id: Option<&str>,
+    tags: &[&str],
+) -> String {
     let store = LocalFsStore::new(ts.local_repo_root(name));
     let repo = Repository::open(&store, PASSWORD).await.unwrap();
     let keys = repo.read_keys().write_keys(repo.config_hash());
@@ -48,6 +58,7 @@ async fn write_snapshot(ts: &TestServer, name: &str, hostname: &str, tags: &[&st
             &[data],
             BackupOptions {
                 hostname: Some(hostname.as_bytes().to_vec()),
+                agent_id: agent_id.map(|a| a.as_bytes().to_vec()),
                 tags: tags.iter().map(|t| t.to_string()).collect(),
                 ..BackupOptions::default()
             },
@@ -713,6 +724,276 @@ async fn catalog_sync_sees_snapshots_written_while_a_run_was_going() {
         let report = sync.await.unwrap();
         assert!(report.added >= 3, "[{}] {report:?}", backend.name());
         assert_eq!(report.total, 1);
+        ts.stop().await;
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Claim {
+    Absent,
+    HostA,
+    HostB,
+    Ghost,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Expect {
+    Bound(Option<&'static str>, Option<&'static str>),
+    Foreign,
+    Policy,
+    Stream,
+}
+
+struct Case {
+    tags: &'static [&'static str],
+    claim: Claim,
+    hostname: &'static str,
+    signed: bool,
+    job: usize,
+    expect: Expect,
+}
+
+const JOBS: [(Option<&str>, Option<&str>); 3] = [
+    (None, None),
+    (Some("J"), None),
+    (Some("J"), Some("app.dump")),
+];
+
+fn binding_cases() -> Vec<Case> {
+    let untagged = [
+        Expect::Bound(None, None),
+        Expect::Bound(Some("J"), None),
+        Expect::Stream,
+    ];
+    let own = [
+        Expect::Policy,
+        Expect::Bound(Some("J"), None),
+        Expect::Stream,
+    ];
+    let foreign = [Expect::Policy, Expect::Policy, Expect::Stream];
+    let stream = [
+        Expect::Bound(None, None),
+        Expect::Bound(Some("J"), None),
+        Expect::Bound(Some("J"), Some("app.dump")),
+    ];
+    let own_stream = [
+        Expect::Policy,
+        Expect::Bound(Some("J"), None),
+        Expect::Bound(Some("J"), Some("app.dump")),
+    ];
+    let tag_sets: [(&[&str], [Expect; 3]); 12] = [
+        (&[], untagged),
+        (&["policy=J"], own),
+        (&["policy=O"], foreign),
+        (&["policy=J", "policy=O"], foreign),
+        (&["stdin=x"], untagged),
+        (&["policy="], foreign),
+        (&["policy=J", "policy=J"], own),
+        (&["policyx=J"], untagged),
+        (&["stdin=app.dump"], stream),
+        (&["policy=J", "stdin=app.dump"], own_stream),
+        (&["policy=O", "stdin=app.dump"], [Expect::Policy; 3]),
+        (&["stdin=app.dumpx"], untagged),
+    ];
+    let mut cases = Vec::new();
+    for (tags, expected) in tag_sets {
+        for (job, expect) in expected.into_iter().enumerate() {
+            cases.push(Case {
+                tags,
+                claim: Claim::Absent,
+                hostname: "host-a",
+                signed: false,
+                job,
+                expect,
+            });
+        }
+    }
+    let claimed = |claim, hostname, signed, tags, expect| Case {
+        tags,
+        claim,
+        hostname,
+        signed,
+        job: 1,
+        expect,
+    };
+    let bound = Expect::Bound(Some("J"), None);
+    cases.push(claimed(Claim::HostA, "host-a", false, &[], bound));
+    cases.push(claimed(Claim::HostB, "host-b", false, &[], Expect::Foreign));
+    cases.push(claimed(Claim::Ghost, "nowhere", true, &[], Expect::Foreign));
+    cases.push(claimed(Claim::Absent, "nowhere", true, &[], bound));
+    cases.push(claimed(
+        Claim::Ghost,
+        "nowhere",
+        false,
+        &["policy=O"],
+        Expect::Foreign,
+    ));
+    cases
+}
+
+async fn binding_job(ts: &TestServer, id: &str, host: &str, job: usize) {
+    sqlx::query(
+        "INSERT INTO jobs (id, host_id, policy_name, stdin_name, source, state, spec, queued_at) \
+         VALUES ($1, $2, $3, $4, 'manual', 'succeeded', $5, $6)",
+    )
+    .bind(id)
+    .bind(host)
+    .bind(JOBS[job].0)
+    .bind(JOBS[job].1)
+    .bind(Vec::<u8>::new())
+    .bind(lodestore_server::db::now_ms())
+    .execute(&ts.state().db.pool)
+    .await
+    .unwrap();
+}
+
+type Bound = (Option<String>, Option<String>);
+
+async fn link_outcome(
+    ts: &TestServer,
+    repo: &str,
+    host: &str,
+    snapshot: &str,
+    job: &str,
+) -> Result<Bound, Expect> {
+    let result = ingest_snapshot(
+        ts.state(),
+        repo,
+        snapshot,
+        Some(JobLink {
+            job_id: job,
+            host_id: host,
+        }),
+    )
+    .await;
+    let pool = &ts.state().db.pool;
+    match result {
+        Ok(_) => {
+            let row = sqlx::query(
+                "SELECT policy_name, stdin_name, job_id, host_id, verified_at FROM snapshots \
+                 WHERE id = $1",
+            )
+            .bind(snapshot)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            let job_id: Option<String> = row.try_get("job_id").unwrap();
+            let host_id: Option<String> = row.try_get("host_id").unwrap();
+            let verified_at: Option<i64> = row.try_get("verified_at").unwrap();
+            assert_eq!(job_id.as_deref(), Some(job));
+            assert_eq!(host_id.as_deref(), Some(host));
+            assert!(verified_at.is_none());
+            Ok((
+                row.try_get("policy_name").unwrap(),
+                row.try_get("stdin_name").unwrap(),
+            ))
+        }
+        Err(error) => {
+            let linked: i64 = sqlx::query("SELECT COUNT(*) AS n FROM snapshots WHERE job_id = $1")
+                .bind(job)
+                .fetch_one(pool)
+                .await
+                .unwrap()
+                .try_get("n")
+                .unwrap();
+            assert_eq!(linked, 0, "a refused snapshot must not own the job");
+            match error.downcast_ref::<LinkRefused>() {
+                Some(LinkRefused::Foreign) => Err(Expect::Foreign),
+                Some(LinkRefused::Policy { .. }) => Err(Expect::Policy),
+                Some(LinkRefused::Stream { .. }) => Err(Expect::Stream),
+                None => panic!("not a refusal: {error:#}"),
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn catalog_policy_binding_same_on_both_paths() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let a = enroll(&ts, &api, &repo, "host-a", "a").await;
+        let b = enroll(&ts, &api, &repo, "host-b", "b").await;
+        let cases = binding_cases();
+        assert_eq!(cases.len(), 41);
+
+        let write = |n: usize, case: &Case, path: &str| {
+            let mut tags: Vec<String> = case.tags.iter().map(|t| t.to_string()).collect();
+            tags.push(format!("case-{n}-{path}"));
+            let claim = match case.claim {
+                Claim::Absent => None,
+                Claim::HostA => Some(a.clone()),
+                Claim::HostB => Some(b.clone()),
+                Claim::Ghost => Some("ghost-host".to_string()),
+            };
+            let (ts, hostname) = (&ts, case.hostname);
+            async move {
+                let tags: Vec<&str> = tags.iter().map(String::as_str).collect();
+                write_claimed(ts, "main", hostname, claim.as_deref(), &tags).await
+            }
+        };
+        let mut known = Vec::new();
+        for (n, case) in cases.iter().enumerate() {
+            known.push(write(n, case, "known").await);
+        }
+        assert_eq!(sync(&api, &repo).await["added"], cases.len() as u64);
+        for (case, id) in cases.iter().zip(&known) {
+            if case.signed {
+                sqlx::query(
+                    "UPDATE snapshots SET verified_at = $1, verified_by = 'owner' WHERE id = $2",
+                )
+                .bind(lodestore_server::db::now_ms())
+                .bind(id)
+                .execute(&ts.state().db.pool)
+                .await
+                .unwrap();
+            }
+        }
+        let mut fresh = Vec::new();
+        for (n, case) in cases.iter().enumerate() {
+            fresh.push(write(n, case, "fresh").await);
+        }
+
+        for (n, case) in cases.iter().enumerate() {
+            let describe = format!(
+                "[{}] case {n}: tags {:?}, claim {}, job J{}",
+                backend.name(),
+                case.tags,
+                match case.claim {
+                    Claim::Absent => "none",
+                    Claim::HostA => "host-a",
+                    Claim::HostB => "host-b",
+                    Claim::Ghost => "ghost-host",
+                },
+                case.job,
+            );
+            let known_job = format!("known-{n}");
+            let fresh_job = format!("fresh-{n}");
+            binding_job(&ts, &known_job, &a, case.job).await;
+            binding_job(&ts, &fresh_job, &a, case.job).await;
+            let expected = match case.expect {
+                Expect::Bound(policy, stdin) => {
+                    Ok((policy.map(String::from), stdin.map(String::from)))
+                }
+                refused => Err(refused),
+            };
+            let known_outcome = link_outcome(&ts, &repo, &a, &known[n], &known_job).await;
+            let fresh_outcome = link_outcome(&ts, &repo, &a, &fresh[n], &fresh_job).await;
+            assert_eq!(known_outcome, expected, "known snapshot, {describe}");
+            assert_eq!(fresh_outcome, expected, "new snapshot, {describe}");
+            if case.signed && case.expect == Expect::Foreign {
+                let row = sqlx::query("SELECT job_id, verified_at FROM snapshots WHERE id = $1")
+                    .bind(&known[n])
+                    .fetch_one(&ts.state().db.pool)
+                    .await
+                    .unwrap();
+                let job_id: Option<String> = row.try_get("job_id").unwrap();
+                let verified_at: Option<i64> = row.try_get("verified_at").unwrap();
+                assert!(job_id.is_none(), "{describe}");
+                assert!(verified_at.is_some(), "{describe}");
+            }
+        }
         ts.stop().await;
     }
 }

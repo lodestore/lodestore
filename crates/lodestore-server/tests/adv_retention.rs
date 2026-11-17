@@ -160,7 +160,7 @@ async fn adv_hundred_unverified_snapshots_do_not_displace_retention() {
         let job = format!("forged-job-{i}");
         sqlx::query(
             "INSERT INTO jobs (id, host_id, source, state, spec, queued_at, assigned_at, \
-             policy_name) VALUES ($1, $2, 'cli', 'running', $3, $4, $4, $5)",
+             policy_name) VALUES ($1, $2, 'manual', 'running', $3, $4, $4, $5)",
         )
         .bind(&job)
         .bind(&env.host)

@@ -2142,6 +2142,195 @@ async fn agent_update_wave_offline_canary_host_does_not_hold_the_next_wave() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn migration_0032_clears_snapshots_that_disagree_with_their_job() {
+    struct Seed {
+        id: &'static str,
+        job: Option<&'static str>,
+        policy: Option<&'static str>,
+        stdin: Option<&'static str>,
+        origin: Option<&'static str>,
+        claim: Option<&'static str>,
+    }
+    const HOST: &str = "host-a";
+    let seed = |id, job, policy, stdin, origin, claim| Seed {
+        id,
+        job,
+        policy,
+        stdin,
+        origin,
+        claim,
+    };
+    for backend in backends() {
+        let mut ts = TestServer::start(&backend).await;
+        let repo = ts.create_local_repository("main").await;
+        let pool = ts.state().db.pool.clone();
+        let name = backend.name();
+        sqlx::query(
+            "INSERT INTO agents (id, hostname, repository_id, labels_json, os, arch, version, \
+             status, enrolled_at, cert_serial, cert_issued_at, cert_not_after, last_seen_at) \
+             VALUES ($1, 'h', $2, '[]', 'linux', 'x86_64', '0.1.0', 'active', 0, 'serial', 0, 0, 0)",
+        )
+        .bind(HOST)
+        .bind(&repo)
+        .execute(&pool)
+        .await
+        .unwrap();
+        for (id, policy, stdin, source) in [
+            ("j-p", Some("p"), None, "manual"),
+            ("j-none", None, None, "manual"),
+            ("j-stdin", Some("p"), Some("app.dump"), "cli"),
+            ("j-cli", Some("p"), None, "cli"),
+        ] {
+            sqlx::query(
+                "INSERT INTO jobs (id, host_id, policy_name, stdin_name, source, state, spec, \
+                 queued_at) VALUES ($1, $2, $3, $4, $5, 'succeeded', $6, 0)",
+            )
+            .bind(id)
+            .bind(HOST)
+            .bind(policy)
+            .bind(stdin)
+            .bind(source)
+            .bind(Vec::<u8>::new())
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let seeds = [
+            seed(
+                "s1",
+                Some("j-p"),
+                Some("q"),
+                None,
+                Some("manual"),
+                Some(HOST),
+            ),
+            seed("s2", Some("j-none"), Some("p"), None, None, Some(HOST)),
+            seed("s3", Some("purged"), Some("p"), None, None, None),
+            seed("s4", None, Some("p"), None, None, Some(HOST)),
+            seed("s5", Some("j-p"), Some("p"), None, None, Some(HOST)),
+            seed(
+                "s6",
+                Some("j-stdin"),
+                Some("p"),
+                None,
+                Some("stdin"),
+                Some(HOST),
+            ),
+            seed(
+                "s7",
+                Some("j-cli"),
+                Some("p"),
+                None,
+                Some("manual"),
+                Some(HOST),
+            ),
+            seed(
+                "s8",
+                Some("j-stdin"),
+                Some("p"),
+                Some("app.dump"),
+                Some("stdin"),
+                Some(HOST),
+            ),
+            seed("s9", Some("j-p"), Some("p"), None, None, None),
+            seed(
+                "s10",
+                Some("j-p"),
+                Some("p"),
+                None,
+                None,
+                Some("ghost-host"),
+            ),
+        ];
+        for s in &seeds {
+            sqlx::query(
+                "INSERT INTO snapshots (id, repository_id, host_id, hostname, time_ms, paths_json, \
+                 tags_json, policy_name, stdin_name, job_id, origin, agent_id_claim, incomplete, \
+                 errors_total, warnings_total, stats_json, discovered_at, received_at, \
+                 received_exact) VALUES ($1, $2, $3, 'h', 0, '[]', '[]', $4, $5, $6, $7, $8, 0, 0, \
+                 0, '{}', 0, 0, 1)",
+            )
+            .bind(s.id)
+            .bind(&repo)
+            .bind(HOST)
+            .bind(s.policy)
+            .bind(s.stdin)
+            .bind(s.job)
+            .bind(s.origin)
+            .bind(s.claim)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            lodestore_server::db::pending_policy_rebind(&pool).await,
+            None,
+            "[{name}] applied migration"
+        );
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 32")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            lodestore_server::db::pending_policy_rebind(&pool).await,
+            Some(6),
+            "[{name}]"
+        );
+        ts.restart().await;
+        let pool = ts.state().db.pool.clone();
+        assert_eq!(
+            lodestore_server::db::pending_policy_rebind(&pool).await,
+            None,
+            "[{name}]"
+        );
+
+        let policy =
+            |id: &'static str| text(&pool, "SELECT policy_name FROM snapshots WHERE id = $1", id);
+        let stdin =
+            |id: &'static str| text(&pool, "SELECT stdin_name FROM snapshots WHERE id = $1", id);
+        let origin =
+            |id: &'static str| text(&pool, "SELECT origin FROM snapshots WHERE id = $1", id);
+        for id in ["s1", "s2", "s6", "s9", "s10"] {
+            assert_eq!(policy(id).await, None, "[{name}] {id}");
+            assert_eq!(stdin(id).await, None, "[{name}] {id}");
+        }
+        for id in ["s3", "s4", "s5"] {
+            assert_eq!(policy(id).await.as_deref(), Some("p"), "[{name}] {id}");
+        }
+        assert_eq!(policy("s7").await.as_deref(), Some("p"), "[{name}]");
+        assert_eq!(stdin("s7").await, None, "[{name}]");
+        assert_eq!(origin("s7").await.as_deref(), Some("stdin"), "[{name}]");
+        assert_eq!(policy("s8").await.as_deref(), Some("p"), "[{name}]");
+        assert_eq!(stdin("s8").await.as_deref(), Some("app.dump"), "[{name}]");
+        assert_eq!(origin("s8").await.as_deref(), Some("stdin"), "[{name}]");
+        assert_eq!(origin("s1").await.as_deref(), Some("manual"), "[{name}]");
+
+        for (label, sql) in [
+            (
+                "invariant 1",
+                "SELECT COUNT(*) FROM snapshots s JOIN jobs j ON j.id = s.job_id WHERE \
+                 (s.policy_name IS NOT NULL AND (j.policy_name IS NULL OR j.policy_name <> s.policy_name)) \
+                 OR (s.stdin_name IS NOT NULL AND (j.stdin_name IS NULL OR j.stdin_name <> s.stdin_name))",
+            ),
+            (
+                "invariant 3",
+                "SELECT COUNT(*) FROM snapshots s JOIN jobs j ON j.id = s.job_id WHERE \
+                 (s.policy_name IS NOT NULL OR s.stdin_name IS NOT NULL) \
+                 AND (s.agent_id_claim IS NULL OR s.agent_id_claim <> s.host_id)",
+            ),
+            (
+                "invariant 2",
+                "SELECT COUNT(*) FROM snapshots s JOIN jobs j ON j.id = s.job_id WHERE \
+                 j.source = 'cli' AND (s.origin IS NULL OR s.origin <> 'stdin')",
+            ),
+        ] {
+            assert_eq!(count(&pool, sql).await, 0, "[{name}] {label}");
+        }
+        ts.stop().await;
+    }
+}
+
 async fn reject(agent: &mut Fake) {
     let assign = agent.assign().await;
     agent

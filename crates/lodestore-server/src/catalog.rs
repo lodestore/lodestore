@@ -213,12 +213,58 @@ async fn bind_host(
     }
 }
 
+struct JobBinding {
+    policy_name: Option<String>,
+    stdin_name: Option<String>,
+}
+
+async fn job_binding(state: &AppState, job_id: &str) -> anyhow::Result<JobBinding> {
+    let row = sqlx::query("SELECT policy_name, stdin_name FROM jobs WHERE id = $1")
+        .bind(job_id)
+        .fetch_optional(&state.db.pool)
+        .await?;
+    Ok(match row {
+        Some(row) => JobBinding {
+            policy_name: row.try_get("policy_name")?,
+            stdin_name: row.try_get("stdin_name")?,
+        },
+        None => JobBinding {
+            policy_name: None,
+            stdin_name: None,
+        },
+    })
+}
+
+fn check_policy_tags(tags: &[String], job: &JobBinding) -> Result<(), LinkRefused> {
+    if let Some(stream) = &job.stdin_name
+        && !tags
+            .iter()
+            .any(|t| t.strip_prefix("stdin=") == Some(stream.as_str()))
+    {
+        return Err(LinkRefused::Stream {
+            job: stream.clone(),
+        });
+    }
+    let mismatch = tags
+        .iter()
+        .filter_map(|t| t.strip_prefix("policy="))
+        .find(|tagged| Some(*tagged) != job.policy_name.as_deref());
+    match mismatch {
+        Some(tagged) => Err(LinkRefused::Policy {
+            tagged: tagged.to_string(),
+            job: job.policy_name.clone(),
+        }),
+        None => Ok(()),
+    }
+}
+
 async fn insert_snapshot(
     state: &AppState,
     repository_id: &str,
     id: &[u8; 32],
     snapshot: &pb::Snapshot,
     link: Option<&JobLink<'_>>,
+    binding: Option<&JobBinding>,
     received: Option<i64>,
 ) -> anyhow::Result<bool> {
     let discovered = now_ms();
@@ -241,7 +287,7 @@ async fn insert_snapshot(
          warnings_total, stats_json, agent_id_claim, discovered_at, received_at, received_exact, \
          origin) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, \
-         $18, $19, (SELECT CASE WHEN j.stdin_name IS NOT NULL THEN 'stdin' ELSE j.origin END \
+         $18, $19, (SELECT CASE WHEN j.stdin_name IS NOT NULL OR j.source = 'cli' THEN 'stdin' ELSE j.origin END \
          FROM jobs j WHERE j.id = $10)) \
          ON CONFLICT (id) DO NOTHING",
     )
@@ -256,8 +302,14 @@ async fn insert_snapshot(
     )
     .bind(serde_json::to_string(&paths)?)
     .bind(serde_json::to_string(&snapshot.tags)?)
-    .bind(tag_value(&snapshot.tags, "policy"))
-    .bind(tag_value(&snapshot.tags, "stdin"))
+    .bind(match binding {
+        Some(binding) => binding.policy_name.as_deref(),
+        None => tag_value(&snapshot.tags, "policy"),
+    })
+    .bind(match binding {
+        Some(binding) => binding.stdin_name.as_deref(),
+        None => tag_value(&snapshot.tags, "stdin"),
+    })
     .bind(link.map(|l| l.job_id))
     .bind(parent)
     .bind(i64::from(snapshot.incomplete))
@@ -280,25 +332,41 @@ pub async fn ingest_snapshot(
     link: Option<JobLink<'_>>,
 ) -> anyhow::Result<bool> {
     let id = parse_hex32(snapshot_id).context("snapshot id must be 64 hex characters")?;
-    let known = sqlx::query("SELECT 1 FROM snapshots WHERE id = $1 AND repository_id = $2")
-        .bind(hex32(&id))
-        .bind(repository_id)
-        .fetch_optional(&state.db.pool)
-        .await?
-        .is_some();
-    if known {
+    let known = sqlx::query(
+        "SELECT tags_json, agent_id_claim FROM snapshots WHERE id = $1 AND repository_id = $2",
+    )
+    .bind(hex32(&id))
+    .bind(repository_id)
+    .fetch_optional(&state.db.pool)
+    .await?;
+    if let Some(known) = known {
         if let Some(link) = &link {
-            link_snapshot(state, repository_id, &id, link).await?;
+            let claim: Option<String> = known.try_get("agent_id_claim")?;
+            if claim.is_some_and(|claim| !claim.is_empty() && claim != link.host_id) {
+                return Err(LinkRefused::Foreign.into());
+            }
+            let tags: Vec<String> =
+                serde_json::from_str(&known.try_get::<String, _>("tags_json")?)?;
+            let binding = job_binding(state, link.job_id).await?;
+            check_policy_tags(&tags, &binding)?;
+            link_snapshot(state, repository_id, &id, link, &binding).await?;
         }
         return Ok(false);
     }
     let source = open_repository(state, repository_id).await?;
     let snapshot = read_snapshot(&source, &id).await?;
+    let binding = match &link {
+        Some(link) => Some(job_binding(state, link.job_id).await?),
+        None => None,
+    };
     if let Some(link) = &link
         && std::str::from_utf8(&snapshot.agent_id)
             .is_ok_and(|claim| !claim.is_empty() && claim != link.host_id)
     {
-        return Err(LinkRefused.into());
+        return Err(LinkRefused::Foreign.into());
+    }
+    if let Some(binding) = &binding {
+        check_policy_tags(&snapshot.tags, binding)?;
     }
     let received = source
         .store
@@ -314,28 +382,48 @@ pub async fn ingest_snapshot(
         &id,
         &snapshot,
         link.as_ref(),
+        binding.as_ref(),
         received,
     )
     .await?;
-    if !inserted && let Some(link) = &link {
-        link_snapshot(state, repository_id, &id, link).await?;
+    if !inserted && let (Some(link), Some(binding)) = (&link, &binding) {
+        link_snapshot(state, repository_id, &id, link, binding).await?;
     }
     Ok(inserted)
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("the snapshot belongs to another host or job")]
-pub struct LinkRefused;
+pub enum LinkRefused {
+    #[error("the snapshot belongs to another host or job")]
+    Foreign,
+    #[error(
+        "the snapshot is tagged for policy \"{tagged}\", but its job has {}",
+        policy_of(job)
+    )]
+    Policy { tagged: String, job: Option<String> },
+    #[error("the snapshot is not a stream named \"{job}\", as its job is")]
+    Stream { job: String },
+}
+
+fn policy_of(job: &Option<String>) -> String {
+    match job {
+        Some(job) => format!("policy \"{job}\""),
+        None => "no policy".to_string(),
+    }
+}
 
 async fn link_snapshot(
     state: &AppState,
     repository_id: &str,
     id: &[u8; 32],
     link: &JobLink<'_>,
+    binding: &JobBinding,
 ) -> anyhow::Result<()> {
     let done = sqlx::query(
-        "UPDATE snapshots SET job_id = $1, host_id = $2, \
-         origin = (SELECT CASE WHEN j.stdin_name IS NOT NULL THEN 'stdin' ELSE j.origin END \
+        "UPDATE snapshots SET job_id = $1, host_id = $2, policy_name = $5, stdin_name = $6, \
+         verified_at = CASE WHEN job_id IS NULL THEN NULL ELSE verified_at END, \
+         verified_by = CASE WHEN job_id IS NULL THEN NULL ELSE verified_by END, \
+         origin = (SELECT CASE WHEN j.stdin_name IS NOT NULL OR j.source = 'cli' THEN 'stdin' ELSE j.origin END \
          FROM jobs j WHERE j.id = $1) \
          WHERE id = $3 AND repository_id = $4 \
          AND (job_id IS NULL OR job_id = $1) AND (host_id IS NULL OR host_id = $2)",
@@ -344,10 +432,12 @@ async fn link_snapshot(
     .bind(link.host_id)
     .bind(hex32(id))
     .bind(repository_id)
+    .bind(binding.policy_name.as_deref())
+    .bind(binding.stdin_name.as_deref())
     .execute(&state.db.pool)
     .await?;
     if done.rows_affected() == 0 {
-        return Err(LinkRefused.into());
+        return Err(LinkRefused::Foreign.into());
     }
     Ok(())
 }
@@ -653,7 +743,7 @@ async fn read_one(
     match read_snapshot(source, &id).await {
         Ok(snapshot) => {
             let inserted =
-                insert_snapshot(state, repository_id, &id, &snapshot, None, received).await?;
+                insert_snapshot(state, repository_id, &id, &snapshot, None, None, received).await?;
             state.catalog.update(repository_id, |s| {
                 s.read += 1;
                 s.added += u64::from(inserted);

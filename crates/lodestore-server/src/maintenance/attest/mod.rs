@@ -66,7 +66,8 @@ pub async fn ensure_upgraded(state: &AppState, repository_id: &str) -> anyhow::R
     Ok(())
 }
 
-/// Signs what a 0.1 catalog already tied to a host and a job. The snapshot
+/// Signs what a 0.1 catalog already tied to a host and a job, when the
+/// manifest names that host: 0.1 linked rows without checking the claim. The snapshot
 /// row is the tie: job rows are purged after 90 days, so a missing one does
 /// not count against it. The database flag is a cache: the signatures are
 /// additive, so a repeat after a crash only duplicates records, which
@@ -88,6 +89,7 @@ pub async fn ensure_provenance_backfilled(
          LEFT JOIN jobs j ON j.id = s.job_id JOIN agents a ON a.id = s.host_id \
          WHERE s.repository_id = $1 AND s.host_id IS NOT NULL AND s.job_id IS NOT NULL \
          AND s.unverified_reason IS NULL AND s.verified_at IS NULL \
+         AND s.agent_id_claim = s.host_id \
          AND (j.id IS NULL OR (j.state IN ('succeeded', 'warnings') \
          AND (j.verify_state IS NULL OR j.verify_state = 'verified'))) ORDER BY s.id",
     )
@@ -195,8 +197,8 @@ pub async fn reconcile_provenance<S: BlobStore>(
     }
     let set = ProvenanceSet::from_attested(&attested, keys);
     let rows = sqlx::query(
-        "SELECT id, host_id FROM snapshots WHERE repository_id = $1 AND verified_at IS NULL \
-         AND unverified_reason IS NULL",
+        "SELECT id, host_id, job_id, agent_id_claim FROM snapshots \
+         WHERE repository_id = $1 AND verified_at IS NULL AND unverified_reason IS NULL",
     )
     .bind(repository_id)
     .fetch_all(&state.db.pool)
@@ -211,33 +213,42 @@ pub async fn reconcile_provenance<S: BlobStore>(
         let (Some(record), Some(signer)) = (set.get(&snapshot), set.signer(&snapshot)) else {
             continue;
         };
-        let by = match signer {
+        let at = record.verified_at.as_ref().map_or(0, |t| {
+            t.seconds
+                .saturating_mul(1000)
+                .saturating_add(i64::from(t.nanos / 1_000_000))
+        });
+        match signer {
             Signer::Server => {
                 let host: Option<String> = row.try_get("host_id")?;
                 if host.as_deref() != Some(record.host_id.as_str()) {
                     other_host += 1;
                     continue;
                 }
-                "server"
+                sqlx::query(
+                    "UPDATE snapshots SET verified_at = $1, verified_by = 'server' \
+                     WHERE id = $2 AND repository_id = $3 AND verified_at IS NULL",
+                )
+                .bind(at)
+                .bind(&id)
+                .bind(repository_id)
+                .execute(&state.db.pool)
+                .await?;
+                marked += 1;
             }
-            Signer::Owner => "owner",
-        };
-        let at = record.verified_at.as_ref().map_or(0, |t| {
-            t.seconds
-                .saturating_mul(1000)
-                .saturating_add(i64::from(t.nanos / 1_000_000))
-        });
-        sqlx::query(
-            "UPDATE snapshots SET verified_at = $1, verified_by = $2 \
-             WHERE id = $3 AND repository_id = $4 AND verified_at IS NULL",
-        )
-        .bind(at)
-        .bind(by)
-        .bind(&id)
-        .bind(repository_id)
-        .execute(&state.db.pool)
-        .await?;
-        marked += 1;
+            Signer::Owner => {
+                let job: Option<String> = row.try_get("job_id")?;
+                let claim: Option<String> = row.try_get("agent_id_claim")?;
+                let host: Option<String> = row.try_get("host_id")?;
+                // the job check never confirms a row whose claim is not its host, and a mark would put it in that job's pool
+                if job.is_some() && (claim.is_none() || claim != host) {
+                    continue;
+                }
+                if mark_owner_signed(state, &id, repository_id, at).await? {
+                    marked += 1;
+                }
+            }
+        }
     }
     if other_host > 0 {
         tracing::warn!(
@@ -247,6 +258,26 @@ pub async fn reconcile_provenance<S: BlobStore>(
         );
     }
     Ok(marked)
+}
+
+// a sync reads rows before it marks them, and a job of another host may link one in between
+pub async fn mark_owner_signed(
+    state: &AppState,
+    snapshot_id: &str,
+    repository_id: &str,
+    at_ms: i64,
+) -> anyhow::Result<bool> {
+    let done = sqlx::query(
+        "UPDATE snapshots SET verified_at = $1, verified_by = 'owner' \
+         WHERE id = $2 AND repository_id = $3 AND verified_at IS NULL \
+         AND (job_id IS NULL OR agent_id_claim = host_id)",
+    )
+    .bind(at_ms)
+    .bind(snapshot_id)
+    .bind(repository_id)
+    .execute(&state.db.pool)
+    .await?;
+    Ok(done.rows_affected() == 1)
 }
 
 pub async fn load_verified(

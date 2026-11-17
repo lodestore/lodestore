@@ -30,6 +30,7 @@ use super::{
 use crate::catalog::retention::{after_backup, append_event};
 use crate::catalog::{self, JobLink, open_repository};
 use crate::db::now_ms;
+use crate::grpc::dispatch::messages::clip;
 use crate::state::AppState;
 
 pub const VERIFICATION_FAILED: &str = "verification_failed";
@@ -225,9 +226,9 @@ async fn ensure_catalog_row(
     .await
     {
         Ok(_) => Ok(None),
-        Err(error) if error.is::<catalog::LinkRefused>() => Ok(Some(Verdict::Failed(
-            "the snapshot belongs to another host or job".into(),
-        ))),
+        Err(error) if error.is::<catalog::LinkRefused>() => {
+            Ok(Some(Verdict::Failed(error.to_string())))
+        }
         Err(error) => match error.downcast_ref::<lodestore_format::Error>() {
             Some(inner) if is_data_error(inner) => Ok(Some(Verdict::Failed(inner.to_string()))),
             _ => Ok(Some(Verdict::Retry(format!("{error:#}")))),
@@ -396,8 +397,9 @@ pub async fn fail_verification(
     reason: &str,
 ) -> anyhow::Result<()> {
     let message = format!(
-        "The server could not verify the data of this backup: {reason}. Its snapshot may not \
-         restore. Run the backup again; if it fails again, check the repository."
+        "The server could not verify the data of this backup: {}. Its snapshot may not \
+         restore. Run the backup again; if it fails again, check the repository.",
+        clip(reason)
     );
     let mut tx = state.db.pool.begin().await?;
     sqlx::query(
