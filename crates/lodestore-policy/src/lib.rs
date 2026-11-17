@@ -284,7 +284,14 @@ pub fn parse_yaml(text: &str) -> Result<BackupPolicy, Vec<Problem>> {
 }
 
 pub fn to_yaml(policy: &BackupPolicy) -> String {
-    yaml_serde::to_string(policy).expect("BackupPolicy always serializes")
+    let mut export = policy.clone();
+    if source::normalized(&export.spec.source).is_none() {
+        export.spec.source = None;
+        export.api_version = API_VERSION.to_owned();
+    } else {
+        export.api_version = API_VERSION_SOURCES.to_owned();
+    }
+    yaml_serde::to_string(&export).expect("BackupPolicy always serializes")
 }
 
 pub fn yaml_problem(error: &yaml_serde::Error) -> Problem {
@@ -299,6 +306,14 @@ pub fn yaml_problem(error: &yaml_serde::Error) -> Problem {
             message = head.to_string();
         }
     }
+    // A position the buffered block reported for itself is closer than the enclosing mapping.
+    let (line, column) = match inner_position(&message) {
+        Some((l, c, head)) => {
+            message = head;
+            (Some(l), Some(c))
+        }
+        None => (line, column),
+    };
     let mut path: Option<String> = None;
     // A deeper path may follow the one the YAML reader added (`spec: spec.source: …`).
     while let Some((head, rest)) = message.split_once(": ")
@@ -317,6 +332,12 @@ pub fn yaml_problem(error: &yaml_serde::Error) -> Problem {
         path,
         message,
     }
+}
+
+fn inner_position(message: &str) -> Option<(usize, usize, String)> {
+    let (head, tail) = message.rsplit_once(" at line ")?;
+    let (line, column) = tail.split_once(" column ")?;
+    Some((line.parse().ok()?, column.parse().ok()?, head.to_owned()))
 }
 
 fn parse_timeout(text: &str) -> Option<u32> {

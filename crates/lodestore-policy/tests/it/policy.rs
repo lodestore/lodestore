@@ -571,3 +571,185 @@ fn policy_v0_2_fixtures_export_unchanged() {
         }
     }
 }
+
+fn sourced(source: &str) -> String {
+    format!(
+        "apiVersion: lodestore.io/v1alpha2\nkind: BackupPolicy\nmetadata:\n  name: p\nspec:\n  repository: main\n  source:\n{source}"
+    )
+}
+
+fn found(text: &str) -> Vec<(String, String)> {
+    parse_yaml(text)
+        .expect_err(text)
+        .into_iter()
+        .map(|p| (p.path.unwrap_or_default(), p.message))
+        .collect()
+}
+
+fn one_problem(text: &str, path: &str, message: &str) {
+    let all = found(text);
+    assert_eq!(all.len(), 1, "{text}: {all:?}");
+    assert_eq!(all[0].0, path, "{text}");
+    assert!(all[0].1.contains(message), "{text}: {all:?}");
+}
+
+#[test]
+fn source_blocks_reject_unknown_fields() {
+    for ty in ["files", "proxmox-vm", "proxmox-ct", "postgres", "mysql"] {
+        let text = sourced(&format!("    type: {ty}\n    extra: 1\n"));
+        let all = parse_yaml(&text).unwrap_err();
+        assert_eq!(all.len(), 1, "{ty}: {all:?}");
+        assert!(
+            all[0].path.as_deref().unwrap().starts_with("spec.source"),
+            "{ty}: {all:?}"
+        );
+        assert!(all[0].message.contains("extra"), "{ty}: {all:?}");
+        assert_ne!((all[0].line, all[0].column), (Some(1), Some(1)), "{ty}");
+    }
+}
+
+#[test]
+fn source_block_errors_name_the_path() {
+    let text = sourced("    type: proxmox-vm\n    vmids: [abc]\n");
+    let all = parse_yaml(&text).unwrap_err();
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert_eq!(all[0].path.as_deref(), Some("spec.source"));
+    assert!(all[0].message.contains("invalid type"), "{all:?}");
+
+    let all = parse_yaml(&sourced("    type: oracle\n")).unwrap_err();
+    assert_eq!(all[0].path.as_deref(), Some("spec.source.type"), "{all:?}");
+    assert!(all[0].message.contains("unknown variant"), "{all:?}");
+    assert_eq!((all[0].line, all[0].column), (Some(8), Some(11)));
+
+    let all = parse_yaml(&sourced("    vmids: [101]\n")).unwrap_err();
+    assert!(all[0].message.contains("missing field `type`"), "{all:?}");
+
+    let text = "apiVersion: lodestore.io/v1alpha2\nkind: BackupPolicy\nmetadata:\n  name: p\nspec:\n  repository: main\n  source: files\n  paths: [/etc]\n";
+    let all = parse_yaml(text).unwrap_err();
+    assert_eq!(all[0].path.as_deref(), Some("spec.source"), "{all:?}");
+}
+
+#[test]
+fn source_needs_v1alpha2() {
+    for block in ["    type: postgres\n", "    type: files\n"] {
+        let text = sourced(block)
+            .replace("v1alpha2", "v1alpha1")
+            .replace("  source:", "  paths: [/etc]\n  source:");
+        let all = found(&text);
+        assert!(
+            all.iter()
+                .any(|(path, message)| path == "spec.source" && message.contains("v1alpha2")),
+            "{all:?}"
+        );
+    }
+}
+
+#[test]
+fn source_forbids_file_fields() {
+    let text = sourced("    type: postgres\n")
+        + "  paths: [/etc]\n  exclude: ['*.tmp']\n  oneFileSystem: true\n  excludeCaches: true\n";
+    let paths: Vec<_> = found(&text).into_iter().map(|(p, _)| p).collect();
+    assert_eq!(
+        paths,
+        [
+            "spec.paths",
+            "spec.exclude",
+            "spec.oneFileSystem",
+            "spec.excludeCaches"
+        ]
+    );
+    let text = sourced("    type: files\n") + "  paths: [/etc]\n";
+    assert!(parse_yaml(&text).is_ok());
+}
+
+#[test]
+fn source_block_rules() {
+    let vm = |vmids: &str| sourced(&format!("    type: proxmox-vm\n    vmids: {vmids}\n"));
+    for ok in ["[100]", "[999999999]"] {
+        assert!(parse_yaml(&vm(ok)).is_ok(), "{ok}");
+    }
+    for bad in ["[99]", "[1000000000]"] {
+        one_problem(&vm(bad), "spec.source.vmids[0]", "100 to 999999999");
+    }
+    one_problem(&vm("[101, 101]"), "spec.source.vmids[1]", "twice");
+    let many = |n: u32| {
+        let ids: Vec<_> = (100..100 + n).map(|i| i.to_string()).collect();
+        vm(&format!("[{}]", ids.join(",")))
+    };
+    assert!(parse_yaml(&many(1000)).is_ok());
+    one_problem(&many(1001), "spec.source.vmids", "At most 1000");
+    one_problem(
+        &sourced("    type: proxmox-ct\n"),
+        "spec.source",
+        "vmids, pool or tags",
+    );
+    let guests = |lines: &str| sourced(&format!("    type: proxmox-ct\n{lines}"));
+    assert!(parse_yaml(&guests("    pool: prod-1\n    tags: [db, _x, a+b.c]\n")).is_ok());
+    one_problem(&guests("    pool: -x\n"), "spec.source.pool", "letters");
+    one_problem(
+        &guests("    tags: ['a b']\n"),
+        "spec.source.tags[0]",
+        "letters",
+    );
+    let tags: Vec<_> = (0..21).map(|i| format!("t{i}")).collect();
+    one_problem(
+        &guests(&format!("    tags: [{}]\n", tags.join(","))),
+        "spec.source.tags",
+        "At most 20",
+    );
+
+    let db = |lines: &str| sourced(&format!("    type: postgres\n{lines}"));
+    assert!(parse_yaml(&db("")).is_ok());
+    let name64 = "a".repeat(64);
+    assert!(parse_yaml(&db(&format!("    databases: [{name64}]\n"))).is_ok());
+    one_problem(
+        &db(&format!("    databases: [{name64}a]\n")),
+        "spec.source.databases[0]",
+        "1 to 64 bytes",
+    );
+    one_problem(
+        &db("    databases: [\"a\\x01\"]\n"),
+        "spec.source.databases[0]",
+        "control characters",
+    );
+    one_problem(
+        &db("    databases: [a, a]\n"),
+        "spec.source.databases[1]",
+        "twice",
+    );
+    one_problem(
+        &db("    databases: [a]\n    excludeDatabases: [a]\n"),
+        "spec.source.excludeDatabases",
+        "only when databases is empty",
+    );
+    one_problem(
+        &db("    databases: [a]\n    excludeDatabases: [b]\n"),
+        "spec.source.excludeDatabases",
+        "only when databases is empty",
+    );
+    assert!(parse_yaml(&db("    excludeDatabases: [template0]\n")).is_ok());
+}
+
+#[test]
+fn source_minimal_export() {
+    let files = parse_yaml(&(sourced("    type: files\n") + "  paths: [/etc]\n")).unwrap();
+    assert!(files.spec.source.as_ref().is_some_and(Source::is_files));
+    let text = to_yaml(&files);
+    assert!(
+        text.starts_with("apiVersion: lodestore.io/v1alpha1\n"),
+        "{text}"
+    );
+    assert!(!text.contains("source"), "{text}");
+    let again = parse_yaml(&text).unwrap();
+    assert_eq!(again.spec.source, None);
+    assert_eq!(to_yaml(&again), text);
+
+    let db = parse_yaml(&sourced("    type: postgres\n    databases: [app]\n")).unwrap();
+    let text = to_yaml(&db);
+    assert!(
+        text.starts_with("apiVersion: lodestore.io/v1alpha2\n"),
+        "{text}"
+    );
+    assert!(text.contains("source:\n    type: postgres\n"), "{text}");
+    assert_eq!(parse_yaml(&text).unwrap(), db);
+}
