@@ -257,6 +257,9 @@ fn cert_severity(not_after_ms: i64, now_ms: i64) -> Severity {
 }
 
 #[cfg(test)]
+mod differential;
+
+#[cfg(test)]
 mod tests {
     use std::time::Duration;
 
@@ -376,12 +379,20 @@ mod tests {
             [a.clone(), b.clone()]
         );
         assert_eq!(
-            super::super::inputs::expected_instances(&guests, Some(&[a.clone()]), &known),
-            [a.clone()]
+            super::super::inputs::expected_instances(
+                &guests,
+                Some(std::slice::from_ref(&a)),
+                &known
+            ),
+            vec![a.clone()]
         );
         assert!(super::super::inputs::expected_instances(&guests, Some(&[]), &known).is_empty());
         assert_eq!(
-            super::super::inputs::expected_instances(&files, Some(&[a]), &known),
+            super::super::inputs::expected_instances(
+                &files,
+                Some(std::slice::from_ref(&a)),
+                &known
+            ),
             [String::new()]
         );
     }
