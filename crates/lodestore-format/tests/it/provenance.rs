@@ -18,9 +18,12 @@ use lodestore_format::error::Error;
 use lodestore_format::keys::{MasterKey, ReadKeys};
 use lodestore_format::locks::new_lock_id;
 use lodestore_format::pb;
-use lodestore_format::provenance::{LatestMode, LatestWarning, ProvenanceSet, Signer, pick_latest};
+use lodestore_format::provenance::{
+    LatestMode, LatestScope, LatestWarning, ProvenanceSet, Signer, pick_latest, pick_latest_in,
+};
 use lodestore_format::reader::Reader;
 use lodestore_format::snapshot::SnapshotEntry;
+use lodestore_format::source::{self, Meta, SourceKey};
 use lodestore_format::store::{BlobError, BlobStore, ListEntry, LocalFsStore, put_named};
 use lodestore_format::writer::{BackupOptions, Writer};
 use rand_chacha::ChaCha20Rng;
@@ -416,4 +419,70 @@ async fn provenance_reader_refuses_a_partial_attestation_read() {
     let err = r.provenance().await.unwrap_err();
     assert!(err.to_string().contains("changed while reading"), "{err}");
     assert!(r.resolve_latest(false).await.is_err());
+}
+
+const GUEST: &str = "proxmox-vm/pve1/0b6f1a2c-3d4e-4f50-8a9b-1c2d3e4f5a6b";
+
+fn guest() -> SourceKey {
+    SourceKey::parse(GUEST).unwrap()
+}
+
+fn from_source(mut r: pb::ProvenanceRecord, key: &SourceKey) -> pb::ProvenanceRecord {
+    r.source = source::encode(key, &Meta::new()).unwrap();
+    r
+}
+
+fn claiming(mut e: SnapshotEntry, key: &SourceKey) -> SnapshotEntry {
+    e.snapshot.source = source::encode(key, &Meta::new()).unwrap();
+    e
+}
+
+#[test]
+fn latest_is_per_source_instance() {
+    let k = guest();
+    let set = signed(&[
+        record(id(1), "h1", "j", 10),
+        from_source(record(id(2), "h1", "j", 10), &k),
+        from_source(record(id(3), "h1", "j", 10), &k),
+    ]);
+    let entries = vec![
+        entry(1, Some(NOW_MS - 3 * HOUR_MS), 0),
+        entry(2, Some(NOW_MS - 2 * HOUR_MS), 0),
+        entry(3, Some(NOW_MS - HOUR_MS), 0),
+    ];
+    let scope = LatestScope::Instance(k.clone());
+    let pick = pick_latest_in(entries.clone(), &set, NOW_MS, false, &scope).unwrap();
+    assert_eq!(pick.entry.id, id(3));
+    let pick = pick_latest(entries, &set, NOW_MS, false).unwrap();
+    assert_eq!(
+        pick.entry.id,
+        id(1),
+        "a guest image became latest for files"
+    );
+    assert_eq!(set.source_of(&id(2)), k);
+    assert!(set.source_of(&id(1)).is_files());
+}
+
+#[test]
+fn latest_legacy_skips_claimed_other_sources() {
+    let k = guest();
+    let plain = entry(1, Some(NOW_MS - 2 * HOUR_MS), 0);
+    let claimed = claiming(entry(2, Some(NOW_MS - HOUR_MS), 0), &k);
+
+    let pick = pick_latest(
+        vec![plain.clone(), claimed.clone()],
+        &unsigned(),
+        NOW_MS,
+        false,
+    )
+    .unwrap();
+    assert_eq!((pick.entry.id, pick.mode), (id(1), LatestMode::Legacy));
+
+    let all_claimed = pick_latest(vec![claimed.clone()], &unsigned(), NOW_MS, false).unwrap_err();
+    let empty = pick_latest(Vec::new(), &unsigned(), NOW_MS, false).unwrap_err();
+    assert_eq!(text(all_claimed), text(empty));
+
+    let scope = LatestScope::Instance(k);
+    let err = pick_latest_in(vec![plain, claimed], &unsigned(), NOW_MS, false, &scope).unwrap_err();
+    assert!(text(err).contains("No snapshot in this repository is signed"));
 }

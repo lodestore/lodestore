@@ -8,6 +8,7 @@ use lodestore_format::crypto::{BlobId, Entropy};
 use lodestore_format::index::parse_hex32;
 use lodestore_format::pb;
 use lodestore_format::repo::Repository;
+use lodestore_format::source::{self, Meta, SourceKey};
 use lodestore_format::store::LocalFsStore;
 use lodestore_format::writer::{BackupOptions, Writer};
 
@@ -380,4 +381,67 @@ async fn cli_backup_refuses_when_attestations_vanish() {
         );
         assert_eq!(repo_files(&fx.repo), before, "{args:?} wrote to the bucket");
     }
+}
+
+const GUEST: &str = "proxmox-vm/pve1/0b6f1a2c-3d4e-4f50-8a9b-1c2d3e4f5a6b";
+
+fn from_source(
+    mut r: pb::ProvenanceRecord,
+    key: &str,
+    meta: &[(&str, &str)],
+) -> pb::ProvenanceRecord {
+    let key = SourceKey::parse(key).unwrap();
+    let meta: Meta = meta
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+        .collect();
+    r.source = source::encode(&key, &meta).unwrap();
+    r
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cli_latest_of_a_source_instance() {
+    let fx = fixture();
+    let dirs: Vec<PathBuf> = (1..=4)
+        .map(|i| {
+            let dir = fx.src.with_file_name(format!("d{i}"));
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::write(dir.join(format!("marker{i}")), b"x").unwrap();
+            dir.canonicalize().unwrap()
+        })
+        .collect();
+    let ids: Vec<BlobId> = dirs.iter().map(|d| backup(&fx.repo, d)).collect();
+    sign(
+        &fx.repo,
+        &[
+            record(ids[0], "h1", "job"),
+            from_source(record(ids[1], "h1", "job"), GUEST, &[]),
+            from_source(record(ids[2], "h1", "job"), GUEST, &[]),
+            from_source(record(ids[3], "h2", "job"), GUEST, &[]),
+        ],
+    )
+    .await;
+
+    let spec = format!("latest@{GUEST}");
+    let listed = stdout_of(lode(&fx.repo).args(["ls", &spec]));
+    assert!(listed.contains("marker4"), "{listed}");
+    assert!(!listed.contains("marker3"), "{listed}");
+
+    let path = dirs[3].to_str().unwrap();
+    let narrowed = stdout_of(lode(&fx.repo).args(["ls", &format!("{spec}:{path}")]));
+    assert!(narrowed.contains("marker4"), "{narrowed}");
+
+    let files = stdout_of(lode(&fx.repo).args(["ls", "latest"]));
+    assert!(
+        files.contains("marker1") && !files.contains("marker4"),
+        "{files}"
+    );
+    let files = stdout_of(lode(&fx.repo).args(["ls", &format!("latest:{}", dirs[0].display())]));
+    assert!(files.contains("marker1"), "{files}");
+
+    lode(&fx.repo)
+        .args(["ls", "latest@bogus"])
+        .assert()
+        .failure()
+        .code(2);
 }

@@ -19,9 +19,10 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use lodestore_format::provenance::LatestMode;
+use lodestore_format::provenance::{LatestMode, LatestScope};
 use lodestore_format::reader::Reader;
 use lodestore_format::snapshot::SnapshotEntry;
+use lodestore_format::source::SourceKey;
 use lodestore_format::store::Store;
 
 use crate::cli::{Cli, Command, UsageError};
@@ -117,14 +118,25 @@ pub fn run(cli: Cli) -> Result<u8> {
     })
 }
 
-/// A snapshot by `latest`, id or unique id prefix. `latest` follows the
-/// signature rules of the format library and explains its choice on stderr.
+/// A snapshot by `latest`, `latest@<source key>`, id or unique id prefix.
+/// `latest` is the newest signed files snapshot; `latest@<key>` is the newest
+/// signed snapshot of that source instance from every host, as `latest` is
+/// for files, so a guest that moved to another node keeps its newest backup.
+/// To pin one host, name a snapshot id from `lode snapshots --source-type`.
+/// Both follow the signature rules of the format library and explain their
+/// choice on stderr.
 pub(crate) async fn resolve_spec(reader: &Reader<Store>, spec: &str) -> Result<SnapshotEntry> {
-    if spec != "latest" {
+    let scope = if spec == "latest" {
+        LatestScope::Files
+    } else if let Some(key) = spec.strip_prefix("latest@") {
+        let key = SourceKey::parse(key)
+            .map_err(|e| UsageError(format!("latest@KEY needs a canonical source key: {e}")))?;
+        LatestScope::Instance(key)
+    } else {
         return Ok(reader.resolve_snapshot(spec).await?);
-    }
+    };
     let mut cache = ShardCache::load(reader.keys().repo_id());
-    let pick = reader.resolve_latest(cache.upgraded).await?;
+    let pick = reader.resolve_latest_in(cache.upgraded, &scope).await?;
     if pick.mode == LatestMode::Strict && !cache.upgraded {
         cache.upgraded = true;
         if let Err(e) = cache.save() {
