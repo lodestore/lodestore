@@ -18,6 +18,7 @@ pub mod reader;
 pub mod repo;
 pub mod selection;
 pub mod snapshot;
+pub mod source;
 pub mod store;
 pub mod tree;
 pub mod tree_cache;
