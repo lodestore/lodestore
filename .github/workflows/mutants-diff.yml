@@ -68,7 +68,7 @@ jobs:
             esac
           }
           run_group format '^crates/lodestore-format/src/' -p lodestore-format
-          run_group gc '^crates/lodestore-server/src/maintenance/gc/' -p lodestore-server --file 'crates/lodestore-server/src/maintenance/gc/*.rs' -- -E 'binary(/^(adv_)?gc_/)'
+          run_group gc '^crates/lodestore-server/src/maintenance/gc/' -p lodestore-server --file 'crates/lodestore-server/src/maintenance/gc/*.rs' -- -E 'binary(it) & test(/^(adv_)?gc_[a-z0-9_]*::/)'
           run_group retention '^crates/lodestore-policy/src/retention\.rs$' -p lodestore-policy --file crates/lodestore-policy/src/retention.rs
           exit "$failed"
       - name: Keep the mutation output

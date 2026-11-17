@@ -6,9 +6,10 @@
 #   scripts/adversarial-vs-release.sh [TAG]      (default: v0.1.0)
 #
 # The current adv_*.rs files and the helper modules they share (adv_support,
-# gc_support, common, forge_support) are copied into a detached worktree of TAG, built and
-# run there with the default nextest profile. The run exits non-zero if any
-# scenario passes, is not run, or does not compile on TAG.
+# gc_support, common, forge_support, tree_support) are copied into tests/it/ of
+# a detached worktree of TAG. Each adv_*.rs is built as the only test module of
+# the `it` binary and run there with the default nextest profile. The run exits
+# non-zero if any scenario passes, is not run, or does not compile on TAG.
 #
 # Heavy: it builds the whole workspace a second time. Run it by hand at the
 # end of a phase, not in CI. The worktree and its target/ are removed on exit.
@@ -29,9 +30,9 @@ trap cleanup EXIT
 
 git worktree add --detach "$WT" "$TAG" >/dev/null
 
-for tests in crates/*/tests; do
+for tests in crates/*/tests/it; do
     [ -d "$tests" ] || continue
-    for support in adv_support gc_support common forge_support; do
+    for support in adv_support gc_support common forge_support tree_support; do
         if [ -d "$tests/$support" ]; then
             mkdir -p "$WT/$tests"
             rm -rf "${WT:?}/$tests/$support"
@@ -49,17 +50,22 @@ TABLE="$WORK/table"
 BAD=0
 : >"$TABLE"
 
-for file in crates/*/tests/adv_*.rs; do
+for file in crates/*/tests/it/adv_*.rs; do
     [ -f "$file" ] || continue
     crate="$(echo "$file" | cut -d/ -f2)"
+    tests="$(dirname "$file")"
     stem="$(basename "$file" .rs)"
     names="$(grep -oE 'fn adv_[a-z0-9_]+' "$file" | sed 's/^fn //')"
     log="$WORK/$stem.log"
     status=0
+    {
+        grep -E '^(#\[path|mod (adv_support|common|forge_support|gc_support|planted|tree_support);)' "$tests/main.rs" || true
+        echo "mod $stem;"
+    } >"$WT/$tests/main.rs"
     (
         cd "$WT"
-        NO_COLOR=1 cargo nextest run -p "$crate" --test "$stem" --no-fail-fast \
-            --color never -E 'test(/^adv_/)'
+        NO_COLOR=1 cargo nextest run -p "$crate" --test it --no-fail-fast \
+            --color never -E 'test(/^[a-z0-9_]+::adv_/)'
     ) >"$log" 2>&1 || status=$?
     echo "== $stem: exit $status"
     grep -A1 'panicked at' "$log" | cut -c1-300 | head -n 24 || true
@@ -70,7 +76,7 @@ for file in crates/*/tests/adv_*.rs; do
         continue
     fi
     for name in $names; do
-        result="$(grep -E "^ +(PASS|FAIL|TIMEOUT|SIG[A-Z]+|ABORT|LEAK[A-Z-]*) .*::${stem} ${name} *\$" "$log" \
+        result="$(grep -E "^ +(PASS|FAIL|TIMEOUT|SIG[A-Z]+|ABORT|LEAK[A-Z-]*) .*::it ${stem}::${name} *\$" "$log" \
             | head -n 1 | awk '{print $1}' || true)"
         case "$result" in
             "") result="NOT RUN"; BAD=1; tail -n 15 "$log" ;;

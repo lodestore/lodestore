@@ -36,6 +36,6 @@ jobs:
       - run: scripts/test-linux.sh --root backup_root_ --no-fail-fast
       - run: scripts/install-minisign.sh
       - run: BINS=lodestore-agent PKG=lodestore-server scripts/test-linux.sh --root e2e_install_ --no-fail-fast
-      - run: cargo nextest run -p lodestore-server --run-ignored only -E 'binary(install_verify)'
+      - run: cargo nextest run -p lodestore-server --run-ignored only -E 'binary(it) & test(/^install_verify::/)'
       - run: BINS=lodestore-agent PKG=lodestore-agent scripts/test-linux.sh --root update_systemd_ --no-fail-fast
-      - run: cargo nextest run -p lodestore-format --run-ignored only --no-fail-fast -E 'test(/^s3_/)'
+      - run: cargo nextest run -p lodestore-format --run-ignored only --no-fail-fast -E 'test(/^[a-z0-9_]+::s3_/)'
