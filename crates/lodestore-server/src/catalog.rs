@@ -11,6 +11,7 @@ use lodestore_format::index::{hex32, parse_hex32};
 use lodestore_format::keys::{MasterKey, ReadKeys};
 use lodestore_format::pb;
 use lodestore_format::snapshot::{MAX_SNAPSHOT_SIZE, open_snapshot, snapshot_object_key};
+use lodestore_format::source::{self, Meta, SourceKey};
 use lodestore_format::store::{BlobDelete, BlobError, BlobStore, Store, read_bounded};
 use lodestore_format::{Error as FormatError, Result as FormatResult};
 use serde::{Deserialize, Serialize};
@@ -216,23 +217,64 @@ async fn bind_host(
 struct JobBinding {
     policy_name: Option<String>,
     stdin_name: Option<String>,
+    source: SourceKey,
+    meta: Meta,
+}
+
+/// The source a job row names, as the catalog and the signed record carry it.
+pub(crate) fn job_source(
+    job_id: &str,
+    source_ref: &str,
+    meta_json: Option<&str>,
+) -> anyhow::Result<(SourceKey, Meta)> {
+    let malformed = || format!("job {job_id} has a malformed source");
+    let key = SourceKey::parse(source_ref).with_context(malformed)?;
+    let meta = match meta_json {
+        Some(json) => serde_json::from_str::<Meta>(json).with_context(malformed)?,
+        None => Meta::new(),
+    };
+    Ok((key, meta))
 }
 
 async fn job_binding(state: &AppState, job_id: &str) -> anyhow::Result<JobBinding> {
-    let row = sqlx::query("SELECT policy_name, stdin_name FROM jobs WHERE id = $1")
-        .bind(job_id)
-        .fetch_optional(&state.db.pool)
-        .await?;
+    let row = sqlx::query(
+        "SELECT policy_name, stdin_name, source_ref, source_meta_json FROM jobs WHERE id = $1",
+    )
+    .bind(job_id)
+    .fetch_optional(&state.db.pool)
+    .await?;
     Ok(match row {
-        Some(row) => JobBinding {
-            policy_name: row.try_get("policy_name")?,
-            stdin_name: row.try_get("stdin_name")?,
-        },
+        Some(row) => {
+            let (source, meta) = job_source(
+                job_id,
+                &row.try_get::<String, _>("source_ref")?,
+                row.try_get::<Option<String>, _>("source_meta_json")?
+                    .as_deref(),
+            )?;
+            JobBinding {
+                policy_name: row.try_get("policy_name")?,
+                stdin_name: row.try_get("stdin_name")?,
+                source,
+                meta,
+            }
+        }
         None => JobBinding {
             policy_name: None,
             stdin_name: None,
+            source: SourceKey::files(),
+            meta: Meta::new(),
         },
     })
+}
+
+impl JobBinding {
+    fn source_columns(&self) -> (&'static str, &str, Option<String>) {
+        (
+            self.source.kind().as_str(),
+            self.source.as_str(),
+            source::label(&self.source, &self.meta),
+        )
+    }
 }
 
 fn check_policy_tags(tags: &[String], job: &JobBinding) -> Result<(), LinkRefused> {
@@ -281,13 +323,17 @@ async fn insert_snapshot(
     let parent = <[u8; 32]>::try_from(snapshot.parent.as_slice())
         .ok()
         .map(|p| hex32(&p));
+    let (source_type, source_ref, source_label) = match binding {
+        Some(binding) => binding.source_columns(),
+        None => ("files", "", None),
+    };
     let result = sqlx::query(
         "INSERT INTO snapshots (id, repository_id, host_id, hostname, time_ms, paths_json, \
          tags_json, policy_name, stdin_name, job_id, parent_id, incomplete, errors_total, \
          warnings_total, stats_json, agent_id_claim, discovered_at, received_at, received_exact, \
-         origin) \
+         source_type, source_ref, source_label, origin) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, \
-         $18, $19, (SELECT CASE WHEN j.stdin_name IS NOT NULL OR j.source = 'cli' THEN 'stdin' ELSE j.origin END \
+         $18, $19, $20, $21, $22, (SELECT CASE WHEN j.stdin_name IS NOT NULL OR j.source = 'cli' THEN 'stdin' ELSE j.origin END \
          FROM jobs j WHERE j.id = $10)) \
          ON CONFLICT (id) DO NOTHING",
     )
@@ -320,6 +366,9 @@ async fn insert_snapshot(
     .bind(discovered)
     .bind(received.unwrap_or(discovered))
     .bind(i64::from(received.is_some() || link.is_some()))
+    .bind(source_type)
+    .bind(source_ref)
+    .bind(source_label)
     .execute(&state.db.pool)
     .await?;
     Ok(result.rows_affected() == 1)
@@ -419,8 +468,10 @@ async fn link_snapshot(
     link: &JobLink<'_>,
     binding: &JobBinding,
 ) -> anyhow::Result<()> {
+    let (source_type, source_ref, source_label) = binding.source_columns();
     let done = sqlx::query(
         "UPDATE snapshots SET job_id = $1, host_id = $2, policy_name = $5, stdin_name = $6, \
+         source_type = $7, source_ref = $8, source_label = $9, \
          verified_at = CASE WHEN job_id IS NULL THEN NULL ELSE verified_at END, \
          verified_by = CASE WHEN job_id IS NULL THEN NULL ELSE verified_by END, \
          origin = (SELECT CASE WHEN j.stdin_name IS NOT NULL OR j.source = 'cli' THEN 'stdin' ELSE j.origin END \
@@ -434,6 +485,9 @@ async fn link_snapshot(
     .bind(repository_id)
     .bind(binding.policy_name.as_deref())
     .bind(binding.stdin_name.as_deref())
+    .bind(source_type)
+    .bind(source_ref)
+    .bind(source_label)
     .execute(&state.db.pool)
     .await?;
     if done.rows_affected() == 0 {

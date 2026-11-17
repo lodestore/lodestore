@@ -16,6 +16,7 @@ use lodestore_format::index::{
 use lodestore_format::keys::ReadKeys;
 use lodestore_format::pb;
 use lodestore_format::snapshot::{MAX_SNAPSHOT_SIZE, open_snapshot, snapshot_object_key};
+use lodestore_format::source::{self, Meta, SourceKey};
 use lodestore_format::store::{BlobError, BlobStore, read_bounded};
 use lodestore_format::verify_snapshot::{
     check_snapshot_resolves, snapshot_index_refs, verify_shard,
@@ -35,6 +36,7 @@ use crate::state::AppState;
 
 pub const VERIFICATION_FAILED: &str = "verification_failed";
 const UNCLAIMED: &str = "the snapshot does not name the host that reported it";
+const SOURCE_MISMATCH: &str = "the snapshot names another source than its job";
 pub const VERIFY_RETRY_WINDOW: Duration = Duration::from_secs(3600);
 const VERIFY_CONCURRENCY: usize = 2;
 
@@ -59,6 +61,8 @@ struct Target {
     snapshot_id: String,
     host_id: String,
     repository_id: String,
+    source: SourceKey,
+    meta: Meta,
 }
 
 fn classify(error: &lodestore_format::Error) -> Verdict {
@@ -129,8 +133,8 @@ async fn run_one(state: &AppState, job_id: &str) -> anyhow::Result<()> {
 
 async fn load_target(state: &AppState, job_id: &str) -> anyhow::Result<Option<Target>> {
     let Some(row) = sqlx::query(
-        "SELECT j.snapshot_id, j.host_id, a.repository_id FROM jobs j \
-         JOIN agents a ON a.id = j.host_id WHERE j.id = $1",
+        "SELECT j.snapshot_id, j.host_id, j.source_ref, j.source_meta_json, a.repository_id \
+         FROM jobs j JOIN agents a ON a.id = j.host_id WHERE j.id = $1",
     )
     .bind(job_id)
     .fetch_optional(&state.db.pool)
@@ -141,10 +145,18 @@ async fn load_target(state: &AppState, job_id: &str) -> anyhow::Result<Option<Ta
     let Some(snapshot_id) = row.try_get::<Option<String>, _>("snapshot_id")? else {
         return Ok(None);
     };
+    let (source, meta) = catalog::job_source(
+        job_id,
+        &row.try_get::<String, _>("source_ref")?,
+        row.try_get::<Option<String>, _>("source_meta_json")?
+            .as_deref(),
+    )?;
     Ok(Some(Target {
         snapshot_id,
         host_id: row.try_get("host_id")?,
         repository_id: row.try_get("repository_id")?,
+        source,
+        meta,
     }))
 }
 
@@ -175,6 +187,7 @@ pub(super) fn timestamp_ms(at_ms: i64) -> pb::Timestamp {
 }
 
 /// Host and job come from the session's own rows; nothing is read from the manifest.
+/// The source comes from the job row too; the manifest's claim is only checked.
 async fn provenance_record(
     state: &AppState,
     job_id: &str,
@@ -192,7 +205,7 @@ async fn provenance_record(
         hostname,
         job_id: job_id.to_string(),
         verified_at: Some(timestamp_ms(now_ms())),
-        source: None,
+        source: source::encode(&target.source, &target.meta)?,
     })
 }
 
@@ -264,7 +277,29 @@ async fn verify_job(state: &AppState, job_id: &str, target: &Target) -> anyhow::
         Err(error) => Err(error),
     };
     match manifest {
-        Ok(manifest) if manifest.agent_id == target.host_id.as_bytes() => {}
+        Ok(manifest) if manifest.agent_id == target.host_id.as_bytes() => {
+            match source::decode(manifest.source.as_ref()) {
+                Ok((claimed, _)) if claimed == target.source => {}
+                Ok((claimed, _)) => {
+                    tracing::warn!(
+                        %job_id,
+                        expected = %target.source,
+                        %claimed,
+                        "the snapshot claims another source than its job"
+                    );
+                    return Ok(Verdict::Failed(SOURCE_MISMATCH.into()));
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %job_id,
+                        expected = %target.source,
+                        %error,
+                        "the snapshot claims an invalid source"
+                    );
+                    return Ok(Verdict::Failed(SOURCE_MISMATCH.into()));
+                }
+            }
+        }
         Ok(_) => return Ok(Verdict::Failed(UNCLAIMED.into())),
         Err(error) => return Ok(classify(&error)),
     }
