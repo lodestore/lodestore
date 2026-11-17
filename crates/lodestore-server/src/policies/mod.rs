@@ -8,6 +8,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use lodestore_policy::jiff::{SignedDuration, Timestamp};
 use lodestore_policy::schedule::{DstNote, MinGap};
+use lodestore_policy::source;
 use lodestore_policy::{
     BackupPolicy, Hooks, Problem, Retention, Schedule, Selector, parse_yaml, to_yaml, validate,
 };
@@ -52,6 +53,20 @@ pub fn changes_retained_content(old: &BackupPolicy, new: &BackupPolicy) -> bool 
         || old.one_file_system != new.one_file_system
         || old.exclude_caches != new.exclude_caches
         || old.repository != new.repository
+        || source::normalized(&old.source) != source::normalized(&new.source)
+}
+
+/// A source this server version does not run is refused rather than stored: a stored
+/// policy that never produces a backup would still look protected.
+pub(crate) fn unsupported_source(policy: &BackupPolicy) -> Option<Problem> {
+    let source = source::normalized(&policy.spec.source)?;
+    Some(problem(
+        "spec.source.type",
+        format!(
+            "source type \"{}\" is not supported by this server version yet",
+            source.type_name()
+        ),
+    ))
 }
 
 const SHORTEST_GAP: SignedDuration = SignedDuration::from_secs(60);
@@ -660,6 +675,9 @@ pub async fn create_policy(
             hooks_purpose(std::slice::from_ref(&name)),
         )?;
     }
+    if let Some(p) = unsupported_source(&checked.policy) {
+        return Err(Failure::Problems(vec![p]).into());
+    }
     let now = now_ms();
     let inserted = sqlx::query(
         "INSERT INTO policies (id, name, repository_id, yaml, spec_json, revision, created_at, \
@@ -751,6 +769,9 @@ pub async fn update_policy(
             Scope::HooksWrite,
             hooks_purpose(std::slice::from_ref(&name)),
         )?;
+    }
+    if let Some(p) = unsupported_source(&checked.policy) {
+        return Err(Failure::Problems(vec![p]).into());
     }
     let updated = sqlx::query(
         "UPDATE policies SET repository_id = $1, yaml = $2, spec_json = $3, \
@@ -1042,6 +1063,54 @@ mod tests {
              spec:\n{body}{retention}"
         ))
         .unwrap()
+    }
+
+    fn sourced(source: &str, retention: bool) -> BackupPolicy {
+        let retention = if retention {
+            "  retention:\n    keepLast: 3\n"
+        } else {
+            ""
+        };
+        lodestore_policy::parse_yaml(&format!(
+            "apiVersion: lodestore.io/v1alpha2\nkind: BackupPolicy\nmetadata:\n  name: db\n\
+             spec:\n  repository: main\n{source}{retention}"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn source_change_is_a_content_change() {
+        const FILES_SRC: &str = "  source:\n    type: files\n  paths: [/etc]\n";
+        const VM_101: &str = "  source:\n    type: proxmox-vm\n    vmids: [101]\n";
+        const VM_102: &str = "  source:\n    type: proxmox-vm\n    vmids: [102]\n";
+        const CT_101: &str = "  source:\n    type: proxmox-ct\n    vmids: [101]\n";
+        const PG_A: &str = "  source:\n    type: postgres\n    databases: [a]\n";
+        const PG_B: &str = "  source:\n    type: postgres\n    databases: [b]\n";
+        for (old, new, changed) in [
+            (VM_101, VM_102, true),
+            (VM_101, CT_101, true),
+            (PG_A, PG_B, true),
+            (VM_101, VM_101, false),
+            (FILES_SRC, "  paths: [/etc]\n", false),
+        ] {
+            assert_eq!(
+                changes_retained_content(&sourced(old, true), &sourced(new, true)),
+                changed,
+                "{old} -> {new}"
+            );
+            assert!(
+                !changes_retained_content(&sourced(old, false), &sourced(new, false)),
+                "no retention, no gate"
+            );
+        }
+        assert_eq!(
+            unsupported_source(&sourced(VM_101, false))
+                .unwrap()
+                .path
+                .as_deref(),
+            Some("spec.source.type")
+        );
+        assert!(unsupported_source(&sourced(FILES_SRC, false)).is_none());
     }
 
     #[test]
