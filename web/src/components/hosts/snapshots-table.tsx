@@ -69,13 +69,20 @@ const route = getRouteApi("/_app/hosts/$id");
 
 const SHORT_ID = 8;
 const ALL = "all";
-const SOURCE_CAP = "max-w-36 @min-[840px]:max-w-48";
+const SOURCE_CAP = "max-w-36 @min-[1040px]:max-w-48";
 const SOURCE_CAP_MIXED =
 	"max-w-28 @min-[680px]:max-w-36 @min-[1040px]:max-w-48";
 const REFRESH_MS = 15_000;
-const SHOW_CONTENTS = "hidden @min-[680px]:table-cell";
-const SHOW_FILES = "hidden @min-[840px]:table-cell";
-const SHOW_FILES_WIDE = "hidden @min-[1040px]:table-cell";
+const FROM_680 = "hidden @min-[680px]:table-cell";
+const FROM_840 = "hidden @min-[840px]:table-cell";
+const FROM_920 = "hidden @min-[920px]:table-cell";
+const FROM_1040 = "hidden @min-[1040px]:table-cell";
+const SOURCE_FLEX =
+	"w-full max-w-0 @min-[680px]:w-auto @min-[680px]:max-w-none";
+const PAD = "px-2 @min-[680px]:px-4";
+const PAD_STATUS = "px-1 @min-[680px]:px-4";
+const STATUS_ICON =
+	"[&_[data-status]>span]:sr-only @min-[680px]:[&_[data-status]>span]:not-sr-only";
 
 const source = (snapshot: SnapshotItem) =>
 	snapshot.policy_name ??
@@ -197,28 +204,28 @@ function TypeIcon({ type }: { type: string }) {
 function SkeletonRows() {
 	return Array.from({ length: 5 }, (_, i) => (
 		<TableRow key={i} aria-hidden className="h-12">
-			<TableCell className="px-4">
+			<TableCell className={PAD}>
 				<Skeleton className="h-4 w-20" />
 			</TableCell>
-			<TableCell className="px-4">
+			<TableCell className={cn(PAD, FROM_680)}>
 				<Skeleton className="h-4 w-20" />
 			</TableCell>
-			<TableCell className="px-4">
-				<Skeleton className="h-4 w-24" />
+			<TableCell className={cn(PAD, SOURCE_FLEX)}>
+				<Skeleton className="h-4 w-24 max-w-full" />
 			</TableCell>
-			<TableCell className={cn("px-4", SHOW_CONTENTS)}>
+			<TableCell className={cn("px-4", FROM_920)}>
 				<Skeleton className="h-4 w-40" />
 			</TableCell>
-			<TableCell className={cn("px-4", SHOW_CONTENTS)}>
+			<TableCell className={cn("px-4", FROM_840)}>
 				<Skeleton className="h-4 w-14" />
 			</TableCell>
-			<TableCell className={cn("px-4", SHOW_FILES)}>
+			<TableCell className={cn("px-4", FROM_1040)}>
 				<Skeleton className="h-4 w-12" />
 			</TableCell>
-			<TableCell className="px-4">
-				<Skeleton className="h-4 w-16" />
+			<TableCell className={PAD_STATUS}>
+				<Skeleton className="h-4 w-6 @min-[680px]:w-16" />
 			</TableCell>
-			<TableCell className="px-4">
+			<TableCell className={PAD}>
 				<Skeleton className="h-8 w-36" />
 			</TableCell>
 		</TableRow>
@@ -254,8 +261,7 @@ export function SnapshotsTable({ host }: { host: HostDetail }) {
 
 	const counts = data?.source_counts ?? [];
 	const several = counts.length > 1;
-	const pad = several ? "px-2 @min-[680px]:px-4" : "px-4";
-	const showFiles = several ? SHOW_FILES_WIDE : SHOW_FILES;
+	const showFiles = several ? FROM_1040 : FROM_920;
 
 	function selectType(next: SourceType | undefined) {
 		setPage(1);
@@ -372,28 +378,30 @@ export function SnapshotsTable({ host }: { host: HostDetail }) {
 					<Table>
 						<TableHeader className="bg-muted">
 							<TableRow>
-								<TableHead className={pad}>
+								<TableHead className={PAD}>
 									{copy.snapshots.columns.created}
 								</TableHead>
-								<TableHead className={pad}>
+								<TableHead className={cn(PAD, FROM_680)}>
 									{copy.snapshots.columns.snapshot}
 								</TableHead>
-								<TableHead className={pad}>
+								<TableHead className={cn(PAD, SOURCE_FLEX)}>
 									{copy.snapshots.columns.source}
 								</TableHead>
-								<TableHead className={cn("px-4", SHOW_CONTENTS)}>
+								<TableHead className={cn("px-4", FROM_920)}>
 									{copy.snapshots.columns.contents}
 								</TableHead>
-								<TableHead className={cn("px-4 text-right", SHOW_CONTENTS)}>
+								<TableHead className={cn("px-4 text-right", FROM_840)}>
 									{copy.snapshots.columns.size}
 								</TableHead>
 								<TableHead className={cn("px-4 text-right", showFiles)}>
 									{copy.snapshots.columns.files}
 								</TableHead>
-								<TableHead className="px-4">
-									{copy.snapshots.columns.status}
+								<TableHead className={PAD_STATUS}>
+									<span className="sr-only @min-[680px]:not-sr-only">
+										{copy.snapshots.columns.status}
+									</span>
 								</TableHead>
-								<TableHead className="px-4">
+								<TableHead className={PAD}>
 									<span className="sr-only">
 										{copy.snapshots.columns.actions}
 									</span>
@@ -406,16 +414,18 @@ export function SnapshotsTable({ host }: { host: HostDetail }) {
 							) : (
 								data.items.map((snapshot) => (
 									<TableRow key={snapshot.id} className="h-12">
-										<TableCell className={cn("text-sm", pad)}>
+										<TableCell className={cn("text-sm", PAD)}>
 											<RelativeTime value={new Date(snapshot.time)} />
 										</TableCell>
 										<TableCell
-											className={cn("font-mono text-sm", pad)}
+											className={cn("font-mono text-sm", PAD, FROM_680)}
 											title={snapshot.id}
 										>
 											{snapshot.id.slice(0, SHORT_ID)}
 										</TableCell>
-										<TableCell className={cn("text-sm font-semibold", pad)}>
+										<TableCell
+											className={cn("text-sm font-semibold", PAD, SOURCE_FLEX)}
+										>
 											<div
 												className={cn(
 													"flex flex-col items-start py-1",
@@ -445,16 +455,18 @@ export function SnapshotsTable({ host }: { host: HostDetail }) {
 												{snapshot.policy_deleted && <PolicyDeletedBadge />}
 											</div>
 										</TableCell>
-										<TableCell className={cn("px-4 text-sm", SHOW_CONTENTS)}>
+										<TableCell
+											className={cn("w-full max-w-0 px-4 text-sm", FROM_920)}
+										>
 											<Truncated
 												text={contents(snapshot)}
-												className="max-w-80 font-mono"
+												className="font-mono"
 											/>
 										</TableCell>
 										<TableCell
 											className={cn(
 												"px-4 text-right text-sm tabular-nums",
-												SHOW_CONTENTS,
+												FROM_840,
 											)}
 										>
 											{formatBytes(snapshot.stats.bytes_total)}
@@ -467,8 +479,13 @@ export function SnapshotsTable({ host }: { host: HostDetail }) {
 										>
 											{formatCount(fileTotal(snapshot))}
 										</TableCell>
-										<TableCell className="px-4">
-											<div className="flex flex-wrap items-center gap-1">
+										<TableCell className={PAD_STATUS}>
+											<div
+												className={cn(
+													"flex flex-wrap items-center gap-1",
+													STATUS_ICON,
+												)}
+											>
 												<ProvenanceBadge snapshot={snapshot} />
 												{snapshot.suspicious && (
 													<SuspiciousBadge snapshot={snapshot} />
@@ -484,7 +501,7 @@ export function SnapshotsTable({ host }: { host: HostDetail }) {
 												)}
 											</div>
 										</TableCell>
-										<TableCell className="px-4">
+										<TableCell className={cn("@min-[840px]:min-w-48", PAD)}>
 											<div className="flex items-center justify-end gap-1">
 												<Button asChild variant="outline" size="sm">
 													<Link
