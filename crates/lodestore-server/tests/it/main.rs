@@ -89,6 +89,7 @@ mod retention_s3;
 mod schedule;
 mod secrets_upgrade;
 mod snapshot_actions;
+mod source_filter;
 mod spa;
 mod stdin;
 mod token_upgrade;
