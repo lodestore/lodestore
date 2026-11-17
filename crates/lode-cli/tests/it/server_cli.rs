@@ -717,6 +717,19 @@ fn cli_server_snapshots_filter_by_source_type() {
         2,
     );
     assert_eq!(server.calls().len(), before);
+
+    let key = "proxmox-vm/pve1/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    stdout(lode(&server, home.path()).args(["snapshots", "list", "--host", "h1", "--source", key]));
+    assert_eq!(
+        server.calls().last().unwrap().query,
+        "host=h1&limit=200&source=proxmox-vm%2Fpve1%2Faaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    );
+    let before = server.calls().len();
+    failure(
+        lode(&server, home.path()).args(["snapshots", "list", "--host", "h1", "--source", "bogus"]),
+        2,
+    );
+    assert_eq!(server.calls().len(), before);
 }
 
 #[test]

@@ -5540,7 +5540,7 @@
             }
           },
           "422": {
-            "description": "The selection, destination or host is not valid",
+            "description": "The selection, destination or host is not valid, or the snapshot is not a files backup",
             "content": {
               "application/json": {
                 "schema": {

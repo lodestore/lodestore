@@ -4,7 +4,7 @@ use std::time::Duration;
 use anyhow::Result;
 use data_encoding::BASE64URL_NOPAD;
 use lodestore_format::pb;
-use lodestore_format::source::SourceType;
+use lodestore_format::source::{SourceKey, SourceType};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -856,12 +856,13 @@ undone. Storage space is freed later by garbage collection."
 }
 
 async fn snapshots(client: &Client, out: Output, command: ServerSnapshotsCommand) -> Result<()> {
-    let (host, limit, source_type) = match command {
+    let (host, limit, source_type, source) = match command {
         ServerSnapshotsCommand::List {
             host,
             limit,
             source_type,
-        } => (host, limit, source_type),
+            source,
+        } => (host, limit, source_type, source),
         ServerSnapshotsCommand::Mark { id, reason } => {
             return mark_snapshot(client, out, &id, true, reason).await;
         }
@@ -879,6 +880,10 @@ async fn snapshots(client: &Client, out: Output, command: ServerSnapshotsCommand
             ))
         })?;
     }
+    if let Some(text) = &source {
+        SourceKey::parse(text)
+            .map_err(|_| UsageError(format!("{text:?} is not a canonical source key.")))?;
+    }
     let host = resolve_host(client, &host).await?;
     let mut found: Vec<Snapshot> = Vec::new();
     let mut before: Option<String> = None;
@@ -889,6 +894,7 @@ async fn snapshots(client: &Client, out: Output, command: ServerSnapshotsCommand
         let mut query = vec![("host", host.clone()), ("limit", wanted.to_string())];
         query.extend(before.take().map(|cursor| ("before", cursor)));
         query.extend(source_type.clone().map(|t| ("source_type", t)));
+        query.extend(source.clone().map(|k| ("source", k)));
         let page: SnapshotPage = client.get_json("/api/v1/restore/snapshots", &query).await?;
         found.extend(page.items);
         before = page.next;

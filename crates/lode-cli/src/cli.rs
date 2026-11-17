@@ -321,6 +321,9 @@ pub enum ServerSnapshotsCommand {
         /// Only snapshots of this source type: files, proxmox-vm, proxmox-ct, postgres, postgres-wal or mysql.
         #[arg(long, value_name = "TYPE")]
         source_type: Option<String>,
+        /// Only snapshots of this source instance (a canonical source key).
+        #[arg(long, value_name = "KEY")]
+        source: Option<String>,
     },
     /// Mark a snapshot as suspicious; retention then neither counts nor forgets it
     Mark {
