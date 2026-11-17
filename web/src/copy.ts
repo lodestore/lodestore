@@ -9,6 +9,7 @@ import { notifications } from "@/copy.notifications";
 import { overview } from "@/copy.overview";
 import { policies } from "@/copy.policies";
 import { restore } from "@/copy.restore";
+import { sources } from "@/copy.sources";
 import { tokens } from "@/copy.tokens";
 import { user } from "@/copy.user";
 import { sentence } from "@/lib/sentence";
@@ -24,6 +25,7 @@ export const copy = {
 	overview,
 	policies,
 	restore,
+	sources,
 	tokens,
 	user,
 	hostBackup,

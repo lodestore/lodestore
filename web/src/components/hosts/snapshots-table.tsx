@@ -1,5 +1,5 @@
 import { keepPreviousData, useQueryClient } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
+import { getRouteApi, Link } from "@tanstack/react-router";
 import { FolderOpen, RefreshCw } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
@@ -8,7 +8,7 @@ import {
 	useListHostSnapshots,
 	useSyncCatalog,
 } from "@/api/gen/endpoints";
-import type { HostDetail, SnapshotItem } from "@/api/gen/model";
+import type { HostDetail, SnapshotItem, SourceCount } from "@/api/gen/model";
 import { Illustration } from "@/components/brand/illustration";
 import { TextWithPaths } from "@/components/path-text";
 import { RelativeTime } from "@/components/relative-time";
@@ -31,6 +31,13 @@ import {
 	EmptyHeader,
 	EmptyTitle,
 } from "@/components/ui/empty";
+import {
+	Select,
+	SelectContent,
+	SelectItem,
+	SelectTrigger,
+	SelectValue,
+} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import {
@@ -41,6 +48,7 @@ import {
 	TableHeader,
 	TableRow,
 } from "@/components/ui/table";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import {
 	Tooltip,
 	TooltipContent,
@@ -48,12 +56,26 @@ import {
 } from "@/components/ui/tooltip";
 import { copy } from "@/copy";
 import { formatBytes, formatCount } from "@/lib/format";
+import {
+	parseSourceType,
+	SOURCE_TYPES,
+	type SourceType,
+	sourceTypeIcon,
+	sourceTypeLabel,
+} from "@/lib/source-type";
 import { cn } from "@/lib/utils";
 
+const route = getRouteApi("/_app/hosts/$id");
+
 const SHORT_ID = 8;
+const ALL = "all";
+const SOURCE_CAP = "max-w-36 @min-[840px]:max-w-48";
+const SOURCE_CAP_MIXED =
+	"max-w-28 @min-[680px]:max-w-36 @min-[1040px]:max-w-48";
 const REFRESH_MS = 15_000;
 const SHOW_CONTENTS = "hidden @min-[680px]:table-cell";
 const SHOW_FILES = "hidden @min-[840px]:table-cell";
+const SHOW_FILES_WIDE = "hidden @min-[1040px]:table-cell";
 
 const source = (snapshot: SnapshotItem) =>
 	snapshot.policy_name ??
@@ -78,6 +100,98 @@ function Truncated({ text, className }: { text: string; className?: string }) {
 			</TooltipContent>
 		</Tooltip>
 	);
+}
+
+function SourceTypeFilter({
+	counts,
+	value,
+	onChange,
+}: {
+	counts: SourceCount[];
+	value: SourceType | undefined;
+	onChange: (next: SourceType | undefined) => void;
+}) {
+	const total = counts.reduce((sum, { count }) => sum + count, 0);
+	const items = SOURCE_TYPES.flatMap((type) => {
+		const count = counts.find((c) => c.source_type === type)?.count;
+		return count === undefined ? [] : [{ type, count }];
+	});
+	const options: { type: SourceType | typeof ALL; count: number }[] = [
+		{ type: ALL, count: total },
+		...items,
+	];
+	const current = value ?? ALL;
+	const change = (next: string) =>
+		onChange(next === ALL ? undefined : parseSourceType(next));
+	const active = items.find((item) => item.type === value);
+	const summary = copy.snapshots.filter.selectValue(
+		active ? sourceTypeLabel(active.type) : copy.snapshots.filter.all,
+		active?.count ?? total,
+	);
+
+	return (
+		<>
+			<ToggleGroup
+				type="single"
+				variant="outline"
+				size="lg"
+				spacing={0}
+				aria-label={copy.snapshots.filter.label}
+				className="hidden @min-[680px]:flex"
+				value={current}
+				onValueChange={(next) => next && change(next)}
+			>
+				{options.map(({ type, count }) => {
+					const Icon = type === ALL ? undefined : sourceTypeIcon[type];
+					return (
+						<ToggleGroupItem
+							key={type}
+							value={type}
+							className="gap-2 px-4 font-normal data-[state=on]:bg-primary-subtle data-[state=on]:font-semibold data-[state=on]:text-primary-strong"
+						>
+							{Icon && (
+								<Icon
+									aria-hidden
+									className="hidden text-muted-foreground @min-[840px]:block"
+								/>
+							)}
+							{type === ALL ? copy.snapshots.filter.all : sourceTypeLabel(type)}
+							<span className="font-normal text-muted-foreground tabular-nums group-data-[state=on]/toggle:font-semibold group-data-[state=on]/toggle:text-primary-strong">
+								{count}
+							</span>
+						</ToggleGroupItem>
+					);
+				})}
+			</ToggleGroup>
+			<Select value={current} onValueChange={change}>
+				<SelectTrigger
+					aria-label={summary}
+					className="w-full data-[size=default]:h-10 @min-[680px]:hidden"
+				>
+					<SelectValue>{summary}</SelectValue>
+				</SelectTrigger>
+				<SelectContent>
+					<SelectItem value={ALL}>
+						{copy.snapshots.filter.all}
+						<span className="text-muted-foreground tabular-nums">{total}</span>
+					</SelectItem>
+					{items.map(({ type, count }) => (
+						<SelectItem key={type} value={type}>
+							{sourceTypeLabel(type)}
+							<span className="text-muted-foreground tabular-nums">
+								{count}
+							</span>
+						</SelectItem>
+					))}
+				</SelectContent>
+			</Select>
+		</>
+	);
+}
+
+function TypeIcon({ type }: { type: string }) {
+	const Icon = sourceTypeIcon[type as SourceType] ?? sourceTypeIcon.files;
+	return <Icon aria-hidden className="size-4 shrink-0 text-muted-foreground" />;
 }
 
 function SkeletonRows() {
@@ -114,13 +228,15 @@ function SkeletonRows() {
 export function SnapshotsTable({ host }: { host: HostDetail }) {
 	const queryClient = useQueryClient();
 	const [page, setPage] = useState(1);
+	const type = parseSourceType(route.useSearch().type);
+	const navigate = route.useNavigate();
 	const [action, setAction] = useState<{
 		snapshot: SnapshotItem;
 		action: SnapshotAction;
 	}>();
 	const query = useListHostSnapshots(
 		host.id,
-		{ page },
+		{ page, source_type: type },
 		{
 			query: {
 				placeholderData: keepPreviousData,
@@ -136,11 +252,35 @@ export function SnapshotsTable({ host }: { host: HostDetail }) {
 		? Math.max(1, Math.ceil(data.total / data.page_size))
 		: 1;
 
+	const counts = data?.source_counts ?? [];
+	const several = counts.length > 1;
+	const pad = several ? "px-2 @min-[680px]:px-4" : "px-4";
+	const showFiles = several ? SHOW_FILES_WIDE : SHOW_FILES;
+
+	function selectType(next: SourceType | undefined) {
+		setPage(1);
+		void navigate({ search: (s) => ({ ...s, type: next }), replace: true });
+	}
+
 	useEffect(() => {
 		if (data && !query.isPlaceholderData && page > lastPage) {
 			setPage(lastPage);
 		}
 	}, [data, query.isPlaceholderData, page, lastPage]);
+
+	useEffect(() => {
+		if (
+			data &&
+			type &&
+			!query.isPlaceholderData &&
+			!data.source_counts.some((c) => c.source_type === type)
+		) {
+			void navigate({
+				search: (s) => ({ ...s, type: undefined }),
+				replace: true,
+			});
+		}
+	}, [data, type, query.isPlaceholderData, navigate]);
 
 	function checkStorage() {
 		sync.mutate(
@@ -162,16 +302,38 @@ export function SnapshotsTable({ host }: { host: HostDetail }) {
 
 	return (
 		<div className="flex flex-col gap-4 pt-4">
-			<div className="flex justify-end">
-				<Button
-					variant="outline"
-					size="sm"
-					disabled={sync.isPending}
-					onClick={checkStorage}
+			<div className="@container">
+				<div
+					className={cn(
+						"flex",
+						several
+							? "flex-col gap-4 @min-[680px]:flex-row @min-[680px]:flex-wrap @min-[680px]:items-center @min-[680px]:justify-between"
+							: "justify-end",
+					)}
 				>
-					{sync.isPending ? <Spinner /> : <RefreshCw aria-hidden />}
-					{sync.isPending ? copy.snapshots.syncing : copy.snapshots.syncCatalog}
-				</Button>
+					{several && (
+						<SourceTypeFilter
+							counts={counts}
+							value={type}
+							onChange={selectType}
+						/>
+					)}
+					<Button
+						variant="outline"
+						size="sm"
+						className={cn(
+							several &&
+								"self-start @min-[680px]:ml-auto @min-[680px]:self-center",
+						)}
+						disabled={sync.isPending}
+						onClick={checkStorage}
+					>
+						{sync.isPending ? <Spinner /> : <RefreshCw aria-hidden />}
+						{sync.isPending
+							? copy.snapshots.syncing
+							: copy.snapshots.syncCatalog}
+					</Button>
+				</div>
 			</div>
 
 			{data === undefined && query.isError && (
@@ -210,13 +372,13 @@ export function SnapshotsTable({ host }: { host: HostDetail }) {
 					<Table>
 						<TableHeader className="bg-muted">
 							<TableRow>
-								<TableHead className="px-4">
+								<TableHead className={pad}>
 									{copy.snapshots.columns.created}
 								</TableHead>
-								<TableHead className="px-4">
+								<TableHead className={pad}>
 									{copy.snapshots.columns.snapshot}
 								</TableHead>
-								<TableHead className="px-4">
+								<TableHead className={pad}>
 									{copy.snapshots.columns.source}
 								</TableHead>
 								<TableHead className={cn("px-4", SHOW_CONTENTS)}>
@@ -225,7 +387,7 @@ export function SnapshotsTable({ host }: { host: HostDetail }) {
 								<TableHead className={cn("px-4 text-right", SHOW_CONTENTS)}>
 									{copy.snapshots.columns.size}
 								</TableHead>
-								<TableHead className={cn("px-4 text-right", SHOW_FILES)}>
+								<TableHead className={cn("px-4 text-right", showFiles)}>
 									{copy.snapshots.columns.files}
 								</TableHead>
 								<TableHead className="px-4">
@@ -244,20 +406,41 @@ export function SnapshotsTable({ host }: { host: HostDetail }) {
 							) : (
 								data.items.map((snapshot) => (
 									<TableRow key={snapshot.id} className="h-12">
-										<TableCell className="px-4 text-sm">
+										<TableCell className={cn("text-sm", pad)}>
 											<RelativeTime value={new Date(snapshot.time)} />
 										</TableCell>
 										<TableCell
-											className="px-4 font-mono text-sm"
+											className={cn("font-mono text-sm", pad)}
 											title={snapshot.id}
 										>
 											{snapshot.id.slice(0, SHORT_ID)}
 										</TableCell>
-										<TableCell className="px-4 text-sm font-semibold">
-											<div className="flex flex-col items-start gap-1 py-1">
+										<TableCell className={cn("text-sm font-semibold", pad)}>
+											<div
+												className={cn(
+													"flex flex-col items-start py-1",
+													several ? cn("gap-0", SOURCE_CAP_MIXED) : "gap-1",
+												)}
+											>
+												{several && (
+													<span className="flex max-w-full items-center gap-2">
+														<TypeIcon type={snapshot.source_type} />
+														<Truncated
+															text={
+																snapshot.source_label ??
+																sourceTypeLabel(snapshot.source_type)
+															}
+															className="min-w-0"
+														/>
+													</span>
+												)}
 												<Truncated
 													text={source(snapshot)}
-													className="max-w-36 @min-[840px]:max-w-48"
+													className={
+														several
+															? "max-w-full font-normal text-muted-foreground"
+															: SOURCE_CAP
+													}
 												/>
 												{snapshot.policy_deleted && <PolicyDeletedBadge />}
 											</div>
@@ -279,7 +462,7 @@ export function SnapshotsTable({ host }: { host: HostDetail }) {
 										<TableCell
 											className={cn(
 												"px-4 text-right text-sm tabular-nums",
-												SHOW_FILES,
+												showFiles,
 											)}
 										>
 											{formatCount(fileTotal(snapshot))}
