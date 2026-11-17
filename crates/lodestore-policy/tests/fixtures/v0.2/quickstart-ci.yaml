@@ -1,0 +1,11 @@
+apiVersion: lodestore.io/v1alpha1
+kind: BackupPolicy
+metadata:
+  name: quickstart
+spec:
+  repository: quickstart
+  selector:
+    matchLabels:
+      agent: quickstart
+  paths:
+    - /srv/lodestore-quickstart/data

@@ -517,3 +517,57 @@ fn source_proxmox_vm_policy_validates() {
     assert!(found[0].message.contains("bogus"), "{found:?}");
     assert_ne!((found[0].line, found[0].column), (Some(1), Some(1)));
 }
+
+// Sources that the 0.2 export reproduced byte for byte; every other source compares with its 83884fdf export.
+const CANONICAL: &[&str] = &["quickstart.yaml"];
+
+fn fixtures() -> Vec<(String, String)> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/v0.2");
+    let mut found: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| {
+            let name = entry.unwrap().file_name().into_string().unwrap();
+            let text = std::fs::read_to_string(dir.join(&name)).unwrap();
+            (name, text)
+        })
+        .filter(|(name, _)| name.ends_with(".yaml"))
+        .collect();
+    found.sort();
+    assert!(found.len() >= 7, "fixtures are missing: {}", found.len());
+    found
+}
+
+#[test]
+fn policy_v0_2_fixtures_read_unchanged() {
+    for (name, text) in fixtures() {
+        let policy = parse_yaml(&text).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        assert!(policy.spec.source.is_none(), "{name}");
+        assert_eq!(policy.api_version, lodestore_policy::API_VERSION, "{name}");
+        assert!(validate(&policy).is_empty(), "{name}");
+    }
+}
+
+#[test]
+fn policy_v0_2_fixtures_export_unchanged() {
+    assert!(CANONICAL.contains(&"quickstart.yaml"));
+    let all = fixtures();
+    let text_of = |name: &str| all.iter().find(|(n, _)| n == name).map(|(_, t)| t.as_str());
+    for (name, text) in &all {
+        let exported = to_yaml(&parse_yaml(text).unwrap());
+        if name.ends_with(".export.yaml") {
+            assert_eq!(&exported, text, "{name}");
+            continue;
+        }
+        let export_name = name.replace(".yaml", ".export.yaml");
+        if CANONICAL.contains(&name.as_str()) {
+            assert_eq!(&exported, text, "{name}");
+            assert!(
+                text_of(&export_name).is_none(),
+                "{export_name} must not exist"
+            );
+        } else {
+            let oracle = text_of(&export_name).unwrap_or_else(|| panic!("{export_name} missing"));
+            assert_eq!(exported, oracle, "{name}");
+        }
+    }
+}

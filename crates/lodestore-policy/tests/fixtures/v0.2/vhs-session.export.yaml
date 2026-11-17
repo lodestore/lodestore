@@ -1,0 +1,11 @@
+apiVersion: lodestore.io/v1alpha1
+kind: BackupPolicy
+metadata:
+  name: documents
+spec:
+  repository: main
+  selector:
+    matchLabels:
+      role: demo
+  paths:
+  - /srv/documents
