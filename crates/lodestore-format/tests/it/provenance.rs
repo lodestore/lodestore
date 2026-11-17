@@ -36,6 +36,7 @@ fn record(id: BlobId, host: &str, job: &str, verified: i64) -> pb::ProvenanceRec
             seconds: verified,
             nanos: 0,
         }),
+        source: None,
     }
 }
 

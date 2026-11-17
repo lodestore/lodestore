@@ -111,6 +111,7 @@ pub async fn ensure_provenance_backfilled(
             hostname: row.try_get("hostname")?,
             job_id: row.try_get("job_id")?,
             verified_at: Some(verify::timestamp_ms(at)),
+            source: None,
         };
         sealed.push((id, seal_provenance(&source.keys, &record, &mut entropy)?));
     }
