@@ -57,6 +57,14 @@ pub struct PairFacts {
     pub last_success_ms: Option<i64>,
     pub baseline_ms: i64,
     pub last_failure: Option<(i64, String)>,
+    /// The source instance key; empty for files, whose alert keys carry no suffix.
+    pub source_ref: String,
+    /// The label of the instance, if any snapshot has one.
+    pub source_label: Option<String>,
+    /// Whether the policy still expects this instance; one that it does not is never overdue.
+    pub expected: bool,
+    /// When the alert loop first saw that the policy no longer expects this instance.
+    pub gone_at_ms: Option<i64>,
 }
 
 impl PairFacts {
@@ -65,8 +73,10 @@ impl PairFacts {
     }
 
     pub fn pair_overdue(&self, now_ms: i64) -> bool {
-        self.limit
-            .is_some_and(|limit| self.age_ms(now_ms) > limit.as_millis() as i64)
+        self.expected
+            && self
+                .limit
+                .is_some_and(|limit| self.age_ms(now_ms) > limit.as_millis() as i64)
     }
 
     pub fn pair_failed(&self) -> bool {
@@ -335,6 +345,10 @@ mod tests {
             last_success_ms: success_ago_h.map(|h| NOW_MS - h * HOUR),
             baseline_ms: NOW_MS - HOUR,
             last_failure: None,
+            source_ref: String::new(),
+            source_label: None,
+            expected: true,
+            gone_at_ms: None,
         }
     }
 
