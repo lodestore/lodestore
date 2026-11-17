@@ -33,7 +33,7 @@ use lodestore_policy::{format_duration, parse_duration};
 const SECRET_KIND: &str = "notification-channel";
 const CONFIG_READ_ONLY: &str =
     "This channel is defined in the server configuration. Change it there and restart the server.";
-const ALL_TYPES: [AlertType; 10] = [
+const ALL_TYPES: [AlertType; 11] = [
     AlertType::BackupFailed,
     AlertType::NoRecentBackup,
     AlertType::AgentOffline,
@@ -44,6 +44,7 @@ const ALL_TYPES: [AlertType; 10] = [
     AlertType::RepositoryUnavailable,
     AlertType::AgentSessionConflict,
     AlertType::AgentCertificateRejected,
+    AlertType::SourceInstanceGone,
 ];
 
 fn all_types() -> Vec<AlertType> {
