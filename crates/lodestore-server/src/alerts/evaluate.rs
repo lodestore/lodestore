@@ -387,6 +387,47 @@ mod tests {
     }
 
     #[test]
+    fn instances_no_longer_expected_stay_quiet() {
+        use crate::alerts::inputs::instance_facts;
+        use crate::alerts::model::{HostState, OFFLINE_AFTER_DEFAULT};
+        let known = [
+            ("A".to_string(), NOW - HOUR, None),
+            ("B".to_string(), NOW - 30 * 24 * HOUR, None),
+        ];
+        let pairs = instance_facts(
+            "daily",
+            Some(Duration::from_secs(48 * 3600)),
+            NOW - 1000 * HOUR,
+            &["A".to_string()],
+            &known,
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+        );
+        assert_eq!(pairs.len(), 2);
+        assert!(!pairs[1].expected);
+        for later in [NOW, NOW + 365 * 24 * HOUR] {
+            let mut h = host(pairs.clone());
+            h.last_seen_ms = Some(later);
+            let inputs = Inputs {
+                hosts: vec![h.clone()],
+                ..Inputs::default()
+            };
+            let out = evaluate(&inputs, later, 0, &T);
+            let backups: Vec<_> = out
+                .iter()
+                .filter(|c| c.key.contains(":B") || c.kind == AlertType::BackupFailed)
+                .collect();
+            assert!(backups.is_empty(), "{backups:?}");
+            if later == NOW {
+                assert_ne!(
+                    crate::alerts::model::host_state(&h, later, 0, OFFLINE_AFTER_DEFAULT),
+                    HostState::Overdue
+                );
+            }
+        }
+    }
+
+    #[test]
     fn offline_and_certificates() {
         let mut h = host(vec![]);
         h.online = false;

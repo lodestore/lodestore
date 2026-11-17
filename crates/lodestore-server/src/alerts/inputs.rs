@@ -158,6 +158,7 @@ pub async fn gather_with(
     let (policies, unreadable_policies) = load_policies(state).await?;
     let successes = last_successes(state).await?;
     let failures = last_failures(state).await?;
+    let gone = gone_moments(state).await?;
     let mut snapshots = last_snapshots(state).await?;
     let no_failures = HashMap::new();
     let no_gone = HashMap::new();
@@ -187,7 +188,7 @@ pub async fn gather_with(
                         &expected,
                         known,
                         failures.get(&key).unwrap_or(&no_failures),
-                        &no_gone,
+                        gone.get(&key).unwrap_or(&no_gone),
                     )
                 })
                 .collect();
@@ -520,6 +521,63 @@ async fn last_failures(
     Ok(out)
 }
 
+async fn gone_moments(state: &AppState) -> anyhow::Result<HashMap<Pair, HashMap<String, i64>>> {
+    let rows =
+        sqlx::query("SELECT policy_name, host_id, source_ref, gone_at FROM source_instances_gone")
+            .fetch_all(&state.db.pool)
+            .await
+            .context("reading when source instances stopped being expected")?;
+    let mut out: HashMap<Pair, HashMap<String, i64>> = HashMap::new();
+    for row in &rows {
+        out.entry((row.try_get("policy_name")?, row.try_get("host_id")?))
+            .or_default()
+            .insert(row.try_get("source_ref")?, row.try_get("gone_at")?);
+    }
+    Ok(out)
+}
+
+/// Remembers when the policy stopped expecting an instance, once, so the gone event starts there and a restart does not move it.
+// shortcut: rows of deleted policies and hosts stay; prune them if the table ever grows
+pub async fn record_gone(
+    state: &AppState,
+    hosts: &mut [HostFacts],
+    now_ms: i64,
+) -> anyhow::Result<()> {
+    const CONTEXT: &str = "recording a source instance that is no longer expected";
+    for host in hosts {
+        for pair in &mut host.pairs {
+            if !pair.expected && pair.gone_at_ms.is_none() {
+                sqlx::query(
+                    "INSERT INTO source_instances_gone (policy_name, host_id, source_ref, gone_at) \
+                     VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+                )
+                .bind(&pair.policy)
+                .bind(&host.host_id)
+                .bind(&pair.source_ref)
+                .bind(now_ms)
+                .execute(&state.db.pool)
+                .await
+                .context(CONTEXT)?;
+                pair.gone_at_ms = Some(now_ms);
+            } else if pair.expected && pair.gone_at_ms.is_some() {
+                sqlx::query(
+                    "DELETE FROM source_instances_gone \
+                     WHERE policy_name = $1 AND host_id = $2 AND source_ref = $3",
+                )
+                .bind(&pair.policy)
+                .bind(&host.host_id)
+                .bind(&pair.source_ref)
+                .execute(&state.db.pool)
+                .await
+                .context(CONTEXT)?;
+                pair.gone_at_ms = None;
+            }
+        }
+    }
+    Ok(())
+}
+
+// shortcut: the newest snapshot of any source of the host; split it per source when other sources back up (phase 22).
 async fn last_snapshots(state: &AppState) -> anyhow::Result<HashMap<String, SnapshotFacts>> {
     let rows = sqlx::query(
         "SELECT s.host_id, s.received_at, s.stats_json FROM snapshots s JOIN ( \

@@ -306,6 +306,21 @@ impl Env {
         .unwrap();
     }
 
+    async fn gone_rows(&self) -> Vec<(String, i64)> {
+        sqlx::query("SELECT source_ref, gone_at FROM source_instances_gone ORDER BY source_ref")
+            .fetch_all(self.pool())
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| {
+                (
+                    r.try_get("source_ref").unwrap(),
+                    r.try_get("gone_at").unwrap(),
+                )
+            })
+            .collect()
+    }
+
     async fn stop(self) {
         self.ts.stop().await;
     }
@@ -1225,6 +1240,157 @@ async fn alerts_dead_man_per_source_instance() {
             overdue(&unknown),
             want,
             "[{}] without discovery",
+            backend.name()
+        );
+        env.stop().await;
+    }
+}
+
+async fn files_host_with_two_guests(env: &Env, now: i64) -> (String, String) {
+    env.host("h1", "web-1").await;
+    env.policy("daily", "h1", DAILY).await;
+    env.snapshot("f1", "h1", "daily", now - MINUTE).await;
+    let refs = guests(2);
+    env.guest_snapshot("g1", "h1", "daily", &refs[0], now - 30 * DAY)
+        .await;
+    env.guest_snapshot("g2", "h1", "daily", &refs[1], now - MINUTE)
+        .await;
+    (refs[0].clone(), refs[1].clone())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn alerts_instance_no_longer_selected_goes_quiet() {
+    for backend in backends() {
+        let env = Env::start(&backend).await;
+        let now = now_ms();
+        files_host_with_two_guests(&env, now).await;
+        env.snapshot("f2", "h1", "daily", now + 30 * DAY).await;
+
+        env.tick(now).await;
+        env.tick(now + 30 * DAY).await;
+        for kind in ["backup_failed", "no_recent_backup"] {
+            let found = sqlx::query("SELECT COUNT(*) AS n FROM alerts WHERE type = $1")
+                .bind(kind)
+                .fetch_one(env.pool())
+                .await
+                .unwrap();
+            assert_eq!(
+                found.try_get::<i64, _>("n").unwrap(),
+                0,
+                "[{}] {kind}",
+                backend.name()
+            );
+        }
+
+        let fleet = env.api.get("/api/v1/fleet").await;
+        let fleet: Value = fleet.json().await.unwrap();
+        assert_eq!(
+            fleet["hosts"][0]["state"],
+            "healthy",
+            "[{}]",
+            backend.name()
+        );
+
+        let token = env.ts.issue_token(&["metrics:read"]).await;
+        let scrape = bearer_client(&token)
+            .get(format!("{}/metrics", env.ts.rest_url()))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        let overdue: Vec<_> = scrape
+            .lines()
+            .filter(|l| l.starts_with("lodestore_backup_overdue{"))
+            .collect();
+        assert_eq!(overdue.len(), 1, "{overdue:?}");
+        assert!(overdue[0].ends_with(" 0"), "{overdue:?}");
+        env.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn alerts_gone_moment_is_stored_once() {
+    for backend in backends() {
+        let env = Env::start(&backend).await;
+        let t0 = now_ms();
+        let (g1, g2) = files_host_with_two_guests(&env, t0).await;
+
+        env.tick(t0).await;
+        let want = vec![(g1.clone(), t0), (g2.clone(), t0)];
+        assert_eq!(env.gone_rows().await, want, "[{}]", backend.name());
+        env.tick(t0 + HOUR).await;
+        env.tick(t0 + 2 * DAY).await;
+        assert_eq!(env.gone_rows().await, want, "[{}]", backend.name());
+
+        let inputs = alerts::inputs::gather(env.ts.state(), t0 + 2 * DAY)
+            .await
+            .unwrap();
+        for pair in &inputs.hosts[0].pairs {
+            if pair.source_ref.is_empty() {
+                assert!(pair.expected);
+                assert_eq!(pair.gone_at_ms, None);
+            } else {
+                assert!(!pair.expected);
+                assert_eq!(pair.gone_at_ms, Some(t0), "{}", pair.source_ref);
+            }
+        }
+        env.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn alerts_gone_moment_clears_when_expected_again() {
+    for backend in backends() {
+        let env = Env::start(&backend).await;
+        env.host("h1", "web-1").await;
+        env.guest_policy("vms", "h1").await;
+        let now = now_ms();
+        let refs = guests(2);
+        env.guest_snapshot("g1", "h1", "vms", &refs[0], now - MINUTE)
+            .await;
+        env.guest_snapshot("g2", "h1", "vms", &refs[1], now - MINUTE)
+            .await;
+        let (a, b) = (refs[0].clone(), refs[1].clone());
+
+        let step = |listed: Vec<String>, at: i64| {
+            let state = env.ts.state();
+            async move {
+                let mut inputs =
+                    alerts::inputs::gather_with(state, at, |_, _| Some(listed.clone()))
+                        .await
+                        .unwrap();
+                alerts::inputs::record_gone(state, &mut inputs.hosts, at)
+                    .await
+                    .unwrap();
+                inputs.hosts.remove(0).pairs
+            }
+        };
+        let pairs = step(vec![a.clone()], now + MINUTE).await;
+        assert_eq!(
+            env.gone_rows().await,
+            [(b.clone(), now + MINUTE)],
+            "[{}]",
+            backend.name()
+        );
+        assert_eq!(
+            pairs.iter().find(|p| p.source_ref == b).unwrap().gone_at_ms,
+            Some(now + MINUTE)
+        );
+
+        let pairs = step(vec![a.clone(), b.clone()], now + 2 * MINUTE).await;
+        assert!(env.gone_rows().await.is_empty(), "[{}]", backend.name());
+        assert_eq!(
+            pairs.iter().find(|p| p.source_ref == b).unwrap().gone_at_ms,
+            None
+        );
+
+        step(vec![a], now + 3 * MINUTE).await;
+        assert_eq!(
+            env.gone_rows().await,
+            [(b, now + 3 * MINUTE)],
+            "[{}]",
             backend.name()
         );
         env.stop().await;
