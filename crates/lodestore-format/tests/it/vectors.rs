@@ -35,6 +35,7 @@ use lodestore_format::locks::{
 };
 use lodestore_format::pack::{CODEC_RAW, PACK_PREFIX_LEN, PackBuilder, compress};
 use lodestore_format::pb;
+use lodestore_format::source::{self, Meta, SourceKey};
 use prost::Message;
 use rand_chacha::ChaCha20Rng;
 use rand_chacha::rand_core::{Rng, SeedableRng};
@@ -458,6 +459,214 @@ fn attest_vectors_generate_v1() {
             )
         });
     let text = serde_json::to_string_pretty(&attest_vectors()).unwrap();
+    std::io::Write::write_all(&mut out, format!("{text}\n").as_bytes()).unwrap();
+}
+
+fn source_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/v1/source-vectors.json")
+}
+
+fn source_vectors() -> Value {
+    const VM_A: &str = "0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d";
+    const VM_B: &str = "7f3e9a10-2b4c-4d5e-8f60-a1b2c3d4e5f6";
+    const CT: &str = "c0ffee00-1234-4abc-8def-0123456789ab";
+    const MYSQL: &str = "5d0c4a1e-9b2f-4e7a-a6c3-18f2d4b7e9a0";
+
+    let keys: Vec<(&str, SourceKey)> = vec![
+        ("files", SourceKey::files()),
+        (
+            "proxmox_vm(pve1, VM_A)",
+            SourceKey::proxmox_vm("pve1", VM_A).unwrap(),
+        ),
+        (
+            "proxmox_vm(pve1, VM_B): the same VMID 101 with another uuid is another instance",
+            SourceKey::proxmox_vm("pve1", VM_B).unwrap(),
+        ),
+        (
+            "proxmox_ct(pve1, CT)",
+            SourceKey::proxmox_ct("pve1", CT).unwrap(),
+        ),
+        (
+            "proxmox_vm(my cluster/1, VM_A)",
+            SourceKey::proxmox_vm("my cluster/1", VM_A).unwrap(),
+        ),
+        (
+            "postgres(7300000000000000001, 16384)",
+            SourceKey::postgres(7_300_000_000_000_000_001, 16384).unwrap(),
+        ),
+        (
+            "postgres(7300000000000000001, 16385): another database of the cluster",
+            SourceKey::postgres(7_300_000_000_000_000_001, 16385).unwrap(),
+        ),
+        (
+            "postgres(18446744073709551615, 4294967295)",
+            SourceKey::postgres(u64::MAX, u32::MAX).unwrap(),
+        ),
+        (
+            "postgres_wal(7300000000000000001)",
+            SourceKey::postgres_wal(7_300_000_000_000_000_001).unwrap(),
+        ),
+        (
+            "mysql(MYSQL, shop)",
+            SourceKey::mysql(MYSQL, "shop").unwrap(),
+        ),
+        ("mysql(MYSQL, a/b)", SourceKey::mysql(MYSQL, "a/b").unwrap()),
+        (
+            "mysql(MYSQL, 100%)",
+            SourceKey::mysql(MYSQL, "100%").unwrap(),
+        ),
+        ("mysql(MYSQL, ü)", SourceKey::mysql(MYSQL, "ü").unwrap()),
+        ("mysql(MYSQL, x y)", SourceKey::mysql(MYSQL, "x y").unwrap()),
+    ];
+    let keys: Vec<Value> = keys
+        .iter()
+        .map(|(input, key)| {
+            assert_eq!(&SourceKey::parse(key.as_str()).unwrap(), key);
+            json!({ "input": input, "key": key.as_str() })
+        })
+        .collect();
+
+    let rejected: serde_json::Map<String, Value> = [
+        "files",
+        "oracle/x",
+        "proxmox-vm/pve1",
+        "proxmox-vm/pve1/101",
+        "proxmox-vm/pve1/0B1C2D3E-4F50-4A6B-8C7D-9E0F1A2B3C4D",
+        "proxmox-ct/pve1/105",
+        "proxmox-ct/pve1/web-ct",
+        "proxmox-ct/pve1/0B1C2D3E-4F50-4A6B-8C7D-9E0F1A2B3C4D",
+        "postgres/0/1",
+        "postgres/01/1",
+        "postgres/1/0",
+        "postgres/18446744073709551616/1",
+        "postgres-wal/1/2",
+        "mysql/0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d/a%2fb",
+        "mysql/0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d/%41",
+        "mysql/0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d/a%4",
+        "mysql/0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d/%FF",
+    ]
+    .into_iter()
+    .map(|bad| {
+        let error = SourceKey::parse(bad).unwrap_err().to_string();
+        (bad.to_owned(), json!(error))
+    })
+    .collect();
+
+    let meta = |pairs: &[(&str, &str)]| -> Meta {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect()
+    };
+    let labelled: Vec<(SourceKey, Meta)> = vec![
+        (
+            SourceKey::proxmox_vm("pve1", VM_A).unwrap(),
+            meta(&[("name", "web-01"), ("vmid", "101")]),
+        ),
+        (
+            SourceKey::proxmox_vm("pve1", VM_A).unwrap(),
+            meta(&[("vmid", "101")]),
+        ),
+        (
+            SourceKey::proxmox_vm("pve1", VM_A).unwrap(),
+            meta(&[("name", "web-01")]),
+        ),
+        (
+            SourceKey::proxmox_ct("pve1", CT).unwrap(),
+            meta(&[("name", "dns"), ("vmid", "105")]),
+        ),
+        (
+            SourceKey::postgres(7_300_000_000_000_000_001, 16384).unwrap(),
+            meta(&[("database", "app"), ("server_version", "16.4")]),
+        ),
+        (
+            SourceKey::mysql(MYSQL, "shop").unwrap(),
+            meta(&[("server_version", "8.4.2")]),
+        ),
+        (
+            SourceKey::postgres_wal(7_300_000_000_000_000_001).unwrap(),
+            meta(&[("database", "app")]),
+        ),
+        (SourceKey::files(), Meta::new()),
+    ];
+    let labels: Vec<Value> = labelled
+        .iter()
+        .map(|(key, meta)| json!({ "key": key.as_str(), "meta": meta, "label": source::label(key, meta) }))
+        .collect();
+
+    let guest = source::encode(
+        &SourceKey::proxmox_vm("pve1", VM_A).unwrap(),
+        &meta(&[("name", "web-01"), ("vmid", "101")]),
+    )
+    .unwrap()
+    .unwrap();
+    let database = source::encode(
+        &SourceKey::postgres(7_300_000_000_000_000_001, 16384).unwrap(),
+        &meta(&[("database", "app"), ("server_version", "16.4")]),
+    )
+    .unwrap()
+    .unwrap();
+    let encoded = json!({
+        "guest": hex(&guest.encode_to_vec()),
+        "database": hex(&database.encode_to_vec()),
+    });
+
+    let keys_of = ReadKeys::derive(MasterKey::from_bytes([1u8; 32]), [1u8; 16]);
+    let record = pb::ProvenanceRecord {
+        snapshot_id: vec![0x33; 32],
+        host_id: "vector-host-id".into(),
+        hostname: "vector-host".into(),
+        job_id: "vector-job".into(),
+        verified_at: Some(pb::Timestamp {
+            seconds: 1_700_000_000,
+            nanos: 0,
+        }),
+        source: Some(database),
+    };
+    let sealed = seal_provenance(&keys_of, &record, &mut entropy(18)).unwrap();
+    let opened = open_provenance(&keys_of, &sealed).unwrap();
+    assert_eq!(opened, record);
+
+    json!({
+        "keys": keys,
+        "rejected": rejected,
+        "labels": labels,
+        "encoded": encoded,
+        "sealed": {
+            "master": hex(&[1u8; 32]),
+            "repo_id": hex(&[1u8; 16]),
+            "record_chacha20_seed": 18,
+            "record_plaintext": hex(&record.encode_to_vec()),
+            "sealed_record": hex(&sealed),
+        },
+    })
+}
+
+#[test]
+fn source_vectors_match() {
+    let committed: Value =
+        serde_json::from_str(&fs::read_to_string(source_path()).unwrap()).unwrap();
+    assert_eq!(source_vectors(), committed);
+}
+
+#[test]
+#[ignore = "generates frozen fixtures; run once via LODE_GENERATE_FIXTURES=1 cargo nextest run -p lodestore-format --run-ignored only source_vectors_generate_v1"]
+fn source_vectors_generate_v1() {
+    if std::env::var_os("LODE_GENERATE_FIXTURES").is_none() {
+        eprintln!("skipped: set LODE_GENERATE_FIXTURES=1 to generate fixtures");
+        return;
+    }
+    let mut out = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(source_path())
+        .unwrap_or_else(|e| {
+            panic!(
+                "{}: {e}; the v1 vectors are frozen",
+                source_path().display()
+            )
+        });
+    let text = serde_json::to_string_pretty(&source_vectors()).unwrap();
     std::io::Write::write_all(&mut out, format!("{text}\n").as_bytes()).unwrap();
 }
 
