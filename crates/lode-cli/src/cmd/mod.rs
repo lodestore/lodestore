@@ -95,7 +95,11 @@ pub fn run(cli: Cli) -> Result<u8> {
                 backup::run(&url, &secret, out, &paths, flags).await
             }
             Command::Key { command } => key::run(&url, &secret, out, command).await.map(|()| 0),
-            Command::Snapshots => snapshots::run(&url, &secret, out).await.map(|()| 0),
+            Command::Snapshots { source_type } => {
+                snapshots::run(&url, &secret, out, source_type.as_deref())
+                    .await
+                    .map(|()| 0)
+            }
             Command::Ls { snapshot, long } => ls::run(&url, &secret, out, &snapshot, long)
                 .await
                 .map(|()| 0),

@@ -11,6 +11,8 @@ expression: doc
       "parent": null,
       "paths": "[paths]",
       "short_id": "[short_id]",
+      "source_label": null,
+      "source_type": "files",
       "stats": {
         "bytes_added": "[bytes_added]",
         "bytes_read": 4,

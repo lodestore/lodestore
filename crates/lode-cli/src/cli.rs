@@ -89,7 +89,12 @@ pub enum Command {
         flags: BackupFlags,
     },
     /// List snapshots, oldest first
-    Snapshots,
+    Snapshots {
+        /// Only snapshots of this signed source type: files, proxmox-vm,
+        /// proxmox-ct, postgres, postgres-wal or mysql
+        #[arg(long, value_name = "TYPE")]
+        source_type: Option<String>,
+    },
     /// Repository keys
     Key {
         #[command(subcommand)]
@@ -97,8 +102,8 @@ pub enum Command {
     },
     /// List the files of a snapshot, or of one path inside it
     Ls {
-        /// `latest`, a snapshot id or unique id prefix, optionally followed by
-        /// `:<path>` to list only that path
+        /// `latest`, `latest@<source key>`, a snapshot id or unique id prefix,
+        /// optionally followed by `:<path>` to list only that path
         #[arg(value_name = "SNAPSHOT[:PATH]")]
         snapshot: String,
         /// Show type, mode, size and modification time
@@ -107,15 +112,16 @@ pub enum Command {
     },
     /// Write one file of a snapshot to stdout
     Dump {
-        /// `latest`, a snapshot id or unique id prefix
+        /// `latest`, `latest@<source key>`, a snapshot id or unique id prefix
         snapshot: String,
         /// Absolute path of a regular file as recorded in the snapshot
         path: String,
     },
     /// Restore a snapshot below a target directory
     Restore {
-        /// `latest`, a snapshot id or unique id prefix, optionally followed by
-        /// `:<path>` to restore only that path directly into the target
+        /// `latest`, `latest@<source key>`, a snapshot id or unique id prefix,
+        /// optionally followed by `:<path>` to restore only that path directly
+        /// into the target
         #[arg(value_name = "SNAPSHOT[:PATH]")]
         snapshot: String,
         /// Directory to restore into; files land at <DIR>/<original absolute path>

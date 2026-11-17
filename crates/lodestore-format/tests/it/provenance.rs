@@ -486,3 +486,129 @@ fn latest_legacy_skips_claimed_other_sources() {
     let err = pick_latest_in(vec![plain, claimed], &unsigned(), NOW_MS, false, &scope).unwrap_err();
     assert!(text(err).contains("No snapshot in this repository is signed"));
 }
+
+fn idw(n: u16) -> BlobId {
+    let mut out = [0u8; 32];
+    out[..2].copy_from_slice(&n.to_be_bytes());
+    out
+}
+
+fn entry_w(n: u16, modified_ms: i64) -> SnapshotEntry {
+    SnapshotEntry {
+        id: idw(n),
+        ..entry(0, Some(modified_ms), 0)
+    }
+}
+
+#[test]
+fn latest_separates_forty_instances() {
+    let key = |i: u32| {
+        SourceKey::proxmox_vm("pve1", &format!("{i:08x}-0000-4000-8000-000000000000")).unwrap()
+    };
+    let at = |n: u16| NOW_MS - 10 * DAY_MS + i64::from(n) * 1000;
+    let build = |skip: Option<u32>| {
+        let mut records = vec![record(idw(1), "h", "j", 10), record(idw(2), "h", "j", 10)];
+        let mut entries = vec![entry_w(1, at(1)), entry_w(2, at(2))];
+        for i in 0..40u32 {
+            if skip == Some(i) {
+                continue;
+            }
+            for j in 0..2 + u16::try_from(i % 2).unwrap() {
+                let n = u16::try_from(10 + i * 3).unwrap() + j;
+                records.push(from_source(record(idw(n), "h", "j", 10), &key(i)));
+                entries.push(entry_w(n, at(n)));
+            }
+        }
+        (signed(&records), entries)
+    };
+    let (set, entries) = build(None);
+    let (set7, entries7) = build(Some(7));
+    for i in 0..40u32 {
+        let newest = 10 + i * 3 + 1 + i % 2;
+        let want = idw(u16::try_from(newest).unwrap());
+        let scope = LatestScope::Instance(key(i));
+        let pick = pick_latest_in(entries.clone(), &set, NOW_MS, false, &scope).unwrap();
+        assert_eq!(pick.entry.id, want, "instance {i}");
+        if i != 7 {
+            let again = pick_latest_in(entries7.clone(), &set7, NOW_MS, false, &scope).unwrap();
+            assert_eq!(again.entry.id, want, "instance {i} moved with 7 gone");
+        }
+    }
+    let pick = pick_latest(entries, &set, NOW_MS, false).unwrap();
+    assert_eq!(pick.entry.id, idw(2));
+}
+
+#[test]
+fn latest_skips_wal_batches() {
+    let wal = SourceKey::postgres_wal(7_300_000_000_000_000_001).unwrap();
+    let set = signed(&[
+        record(id(1), "h", "j", 10),
+        record(id(2), "h", "j", 10),
+        from_source(record(id(3), "h", "j", 10), &wal),
+        from_source(record(id(4), "h", "j", 10), &wal),
+    ]);
+    let entries = vec![
+        entry(1, Some(NOW_MS - 4 * HOUR_MS), 0),
+        entry(2, Some(NOW_MS - 3 * HOUR_MS), 0),
+        entry(3, Some(NOW_MS - 2 * HOUR_MS), 0),
+        entry(4, Some(NOW_MS - HOUR_MS), 0),
+    ];
+    let err = pick_latest_in(
+        entries.clone(),
+        &set,
+        NOW_MS,
+        false,
+        &LatestScope::Instance(wal),
+    )
+    .unwrap_err();
+    assert!(text(err).contains("No snapshot in this repository is signed"));
+    assert_eq!(
+        pick_latest(entries, &set, NOW_MS, false).unwrap().entry.id,
+        id(2)
+    );
+}
+
+async fn plant_claiming(fx: &Fx, label: &str, claim: Option<pb::Source>) -> BlobId {
+    let src = fx.make_src(label, &[("f", 1, 1000)]);
+    let keys = attacker_keys(&fx.repo);
+    let mut w = Writer::new(&fx.store, keys, fx.repo.config())
+        .await
+        .unwrap();
+    let options = BackupOptions {
+        source: claim,
+        ..Default::default()
+    };
+    w.backup(&[src], options, &|_| {})
+        .await
+        .unwrap()
+        .snapshot_id
+}
+
+#[tokio::test]
+async fn latest_ignores_the_claim_of_the_manifest() {
+    let fx = Fx::new().await;
+    let k = guest();
+    let claimed_guest = source::encode(&k, &Meta::new()).unwrap();
+    let a = plant_claiming(&fx, "a", claimed_guest).await;
+    let b = plant_claiming(&fx, "b", None).await;
+    upgrade(&fx).await;
+    sign(
+        &fx,
+        &[
+            record(a, "h", "j", 10),
+            from_source(record(b, "h", "j", 10), &k),
+        ],
+    )
+    .await;
+
+    let r = reader(&fx);
+    let set = r.provenance().await.unwrap();
+    assert!(set.source_of(&a).is_files());
+    assert_eq!(set.source_of(&b), k);
+    assert_eq!(r.resolve_latest(false).await.unwrap().entry.id, a);
+    let scope = LatestScope::Instance(k);
+    assert_eq!(
+        r.resolve_latest_in(false, &scope).await.unwrap().entry.id,
+        b
+    );
+}

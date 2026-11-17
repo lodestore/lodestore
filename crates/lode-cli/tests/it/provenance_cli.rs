@@ -445,3 +445,77 @@ async fn cli_latest_of_a_source_instance() {
         .failure()
         .code(2);
 }
+
+async fn claiming_backup(repo: &Path, src: &Path, claim: &str) -> BlobId {
+    let store = LocalFsStore::new(repo.to_path_buf());
+    let repository = Repository::open(&store, PASSWORD.as_bytes()).await.unwrap();
+    let keys = repository.read_keys().write_keys(repository.config_hash());
+    let mut writer = Writer::new(&store, keys, repository.config())
+        .await
+        .unwrap();
+    let key = SourceKey::parse(claim).unwrap();
+    let options = BackupOptions {
+        source: source::encode(&key, &Meta::new()).unwrap(),
+        ..Default::default()
+    };
+    writer
+        .backup(&[src.to_path_buf()], options, &|_| {})
+        .await
+        .unwrap()
+        .snapshot_id
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cli_snapshots_filter_by_signed_source_type() {
+    let fx = fixture();
+    let second = fx.src.with_file_name("second");
+    std::fs::create_dir(&second).unwrap();
+    std::fs::write(second.join("f"), b"second").unwrap();
+    let first = backup(&fx.repo, &fx.src);
+    let vm = backup(&fx.repo, &second);
+    let claimed = claiming_backup(&fx.repo, &fx.forged_src, GUEST).await;
+    sign(
+        &fx.repo,
+        &[
+            record(first, "host", "job"),
+            from_source(
+                record(vm, "host", "job"),
+                GUEST,
+                &[("vmid", "101"), ("name", "web")],
+            ),
+        ],
+    )
+    .await;
+
+    let list = |args: &[&str]| -> Vec<serde_json::Value> {
+        let mut cmd = lode(&fx.repo);
+        let out = stdout_of(cmd.args(["snapshots", "--json"]).args(args));
+        let doc: serde_json::Value = serde_json::from_str(out.lines().next().unwrap()).unwrap();
+        doc["snapshots"].as_array().unwrap().clone()
+    };
+    let hex = lodestore_format::index::hex32;
+    let only_vm = list(&["--source-type", "proxmox-vm"]);
+    assert_eq!(only_vm.len(), 1);
+    assert_eq!(only_vm[0]["id"], hex(&vm).as_str());
+    assert_eq!(only_vm[0]["source_type"], "proxmox-vm");
+    assert_eq!(only_vm[0]["source_label"], "VM 101 · web");
+
+    let mut files: Vec<_> = list(&["--source-type", "files"])
+        .iter()
+        .map(|s| s["id"].as_str().unwrap().to_owned())
+        .collect();
+    files.sort();
+    let mut want = vec![hex(&first), hex(&claimed)];
+    want.sort();
+    assert_eq!(files, want, "an unsigned claim counted as a guest");
+
+    let all = list(&[]);
+    assert_eq!(all.len(), 3);
+    assert!(all.iter().all(|s| s["source_type"].is_string()));
+
+    lode(&fx.repo)
+        .args(["snapshots", "--source-type", "oracle"])
+        .assert()
+        .failure()
+        .code(2);
+}
