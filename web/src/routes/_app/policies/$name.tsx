@@ -1,6 +1,7 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { MoreHorizontal } from "lucide-react";
 import { useRef, useState } from "react";
+import { z } from "zod";
 import { ApiError } from "@/api/fetcher";
 import {
 	useGetPolicy,
@@ -52,6 +53,9 @@ import { copy } from "@/copy";
 import { hostCount } from "@/lib/plural";
 
 export const Route = createFileRoute("/_app/policies/$name")({
+	validateSearch: z.object({
+		tab: z.enum(["policy", "preview"]).optional().catch(undefined),
+	}),
 	component: PolicyPage,
 });
 
@@ -205,6 +209,7 @@ function PolicyPage() {
 	const repositories = useListRepositories();
 	const [changed, setChanged] = useState(false);
 	const navigate = useNavigate();
+	const { tab = "policy" } = Route.useSearch();
 	const menuOrigin = useRef<HTMLElement | null>(null);
 	const leaving = useRef(false);
 	const [running, setRunning] = useState<string>();
@@ -301,6 +306,15 @@ function PolicyPage() {
 						leaving={leaving}
 						repositories={repositories.data}
 						onChangedChange={setChanged}
+						previewTab={tab}
+						onPreviewTab={(value) =>
+							void navigate({
+								to: "/policies/$name",
+								params: { name: detail.name },
+								search: { tab: value },
+								replace: true,
+							})
+						}
 					>
 						<RecentJobs name={detail.name} />
 					</PolicyEditor>

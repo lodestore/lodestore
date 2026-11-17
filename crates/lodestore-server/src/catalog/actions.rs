@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use axum::Json;
 use axum::extract::{Path, State};
 use lodestore_format::index::{hex32, parse_hex32};
@@ -10,7 +12,7 @@ use utoipa_axum::routes;
 use lodestore_policy::retention::Rule;
 use lodestore_policy::{BackupPolicy, Retention, Schedule, validate};
 
-use super::retention::plan_policy;
+use super::retention::{PlanItem, plan_policy};
 use super::{SNAPSHOT_COLUMNS, SnapshotItem, item_from_row};
 use crate::auth::tokens::{PoliciesRead, Scoped, SnapshotsDelete};
 use crate::db::now_ms;
@@ -153,6 +155,17 @@ pub struct HostRetentionPreview {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
+pub struct InstanceRetentionPreview {
+    pub host_id: String,
+    pub hostname: String,
+    pub source_type: String,
+    pub source_label: Option<String>,
+    pub forget: u64,
+    pub keep: u64,
+    pub snapshots: Vec<PreviewSnapshot>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
 pub struct RetentionPreview {
     pub total: u64,
     pub forget: u64,
@@ -162,6 +175,12 @@ pub struct RetentionPreview {
     pub suspicious: u64,
     pub truncated: u64,
     pub hosts: Vec<HostRetentionPreview>,
+    /// Some host of the policy has more than one source instance.
+    pub multi_instance: bool,
+    /// Every source instance with something to forget, sorted by snapshots to forget, then by label.
+    pub instances: Vec<InstanceRetentionPreview>,
+    /// Snapshots left out of the instance lists, which share a limit of 200.
+    pub instances_truncated: u64,
 }
 
 #[utoipa::path(
@@ -217,9 +236,51 @@ pub async fn retention_preview(
         suspicious: 0,
         truncated: 0,
         hosts: Vec::new(),
+        multi_instance: false,
+        instances: Vec::new(),
+        instances_truncated: 0,
     };
     let mut room = PREVIEW_LIMIT;
+    let mut grouped: Vec<(String, InstanceRetentionPreview)> = Vec::new();
     for host in plan.hosts {
+        let mut by_ref: BTreeMap<&str, Vec<&PlanItem>> = BTreeMap::new();
+        for item in &host.items {
+            by_ref
+                .entry(item.source_ref.as_str())
+                .or_default()
+                .push(item);
+        }
+        preview.multi_instance |= by_ref.len() > 1;
+        for (source_ref, items) in by_ref {
+            let mut doomed: Vec<_> = items.iter().filter(|i| !i.keep).collect();
+            if doomed.is_empty() {
+                continue;
+            }
+            doomed.sort_by(|a, b| {
+                b.received_at_ms
+                    .cmp(&a.received_at_ms)
+                    .then_with(|| a.id.cmp(&b.id))
+            });
+            grouped.push((
+                source_ref.to_owned(),
+                InstanceRetentionPreview {
+                    host_id: host.host_id.clone(),
+                    hostname: host.hostname.clone(),
+                    source_type: items[0].source_type.clone(),
+                    source_label: items[0].source_label.clone(),
+                    forget: doomed.len() as u64,
+                    keep: items.iter().filter(|i| i.keep).count() as u64,
+                    snapshots: doomed
+                        .into_iter()
+                        .map(|i| PreviewSnapshot {
+                            id: i.id.clone(),
+                            time: i.time_ms,
+                            received_at: i.received_at_ms,
+                        })
+                        .collect(),
+                },
+            ));
+        }
         let mut doomed: Vec<_> = host.items.iter().filter(|i| !i.keep).collect();
         doomed.sort_by(|a, b| {
             b.received_at_ms
@@ -252,6 +313,25 @@ pub async fn retention_preview(
                 })
                 .collect(),
         });
+    }
+    grouped.sort_by(|(ra, a), (rb, b)| {
+        let name = |i: &InstanceRetentionPreview| {
+            i.source_label
+                .clone()
+                .unwrap_or_else(|| i.source_type.clone())
+        };
+        b.forget
+            .cmp(&a.forget)
+            .then_with(|| name(a).cmp(&name(b)))
+            .then_with(|| ra.cmp(rb))
+    });
+    let mut instance_room = PREVIEW_LIMIT;
+    for (_, mut instance) in grouped {
+        let shown = instance.snapshots.len().min(instance_room);
+        instance_room -= shown;
+        preview.instances_truncated += (instance.snapshots.len() - shown) as u64;
+        instance.snapshots.truncate(shown);
+        preview.instances.push(instance);
     }
     Ok(Json(preview))
 }

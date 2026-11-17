@@ -6,6 +6,7 @@ import type {
 	Retention,
 	RetentionPreview as RetentionPreviewData,
 } from "@/api/gen/model";
+import { Truncated } from "@/components/hosts/hosts-table";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
@@ -14,9 +15,22 @@ import {
 	CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { Spinner } from "@/components/ui/spinner";
+import {
+	Table,
+	TableBody,
+	TableCell,
+	TableHead,
+	TableHeader,
+	TableRow,
+} from "@/components/ui/table";
 import { copy } from "@/copy";
 import { formatDateTime } from "@/lib/format";
 import { hostCount, snapshotCount } from "@/lib/plural";
+import {
+	type SourceType,
+	sourceTypeIcon,
+	sourceTypeLabel,
+} from "@/lib/source-type";
 import { cn } from "@/lib/utils";
 
 const DEBOUNCE_MS = 400;
@@ -269,5 +283,58 @@ export function RetentionPreview({
 				)}
 			</div>
 		</div>
+	);
+}
+
+export function InstancePreview({ data }: { data: RetentionPreviewData }) {
+	const columns = copy.policies.retention.preview.columns;
+	return (
+		<Table>
+			<TableHeader>
+				<TableRow>
+					<TableHead>{columns.source}</TableHead>
+					<TableHead>{columns.host}</TableHead>
+					<TableHead className="text-right">{columns.forget}</TableHead>
+					<TableHead className="text-right">{columns.keep}</TableHead>
+				</TableRow>
+			</TableHeader>
+			<TableBody>
+				{data.instances.map((instance, i) => {
+					const Icon =
+						sourceTypeIcon[instance.source_type as SourceType] ??
+						sourceTypeIcon.files;
+					const label =
+						instance.source_label ?? sourceTypeLabel(instance.source_type);
+					return (
+						<TableRow key={`${instance.host_id}-${i}`}>
+							<TableCell className="max-w-0 min-w-40">
+								<div className="flex items-center gap-2">
+									<Icon
+										aria-hidden
+										className="size-4 shrink-0 text-muted-foreground"
+									/>
+									<Truncated text={label} className="font-semibold" />
+								</div>
+							</TableCell>
+							<TableCell>
+								<Link
+									to="/hosts/$id"
+									params={{ id: instance.host_id }}
+									className="font-semibold text-primary-strong wrap-anywhere underline-offset-4 hover:underline"
+								>
+									{instance.hostname}
+								</Link>
+							</TableCell>
+							<TableCell className="text-right tabular-nums">
+								{instance.forget}
+							</TableCell>
+							<TableCell className="text-right tabular-nums">
+								{instance.keep}
+							</TableCell>
+						</TableRow>
+					);
+				})}
+			</TableBody>
+		</Table>
 	);
 }

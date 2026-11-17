@@ -704,3 +704,101 @@ async fn retention_preview_validates_rules() {
         ts.stop().await;
     }
 }
+
+async fn set_source(
+    env: &AgentEnv,
+    first: u64,
+    count: u64,
+    kind: &str,
+    source_ref: &str,
+    label: &str,
+) {
+    for n in first..first + count {
+        sqlx::query(
+            "UPDATE snapshots SET source_type = $1, source_ref = $2, source_label = $3 \
+             WHERE id = $4",
+        )
+        .bind(kind)
+        .bind(source_ref)
+        .bind(label)
+        .bind(snapshot_id(n))
+        .execute(&env.ts().state().db.pool)
+        .await
+        .unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retention_preview_lists_instances_sorted() {
+    for backend in backends() {
+        let env = AgentEnv::start(&backend).await;
+        let other = AgentEnv::start_on(env.ts(), &env.repo, "main", "host-two").await;
+        add_policy(&env, "p").await;
+        fill(&env, &env.host, &env.hostname, 0, 5, 1_000).await;
+        fill(&env, &env.host, &env.hostname, 10, 3, 2_000).await;
+        fill(&env, &other.host, "host-two", 20, 4, 1_000).await;
+        set_source(&env, 0, 5, "proxmox-vm", "proxmox-vm/pve1/g1", "guest-one").await;
+        set_source(&env, 10, 3, "proxmox-vm", "proxmox-vm/pve1/g2", "guest-two").await;
+
+        let response = preview(&env, "p", &json!({ "retention": { "keepLast": 1 } })).await;
+
+        assert_eq!(response.status(), 200, "{}", backend.name());
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(body["multi_instance"], true);
+        assert_eq!(body["instances_truncated"], 0);
+        let instances = body["instances"].as_array().unwrap();
+        let shape: Vec<(&str, &str, u64, u64)> = instances
+            .iter()
+            .map(|i| {
+                (
+                    i["source_label"].as_str().unwrap_or(""),
+                    i["source_type"].as_str().unwrap(),
+                    i["forget"].as_u64().unwrap(),
+                    i["keep"].as_u64().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                ("guest-one", "proxmox-vm", 3, 2),
+                ("", "files", 2, 2),
+                ("guest-two", "proxmox-vm", 1, 2),
+            ],
+            "{}",
+            backend.name()
+        );
+        assert_eq!(instances[1]["host_id"], other.host.as_str());
+        assert_eq!(instances[1]["hostname"], "host-two");
+        assert_eq!(instances[0]["host_id"], env.host.as_str());
+        let ids: Vec<&str> = instances[0]["snapshots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, [snapshot_id(2), snapshot_id(1), snapshot_id(0)]);
+        assert_eq!(body["hosts"].as_array().unwrap().len(), 2);
+        other.stop().await;
+        env.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retention_preview_single_instance_is_not_multi() {
+    for backend in backends() {
+        let env = AgentEnv::start(&backend).await;
+        add_policy(&env, "p").await;
+        fill(&env, &env.host, &env.hostname, 0, 5, 1_000).await;
+
+        let response = preview(&env, "p", &json!({ "retention": { "keepLast": 1 } })).await;
+
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(body["multi_instance"], false, "{}", backend.name());
+        let instances = body["instances"].as_array().unwrap();
+        assert_eq!(instances.len(), 1);
+        assert_eq!(instances[0]["source_type"], "files");
+        assert_eq!(instances[0]["forget"], 3);
+        env.stop().await;
+    }
+}

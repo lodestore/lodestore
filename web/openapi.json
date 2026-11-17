@@ -10485,6 +10485,50 @@
           "rolled_back"
         ]
       },
+      "InstanceRetentionPreview": {
+        "type": "object",
+        "required": [
+          "host_id",
+          "hostname",
+          "source_type",
+          "forget",
+          "keep",
+          "snapshots"
+        ],
+        "properties": {
+          "forget": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "host_id": {
+            "type": "string"
+          },
+          "hostname": {
+            "type": "string"
+          },
+          "keep": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "snapshots": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PreviewSnapshot"
+            }
+          },
+          "source_label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source_type": {
+            "type": "string"
+          }
+        }
+      },
       "IoniceClass": {
         "type": "string",
         "enum": [
@@ -12597,7 +12641,10 @@
           "floor",
           "suspicious",
           "truncated",
-          "hosts"
+          "hosts",
+          "multi_instance",
+          "instances",
+          "instances_truncated"
         ],
         "properties": {
           "floor": {
@@ -12616,6 +12663,23 @@
             "items": {
               "$ref": "#/components/schemas/HostRetentionPreview"
             }
+          },
+          "instances": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InstanceRetentionPreview"
+            },
+            "description": "Every source instance with something to forget, sorted by snapshots to forget, then by label."
+          },
+          "instances_truncated": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Snapshots left out of the instance lists, which share a limit of 200.",
+            "minimum": 0
+          },
+          "multi_instance": {
+            "type": "boolean",
+            "description": "Some host of the policy has more than one source instance."
           },
           "suspicious": {
             "type": "integer",
