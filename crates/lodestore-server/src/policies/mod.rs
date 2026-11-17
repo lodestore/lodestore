@@ -1266,13 +1266,80 @@ mod tests {
         )
     }
 
+    fn any_source() -> impl Strategy<Value = Option<lodestore_policy::Source>> {
+        use lodestore_policy::{DatabaseSource, FilesSource, ProxmoxGuests, Source};
+        let guests = |ids: &[u32]| ProxmoxGuests {
+            vmids: ids.to_vec(),
+            ..Default::default()
+        };
+        let databases = |names: &[&str]| DatabaseSource {
+            databases: names.iter().map(|n| n.to_string()).collect(),
+            ..Default::default()
+        };
+        prop_oneof![
+            Just(None),
+            Just(Some(Source::Files(FilesSource::default()))),
+            Just(Some(Source::ProxmoxVm(guests(&[101])))),
+            Just(Some(Source::ProxmoxVm(guests(&[101, 102])))),
+            Just(Some(Source::ProxmoxCt(guests(&[101])))),
+            Just(Some(Source::Postgres(databases(&["a"])))),
+            Just(Some(Source::Postgres(databases(&["b"])))),
+            Just(Some(Source::Mysql(databases(&["a"])))),
+        ]
+    }
+
+    fn zoned(zone: Option<&str>, retention: bool) -> BackupPolicy {
+        let mut policy = spec('a', retention);
+        let zone = zone.map_or(String::new(), |z| format!("    timezone: {z}\n"));
+        policy.spec.schedule = lodestore_policy::parse_yaml(&format!(
+            "apiVersion: lodestore.io/v1alpha1\nkind: BackupPolicy\nmetadata:\n  name: db\n\
+             spec:\n  repository: main\n  paths: [/etc]\n  schedule:\n    cron: \"0 3 * * *\"\n{zone}"
+        ))
+        .unwrap()
+        .spec
+        .schedule;
+        policy
+    }
+
+    fn any_zone() -> impl Strategy<Value = Option<&'static str>> {
+        prop_oneof![
+            Just(None),
+            Just(Some("UTC")),
+            Just(Some("Europe/Kyiv")),
+            Just(Some("America/New_York")),
+        ]
+    }
+
     proptest! {
         #[test]
+        fn unchanged_zone_keeps_retention_buckets(
+            old_zone in any_zone(),
+            new_zone in any_zone(),
+            retention in any::<[bool; 2]>(),
+        ) {
+            let old = zoned(old_zone, retention[0]);
+            let new = zoned(new_zone, retention[1]);
+            if !shifts_retention_buckets(&old, &new) && (retention[0] || retention[1]) {
+                prop_assert_eq!(
+                    lodestore_policy::retention::timezone_of(&old.spec),
+                    lodestore_policy::retention::timezone_of(&new.spec)
+                );
+            }
+        }
+
+        #[test]
         fn unchanged_content_selects_the_same_files(
-            (old, new) in pair(),
+            (mut old, mut new) in pair(),
+            sources in (any_source(), any_source()),
             tree in prop::sample::subsequence(FILES.to_vec(), 0..=FILES.len()),
         ) {
+            old.spec.source = sources.0;
+            new.spec.source = sources.1;
             if !changes_retained_content(&old, &new) {
+                prop_assert_eq!(
+                    lodestore_policy::source::normalized(&old.spec.source),
+                    lodestore_policy::source::normalized(&new.spec.source)
+                );
                 prop_assert_eq!(selected(&old, &tree), selected(&new, &tree));
                 prop_assert_eq!(old.spec.one_file_system, new.spec.one_file_system);
                 prop_assert_eq!(old.spec.exclude_caches, new.spec.exclude_caches);
