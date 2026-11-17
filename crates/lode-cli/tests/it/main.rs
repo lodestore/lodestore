@@ -1,0 +1,27 @@
+mod adv_support;
+mod common;
+#[path = "../../../lodestore-format/tests/it/adv_support/mod.rs"]
+mod planted;
+
+mod adv_lode;
+mod apply_cli;
+mod backup_behavior;
+mod backup_strict;
+mod check_cli;
+mod check_server_cli;
+mod cli_contract;
+mod e2e_chain;
+mod e2e_local;
+mod find_server_cli;
+mod gc_cli;
+mod gc_writer_marker;
+mod keys;
+mod provenance_cli;
+mod rebuild_index;
+mod recovery;
+mod restore_modes;
+mod secrets;
+mod server_cli;
+mod stdin_agent;
+mod stdin_agent_interop;
+mod upgraded_fixture;

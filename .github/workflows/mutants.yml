@@ -48,16 +48,16 @@ jobs:
           - { group: format, shard: 21, shards: 24, args: "-p lodestore-format", filter: "" }
           - { group: format, shard: 22, shards: 24, args: "-p lodestore-format", filter: "" }
           - { group: format, shard: 23, shards: 24, args: "-p lodestore-format", filter: "" }
-          - { group: gc, shard: 0, shards: 10, args: "-p lodestore-server --file crates/lodestore-server/src/maintenance/gc/*.rs", filter: "binary(/^(adv_)?gc_/)" }
-          - { group: gc, shard: 1, shards: 10, args: "-p lodestore-server --file crates/lodestore-server/src/maintenance/gc/*.rs", filter: "binary(/^(adv_)?gc_/)" }
-          - { group: gc, shard: 2, shards: 10, args: "-p lodestore-server --file crates/lodestore-server/src/maintenance/gc/*.rs", filter: "binary(/^(adv_)?gc_/)" }
-          - { group: gc, shard: 3, shards: 10, args: "-p lodestore-server --file crates/lodestore-server/src/maintenance/gc/*.rs", filter: "binary(/^(adv_)?gc_/)" }
-          - { group: gc, shard: 4, shards: 10, args: "-p lodestore-server --file crates/lodestore-server/src/maintenance/gc/*.rs", filter: "binary(/^(adv_)?gc_/)" }
-          - { group: gc, shard: 5, shards: 10, args: "-p lodestore-server --file crates/lodestore-server/src/maintenance/gc/*.rs", filter: "binary(/^(adv_)?gc_/)" }
-          - { group: gc, shard: 6, shards: 10, args: "-p lodestore-server --file crates/lodestore-server/src/maintenance/gc/*.rs", filter: "binary(/^(adv_)?gc_/)" }
-          - { group: gc, shard: 7, shards: 10, args: "-p lodestore-server --file crates/lodestore-server/src/maintenance/gc/*.rs", filter: "binary(/^(adv_)?gc_/)" }
-          - { group: gc, shard: 8, shards: 10, args: "-p lodestore-server --file crates/lodestore-server/src/maintenance/gc/*.rs", filter: "binary(/^(adv_)?gc_/)" }
-          - { group: gc, shard: 9, shards: 10, args: "-p lodestore-server --file crates/lodestore-server/src/maintenance/gc/*.rs", filter: "binary(/^(adv_)?gc_/)" }
+          - { group: gc, shard: 0, shards: 10, args: "-p lodestore-server --file crates/lodestore-server/src/maintenance/gc/*.rs", filter: "binary(it) & test(/^(adv_)?gc_[a-z0-9_]*::/)" }
+          - { group: gc, shard: 1, shards: 10, args: "-p lodestore-server --file crates/lodestore-server/src/maintenance/gc/*.rs", filter: "binary(it) & test(/^(adv_)?gc_[a-z0-9_]*::/)" }
+          - { group: gc, shard: 2, shards: 10, args: "-p lodestore-server --file crates/lodestore-server/src/maintenance/gc/*.rs", filter: "binary(it) & test(/^(adv_)?gc_[a-z0-9_]*::/)" }
+          - { group: gc, shard: 3, shards: 10, args: "-p lodestore-server --file crates/lodestore-server/src/maintenance/gc/*.rs", filter: "binary(it) & test(/^(adv_)?gc_[a-z0-9_]*::/)" }
+          - { group: gc, shard: 4, shards: 10, args: "-p lodestore-server --file crates/lodestore-server/src/maintenance/gc/*.rs", filter: "binary(it) & test(/^(adv_)?gc_[a-z0-9_]*::/)" }
+          - { group: gc, shard: 5, shards: 10, args: "-p lodestore-server --file crates/lodestore-server/src/maintenance/gc/*.rs", filter: "binary(it) & test(/^(adv_)?gc_[a-z0-9_]*::/)" }
+          - { group: gc, shard: 6, shards: 10, args: "-p lodestore-server --file crates/lodestore-server/src/maintenance/gc/*.rs", filter: "binary(it) & test(/^(adv_)?gc_[a-z0-9_]*::/)" }
+          - { group: gc, shard: 7, shards: 10, args: "-p lodestore-server --file crates/lodestore-server/src/maintenance/gc/*.rs", filter: "binary(it) & test(/^(adv_)?gc_[a-z0-9_]*::/)" }
+          - { group: gc, shard: 8, shards: 10, args: "-p lodestore-server --file crates/lodestore-server/src/maintenance/gc/*.rs", filter: "binary(it) & test(/^(adv_)?gc_[a-z0-9_]*::/)" }
+          - { group: gc, shard: 9, shards: 10, args: "-p lodestore-server --file crates/lodestore-server/src/maintenance/gc/*.rs", filter: "binary(it) & test(/^(adv_)?gc_[a-z0-9_]*::/)" }
           - { group: retention, shard: 0, shards: 1, args: "-p lodestore-policy --file crates/lodestore-policy/src/retention.rs", filter: "" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
