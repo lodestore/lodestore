@@ -47,7 +47,11 @@ pub fn evaluate(
 ) -> Vec<Candidate> {
     let mut out = Vec::new();
     for h in &inputs.hosts {
-        for pair in &h.pairs {
+        for pair in h.pairs.iter().filter(|p| p.expected) {
+            let suffix = match pair.source_ref.as_str() {
+                "" => String::new(),
+                instance => format!(":{instance}"),
+            };
             if let Some((_, error)) = &pair.last_failure {
                 out.push(Candidate {
                     policy: Some(pair.policy.clone()),
@@ -58,7 +62,7 @@ pub fn evaluate(
                     ..Candidate::for_host(
                         h,
                         AlertType::BackupFailed,
-                        format!("backup_failed:{}:{}", h.host_id, pair.policy),
+                        format!("backup_failed:{}:{}{suffix}", h.host_id, pair.policy),
                         Severity::Critical,
                     )
                 });
@@ -74,7 +78,7 @@ pub fn evaluate(
                     ..Candidate::for_host(
                         h,
                         AlertType::NoRecentBackup,
-                        format!("no_recent_backup:{}:{}", h.host_id, pair.policy),
+                        format!("no_recent_backup:{}:{}{suffix}", h.host_id, pair.policy),
                         Severity::Warning,
                     )
                 });
@@ -273,6 +277,17 @@ mod tests {
             last_success_ms: success_ago_h.map(|h| NOW - h * HOUR),
             baseline_ms: NOW - 1000 * HOUR,
             last_failure: failure.map(|e| (NOW, e.into())),
+            source_ref: String::new(),
+            source_label: None,
+            expected: true,
+            gone_at_ms: None,
+        }
+    }
+
+    fn instance(source_ref: &str, success_ago_h: i64) -> PairFacts {
+        PairFacts {
+            source_ref: source_ref.into(),
+            ..pair(None, Some(success_ago_h))
         }
     }
 
@@ -315,6 +330,60 @@ mod tests {
         assert_eq!(out[1].severity, Severity::Warning);
         assert_eq!(out[1].facts.limit_secs, Some(48 * 3600));
         assert!(run(host(vec![pair(None, Some(1))]), None).is_empty());
+    }
+
+    #[test]
+    fn files_alert_keys_are_unchanged() {
+        let out = run(host(vec![pair(Some("boom"), Some(100))]), None);
+        assert_eq!(
+            keys(&out),
+            ["backup_failed:h1:daily", "no_recent_backup:h1:daily"]
+        );
+    }
+
+    #[test]
+    fn one_of_40_instances_overdue_raises_one_alert() {
+        let pairs = (0..40)
+            .map(|n| {
+                instance(
+                    &format!("proxmox-vm/pve1/{n:02}"),
+                    if n == 17 { 100 } else { 1 },
+                )
+            })
+            .collect();
+        let out = run(host(pairs), None);
+        assert_eq!(keys(&out), ["no_recent_backup:h1:daily:proxmox-vm/pve1/17"]);
+    }
+
+    #[test]
+    fn expected_instances_without_discovery_are_the_known_ones() {
+        let policy = |version: &str, source: &str| {
+            let yaml = format!(
+                "apiVersion: lodestore.io/{version}\nkind: BackupPolicy\nmetadata:\n  name: p\n\
+                 spec:\n  repository: main\n{source}"
+            );
+            lodestore_policy::parse_yaml(&yaml).unwrap()
+        };
+        let guests = policy(
+            "v1alpha2",
+            "  source:\n    type: proxmox-vm\n    vmids: [101]\n",
+        );
+        let files = policy("v1alpha1", "  paths: [/etc]\n");
+        let (a, b) = (String::from("vm/a"), String::from("vm/b"));
+        let known = [a.clone(), b.clone()];
+        assert_eq!(
+            super::super::inputs::expected_instances(&guests, None, &known),
+            [a.clone(), b.clone()]
+        );
+        assert_eq!(
+            super::super::inputs::expected_instances(&guests, Some(&[a.clone()]), &known),
+            [a.clone()]
+        );
+        assert!(super::super::inputs::expected_instances(&guests, Some(&[]), &known).is_empty());
+        assert_eq!(
+            super::super::inputs::expected_instances(&files, Some(&[a]), &known),
+            [String::new()]
+        );
     }
 
     #[test]

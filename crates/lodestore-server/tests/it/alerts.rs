@@ -271,6 +271,41 @@ impl Env {
         .unwrap();
     }
 
+    async fn guest_policy(&self, name: &str, host: &str) {
+        let yaml = format!(
+            "apiVersion: lodestore.io/v1alpha2\nkind: BackupPolicy\nmetadata:\n  name: {name}\n\
+             spec:\n  repository: main\n  selector:\n    hosts: [{host}]\n  \
+             source:\n    type: proxmox-vm\n    vmids: [101]\n{DAILY}"
+        );
+        let policy = lodestore_policy::parse_yaml(&yaml).unwrap();
+        sqlx::query(
+            "INSERT INTO policies (id, name, repository_id, yaml, spec_json, revision, \
+             created_at, updated_at) VALUES ($1, $1, $2, $3, $4, 1, $5, $5)",
+        )
+        .bind(name)
+        .bind(&self.repo)
+        .bind(&yaml)
+        .bind(serde_json::to_string(&policy).unwrap())
+        .bind(now_ms() - 30 * DAY)
+        .execute(self.pool())
+        .await
+        .unwrap();
+    }
+
+    async fn guest_snapshot(&self, id: &str, host: &str, policy: &str, guest: &str, at: i64) {
+        self.snapshot(id, host, policy, at).await;
+        sqlx::query(
+            "UPDATE snapshots SET source_type = 'proxmox-vm', source_ref = $1, \
+             source_label = $2 WHERE id = $3",
+        )
+        .bind(guest)
+        .bind(format!("label of {guest}"))
+        .bind(id)
+        .execute(self.pool())
+        .await
+        .unwrap();
+    }
+
     async fn stop(self) {
         self.ts.stop().await;
     }
@@ -1131,6 +1166,67 @@ async fn alerts_security_alert_survives_a_restart_until_its_day_is_over() {
         assert_eq!(env.tick(now + 21 * HOUR).await.resolved, 0);
         assert_eq!(env.tick(now + 23 * HOUR).await.resolved, 1);
         assert!(env.alerts("active").await.is_empty());
+        env.stop().await;
+    }
+}
+
+fn guests(n: usize) -> Vec<String> {
+    (0..n)
+        .map(|i| format!("proxmox-vm/pve1/{i:08}-0000-4000-8000-000000000000"))
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn alerts_dead_man_per_source_instance() {
+    for backend in backends() {
+        let env = Env::start(&backend).await;
+        env.host("h1", "web-1").await;
+        env.policy("daily", "h1", DAILY).await;
+        env.guest_policy("vms", "h1").await;
+        let now = now_ms();
+        env.snapshot("f1", "h1", "daily", now - HOUR).await;
+        let refs = guests(40);
+        for (i, guest) in refs.iter().enumerate() {
+            let at = if i == 17 { now - 3 * DAY } else { now - HOUR };
+            env.guest_snapshot(&format!("g{i}"), "h1", "vms", guest, at)
+                .await;
+        }
+        let thresholds = alerts::model::load_thresholds(env.ts.state())
+            .await
+            .unwrap();
+        let overdue = |inputs: &alerts::inputs::Inputs| {
+            alerts::evaluate::evaluate(inputs, now, env.started(), &thresholds)
+                .into_iter()
+                .filter(|c| c.kind == alerts::model::AlertType::NoRecentBackup)
+                .map(|c| c.key)
+                .collect::<Vec<_>>()
+        };
+        let want = vec![format!("no_recent_backup:h1:vms:{}", refs[17])];
+
+        let listed = refs.clone();
+        let inputs = alerts::inputs::gather_with(env.ts.state(), now, |policy, _| {
+            (policy == "vms").then(|| listed.clone())
+        })
+        .await
+        .unwrap();
+        assert_eq!(overdue(&inputs), want, "[{}]", backend.name());
+        let pair = inputs.hosts[0]
+            .pairs
+            .iter()
+            .find(|p| p.source_ref == refs[17])
+            .unwrap();
+        assert_eq!(
+            pair.source_label.as_deref(),
+            Some(format!("label of {}", refs[17]).as_str())
+        );
+
+        let unknown = alerts::inputs::gather(env.ts.state(), now).await.unwrap();
+        assert_eq!(
+            overdue(&unknown),
+            want,
+            "[{}] without discovery",
+            backend.name()
+        );
         env.stop().await;
     }
 }
