@@ -13,6 +13,9 @@ export const expiresInDays = (n: number) =>
 export const hostCount = (n: number) =>
 	`${count.format(n)} ${noun(n, "host", "hosts")}`;
 
+export const sourceCount = (n: number) =>
+	`${count.format(n)} ${noun(n, "source", "sources")}`;
+
 export const jobCount = (n: number) =>
 	`${count.format(n)} ${noun(n, "job", "jobs")}`;
 
