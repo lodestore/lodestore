@@ -3196,7 +3196,7 @@
             }
           },
           "403": {
-            "description": "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention, a more frequent cron, a change of paths, exclude, oneFileSystem, excludeCaches or repository of a policy with retention, or a --prune that deletes a policy with retention. A session needs the password entered in the last 15 minutes for those changes (code step_up_required)",
+            "description": "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention, a more frequent cron, a change of source, paths, exclude, oneFileSystem, excludeCaches, repository or schedule.timezone of a policy with retention, or a --prune that deletes a policy with retention. A session needs the password entered in the last 15 minutes for those changes (code step_up_required)",
             "content": {
               "application/json": {
                 "schema": {
@@ -3371,7 +3371,7 @@
             }
           },
           "403": {
-            "description": "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention, a more frequent cron, or a change of paths, exclude, oneFileSystem, excludeCaches or repository of a policy with retention. A session needs the password entered in the last 15 minutes for those changes (code step_up_required)",
+            "description": "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention, a more frequent cron, or a change of source, paths, exclude, oneFileSystem, excludeCaches, repository or schedule.timezone of a policy with retention. A session needs the password entered in the last 15 minutes for those changes (code step_up_required)",
             "content": {
               "application/json": {
                 "schema": {

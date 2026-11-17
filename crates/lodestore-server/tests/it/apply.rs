@@ -690,3 +690,44 @@ async fn apply_syntax_error_is_reported_once() {
         f.ts.stop().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn apply_refuses_unsupported_source_types() {
+    let sources = [
+        "  source:\n    type: mysql\n    databases: [app]\n",
+        "  source:\n    type: postgres\n    databases: [app]\n",
+        "  source:\n    type: proxmox-vm\n    vmids: [101]\n",
+        "  source:\n    type: proxmox-ct\n    vmids: [101]\n",
+    ];
+    for backend in backends() {
+        let f = Fixture::start(&backend).await;
+        let supported =
+            doc("fresh", "  source:\n    type: files\n").replace("v1alpha1", "v1alpha2");
+        for source in sources {
+            let unsupported = format!(
+                "apiVersion: lodestore.io/v1alpha2\nkind: BackupPolicy\nmetadata:\n  name: db\n\
+                 spec:\n  repository: main\n  selector:\n    matchLabels:\n      env: prod\n{source}"
+            );
+            for dry_run in [true, false] {
+                let body = json!({
+                    "documents": [file("a.yaml", &[supported.clone(), unsupported.clone()])],
+                    "dry_run": dry_run,
+                });
+                let (status, error) = f.apply(body).await;
+                assert_eq!(status, 422, "[{}] {error}", backend.name());
+                assert_eq!(error["code"], "validation");
+                assert_eq!(error["errors"][0]["source"], "a.yaml");
+                assert_eq!(error["errors"][0]["path"], "spec.source.type");
+                assert!(
+                    error["errors"][0]["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains("is not supported by this server version yet"),
+                    "{error}"
+                );
+                assert_eq!(f.count().await, 0, "[{}] atomic", backend.name());
+            }
+        }
+        f.ts.stop().await;
+    }
+}
