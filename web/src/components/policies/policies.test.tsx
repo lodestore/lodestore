@@ -2280,6 +2280,9 @@ function previewOf(over: Partial<RetentionPreview> = {}): RetentionPreview {
 		suspicious: 0,
 		truncated: 0,
 		hosts: [previewHost("web-1", 12, 3), previewHost("db-1", 8, 1)],
+		multi_instance: false,
+		instances: [],
+		instances_truncated: 0,
 		...over,
 	};
 }
@@ -2845,5 +2848,75 @@ describe("Saving retention rules", () => {
 		expect(
 			(created[0] as { policy: BackupPolicy }).policy.spec.retention,
 		).toEqual({ keepLast: 4 });
+	}, 20_000);
+});
+
+describe("Retention preview by source", () => {
+	const instance = (
+		hostname: string,
+		type: string,
+		label: string | null,
+		forget: number,
+		keep: number,
+	) => ({
+		host_id: `${hostname}-id`,
+		hostname,
+		source_type: type,
+		source_label: label,
+		forget,
+		keep,
+		snapshots: [],
+	});
+
+	it("keeps the preview inside the form for one instance", async () => {
+		mockPreview("nightly", () =>
+			previewOf({ instances: [instance("web-1", "files", null, 4, 2)] }),
+		);
+		await openRetained();
+
+		await screen.findByText("Would forget 4 of 20 snapshots on 2 hosts.");
+		expect(
+			screen.queryByRole("tab", { name: /Retention preview/ }),
+		).not.toBeInTheDocument();
+		expect(screen.queryByRole("table")).not.toBeInTheDocument();
+	}, 20_000);
+
+	it("shows the preview tab when a pair has several sources", async () => {
+		mockPreview("nightly", () =>
+			previewOf({
+				multi_instance: true,
+				instances: [
+					instance("web-1", "proxmox-vm", "guest-one", 3, 2),
+					instance("db-1", "files", null, 1, 2),
+				],
+			}),
+		);
+		useSignedIn();
+		mockValidate();
+		mockPolicy(makeDetail("nightly", {}, { retention: { keepLast: 3 } }));
+		const user = userEvent.setup();
+		const { router } = renderApp("/policies/nightly");
+
+		expect(await screen.findByRole("tab", { name: "Policy" })).toHaveAttribute(
+			"aria-selected",
+			"true",
+		);
+		await user.click(screen.getByRole("tab", { name: /^Retention preview/ }));
+
+		expect(router.state.location.search).toEqual({ tab: "preview" });
+		const table = await screen.findByRole("table");
+		expect(
+			within(table)
+				.getAllByRole("columnheader")
+				.map((h) => h.textContent),
+		).toEqual(["Source", "Host", "Forget", "Keep"]);
+		const rows = within(table).getAllByRole("row").slice(1);
+		expect(rows.map((r) => r.textContent)).toEqual([
+			"guest-oneweb-132",
+			"Filesdb-112",
+		]);
+		expect(
+			within(rows[0]).getByRole("link", { name: "web-1" }),
+		).toHaveAttribute("href", "/hosts/web-1-id");
 	}, 20_000);
 });

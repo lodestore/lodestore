@@ -1,4 +1,8 @@
 export const policies = {
+	tabs: {
+		policy: "Policy",
+		preview: "Retention preview",
+	},
 	title: "Policies",
 	newTitle: "New policy",
 	create: "Create policy",
@@ -262,6 +266,14 @@ export const policies = {
 			notKept: "Not kept by any rule",
 			showAll: (n: number) => `Show all ${n} hosts`,
 			more: (n: number) => `and ${n} more`,
+			tabCount: (n: number) => `forget ${n}`,
+			tabCountZero: "nothing to forget",
+			columns: {
+				source: "Source",
+				host: "Host",
+				forget: "Forget",
+				keep: "Keep",
+			},
 		},
 		confirm: {
 			title: "Save retention rules?",
