@@ -338,6 +338,7 @@ async fn backup_strict_parent_ignores_another_hosts_signed_snapshot() {
             seconds: 1_700_000_000,
             nanos: 0,
         }),
+        source: None,
     };
     let sealed = seal_provenance(keys, &record, &mut Entropy::os()).unwrap();
     put_attestation(&store, keys, &[], &[], vec![sealed], &mut Entropy::os())

@@ -82,6 +82,22 @@ fn stats() -> impl Strategy<Value = pb::SnapshotStats> {
     })
 }
 
+fn source() -> impl Strategy<Value = Option<pb::Source>> {
+    prop::option::of((
+        "[ -~]{0,64}",
+        prop::collection::vec(("[a-z_]{1,8}", "[ -~]{0,16}"), 0..=3),
+    ))
+    .prop_map(|o| {
+        o.map(|(key, meta)| pb::Source {
+            key,
+            meta: meta
+                .into_iter()
+                .map(|(key, value)| pb::SourceMeta { key, value })
+                .collect(),
+        })
+    })
+}
+
 fn snapshot() -> impl Strategy<Value = pb::Snapshot> {
     let head = (
         prop::option::of(timestamp()),
@@ -103,6 +119,7 @@ fn snapshot() -> impl Strategy<Value = pb::Snapshot> {
         bytes(64),
         any::<u32>(),
         text(),
+        source(),
     );
     (head, tail).prop_map(|(h, t)| pb::Snapshot {
         time: h.0,
@@ -122,7 +139,7 @@ fn snapshot() -> impl Strategy<Value = pb::Snapshot> {
         signature: t.6,
         key_epoch: t.7,
         program_version: t.8,
-        source: None,
+        source: t.9,
     })
 }
 

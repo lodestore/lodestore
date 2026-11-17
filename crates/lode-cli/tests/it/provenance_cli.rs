@@ -32,6 +32,7 @@ fn record(id: BlobId, host: &str, job: &str) -> pb::ProvenanceRecord {
             seconds: 1_700_000_000,
             nanos: 0,
         }),
+        source: None,
     }
 }
 
