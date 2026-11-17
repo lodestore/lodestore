@@ -376,6 +376,7 @@ fn attest_vectors() -> Value {
             seconds: 1_700_000_000,
             nanos: 0,
         }),
+        source: None,
     };
     let sealed_body = seal_provenance_body(
         &k_srv,

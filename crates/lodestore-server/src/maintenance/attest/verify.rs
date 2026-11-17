@@ -192,6 +192,7 @@ async fn provenance_record(
         hostname,
         job_id: job_id.to_string(),
         verified_at: Some(timestamp_ms(now_ms())),
+        source: None,
     })
 }
 

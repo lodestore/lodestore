@@ -483,6 +483,7 @@ async fn sign_as_owner(
             seconds: i64::try_from(now.as_secs()).unwrap_or(i64::MAX),
             nanos: now.subsec_nanos(),
         }),
+        source: None,
     };
     let mut entropy = Entropy::os();
     let sealed = seal_provenance(&strict.keys, &record, &mut entropy)?;

@@ -122,6 +122,7 @@ fn snapshot() -> impl Strategy<Value = pb::Snapshot> {
         signature: t.6,
         key_epoch: t.7,
         program_version: t.8,
+        source: None,
     })
 }
 
@@ -398,7 +399,7 @@ proptest! {
         seed in any::<[u8; 32]>(),
     ) {
         let keys = keys();
-        let record = pb::ProvenanceRecord { snapshot_id, host_id, hostname, job_id, verified_at };
+        let record = pb::ProvenanceRecord { snapshot_id, host_id, hostname, job_id, verified_at, source: None };
         let sealed = seal_provenance(&keys, &record, &mut entropy(seed)).unwrap();
         prop_assert_eq!(open_provenance(&keys, &sealed).unwrap(), record);
     }

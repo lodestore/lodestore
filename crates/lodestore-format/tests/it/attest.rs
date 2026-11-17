@@ -198,6 +198,7 @@ fn random_provenance(rng: &mut ChaCha20Rng) -> pb::ProvenanceRecord {
             seconds: rng.next_u64() as i64,
             nanos: rng.next_u32(),
         }),
+        source: None,
     }
 }
 
@@ -446,6 +447,36 @@ async fn attest_oversized_listing_is_rejected_without_get() {
 }
 
 #[test]
+fn provenance_record_carries_a_source() {
+    let keys = keys();
+    let record = pb::ProvenanceRecord {
+        snapshot_id: vec![5; 32],
+        host_id: "host-1".into(),
+        hostname: "pve1".into(),
+        job_id: "job-9".into(),
+        verified_at: Some(pb::Timestamp {
+            seconds: 1_700_000_000,
+            nanos: 7,
+        }),
+        source: Some(pb::Source {
+            key: "proxmox-vm/pve1/0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d".into(),
+            meta: vec![
+                pb::SourceMeta {
+                    key: "vmid".into(),
+                    value: "101".into(),
+                },
+                pb::SourceMeta {
+                    key: "name".into(),
+                    value: "web".into(),
+                },
+            ],
+        }),
+    };
+    let sealed = seal_provenance(&keys, &record, &mut entropy(4)).unwrap();
+    assert_eq!(open_provenance(&keys, &sealed).unwrap(), record);
+}
+
+#[test]
 fn attest_provenance_round_trip() {
     let keys = keys();
     let record = pb::ProvenanceRecord {
@@ -457,6 +488,7 @@ fn attest_provenance_round_trip() {
             seconds: 1_700_000_000,
             nanos: 7,
         }),
+        source: None,
     };
     let sealed = seal_provenance(&keys, &record, &mut entropy(3)).unwrap();
     assert_eq!(open_provenance(&keys, &sealed).unwrap(), record);
