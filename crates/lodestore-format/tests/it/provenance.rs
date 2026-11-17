@@ -26,6 +26,7 @@ use lodestore_format::snapshot::SnapshotEntry;
 use lodestore_format::source::{self, Meta, SourceKey};
 use lodestore_format::store::{BlobError, BlobStore, ListEntry, LocalFsStore, put_named};
 use lodestore_format::writer::{BackupOptions, Writer};
+use proptest::prelude::*;
 use rand_chacha::ChaCha20Rng;
 use rand_chacha::rand_core::{Rng, SeedableRng};
 
@@ -611,4 +612,191 @@ async fn latest_ignores_the_claim_of_the_manifest() {
         r.resolve_latest_in(false, &scope).await.unwrap().entry.id,
         b
     );
+}
+
+mod before_phase_20 {
+    // Frozen copy of pick_latest from commit 83884fdf (main after 19.1, before phase 20); never fix it together with the code.
+    use super::*;
+    use lodestore_format::provenance::LatestPick;
+
+    const NO_VERIFIED_SNAPSHOT: &str = "No snapshot in this repository is signed by the server or by the password holder. Name one by id; `lode snapshots` lists them.";
+    const ATTESTATIONS_MISSING: &str = "This repository was upgraded for server signatures, but no signature can be read now; they may have been deleted. Name a snapshot by id; `lode snapshots` lists them.";
+    const ALL_STORED_IN_FUTURE: &str = "Every snapshot in this repository was stored with a time in the future. Name one by id; `lode snapshots` lists them.";
+    const ALL_SIGNED_STORED_IN_FUTURE: &str = "Every signed snapshot in this repository was stored with a time in the future. Name one by id; `lode snapshots` lists them.";
+    const FUTURE_TOLERANCE_MS: i64 = 600_000;
+
+    fn manifest_ms(e: &SnapshotEntry) -> i64 {
+        let t = e.snapshot.time.unwrap_or_default();
+        t.seconds
+            .saturating_mul(1000)
+            .saturating_add(i64::from(t.nanos / 1_000_000))
+    }
+
+    fn stored_key(e: &SnapshotEntry) -> (i64, BlobId) {
+        (e.modified_ms.unwrap_or_else(|| manifest_ms(e)), e.id)
+    }
+
+    fn newest_of<'a>(
+        entries: impl Iterator<Item = &'a SnapshotEntry>,
+        key: impl Fn(&SnapshotEntry) -> (i64, BlobId),
+    ) -> Option<(usize, BlobId)> {
+        let mut count = 0;
+        let mut best: Option<(i64, BlobId)> = None;
+        for e in entries {
+            count += 1;
+            best = best.max(Some(key(e)));
+        }
+        best.map(|(_, id)| (count, id))
+    }
+
+    pub fn pick_latest_before_phase_20(
+        entries: Vec<SnapshotEntry>,
+        provenance: &ProvenanceSet,
+        now_ms: i64,
+        expect_upgraded: bool,
+    ) -> Result<LatestPick, Error> {
+        if entries.is_empty() {
+            return Err(Error::InvalidInput(
+                "the repository has no snapshots".into(),
+            ));
+        }
+        if expect_upgraded && !provenance.attested_any() {
+            return Err(Error::InvalidInput(ATTESTATIONS_MISSING.into()));
+        }
+        let limit = now_ms.saturating_add(FUTURE_TOLERANCE_MS);
+        let mut warnings = Vec::new();
+
+        let (mode, chosen) = if provenance.attested_any() {
+            let key = |e: &SnapshotEntry| provenance.stored_order(e);
+            let (kept, future): (Vec<&SnapshotEntry>, Vec<&SnapshotEntry>) = entries
+                .iter()
+                .filter(|e| provenance.contains(&e.id))
+                .partition(|e| key(e).0 <= limit);
+            if kept.is_empty() && !future.is_empty() {
+                return Err(Error::InvalidInput(ALL_SIGNED_STORED_IN_FUTURE.into()));
+            }
+            if let Some((count, newest)) = newest_of(future.into_iter(), key) {
+                warnings.push(LatestWarning::FutureStored { count, newest });
+            }
+            let chosen = kept
+                .into_iter()
+                .max_by_key(|e| key(e))
+                .ok_or_else(|| Error::InvalidInput(NO_VERIFIED_SNAPSHOT.into()))?;
+            let bar = key(chosen);
+            let newer = entries
+                .iter()
+                .filter(|e| !provenance.contains(&e.id) && stored_key(e) > bar);
+            if let Some((count, newest)) = newest_of(newer, stored_key) {
+                warnings.push(LatestWarning::NewerUnverified { count, newest });
+            }
+            (LatestMode::Strict, chosen)
+        } else {
+            warnings.push(LatestWarning::Legacy);
+            let (kept, future): (Vec<&SnapshotEntry>, Vec<&SnapshotEntry>) =
+                entries.iter().partition(|e| stored_key(e).0 <= limit);
+            if let Some((count, newest)) = newest_of(future.into_iter(), stored_key) {
+                warnings.push(LatestWarning::FutureStored { count, newest });
+            }
+            let chosen = kept
+                .into_iter()
+                .max_by_key(|e| stored_key(e))
+                .ok_or_else(|| Error::InvalidInput(ALL_STORED_IN_FUTURE.into()))?;
+            (LatestMode::Legacy, chosen)
+        };
+
+        let ahead = entries.iter().filter(|e| manifest_ms(e) > limit);
+        if let Some((count, newest)) = newest_of(ahead, |e| (manifest_ms(e), e.id)) {
+            warnings.push(LatestWarning::FutureTime { count, newest });
+        }
+        if provenance.unreadable() > 0 {
+            warnings.push(LatestWarning::UnreadableProvenance {
+                count: provenance.unreadable(),
+            });
+        }
+        Ok(LatestPick {
+            entry: chosen.clone(),
+            mode,
+            warnings,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Spec {
+    stored_ms: Option<i64>,
+    manifest_s: i64,
+    signers: u8,
+    server_s: i64,
+    owner_s: i64,
+}
+
+fn offset_ms() -> impl Strategy<Value = i64> {
+    prop_oneof![-3 * DAY_MS..3 * DAY_MS, 599_990..600_010i64, -1000..1000i64]
+}
+
+fn spec() -> impl Strategy<Value = Spec> {
+    (
+        prop_oneof![Just(None), offset_ms().prop_map(|d| Some(NOW_MS + d))],
+        offset_ms().prop_map(|d| (NOW_MS + d) / 1000),
+        0u8..4,
+        offset_ms().prop_map(|d| (NOW_MS + d) / 1000),
+        offset_ms().prop_map(|d| (NOW_MS + d) / 1000),
+    )
+        .prop_map(|(stored_ms, manifest_s, signers, server_s, owner_s)| Spec {
+            stored_ms,
+            manifest_s,
+            signers,
+            server_s,
+            owner_s,
+        })
+}
+
+fn outcome(pick: Result<lodestore_format::provenance::LatestPick, Error>) -> String {
+    match pick {
+        Ok(p) => format!("{:?} {:?} {:?}", p.entry.id, p.mode, p.warnings),
+        Err(e) => text(e),
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    #[test]
+    fn files_latest_picks_like_before(
+        specs in proptest::collection::vec(spec(), 0..=12),
+        attested_any in any::<bool>(),
+        unreadable in any::<bool>(),
+        expect_upgraded in any::<bool>(),
+    ) {
+        let mut records = Vec::new();
+        let mut entries = Vec::new();
+        for (i, s) in specs.iter().enumerate() {
+            let n = u16::try_from(i + 1).unwrap();
+            let mut e = entry_w(n, 0);
+            e.modified_ms = s.stored_ms;
+            e.snapshot.time = Some(pb::Timestamp { seconds: s.manifest_s, nanos: 0 });
+            entries.push(e);
+            if s.signers & 1 != 0 {
+                records.push(record(idw(n), "h", "j", s.server_s));
+            }
+            if s.signers & 2 != 0 {
+                records.push(record(idw(n), "", "", s.owner_s));
+            }
+        }
+        let set = if attested_any {
+            let k = keys();
+            let mut sealed_all: Vec<Vec<u8>> = records.iter().map(|r| sealed(&k, r)).collect();
+            if unreadable {
+                sealed_all.push(vec![7u8; 40]);
+            }
+            ProvenanceSet::from_attested(&attested(sealed_all), &k)
+        } else {
+            unsigned()
+        };
+        let before = before_phase_20::pick_latest_before_phase_20(
+            entries.clone(), &set, NOW_MS, expect_upgraded,
+        );
+        let now = pick_latest(entries, &set, NOW_MS, expect_upgraded);
+        prop_assert_eq!(outcome(now), outcome(before));
+    }
 }
