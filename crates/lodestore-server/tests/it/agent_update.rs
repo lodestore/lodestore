@@ -2143,6 +2143,90 @@ async fn agent_update_wave_offline_canary_host_does_not_hold_the_next_wave() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn migration_0033_marks_existing_rows_as_files() {
+    for backend in backends() {
+        let mut ts = TestServer::start(&backend).await;
+        let repo = ts.create_local_repository("main").await;
+        let pool = ts.state().db.pool.clone();
+        let name = backend.name();
+        for column in [
+            "ALTER TABLE jobs DROP COLUMN source_ref",
+            "ALTER TABLE jobs DROP COLUMN source_meta_json",
+            "ALTER TABLE snapshots DROP COLUMN source_type",
+            "ALTER TABLE snapshots DROP COLUMN source_ref",
+            "ALTER TABLE snapshots DROP COLUMN source_label",
+            "DELETE FROM _sqlx_migrations WHERE version = 33",
+        ] {
+            sqlx::query(column).execute(&pool).await.unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO agents (id, hostname, repository_id, labels_json, os, arch, version, \
+             status, enrolled_at, cert_serial, cert_issued_at, cert_not_after, last_seen_at) \
+             VALUES ('host-a', 'h', $1, '[]', 'linux', 'x86_64', '0.1.0', 'active', 0, 'serial', 0, 0, 0)",
+        )
+        .bind(&repo)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO jobs (id, host_id, source, state, spec, queued_at) \
+             VALUES ('j1', 'host-a', 'manual', 'succeeded', $1, 0)",
+        )
+        .bind(Vec::<u8>::new())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO snapshots (id, repository_id, host_id, hostname, time_ms, paths_json, \
+             tags_json, job_id, incomplete, errors_total, warnings_total, stats_json, \
+             discovered_at, received_at, received_exact) \
+             VALUES ('s1', $1, 'host-a', 'h', 0, '[]', '[]', 'j1', 0, 0, 0, '{}', 0, 0, 1)",
+        )
+        .bind(&repo)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        ts.restart().await;
+        let pool = ts.state().db.pool.clone();
+
+        let job = sqlx::query("SELECT source_ref, source_meta_json FROM jobs WHERE id = 'j1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            job.try_get::<String, _>("source_ref").unwrap(),
+            "",
+            "[{name}]"
+        );
+        assert_eq!(
+            job.try_get::<Option<String>, _>("source_meta_json")
+                .unwrap(),
+            None
+        );
+        let snapshot = sqlx::query(
+            "SELECT source_type, source_ref, source_label FROM snapshots WHERE id = 's1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            snapshot.try_get::<String, _>("source_type").unwrap(),
+            "files",
+            "[{name}]"
+        );
+        assert_eq!(snapshot.try_get::<String, _>("source_ref").unwrap(), "");
+        assert_eq!(
+            snapshot
+                .try_get::<Option<String>, _>("source_label")
+                .unwrap(),
+            None
+        );
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn migration_0032_clears_snapshots_that_disagree_with_their_job() {
     struct Seed {
         id: &'static str,

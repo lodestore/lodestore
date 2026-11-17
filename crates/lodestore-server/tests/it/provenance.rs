@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use common::{AgentEnv, TestServer, WAIT, backends, wait_until};
@@ -951,6 +952,211 @@ async fn provenance_backfill_skips_rows_claimed_by_another_host() {
         assert_eq!(ids(&set, &all), BTreeSet::from([a]));
         assert_eq!(verified_columns(&c.ts, &f).await, (None, None));
         assert_eq!(verified_columns(&c.ts, &b).await, (None, None));
+        c.ts.stop().await;
+    }
+}
+
+const GUEST_A: &str = "proxmox-vm/pve1/11111111-1111-4111-8111-111111111111";
+const GUEST_B: &str = "proxmox-vm/pve1/22222222-2222-4222-8222-222222222222";
+
+#[derive(Clone, Default)]
+struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBuffer {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl LogBuffer {
+    fn take(&self) -> String {
+        String::from_utf8_lossy(&std::mem::take(&mut *self.0.lock().unwrap())).into_owned()
+    }
+}
+
+fn capture_logs() -> LogBuffer {
+    let logs = LogBuffer::default();
+    let writer = logs.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    tracing::subscriber::set_global_default(subscriber).expect("the only test that logs");
+    logs
+}
+
+fn source_claim(key: &str, meta: &[(&str, &str)]) -> pb::Source {
+    pb::Source {
+        key: key.to_string(),
+        meta: meta
+            .iter()
+            .map(|(k, v)| pb::SourceMeta {
+                key: k.to_string(),
+                value: v.to_string(),
+            })
+            .collect(),
+    }
+}
+
+/// A record the server signs: its keys are the ones `open_repository` hands out.
+async fn server_sign(c: &Catalog, snapshot: &str, host: &str, source: Option<pb::Source>) {
+    let store = store(&c.ts);
+    let keys = keys(&c.ts, &c.repo).await;
+    let record = pb::ProvenanceRecord {
+        snapshot_id: parse_hex32(snapshot).unwrap().to_vec(),
+        host_id: host.to_string(),
+        hostname: host.to_string(),
+        job_id: "job-of-the-record".to_string(),
+        verified_at: Some(pb::Timestamp {
+            seconds: now_secs(),
+            nanos: 0,
+        }),
+        source,
+    };
+    let mut entropy = Entropy::os();
+    let sealed = seal_provenance(&keys, &record, &mut entropy).unwrap();
+    put_attestation(&store, &keys, &[], &[], vec![sealed], &mut entropy)
+        .await
+        .unwrap();
+}
+
+async fn catalog_source(c: &Catalog, snapshot: &str) -> (String, String, Option<String>) {
+    let row =
+        sqlx::query("SELECT source_type, source_ref, source_label FROM snapshots WHERE id = $1")
+            .bind(snapshot)
+            .fetch_one(c.pool())
+            .await
+            .unwrap();
+    (
+        row.try_get("source_type").unwrap(),
+        row.try_get("source_ref").unwrap(),
+        row.try_get("source_label").unwrap(),
+    )
+}
+
+async fn plant_source(c: &Catalog, snapshot: &str, key: &str) {
+    sqlx::query("UPDATE snapshots SET source_type = $1, source_ref = $2 WHERE id = $3")
+        .bind(key.split('/').next().unwrap())
+        .bind(key)
+        .bind(snapshot)
+        .execute(c.pool())
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reconcile_takes_the_source_from_the_server_record() {
+    for backend in backends() {
+        let c = Catalog::new(&backend).await;
+        let snapshot = c.write("db", Some("host-a")).await;
+        let key = "postgres/7300000000000000001/16384";
+        let claim = source_claim(key, &[("database", "app"), ("server_version", "16.4")]);
+        server_sign(&c, &snapshot, "host-a", Some(claim)).await;
+
+        sync_repository(c.ts.state(), &c.repo).await.unwrap();
+
+        let (kind, source_ref, label) = catalog_source(&c, &snapshot).await;
+        assert_eq!(kind, "postgres", "[{}]", backend.name());
+        assert_eq!(source_ref, key);
+        assert_eq!(label.as_deref(), Some("app · PostgreSQL 16"));
+        let (at, by) = verified_columns(&c.ts, &snapshot).await;
+        assert!(at.is_some());
+        assert_eq!(by.as_deref(), Some("server"));
+        c.ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reconcile_skips_a_job_row_of_another_source() {
+    let logs = capture_logs();
+    for backend in backends() {
+        let c = Catalog::new(&backend).await;
+        let theirs = c.linked("guest", None).await;
+        plant_source(&c, &theirs, GUEST_A).await;
+        server_sign(&c, &theirs, "host-a", Some(source_claim(GUEST_B, &[]))).await;
+        for label in ["x", "y"] {
+            let files = c.write(label, Some("host-a")).await;
+            server_sign(&c, &files, "host-a", None).await;
+        }
+        logs.take();
+
+        sync_repository(c.ts.state(), &c.repo).await.unwrap();
+
+        assert_eq!(verified_columns(&c.ts, &theirs).await, (None, None));
+        assert_eq!(catalog_source(&c, &theirs).await.1, GUEST_A);
+        let mismatch = |log: &str| {
+            log.lines()
+                .filter(|l| l.contains("another source than their signature"))
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+        let first = mismatch(&logs.take());
+        assert_eq!(first.len(), 1, "[{}] {first:?}", backend.name());
+        assert!(first[0].contains("snapshots=1"), "{first:?}");
+
+        sync_repository(c.ts.state(), &c.repo).await.unwrap();
+
+        assert_eq!(verified_columns(&c.ts, &theirs).await, (None, None));
+        let second = mismatch(&logs.take());
+        assert_eq!(second.len(), 1, "[{}] {second:?}", backend.name());
+        assert!(second[0].contains("snapshots=1"), "{second:?}");
+        c.ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn owner_signature_verifies_files_rows_only() {
+    for backend in backends() {
+        let c = Catalog::new(&backend).await;
+        let guest = c.write("guest", None).await;
+        let files = c.write("files", None).await;
+        for snapshot in [&guest, &files] {
+            ingest_snapshot(c.ts.state(), &c.repo, snapshot, None)
+                .await
+                .unwrap();
+        }
+        plant_source(&c, &guest, GUEST_A).await;
+        owner_sign(&c, &guest, now_secs(), 0).await;
+        owner_sign(&c, &files, now_secs(), 0).await;
+
+        sync_repository(c.ts.state(), &c.repo).await.unwrap();
+
+        assert_eq!(
+            verified_columns(&c.ts, &guest).await,
+            (None, None),
+            "[{}]",
+            backend.name()
+        );
+        let (at, by) = verified_columns(&c.ts, &files).await;
+        assert!(at.is_some());
+        assert_eq!(by.as_deref(), Some("owner"));
+        c.ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn provenance_backfill_skips_rows_with_a_source() {
+    for backend in backends() {
+        let c = Catalog::new(&backend).await;
+        let all = c.like_a_zero_one_catalog().await;
+        let guest = c.linked("guest", None).await;
+        plant_source(&c, &guest, GUEST_A).await;
+
+        let signed = ensure_provenance_backfilled(c.ts.state(), &c.repo)
+            .await
+            .unwrap();
+
+        assert_eq!(signed, 2, "[{}]", backend.name());
+        let set = provenance(&c.ts, &c.repo).await;
+        assert!(!set.contains(&parse_hex32(&guest).unwrap()));
+        assert_eq!(verified_columns(&c.ts, &guest).await, (None, None));
+        assert!(set.contains(&parse_hex32(&all[0]).unwrap()));
         c.ts.stop().await;
     }
 }
