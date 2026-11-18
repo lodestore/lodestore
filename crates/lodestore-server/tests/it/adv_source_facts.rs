@@ -263,15 +263,23 @@ async fn adv_source_facts_never_widen_rights() {
         );
         finish(pool, &vm_job).await;
 
-        // A claim of "nothing here" only turns the job into a refusal.
+        // A claim of "nothing here", made after the job was queued, only
+        // turns the job into a refusal.
         drop(agent);
-        let agent = Fake::connect_with(&ts, &a, &[VM]).await;
-        heartbeat(&agent, facts(Vec::new())).await;
-        wait_stored(pool, &a.id, |d| {
-            d.proxmox.as_ref().is_some_and(|p| p.guests.is_empty())
+        let offline = wait_until(Duration::from_secs(10), || async {
+            !ts.state().registry.is_online(&a.id)
         })
         .await;
+        assert!(offline, "[{}]", backend.name());
         let refused = run(&api, "vms-a").await;
+        let nothing = SourceFacts {
+            age_ms: 0,
+            ..facts(Vec::new())
+        };
+        sources::record(ts.state(), &a.id, &nothing, &mut None, now_ms())
+            .await
+            .unwrap();
+        let _agent = Fake::connect_with(&ts, &a, &[VM]).await;
         wait_job(pool, &refused, "failed").await;
         assert_eq!(
             job_column(pool, &refused, "error_code").await.as_deref(),
@@ -339,13 +347,45 @@ async fn adv_source_facts_are_bounded() {
         big.databases = bloated_servers();
         heartbeat(&agent, big).await;
         wait_stored(pool, &a.id, |d| d.truncated).await;
-        let kept: Discovery = serde_json::from_str(&stored(pool, &a.id).await.unwrap()).unwrap();
+        let dropped: Discovery = serde_json::from_str(&stored(pool, &a.id).await.unwrap()).unwrap();
+        assert!(
+            dropped.proxmox.is_none() && dropped.servers.is_empty(),
+            "[{}] a list above the size limit is not stored",
+            backend.name()
+        );
+
+        let mut cut: Vec<ProxmoxGuest> = bloated_guests()
+            .into_iter()
+            .take(MAX_GUESTS + 1)
+            .map(|g| ProxmoxGuest {
+                name: "n".repeat(MAX_NAME_BYTES + 1),
+                pool: String::new(),
+                tags: Vec::new(),
+                ..g
+            })
+            .collect();
+        cut[0].pool = "p".repeat(100);
+        cut[0].tags = (0..100).map(|t| format!("t{t:02}")).collect();
+        let mut cut = facts(cut);
+        cut.databases = bloated_servers();
+        let c = enroll(&ts, &api, &repo, "pve-c").await;
+        let third = Fake::connect(&ts, &c, vec![]).await;
+        heartbeat(&third, cut).await;
+        wait_stored(pool, &c.id, |d| d.proxmox.is_some()).await;
+        drop(third);
+        let kept: Discovery = serde_json::from_str(&stored(pool, &c.id).await.unwrap()).unwrap();
+        assert!(kept.truncated);
         let guests = &kept.proxmox.as_ref().unwrap().guests;
         assert_eq!(guests.len(), MAX_GUESTS, "[{}]", backend.name());
         for guest in guests {
             assert!(guest.tags.len() <= MAX_GUEST_TAGS);
             assert!(guest.name.as_ref().unwrap().len() <= MAX_NAME_BYTES);
-            assert!(guest.pool.as_ref().unwrap().len() <= MAX_NAME_BYTES);
+            assert!(
+                guest
+                    .pool
+                    .as_ref()
+                    .is_none_or(|p| p.len() <= MAX_NAME_BYTES)
+            );
         }
         assert_eq!(kept.servers.len(), MAX_SERVERS);
         assert!(kept.servers.iter().all(|s| {

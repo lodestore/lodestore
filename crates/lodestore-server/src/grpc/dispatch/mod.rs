@@ -168,7 +168,7 @@ pub async fn assign_queued(state: &AppState, only_agent: Option<&str>) -> anyhow
     let rows = match only_agent {
         Some(agent) => {
             sqlx::query(
-                "SELECT id, host_id, spec, kind, restore_json FROM jobs \
+                "SELECT id, host_id, spec, kind, restore_json, queued_at FROM jobs \
                  WHERE state = 'queued' AND source = 'manual' \
                  AND host_id = $1 ORDER BY queued_at, id",
             )
@@ -178,7 +178,7 @@ pub async fn assign_queued(state: &AppState, only_agent: Option<&str>) -> anyhow
         }
         None => {
             sqlx::query(
-                "SELECT id, host_id, spec, kind, restore_json FROM jobs \
+                "SELECT id, host_id, spec, kind, restore_json, queued_at FROM jobs \
                  WHERE state = 'queued' AND source = 'manual' ORDER BY queued_at, id",
             )
             .fetch_all(&state.db.pool)
@@ -245,7 +245,8 @@ pub async fn assign_queued(state: &AppState, only_agent: Option<&str>) -> anyhow
                     match source_of(&spec) {
                         Ok(Some(source)) => {
                             if let Some((code, message)) =
-                                source_gate(state, &host_id, &source).await?
+                                source_gate(state, &host_id, &source, row.try_get("queued_at")?)
+                                    .await?
                             {
                                 fail_job_with_detail(
                                     state,
@@ -463,12 +464,15 @@ fn source_noun(source_type: &str) -> &'static str {
 }
 
 /// Why a job for a source that is not files must not reach the agent: the agent
-/// cannot back the type up, or a fresh, complete list shows nothing to back up.
-/// Stale, unknown or partial data sends the job on; the agent checks again.
+/// cannot back the type up, or a fresh, complete list collected after the job
+/// was queued shows nothing to back up. Stale, unknown, partial or older data
+/// sends the job on: a guest or database made just before the job may not be
+/// listed yet, and the agent checks again.
 async fn source_gate(
     state: &AppState,
     host_id: &str,
     source: &Source,
+    queued_at: i64,
 ) -> anyhow::Result<Option<(&'static str, String)>> {
     let noun = source_noun(source.type_name());
     if !state
@@ -480,7 +484,9 @@ async fn source_gate(
             format!("The agent on this host does not back up {noun} yet. Update the agent."),
         )));
     }
-    let stored = sources::load(state, host_id).await?;
+    let stored = sources::load(state, host_id)
+        .await?
+        .filter(|s| s.collected_at.is_some_and(|at| at >= queued_at));
     Ok(
         match sources::select::select(source, stored.as_ref(), now_ms()) {
             Selection::NoSource | Selection::Nothing => Some((

@@ -83,6 +83,10 @@ skipped (newest {}); name one by id to restore it.",
 --host {host_id:?} to name it by id."
                 );
             }
+            LatestWarning::HostIdAlsoName { host_id, hosts } => eprintln!(
+                "warning: --host {host_id:?} was taken as a host id; it is also the name of \
+{hosts}."
+            ),
         }
     }
 }

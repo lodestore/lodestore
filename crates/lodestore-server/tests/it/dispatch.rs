@@ -2584,20 +2584,14 @@ async fn dispatch_refuses_a_source_missing_on_the_host() {
         let api = ts.api().await;
         let repo = ts.create_local_repository("main").await;
         let cases = [
-            (
-                "no-proxmox",
-                SourceFacts {
-                    age_ms: 1000,
-                    ..Default::default()
-                },
-            ),
-            ("no-guest", vm_facts(1000, false, &[102])),
+            ("no-proxmox", SourceFacts::default()),
+            ("no-guest", vm_facts(0, false, &[102])),
         ];
         for (name, facts) in cases {
             let host = enroll(&ts, &api, &repo, name).await;
             seed_source_policy(&ts, &repo, name, &host, VM_SOURCE).await;
-            seed_facts(&ts, &host, &facts).await;
             let job = run_now(&api, name).await;
+            seed_facts(&ts, &host, &facts).await;
             let mut agent = Fake::connect_with(&ts, &host, &[VM_CAPABILITY]).await;
             assert_refused(
                 &ts,
@@ -2621,7 +2615,8 @@ async fn dispatch_sends_on_stale_or_incomplete_discovery() {
         let repo = ts.create_local_repository("main").await;
         let cases = [
             ("stale", Some(vm_facts(STALE_MS, false, &[102]))),
-            ("truncated", Some(vm_facts(1000, true, &[102]))),
+            ("truncated", Some(vm_facts(0, true, &[102]))),
+            ("older-than-the-job", Some(vm_facts(1000, false, &[102]))),
             ("unknown", None),
         ];
         for (name, facts) in cases {

@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use axum::Json;
 use axum::extract::{Path, State};
+use lodestore_format::provenance::FUTURE_TOLERANCE_MS;
 use lodestore_format::source::{Meta, SourceKey, label};
 use lodestore_policy::Selector;
 use lodestore_policy::source::{Source, normalized};
@@ -286,9 +287,11 @@ async fn latest_snapshots(
 ) -> Result<HashMap<String, i64>, ApiError> {
     let rows = sqlx::query(
         "SELECT source_ref, MAX(received_at) AS received_at FROM snapshots \
-         WHERE host_id = $1 AND incomplete = 0 AND verified_at IS NOT NULL GROUP BY source_ref",
+         WHERE host_id = $1 AND incomplete = 0 AND verified_at IS NOT NULL \
+         AND received_at <= $2 GROUP BY source_ref",
     )
     .bind(host_id)
+    .bind(crate::db::now_ms().saturating_add(FUTURE_TOLERANCE_MS))
     .fetch_all(&state.db.pool)
     .await?;
     rows.iter()

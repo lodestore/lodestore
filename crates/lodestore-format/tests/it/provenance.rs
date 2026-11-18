@@ -16,6 +16,7 @@ use lodestore_format::attest::{
 };
 use lodestore_format::crypto::{BlobId, Entropy};
 use lodestore_format::error::Error;
+use lodestore_format::index::hex32;
 use lodestore_format::keys::{MasterKey, ReadKeys};
 use lodestore_format::locks::new_lock_id;
 use lodestore_format::pb;
@@ -680,6 +681,9 @@ fn latest_of_an_instance_refuses_two_hosts() {
     assert!(msg.contains("more than one host"), "{msg}");
     assert!(msg.contains(r#""web" ("h1")"#), "{msg}");
     assert!(msg.contains(r#""db" ("h2")"#), "{msg}");
+    let db = format!(r#""db" ("h2") newest {} 1h ago"#, &hex32(&id(3))[..8]);
+    let web = format!(r#""web" ("h1") newest {} 3h ago"#, &hex32(&id(1))[..8]);
+    assert!(msg.contains(&format!("{db}, {web}")), "newest first: {msg}");
     assert!(!msg.contains(r#""old""#), "one item per host: {msg}");
     assert!(msg.contains("--host"), "{msg}");
 
@@ -1005,7 +1009,13 @@ fn latest_on_a_host_matches_id_or_name() {
     for host in ["h4", "nobody"] {
         let msg = text(pick(host).unwrap_err());
         assert!(
-            msg.starts_with("No snapshot in this repository is signed"),
+            msg.starts_with(&format!(
+                "No signed snapshot of {GUEST} comes from host {host:?}. Hosts with signed snapshots of it: "
+            )),
+            "{host}: {msg}"
+        );
+        assert!(
+            msg.contains(r#""db" ("h2") newest"#) && msg.contains(r#""web" ("h3") newest"#),
             "{host}: {msg}"
         );
     }
@@ -1028,17 +1038,77 @@ fn latest_on_a_host_prefers_the_id_over_a_name() {
     let real = pick(&[guest_record(1, "h1", "web"), impostor.clone()]).unwrap();
     assert_eq!(real.entry.id, id(1));
     assert!(by_name(&real.warnings).is_empty(), "{:?}", real.warnings);
+    assert!(
+        real.warnings.iter().any(|w| matches!(
+            w,
+            LatestWarning::HostIdAlsoName { host_id, hosts }
+                if host_id == "h1" && hosts.contains(r#""h1" ("h2")"#)
+        )),
+        "{:?}",
+        real.warnings
+    );
 
     let files_only = named(record(id(1), "h1", "j", 10), "web");
     let msg = text(pick(&[files_only, impostor.clone()]).unwrap_err());
     assert!(
-        msg.starts_with("No snapshot in this repository is signed"),
+        msg.starts_with(r#"No signed snapshot of "#) && msg.contains(r#"from host "h1". "#),
         "{msg}"
     );
+    assert!(msg.contains(r#""h1" ("h2") newest"#), "{msg}");
 
     let absent = pick(&[impostor]).unwrap();
     assert_eq!(absent.entry.id, id(2));
     assert_eq!(by_name(&absent.warnings), [&host_by_name("h1", "h2", "h1")]);
+}
+
+#[test]
+fn latest_on_a_host_never_takes_an_id_as_a_name() {
+    const VICTIM: &str = "0198a2b4-7c1d-7e2f-8a3b-4c5d6e7f8091";
+    let entries = vec![hours_ago(1, 2), hours_ago(2, 1)];
+    let pick = |records: &[pb::ProvenanceRecord], host: &str| {
+        pick_latest_in(
+            entries.clone(),
+            &signed(records),
+            NOW_MS,
+            false,
+            &on_host(host),
+        )
+    };
+    let impostor = guest_record(2, "h2", VICTIM);
+
+    for host in [VICTIM, &VICTIM.to_uppercase()] {
+        let msg = text(pick(std::slice::from_ref(&impostor), host).unwrap_err());
+        assert!(
+            msg.starts_with(&format!(
+                "No signed snapshot of {GUEST} comes from host {host:?} (a host id is never taken as a host name)."
+            )),
+            "{msg}"
+        );
+        assert!(
+            msg.contains(&format!("{VICTIM:?} (\"h2\") newest")),
+            "{msg}"
+        );
+    }
+
+    let real = pick(&[guest_record(1, VICTIM, "web"), impostor.clone()], VICTIM).unwrap();
+    assert_eq!(real.entry.id, id(1));
+    assert!(by_name(&real.warnings).is_empty(), "{:?}", real.warnings);
+    assert!(
+        real.warnings.iter().any(
+            |w| matches!(w, LatestWarning::HostIdAlsoName { host_id, .. } if host_id == VICTIM)
+        ),
+        "{:?}",
+        real.warnings
+    );
+
+    let msg = text(
+        pick(
+            &[named(record(id(1), VICTIM, "j", 10), "web"), impostor],
+            VICTIM,
+        )
+        .unwrap_err(),
+    );
+    assert!(msg.contains("comes from host"), "{msg}");
 }
 
 #[test]
@@ -1050,8 +1120,10 @@ fn latest_on_a_host_follows_a_renamed_host() {
     assert_eq!(by_name(&pick.warnings), [&host_by_name("web", "h2", "db")]);
 }
 
-const HOST_IDS: [&str; 3] = ["h1", "h2", "h3"];
-const HOST_NAMES: [&str; 4] = ["web", "db", "h1", "h2"];
+const UUID_A: &str = "0198a2b4-7c1d-7e2f-8a3b-4c5d6e7f8091";
+const UUID_B: &str = "0198a2b4-7c1d-7e2f-8a3b-4c5d6e7f8092";
+const HOST_IDS: [&str; 4] = ["h1", "h2", "h3", UUID_A];
+const HOST_NAMES: [&str; 6] = ["web", "db", "h1", "h2", UUID_A, UUID_B];
 const TIED_MS: i64 = NOW_MS - HOUR_MS;
 
 #[derive(Debug, Clone)]
@@ -1130,8 +1202,13 @@ fn hostile_set(specs: &[Hostile], order: &[usize]) -> (ProvenanceSet, Vec<Snapsh
 
 #[derive(Debug, PartialEq, Eq)]
 enum Outcome {
-    Pick { id: BlobId, by_name: Option<String> },
+    Pick {
+        id: BlobId,
+        by_name: Option<String>,
+        also_named: bool,
+    },
     NoSigned,
+    NoneOnHost,
     AllFuture,
     TwoHosts,
     TwoNamed,
@@ -1145,6 +1222,10 @@ fn observed(pick: Result<lodestore_format::provenance::LatestPick, Error>) -> Ou
                 LatestWarning::HostByName { host_id, .. } => Some(host_id.clone()),
                 _ => None,
             }),
+            also_named: p
+                .warnings
+                .iter()
+                .any(|w| matches!(w, LatestWarning::HostIdAlsoName { .. })),
         },
         Err(e) => {
             let msg = text(e);
@@ -1156,6 +1237,8 @@ fn observed(pick: Result<lodestore_format::provenance::LatestPick, Error>) -> Ou
                 Outcome::AllFuture
             } else if msg.starts_with("No snapshot in this repository is signed") {
                 Outcome::NoSigned
+            } else if msg.starts_with("No signed snapshot of ") {
+                Outcome::NoneOnHost
             } else {
                 panic!("unexpected refusal: {msg}")
             }
@@ -1164,9 +1247,10 @@ fn observed(pick: Result<lodestore_format::provenance::LatestPick, Error>) -> Ou
 }
 
 /// The rule written out on its own: a record whose source does not open
-/// leaves its snapshot unsigned; `--host` is an id when any signed record
-/// carries it, else the name of exactly one host; the newest by (store time,
-/// id) within the tolerance wins.
+/// leaves its snapshot unsigned; `--host` is an id when it has the form of a
+/// UUID or any signed record carries it, else the name of exactly one host;
+/// nothing left on the host is a refusal; the newest by (store time, id)
+/// within the tolerance wins.
 fn model(specs: &[Hostile], scope: &LatestScope) -> Outcome {
     let want_source = if matches!(scope, LatestScope::Files) {
         0
@@ -1177,6 +1261,7 @@ fn model(specs: &[Hostile], scope: &LatestScope) -> Outcome {
         .filter(|&i| specs[i].opens() && specs[i].source == want_source)
         .collect();
     let mut by_name = None;
+    let mut also_named = false;
     match scope {
         LatestScope::Files => {}
         LatestScope::Instance(_) => {
@@ -1186,14 +1271,16 @@ fn model(specs: &[Hostile], scope: &LatestScope) -> Outcome {
             }
         }
         LatestScope::InstanceOnHost(_, host) => {
-            let chosen = if specs.iter().any(|s| s.opens() && HOST_IDS[s.host] == host) {
+            let named: BTreeSet<usize> = admitted
+                .iter()
+                .filter(|&&i| HOST_NAMES[specs[i].name] == host && HOST_IDS[specs[i].host] != host)
+                .map(|&i| specs[i].host)
+                .collect();
+            let uuid = host.len() == 36 && host.contains('-');
+            let chosen = if uuid || specs.iter().any(|s| s.opens() && HOST_IDS[s.host] == host) {
+                also_named = !named.is_empty();
                 HOST_IDS.iter().position(|h| h == host)
             } else {
-                let named: BTreeSet<usize> = admitted
-                    .iter()
-                    .filter(|&&i| HOST_NAMES[specs[i].name] == host)
-                    .map(|&i| specs[i].host)
-                    .collect();
                 if named.len() > 1 {
                     return Outcome::TwoNamed;
                 }
@@ -1202,6 +1289,9 @@ fn model(specs: &[Hostile], scope: &LatestScope) -> Outcome {
                 one
             };
             admitted.retain(|&i| Some(specs[i].host) == chosen);
+            if admitted.is_empty() {
+                return Outcome::NoneOnHost;
+            }
         }
     }
     let order = |&i: &usize| {
@@ -1211,7 +1301,11 @@ fn model(specs: &[Hostile], scope: &LatestScope) -> Outcome {
     };
     let limit = NOW_MS + FUTURE_TOLERANCE_MS;
     match admitted.iter().map(order).filter(|o| o.0 <= limit).max() {
-        Some((_, id)) => Outcome::Pick { id, by_name },
+        Some((_, id)) => Outcome::Pick {
+            id,
+            by_name,
+            also_named,
+        },
         None if admitted.is_empty() => Outcome::NoSigned,
         None => Outcome::AllFuture,
     }

@@ -1470,7 +1470,9 @@ async fn lode_latest(
             }),
         ),
         Err(lodestore_format::Error::InvalidInput(m))
-            if m == NO_VERIFIED_SNAPSHOT || m == ALL_SIGNED_STORED_IN_FUTURE =>
+            if m == NO_VERIFIED_SNAPSHOT
+                || m == ALL_SIGNED_STORED_IN_FUTURE
+                || m.starts_with("No signed snapshot of ") =>
         {
             Got::Nothing
         }
