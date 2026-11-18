@@ -30,6 +30,11 @@ pub const MAX_DATABASES: usize = 1000;
 pub const MAX_NAME_BYTES: usize = 64;
 /// Longest server version string.
 pub const MAX_VERSION_BYTES: usize = 32;
+/// The longest cluster or node name, as Proxmox allows for a node.
+pub const MAX_SCOPE_NAME_BYTES: usize = 63;
+/// The largest list stored: the 256 KiB the agent cuts its list to, plus its
+/// age, which the agent adds after the cut.
+pub const MAX_FACTS_BYTES: usize = (256 << 10) + 16;
 /// The source types besides files, in the order lists show them.
 pub const SOURCE_TYPES: [&str; 4] = ["proxmox-vm", "proxmox-ct", "postgres", "mysql"];
 /// How long a collection counts as current.
@@ -125,6 +130,13 @@ fn clipped(text: &str, max: usize) -> Option<String> {
 
 impl Discovery {
     pub fn from_proto(facts: &SourceFacts) -> Discovery {
+        if prost::Message::encoded_len(facts) > MAX_FACTS_BYTES {
+            return Discovery {
+                truncated: true,
+                proxmox: None,
+                servers: Vec::new(),
+            };
+        }
         let mut truncated = facts.truncated;
         let mut seen = HashSet::new();
         let proxmox = facts
@@ -201,7 +213,7 @@ fn proxmox_node(
     } else {
         (ScopeKind::Cluster, facts.cluster.as_str())
     };
-    if name.is_empty() {
+    if name.is_empty() || name.len() > MAX_SCOPE_NAME_BYTES {
         *truncated = true;
         return None;
     }
@@ -212,7 +224,7 @@ fn proxmox_node(
             *truncated = true;
             break;
         }
-        match proxmox_guest(guest, name, &mut vmids, seen) {
+        match proxmox_guest(guest, name, &mut vmids, seen, truncated) {
             Some(guest) => guests.push(guest),
             None => *truncated = true,
         }
@@ -229,6 +241,7 @@ fn proxmox_guest(
     scope_name: &str,
     vmids: &mut HashSet<u32>,
     seen: &mut HashSet<String>,
+    truncated: &mut bool,
 ) -> Option<Guest> {
     let kind = match GuestKind::try_from(guest.kind).ok()? {
         GuestKind::Vm => GuestType::Vm,
@@ -255,7 +268,10 @@ fn proxmox_guest(
         .collect();
     tags.sort();
     tags.dedup();
-    tags.truncate(MAX_GUEST_TAGS);
+    if tags.len() > MAX_GUEST_TAGS {
+        tags.truncate(MAX_GUEST_TAGS);
+        *truncated = true;
+    }
     Some(Guest {
         kind,
         vmid: guest.vmid,
@@ -581,6 +597,29 @@ mod tests {
         assert_eq!(tags.len(), MAX_GUEST_TAGS);
         assert_eq!(tags[0], "t00");
         assert_eq!(tags[19], "t19");
+        assert!(tagged.truncated);
+
+        let mut twenty = vm(100);
+        twenty.tags = (0..20).map(|n| format!("t{n:02}")).collect();
+        twenty.tags.push("t00".into());
+        assert!(!Discovery::from_proto(&node(vec![twenty])).truncated);
+
+        for (cluster, node_name) in [("c".repeat(64), "pve1"), (String::new(), &*"n".repeat(64))] {
+            let mut facts = node(vec![vm(100)]);
+            let proxmox = facts.proxmox.as_mut().unwrap();
+            proxmox.cluster = cluster;
+            proxmox.node = node_name.into();
+            let long = Discovery::from_proto(&facts);
+            assert!(long.proxmox.is_none() && long.truncated);
+        }
+        let mut facts = node(vec![vm(100)]);
+        facts.proxmox.as_mut().unwrap().cluster = "c".repeat(63);
+        assert!(!Discovery::from_proto(&facts).truncated);
+
+        let mut huge = node((100..110).map(vm).collect());
+        huge.proxmox.as_mut().unwrap().guests[0].name = "x".repeat(MAX_FACTS_BYTES);
+        let huge = Discovery::from_proto(&huge);
+        assert!(huge.truncated && huge.proxmox.is_none() && huge.servers.is_empty());
 
         let many_servers = Discovery::from_proto(&servers(
             (1..=20)
