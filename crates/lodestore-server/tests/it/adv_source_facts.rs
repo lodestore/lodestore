@@ -263,15 +263,23 @@ async fn adv_source_facts_never_widen_rights() {
         );
         finish(pool, &vm_job).await;
 
-        // A claim of "nothing here" only turns the job into a refusal.
+        // A claim of "nothing here", made after the job was queued, only
+        // turns the job into a refusal.
         drop(agent);
-        let agent = Fake::connect_with(&ts, &a, &[VM]).await;
-        heartbeat(&agent, facts(Vec::new())).await;
-        wait_stored(pool, &a.id, |d| {
-            d.proxmox.as_ref().is_some_and(|p| p.guests.is_empty())
+        let offline = wait_until(Duration::from_secs(10), || async {
+            !ts.state().registry.is_online(&a.id)
         })
         .await;
+        assert!(offline, "[{}]", backend.name());
         let refused = run(&api, "vms-a").await;
+        let nothing = SourceFacts {
+            age_ms: 0,
+            ..facts(Vec::new())
+        };
+        sources::record(ts.state(), &a.id, &nothing, &mut None, now_ms())
+            .await
+            .unwrap();
+        let _agent = Fake::connect_with(&ts, &a, &[VM]).await;
         wait_job(pool, &refused, "failed").await;
         assert_eq!(
             job_column(pool, &refused, "error_code").await.as_deref(),
