@@ -7,6 +7,7 @@ import type {
 	SourceOptions,
 	SourceOptionsRequest,
 } from "@/api/gen/model";
+import { ErrorText } from "@/components/policies/form-field";
 import type { SourceDraft } from "@/components/policies/policy-form";
 import { Truncated } from "@/components/truncated";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -100,6 +101,7 @@ export function SourcePicker({
 	notice?: string;
 	error?: string;
 }) {
+	const errorId = useId();
 	const type = value.type;
 	const request =
 		hostsSelected && repository !== ""
@@ -141,11 +143,7 @@ export function SourcePicker({
 					{data && <PickerNotes data={data} noun={noun} />}
 				</>
 			)}
-			{error && (
-				<p className="text-sm text-destructive" role="alert">
-					{error}
-				</p>
-			)}
+			<ErrorText id={`${errorId}-error`} message={error} />
 			{notice && <p className="text-sm text-muted-foreground">{notice}</p>}
 		</FieldSet>
 	);
