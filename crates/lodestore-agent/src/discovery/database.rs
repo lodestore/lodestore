@@ -28,7 +28,7 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
-use super::{Config, MAX_DATABASES, MAX_NAME_BYTES, MAX_SERVERS, clip};
+use super::{Config, MAX_DATABASES, MAX_NAME_BYTES, MAX_SERVERS};
 use crate::hooks::terminate;
 
 /// One statement: before PostgreSQL 15 `-c` with several prints only the last
@@ -572,10 +572,16 @@ fn parse_psql(out: &[u8]) -> Option<PsqlReply> {
             truncated = true;
             continue;
         }
-        databases.push(Database {
-            name: clip(String::from_utf8_lossy(name).into_owned()),
-            oid,
-        });
+        // A policy selects a database by name; a cut or re-encoded name
+        // would select another database or none.
+        let Some(name) = String::from_utf8(name.to_vec())
+            .ok()
+            .filter(|n| n.len() <= MAX_NAME_BYTES)
+        else {
+            truncated = true;
+            continue;
+        };
+        databases.push(Database { name, oid });
     }
     Some(PsqlReply {
         system_id,
@@ -1595,7 +1601,7 @@ exit 0
     }
 
     #[tokio::test]
-    async fn non_utf8_names_do_not_panic() {
+    async fn database_names_that_do_not_fit_are_not_reported() {
         let (mut host, _dir) = one_cluster();
         host.set(
             "psql",
@@ -1604,6 +1610,9 @@ exit 0
             &psql_out(&[
                 [b"s", SYSID.as_bytes(), b"16"],
                 [b"d", b"16384", b"caf\xff"],
+                [b"d", b"16385", "é".repeat(32).as_bytes()],
+                [b"d", b"16386", format!("{}x", "é".repeat(32)).as_bytes()],
+                [b"d", b"16387", format!("{}y", "é".repeat(32)).as_bytes()],
             ]),
         );
         host.mysql_socket("mysqld.sock");
@@ -1612,7 +1621,7 @@ exit 0
         host.set("mysql", "", "out", &reply);
         let (servers, truncated) = host.scan().await;
         assert!(truncated);
-        assert_eq!(servers[0].databases, vec![db("caf\u{fffd}", 16384)]);
+        assert_eq!(servers[0].databases, vec![db(&"é".repeat(32), 16385)]);
         assert_eq!(names(&servers[1]), ["shop"]);
     }
 
