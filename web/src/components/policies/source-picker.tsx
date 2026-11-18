@@ -213,7 +213,12 @@ function Loading({ query }: { query: QueryState }) {
 				<InputGroupAddon>
 					<Search aria-hidden />
 				</InputGroupAddon>
-				<InputGroupInput disabled tabIndex={-1} className="h-full" />
+				<InputGroupInput
+					type="search"
+					disabled
+					tabIndex={-1}
+					className="h-full"
+				/>
 			</InputGroup>
 			<div className="rounded-lg border bg-card">
 				{Array.from({ length: 5 }, (_, i) => (
@@ -639,9 +644,9 @@ function TagChips({
 						key={name}
 						value={name}
 						disabled={full && !value.includes(name)}
-						className="gap-2 px-3 data-[state=on]:bg-primary-subtle data-[state=on]:text-primary-strong"
+						className="gap-2 px-4 data-[state=on]:bg-primary-subtle data-[state=on]:text-primary-strong"
 					>
-						{name}
+						{name}{" "}
 						{count !== undefined && (
 							<span className="font-normal text-muted-foreground tabular-nums group-data-[state=on]/toggle:text-primary-strong">
 								{count}
