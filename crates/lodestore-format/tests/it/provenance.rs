@@ -4,6 +4,7 @@
 use crate::adv_support;
 use crate::gc_support;
 
+use std::collections::BTreeSet;
 use std::ops::Range;
 
 use adv_support::attacker_keys;
@@ -19,7 +20,8 @@ use lodestore_format::keys::{MasterKey, ReadKeys};
 use lodestore_format::locks::new_lock_id;
 use lodestore_format::pb;
 use lodestore_format::provenance::{
-    LatestMode, LatestScope, LatestWarning, ProvenanceSet, Signer, pick_latest, pick_latest_in,
+    FUTURE_TOLERANCE_MS, LatestMode, LatestScope, LatestWarning, ProvenanceSet, Signer,
+    pick_latest, pick_latest_in,
 };
 use lodestore_format::reader::Reader;
 use lodestore_format::snapshot::SnapshotEntry;
@@ -751,7 +753,11 @@ fn latest_skips_a_source_this_build_cannot_read() {
     ] {
         let pick = pick_latest_in(entries.clone(), &set, NOW_MS, false, &scope).unwrap();
         assert_eq!(pick.entry.id, want, "{scope:?}");
-        assert!(pick.warnings.contains(&unsigned_newer), "{:?}", pick.warnings);
+        assert!(
+            pick.warnings.contains(&unsigned_newer),
+            "{:?}",
+            pick.warnings
+        );
         assert!(pick.warnings.contains(&unopened), "{:?}", pick.warnings);
     }
     assert!(!set.contains(&id(3)) && !set.contains(&id(4)));
@@ -945,5 +951,312 @@ proptest! {
         );
         let now = pick_latest(entries, &set, NOW_MS, expect_upgraded);
         prop_assert_eq!(outcome(now), outcome(before));
+    }
+}
+
+fn on_host(host: &str) -> LatestScope {
+    LatestScope::InstanceOnHost(guest(), host.into())
+}
+
+fn by_name(warnings: &[LatestWarning]) -> Vec<&LatestWarning> {
+    warnings
+        .iter()
+        .filter(|w| matches!(w, LatestWarning::HostByName { .. }))
+        .collect()
+}
+
+fn host_by_name(name: &str, host_id: &str, current: &str) -> LatestWarning {
+    LatestWarning::HostByName {
+        name: name.into(),
+        host_id: host_id.into(),
+        current: current.into(),
+    }
+}
+
+#[test]
+fn latest_on_a_host_matches_id_or_name() {
+    let set = signed(&[
+        guest_record(1, "h1", "web"),
+        guest_record(2, "h2", "db"),
+        guest_record(3, "h2", "db"),
+        guest_record(4, "h3", "web"),
+        record(id(5), "h4", "j", 10),
+    ]);
+    let entries: Vec<_> = (1..=5).map(|n| hours_ago(n, 6 - i64::from(n))).collect();
+    let pick = |host: &str| pick_latest_in(entries.clone(), &set, NOW_MS, false, &on_host(host));
+
+    let by_id = pick("h2").unwrap();
+    assert_eq!(by_id.entry.id, id(3));
+    assert!(by_name(&by_id.warnings).is_empty(), "{:?}", by_id.warnings);
+
+    let named = pick("db").unwrap();
+    assert_eq!(named.entry.id, id(3));
+    assert_eq!(by_name(&named.warnings), [&host_by_name("db", "h2", "db")]);
+
+    let msg = text(pick("web").unwrap_err());
+    assert!(msg.contains("names more than one host"), "{msg}");
+    assert!(
+        msg.contains(r#"("h1")"#) && msg.contains(r#"("h3")"#),
+        "{msg}"
+    );
+    assert!(!msg.contains(r#"("h2")"#), "{msg}");
+    assert!(msg.contains("--host with the host id"), "{msg}");
+
+    for host in ["h4", "nobody"] {
+        let msg = text(pick(host).unwrap_err());
+        assert!(
+            msg.starts_with("No snapshot in this repository is signed"),
+            "{host}: {msg}"
+        );
+    }
+}
+
+#[test]
+fn latest_on_a_host_prefers_the_id_over_a_name() {
+    let entries = vec![hours_ago(1, 2), hours_ago(2, 1)];
+    let pick = |records: &[pb::ProvenanceRecord]| {
+        pick_latest_in(
+            entries.clone(),
+            &signed(records),
+            NOW_MS,
+            false,
+            &on_host("h1"),
+        )
+    };
+    let impostor = guest_record(2, "h2", "h1");
+
+    let real = pick(&[guest_record(1, "h1", "web"), impostor.clone()]).unwrap();
+    assert_eq!(real.entry.id, id(1));
+    assert!(by_name(&real.warnings).is_empty(), "{:?}", real.warnings);
+
+    let files_only = named(record(id(1), "h1", "j", 10), "web");
+    let msg = text(pick(&[files_only, impostor.clone()]).unwrap_err());
+    assert!(
+        msg.starts_with("No snapshot in this repository is signed"),
+        "{msg}"
+    );
+
+    let absent = pick(&[impostor]).unwrap();
+    assert_eq!(absent.entry.id, id(2));
+    assert_eq!(by_name(&absent.warnings), [&host_by_name("h1", "h2", "h1")]);
+}
+
+#[test]
+fn latest_on_a_host_follows_a_renamed_host() {
+    let set = signed(&[guest_record(1, "h2", "web"), guest_record(2, "h2", "db")]);
+    let entries = vec![hours_ago(1, 2), hours_ago(2, 1)];
+    let pick = pick_latest_in(entries, &set, NOW_MS, false, &on_host("web")).unwrap();
+    assert_eq!(pick.entry.id, id(2));
+    assert_eq!(by_name(&pick.warnings), [&host_by_name("web", "h2", "db")]);
+}
+
+const HOST_IDS: [&str; 3] = ["h1", "h2", "h3"];
+const HOST_NAMES: [&str; 4] = ["web", "db", "h1", "h2"];
+const TIED_MS: i64 = NOW_MS - HOUR_MS;
+
+#[derive(Debug, Clone)]
+struct Hostile {
+    host: usize,
+    name: usize,
+    /// 0 files, 1 the guest, 2 another guest, 3 WAL, 4 unknown type, 5 bad meta.
+    source: u8,
+    signed: bool,
+    stored_ms: Option<i64>,
+    verified_s: i64,
+}
+
+impl Hostile {
+    fn opens(&self) -> bool {
+        self.signed && self.source < 4
+    }
+}
+
+fn hostile_record() -> impl Strategy<Value = Hostile> {
+    let now_s = NOW_MS / 1000;
+    (
+        0..HOST_IDS.len(),
+        0..HOST_NAMES.len(),
+        0u8..6,
+        proptest::bool::weighted(0.85),
+        prop_oneof![
+            Just(None),
+            Just(Some(TIED_MS)),
+            (-3 * DAY_MS..0i64).prop_map(|d| Some(NOW_MS + d)),
+            (FUTURE_TOLERANCE_MS + 1..DAY_MS).prop_map(|d| Some(NOW_MS + d)),
+        ],
+        now_s - 3 * 86_400..now_s + 86_400,
+    )
+        .prop_map(
+            |(host, name, source, signed, stored_ms, verified_s)| Hostile {
+                host,
+                name,
+                source,
+                signed,
+                stored_ms,
+                verified_s,
+            },
+        )
+}
+
+fn hostile_set(specs: &[Hostile], order: &[usize]) -> (ProvenanceSet, Vec<SnapshotEntry>) {
+    let other = SourceKey::proxmox_vm("pve1", "11111111-1111-4111-8111-111111111111").unwrap();
+    let wal = SourceKey::postgres_wal(7_300_000_000_000_000_001).unwrap();
+    let mut records = Vec::new();
+    let mut entries = Vec::new();
+    for &i in order {
+        let s = &specs[i];
+        let n = u16::try_from(i + 1).unwrap();
+        entries.push(SnapshotEntry {
+            modified_ms: s.stored_ms,
+            ..entry_w(n, 0)
+        });
+        if !s.signed {
+            continue;
+        }
+        let r = named(
+            record(idw(n), HOST_IDS[s.host], "j", s.verified_s),
+            HOST_NAMES[s.name],
+        );
+        records.push(match s.source {
+            0 => r,
+            1 => from_source(r, &guest()),
+            2 => from_source(r, &other),
+            3 => from_source(r, &wal),
+            n => unreadable(r, n == 4),
+        });
+    }
+    (signed(&records), entries)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Outcome {
+    Pick { id: BlobId, by_name: Option<String> },
+    NoSigned,
+    AllFuture,
+    TwoHosts,
+    TwoNamed,
+}
+
+fn observed(pick: Result<lodestore_format::provenance::LatestPick, Error>) -> Outcome {
+    match pick {
+        Ok(p) => Outcome::Pick {
+            id: p.entry.id,
+            by_name: p.warnings.iter().find_map(|w| match w {
+                LatestWarning::HostByName { host_id, .. } => Some(host_id.clone()),
+                _ => None,
+            }),
+        },
+        Err(e) => {
+            let msg = text(e);
+            if msg.contains("names more than one host") {
+                Outcome::TwoNamed
+            } else if msg.contains("come from more than one host") {
+                Outcome::TwoHosts
+            } else if msg.starts_with("Every signed snapshot") {
+                Outcome::AllFuture
+            } else if msg.starts_with("No snapshot in this repository is signed") {
+                Outcome::NoSigned
+            } else {
+                panic!("unexpected refusal: {msg}")
+            }
+        }
+    }
+}
+
+/// The rule written out on its own: a record whose source does not open
+/// leaves its snapshot unsigned; `--host` is an id when any signed record
+/// carries it, else the name of exactly one host; the newest by (store time,
+/// id) within the tolerance wins.
+fn model(specs: &[Hostile], scope: &LatestScope) -> Outcome {
+    let want_source = if matches!(scope, LatestScope::Files) {
+        0
+    } else {
+        1
+    };
+    let mut admitted: Vec<usize> = (0..specs.len())
+        .filter(|&i| specs[i].opens() && specs[i].source == want_source)
+        .collect();
+    let mut by_name = None;
+    match scope {
+        LatestScope::Files => {}
+        LatestScope::Instance(_) => {
+            let hosts: BTreeSet<usize> = admitted.iter().map(|&i| specs[i].host).collect();
+            if hosts.len() > 1 {
+                return Outcome::TwoHosts;
+            }
+        }
+        LatestScope::InstanceOnHost(_, host) => {
+            let chosen = if specs.iter().any(|s| s.opens() && HOST_IDS[s.host] == host) {
+                HOST_IDS.iter().position(|h| h == host)
+            } else {
+                let named: BTreeSet<usize> = admitted
+                    .iter()
+                    .filter(|&&i| HOST_NAMES[specs[i].name] == host)
+                    .map(|&i| specs[i].host)
+                    .collect();
+                if named.len() > 1 {
+                    return Outcome::TwoNamed;
+                }
+                let one = named.first().copied();
+                by_name = one.map(|h| HOST_IDS[h].to_owned());
+                one
+            };
+            admitted.retain(|&i| Some(specs[i].host) == chosen);
+        }
+    }
+    let order = |&i: &usize| {
+        let s = &specs[i];
+        let n = u16::try_from(i + 1).unwrap();
+        (s.stored_ms.unwrap_or(s.verified_s * 1000), idw(n))
+    };
+    let limit = NOW_MS + FUTURE_TOLERANCE_MS;
+    match admitted.iter().map(order).filter(|o| o.0 <= limit).max() {
+        Some((_, id)) => Outcome::Pick { id, by_name },
+        None if admitted.is_empty() => Outcome::NoSigned,
+        None => Outcome::AllFuture,
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    #[test]
+    fn latest_of_an_instance_on_hostile_records(
+        specs in proptest::collection::vec(hostile_record(), 1..=10),
+        seed in any::<[u8; 32]>(),
+    ) {
+        let forward: Vec<usize> = (0..specs.len()).collect();
+        let reversed: Vec<usize> = forward.iter().rev().copied().collect();
+        let mut shuffled = forward.clone();
+        let mut rng = ChaCha20Rng::from_seed(seed);
+        for i in (1..shuffled.len()).rev() {
+            shuffled.swap(i, rng.next_u32() as usize % (i + 1));
+        }
+        let pool: BTreeSet<&str> = HOST_IDS.iter().chain(HOST_NAMES.iter()).copied().collect();
+        let mut scopes = vec![LatestScope::Files, LatestScope::Instance(guest())];
+        scopes.extend(pool.iter().map(|s| on_host(s)));
+        let signed_hosts: BTreeSet<&str> = specs
+            .iter()
+            .filter(|s| s.opens())
+            .map(|s| HOST_IDS[s.host])
+            .collect();
+
+        for scope in &scopes {
+            let want = model(&specs, scope);
+            for order in [&forward, &reversed, &shuffled] {
+                let (set, entries) = hostile_set(&specs, order);
+                let got = observed(pick_latest_in(entries, &set, NOW_MS, false, scope));
+                prop_assert_eq!(&got, &want, "{:?} in order {:?}", scope, order);
+                if let Outcome::Pick { id, .. } = got {
+                    let i = usize::from(u16::from_be_bytes([id[0], id[1]])) - 1;
+                    prop_assert!(specs[i].opens(), "a record that does not open was chosen");
+                    if let LatestScope::InstanceOnHost(_, host) = scope
+                        && signed_hosts.contains(host.as_str())
+                    {
+                        prop_assert_eq!(HOST_IDS[specs[i].host], host.as_str());
+                    }
+                }
+            }
+        }
     }
 }

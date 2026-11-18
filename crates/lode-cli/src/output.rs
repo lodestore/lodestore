@@ -68,6 +68,21 @@ skipped (newest {}); name one by id to restore it.",
             LatestWarning::UnreadableProvenance { count } => eprintln!(
                 "warning: {count} provenance record(s) could not be opened and were ignored."
             ),
+            LatestWarning::HostByName {
+                name,
+                host_id,
+                current,
+            } => {
+                let renamed = if current == name {
+                    String::new()
+                } else {
+                    format!(", now called {current:?}")
+                };
+                eprintln!(
+                    "warning: --host {name:?} is the name of host {host_id:?}{renamed}; pass \
+--host {host_id:?} to name it by id."
+                );
+            }
         }
     }
 }

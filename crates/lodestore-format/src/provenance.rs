@@ -4,7 +4,7 @@
 //! written by the host being backed up, so its time and names never decide
 //! the order of a verified repository.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::attest::{AttestedSet, open_provenance};
 use crate::crypto::BlobId;
@@ -105,6 +105,11 @@ impl ProvenanceSet {
         self.records.contains_key(id)
     }
 
+    /// Some signed record, of any source, carries this `host_id`.
+    pub fn names_host(&self, host: &str) -> bool {
+        self.records.values().any(|r| r.host_id == host)
+    }
+
     /// The source of a snapshot, from its signed record only; the manifest's
     /// own claim never counts. No record, or a record without the field, is
     /// `files`. A record whose source this build cannot read does not open
@@ -184,6 +189,13 @@ pub enum LatestWarning {
     UnreadableProvenance {
         count: usize,
     },
+    /// `--host` matched no host id and was taken as the name of one host;
+    /// `current` is the name on its newest record. Cut to 64 characters.
+    HostByName {
+        name: String,
+        host_id: String,
+        current: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -228,6 +240,10 @@ pub enum LatestScope {
     /// records name more than one host: clones and copies share a key, so the
     /// caller names the host.
     Instance(SourceKey),
+    /// The snapshots of one source instance that one host made. The host is
+    /// named by its id; a name is looked up only when no signed record
+    /// carries that id, and must name exactly one host.
+    InstanceOnHost(SourceKey, String),
 }
 
 impl LatestScope {
@@ -235,7 +251,9 @@ impl LatestScope {
     fn admits(&self, source: &SourceKey) -> bool {
         match self {
             LatestScope::Files => source.is_files(),
-            LatestScope::Instance(key) => source == key && !key.kind().is_wal_batch(),
+            LatestScope::Instance(key) | LatestScope::InstanceOnHost(key, _) => {
+                source == key && !key.kind().is_wal_batch()
+            }
         }
     }
 }
@@ -323,7 +341,7 @@ pub fn pick_latest_in(
     let entries = if provenance.attested_any() {
         entries
     } else {
-        if matches!(scope, LatestScope::Instance(_)) {
+        if !matches!(scope, LatestScope::Files) {
             return Err(Error::InvalidInput(NO_VERIFIED_SNAPSHOT.into()));
         }
         let claims = |e: &SnapshotEntry| {
@@ -345,18 +363,53 @@ pub fn pick_latest_in(
 
     let (mode, chosen) = if provenance.attested_any() {
         let key = |e: &SnapshotEntry| provenance.stored_order(e);
-        let admitted: Vec<&SnapshotEntry> = entries
+        let mut admitted: Vec<&SnapshotEntry> = entries
             .iter()
             .filter(|e| provenance.contains(&e.id) && scope.admits(&provenance.source_of(&e.id)))
             .collect();
-        if let LatestScope::Instance(source) = scope {
-            let hosts = hosts_of(provenance, &admitted);
-            if hosts.len() > 1 {
-                return Err(Error::InvalidInput(format!(
-                    "the snapshots of {} come from more than one host: {}; add --host with a host id to choose one",
-                    source.as_str(),
-                    host_list(hosts.iter())
-                )));
+        let host_of = |e: &SnapshotEntry| provenance.get(&e.id).map(|r| r.host_id.as_str());
+        match scope {
+            LatestScope::Files => {}
+            LatestScope::Instance(source) => {
+                let hosts = hosts_of(provenance, &admitted);
+                if hosts.len() > 1 {
+                    return Err(Error::InvalidInput(format!(
+                        "the snapshots of {} come from more than one host: {}; add --host with a host id to choose one",
+                        source.as_str(),
+                        host_list(hosts.iter())
+                    )));
+                }
+            }
+            LatestScope::InstanceOnHost(source, host) => {
+                let chosen = if provenance.names_host(host) {
+                    Some(host.clone())
+                } else {
+                    let hosts = hosts_of(provenance, &admitted);
+                    let named: BTreeSet<&str> = admitted
+                        .iter()
+                        .filter_map(|e| provenance.get(&e.id))
+                        .filter(|r| r.hostname == *host)
+                        .map(|r| r.host_id.as_str())
+                        .collect();
+                    if named.len() > 1 {
+                        return Err(Error::InvalidInput(format!(
+                            "{:?} names more than one host with snapshots of {}: {}; add --host with the host id",
+                            clip(host),
+                            source.as_str(),
+                            host_list(hosts.iter().filter(|(id, _)| named.contains(id.as_str())))
+                        )));
+                    }
+                    named.first().map(|id| {
+                        let current = hosts.get(*id).map_or("", |(_, name)| name.as_str());
+                        warnings.push(LatestWarning::HostByName {
+                            name: clip(host),
+                            host_id: clip(id),
+                            current: clip(current),
+                        });
+                        (*id).to_owned()
+                    })
+                };
+                admitted.retain(|e| chosen.is_some() && host_of(e) == chosen.as_deref());
             }
         }
         let (kept, future): (Vec<&SnapshotEntry>, Vec<&SnapshotEntry>) =
