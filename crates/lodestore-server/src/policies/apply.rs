@@ -13,7 +13,7 @@ use utoipa::ToSchema;
 use super::{
     CONTENT_PURPOSE, Checked, DELETE_PURPOSE, Failure, PolicyRow, RETENTION_PURPOSE,
     SCHEDULE_PURPOSE, all_policies, changes_retained_content, gains_hook_hosts, hooks_purpose,
-    resolve, retention_of, runs_more_often, shifts_retention_buckets, unsupported_source,
+    resolve, retention_of, runs_more_often, shifts_retention_buckets,
 };
 use crate::auth::tokens::{PoliciesWrite, Scope, Scoped};
 use crate::db::now_ms;
@@ -303,7 +303,6 @@ struct Plan {
     content_changed: bool,
     retention_deleted: bool,
     hooks_policies: Vec<String>,
-    unsupported: Vec<ApplyProblem>,
 }
 
 fn plan(
@@ -331,14 +330,10 @@ fn plan(
     let mut schedule_faster = false;
     let mut content_changed = false;
     let mut hooks_policies = Vec::new();
-    let mut unsupported = Vec::new();
     let mut wanted = BTreeSet::new();
     for input in inputs {
         let name = input.checked.policy.metadata.name.clone();
         wanted.insert(name.clone());
-        if let Some(p) = unsupported_source(&input.checked.policy) {
-            unsupported.push(located(&input.source, p));
-        }
         let change = |action, adopted, fields| PolicyChange {
             action,
             name: name.clone(),
@@ -449,7 +444,6 @@ fn plan(
         content_changed,
         retention_deleted,
         hooks_policies,
-        unsupported,
     })
 }
 
@@ -590,7 +584,6 @@ pub async fn apply_policies(
         content_changed,
         retention_deleted,
         hooks_policies,
-        unsupported,
     } = plan(&req, &manager, inputs, all_policies(&state).await?)?;
     if retention_changed {
         auth.require_also_or_step_up(Scope::SnapshotsDelete, RETENTION_PURPOSE)?;
@@ -606,9 +599,6 @@ pub async fn apply_policies(
     }
     if !hooks_policies.is_empty() {
         auth.require_also_or_step_up(Scope::HooksWrite, hooks_purpose(&hooks_policies))?;
-    }
-    if !unsupported.is_empty() {
-        return Err(ApplyFailure::Problems(unsupported));
     }
     if !req.dry_run && !steps.is_empty() {
         execute(&state, &manager, steps).await?;
