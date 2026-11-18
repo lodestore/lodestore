@@ -67,7 +67,7 @@ Then:
    lode restore latest --target ./restored
    ```
 
-   `latest` is the newest snapshot the server signed, ordered by the time the storage wrote it, so a snapshot that a compromised host planted with a date in the future is not chosen.
+   `latest` is the newest `files` snapshot the server signed, ordered by the time the storage wrote it, so a snapshot that a compromised host planted with a date in the future is not chosen.
 
 The quickstart uses plain HTTP so that it works on any network; for anything beyond a trial, put the server behind HTTPS: [With HTTPS](https://lodestore.dev/docs/quickstart/#with-https). Full walkthrough with the storage keys: <https://lodestore.dev/docs/quickstart/>
 

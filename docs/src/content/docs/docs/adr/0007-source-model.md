@@ -72,7 +72,7 @@ The missing-backup alert is raised per expected instance. For `files` that is th
 
 There are four new scopes, independent of each other and of the existing ones: `restore:guest`, `restore:guest-in-place`, `restore:db`, `restore:db-in-place`. `restore:host` and `restore:in-place` do not include them, and tokens issued before do not get them. An admin session gets them as it gets every scope, and the in-place variants need a step-up by the existing rule. Restoring a guest is root on the Proxmox node; the threat model describes the risk. No endpoint uses these scopes in phase 20.
 
-`RestoreSpec` gains `oneof target { GuestTarget guest = 8; DatabaseTarget database = 9; }`. The rule for compatibility: the server sends a guest or database target with an empty `destination` and `in_place = false`, so an agent that cannot run it fails on the existing check of the destination and creates nothing. A files restore of a snapshot of another type is refused with 422 by the server.
+`RestoreSpec` gains `oneof target { GuestTarget guest = 8; DatabaseTarget database = 9; }`. The rule for compatibility: the server sends a guest or database target with an empty `destination` and `in_place = false`, so an agent released before targets existed fails on the existing check of the destination and creates nothing; agents from this release refuse any spec that sets `target` before they look at the destination. A files restore of a snapshot of another type is refused with 422 by the server.
 
 ### Disk images
 
