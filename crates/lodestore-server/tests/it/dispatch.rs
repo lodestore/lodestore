@@ -2444,3 +2444,53 @@ async fn dispatch_token_restore_rechecks_roots_capability() {
         ts.stop().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dispatch_finish_of_a_job_with_malformed_source_is_refused() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let host = enroll(&ts, &api, &repo, "host-m").await;
+        let pool = &ts.state().db.pool;
+        let mut agent = Fake::connect(&ts, &host, vec![]).await;
+        insert_job(pool, "job-m", &host.id, "cli", "running", now_ms()).await;
+        sqlx::query(
+            "UPDATE jobs SET source_ref = 'proxmox-vm/pve1/11111111-1111-4111-8111-111111111111', \
+             source_meta_json = '{\"BAD\":\"x\"}' WHERE id = 'job-m'",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        let snapshot = write_snapshot_for(&ts, "host-m", Some(&host.id)).await;
+
+        agent
+            .send(AgentBody::JobFinished(finished(
+                "job-m",
+                JobOutcome::Succeeded,
+                &snapshot,
+            )))
+            .await;
+        assert_eq!(agent.recv(is_ack).await, "job-m");
+        wait_state(pool, "job-m", "failed").await;
+        let at = backend.name();
+        let sql = "SELECT error_code FROM jobs WHERE id = $1";
+        assert_eq!(
+            text(pool, sql, "job-m").await.as_deref(),
+            Some("snapshot_policy_mismatch"),
+            "[{at}]"
+        );
+        let sql = "SELECT error_message FROM jobs WHERE id = $1";
+        let message = text(pool, sql, "job-m").await.unwrap_or_default();
+        assert!(message.contains("malformed source"), "[{at}] {message}");
+        let sql = "SELECT snapshot_id FROM jobs WHERE id = $1";
+        assert_eq!(text(pool, sql, "job-m").await, None, "[{at}]");
+        let sql = "SELECT verify_state FROM jobs WHERE id = $1";
+        assert_eq!(text(pool, sql, "job-m").await, None, "[{at}]");
+        let sql = "SELECT COUNT(*) FROM snapshots WHERE job_id = $1";
+        assert_eq!(number(pool, sql, "job-m").await, 0, "[{at}]");
+        assert!(!signed(&ts, &repo, &snapshot).await, "[{at}]");
+        drop(agent);
+        ts.stop().await;
+    }
+}

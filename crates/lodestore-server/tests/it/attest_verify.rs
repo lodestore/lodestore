@@ -1642,12 +1642,11 @@ impl Env {
         for key in [0, 1, 2, WAL] {
             let source_key = SourceKey::parse(KEYS[key]).unwrap();
             let of_key = || verified().filter(|d| d.key == key && key != WAL);
-            for host in 0..hosts {
+            for (host, host_id) in HOST_IDS.iter().enumerate().take(hosts) {
                 let server = self.server_latest(host, key).await;
                 // An id no signed record carries is looked up as a name; the name checks cover it.
                 if signed_hosts.contains(&host) {
-                    let scope =
-                        LatestScope::InstanceOnHost(source_key.clone(), HOST_IDS[host].into());
+                    let scope = LatestScope::InstanceOnHost(source_key.clone(), (*host_id).into());
                     let lode = lode_latest(&source, &scope).await?;
                     prop_assert_eq!(
                         &lode,
@@ -1835,5 +1834,62 @@ fn attest_verify_latest_of_a_cloned_key_needs_a_host() {
             panic!("{e}");
         }
         assert_eq!(coverage.into_inner().two_hosts, 1, "[{}]", backend.name());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn attest_verify_refuses_a_job_with_malformed_meta() {
+    let crowded = format!(
+        "{{{}}}",
+        (0..33)
+            .map(|n| format!("\"k{n:02}\":\"v\""))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    for backend in backends() {
+        let env = Env::new(&backend).await;
+        env.upgrade().await;
+        for (job, meta) in [
+            ("j-bad-key", r#"{"BAD":"x"}"#),
+            ("j-crowded", crowded.as_str()),
+        ] {
+            let snapshot_id = env.snapshot_claiming(job, claim(GUEST_A)).await;
+            env.job_of_source(job, &snapshot_id, GUEST_A, Some(meta))
+                .await;
+            for _ in 0..2 {
+                env.verify(job).await;
+                let at = format!("{job} [{}]", backend.name());
+                let column = |name| env.column(job, name);
+                assert_eq!(column("state").await.as_deref(), Some("failed"), "{at}");
+                assert_eq!(
+                    column("verify_state").await.as_deref(),
+                    Some("failed"),
+                    "{at}"
+                );
+                assert_eq!(
+                    column("error_code").await.as_deref(),
+                    Some("verification_failed"),
+                    "{at}"
+                );
+                let message = column("error_message").await.unwrap();
+                assert!(message.contains("malformed source"), "{at}: {message}");
+                assert_eq!(
+                    env.events(job, "verification_failed").await.len(),
+                    1,
+                    "{at}"
+                );
+                let linked: i64 =
+                    sqlx::query("SELECT COUNT(*) AS n FROM snapshots WHERE job_id = $1")
+                        .bind(job)
+                        .fetch_one(env.pool())
+                        .await
+                        .unwrap()
+                        .try_get("n")
+                        .unwrap();
+                assert_eq!(linked, 0, "{at}");
+                assert!(env.signed_source(&snapshot_id).await.is_none(), "{at}");
+            }
+        }
+        env.ts.stop().await;
     }
 }

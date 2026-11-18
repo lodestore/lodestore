@@ -61,8 +61,8 @@ struct Target {
     snapshot_id: String,
     host_id: String,
     repository_id: String,
-    source: SourceKey,
-    meta: Meta,
+    source_ref: String,
+    source_meta_json: Option<String>,
 }
 
 fn classify(error: &lodestore_format::Error) -> Verdict {
@@ -145,18 +145,12 @@ async fn load_target(state: &AppState, job_id: &str) -> anyhow::Result<Option<Ta
     let Some(snapshot_id) = row.try_get::<Option<String>, _>("snapshot_id")? else {
         return Ok(None);
     };
-    let (source, meta) = catalog::job_source(
-        job_id,
-        &row.try_get::<String, _>("source_ref")?,
-        row.try_get::<Option<String>, _>("source_meta_json")?
-            .as_deref(),
-    )?;
     Ok(Some(Target {
         snapshot_id,
         host_id: row.try_get("host_id")?,
         repository_id: row.try_get("repository_id")?,
-        source,
-        meta,
+        source_ref: row.try_get("source_ref")?,
+        source_meta_json: row.try_get("source_meta_json")?,
     }))
 }
 
@@ -192,6 +186,7 @@ async fn provenance_record(
     state: &AppState,
     job_id: &str,
     target: &Target,
+    (key, meta): (&SourceKey, &Meta),
     snapshot: &BlobId,
 ) -> anyhow::Result<pb::ProvenanceRecord> {
     let hostname: String = sqlx::query("SELECT hostname FROM agents WHERE id = $1")
@@ -205,7 +200,7 @@ async fn provenance_record(
         hostname,
         job_id: job_id.to_string(),
         verified_at: Some(timestamp_ms(now_ms())),
-        source: source::encode(&target.source, &target.meta)?,
+        source: source::encode(key, meta)?,
     })
 }
 
@@ -254,6 +249,12 @@ async fn verify_job(state: &AppState, job_id: &str, target: &Target) -> anyhow::
     if let Some(verdict) = ensure_catalog_row(state, job_id, target).await? {
         return Ok(verdict);
     }
+    // The catalog link already parsed the same row and refused a malformed source.
+    let (job_source, job_meta) = catalog::job_source(
+        job_id,
+        &target.source_ref,
+        target.source_meta_json.as_deref(),
+    )?;
     let repository = &target.repository_id;
     if let Err(error) = ensure_upgraded(state, repository).await {
         let error = format!("{error:#}");
@@ -279,11 +280,11 @@ async fn verify_job(state: &AppState, job_id: &str, target: &Target) -> anyhow::
     match manifest {
         Ok(manifest) if manifest.agent_id == target.host_id.as_bytes() => {
             match source::decode(manifest.source.as_ref()) {
-                Ok((claimed, _)) if claimed == target.source => {}
+                Ok((claimed, _)) if claimed == job_source => {}
                 Ok((claimed, _)) => {
                     tracing::warn!(
                         %job_id,
-                        expected = %target.source,
+                        expected = %job_source,
                         %claimed,
                         "the snapshot claims another source than its job"
                     );
@@ -292,7 +293,7 @@ async fn verify_job(state: &AppState, job_id: &str, target: &Target) -> anyhow::
                 Err(error) => {
                     tracing::warn!(
                         %job_id,
-                        expected = %target.source,
+                        expected = %job_source,
                         %error,
                         "the snapshot claims an invalid source"
                     );
@@ -393,7 +394,8 @@ async fn verify_job(state: &AppState, job_id: &str, target: &Target) -> anyhow::
         }
     }
     let mut entropy = Entropy::os();
-    let record = provenance_record(state, job_id, target, &snapshot).await?;
+    let record =
+        provenance_record(state, job_id, target, (&job_source, &job_meta), &snapshot).await?;
     let sealed = match seal_provenance(keys, &record, &mut entropy) {
         Ok(sealed) => sealed,
         Err(error) => return Ok(Verdict::Retry(error.to_string())),
