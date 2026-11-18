@@ -971,6 +971,9 @@ describe("Matching hosts", () => {
 		expect(screen.getByText("2 hook warnings")).toBeInTheDocument();
 		await user.click(screen.getByRole("button", { name: "Show hosts" }));
 		expect(screen.getByText("Other repository")).toBeInTheDocument();
+		expect(
+			screen.getByRole("link", { name: "web-1" }).closest(".grid"),
+		).toHaveClass("@min-[960px]:grid-cols-2");
 		expect(screen.getByText("Uses archive")).toBeInTheDocument();
 		expect(
 			screen.getByRole("img", {
@@ -997,6 +1000,10 @@ describe("Matching hosts", () => {
 
 		await user.click(toggle);
 		expect(screen.getByRole("link", { name: "web-1" })).toBeInTheDocument();
+		// Without another repository the host list spans the whole card.
+		expect(
+			screen.getByRole("link", { name: "web-1" }).closest(".grid"),
+		).not.toHaveClass("@min-[960px]:grid-cols-2");
 		const hide = screen.getByRole("button", { name: "Hide hosts" });
 		expect(hide).toHaveAttribute("aria-expanded", "true");
 

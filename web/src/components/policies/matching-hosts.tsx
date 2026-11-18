@@ -20,6 +20,7 @@ import {
 } from "@/components/ui/tooltip";
 import { copy } from "@/copy";
 import { sourceTypeNoun } from "@/lib/source-type";
+import { cn } from "@/lib/utils";
 
 const VISIBLE = 10;
 
@@ -286,7 +287,12 @@ export function MatchingHosts({
 						</CollapsibleTrigger>
 					)}
 				</div>
-				<CollapsibleContent className="grid gap-6 px-(--card-spacing) pt-4 @min-[960px]:grid-cols-2">
+				<CollapsibleContent
+					className={cn(
+						"grid gap-6 px-(--card-spacing) pt-4",
+						other.length > 0 && "@min-[960px]:grid-cols-2",
+					)}
+				>
 					<div className="flex min-w-0 flex-col gap-4">
 						{selectorEmpty && (
 							<p className="text-sm text-muted-foreground">
