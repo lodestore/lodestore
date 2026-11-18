@@ -165,7 +165,7 @@ fn row(candidate: Candidate, pool: Pool, exact: bool, source_ref: &str) -> PairR
 fn files_rows(
     specs: &[Spec],
     force_exact: bool,
-    name: Option<&str>,
+    name: impl Fn(usize) -> Option<&'static str>,
 ) -> (Vec<RowBefore>, Vec<PairRow>) {
     let mut before = Vec::new();
     let mut after = Vec::new();
@@ -174,7 +174,7 @@ fn files_rows(
         let (old, new) = match spec.pool {
             0 => (PoolBefore::Scheduled, Pool::Scheduled),
             1 => (PoolBefore::Manual, Pool::Manual),
-            _ => (PoolBefore::Stdin, stream(name)),
+            _ => (PoolBefore::Stdin, stream(name(index))),
         };
         before.push(RowBefore {
             pool: old,
@@ -196,6 +196,20 @@ fn stream_name() -> impl Strategy<Value = Option<&'static str>> {
     prop_oneof![Just(None), Just(Some(STREAM))]
 }
 
+fn stream_names() -> impl Strategy<Value = Vec<Option<&'static str>>> {
+    let streams = prop_oneof![
+        Just(vec![STREAM, "db.sql"]),
+        Just(vec![STREAM, "db.sql", "vault.tar"]),
+    ];
+    streams.prop_flat_map(|streams| {
+        let name = prop_oneof![
+            1 => Just(None),
+            3 => proptest::sample::select(streams).prop_map(Some),
+        ];
+        vec(name, 60)
+    })
+}
+
 proptest! {
     #[test]
     fn files_only_catalogs_decide_like_before(
@@ -206,7 +220,7 @@ proptest! {
         zone in zone(),
     ) {
         let policy = policy(zone);
-        let (before, after) = files_rows(&specs, force_exact, name);
+        let (before, after) = files_rows(&specs, force_exact, |_| name);
         let old_refs: Vec<&RowBefore> = before.iter().collect();
         let new_refs: Vec<&PairRow> = after.iter().collect();
 
@@ -226,7 +240,7 @@ proptest! {
         zone in zone(),
     ) {
         let policy = policy(zone);
-        let (_, mut mixed) = files_rows(&specs, force_exact, name);
+        let (_, mut mixed) = files_rows(&specs, force_exact, |_| name);
         let alone: Vec<Decision> = {
             let refs: Vec<&PairRow> = mixed.iter().collect();
             decide(&policy, &rules, &refs)
@@ -252,5 +266,45 @@ proptest! {
             .collect();
 
         prop_assert_eq!(actual, alone);
+    }
+
+    #[test]
+    fn named_streams_keep_everything_the_old_decide_kept(
+        specs in vec(spec(), 0..=60),
+        names in stream_names(),
+        force_exact in exactness(),
+        rules in retention(),
+        zone in zone(),
+    ) {
+        let policy = policy(zone);
+        let (before, after) = files_rows(&specs, force_exact, |i| names[i]);
+        let new_refs: Vec<&PairRow> = after.iter().collect();
+        let new: BTreeMap<String, bool> = decide(&policy, &rules, &new_refs)
+            .into_iter()
+            .map(|d| (d.id, d.keep))
+            .collect();
+        prop_assert_eq!(new.len(), after.len());
+
+        let old_refs: Vec<&RowBefore> = before.iter().collect();
+        for old in decide_before_phase_20(&policy, &rules, &old_refs) {
+            prop_assert!(!old.keep || new[&old.id], "forgot {}", old.id);
+        }
+
+        // Each stream decided alone by the old code is exactly what the new code decides for it.
+        if !times_unconfirmed_before(&old_refs) {
+            for (index, row) in before.iter().enumerate() {
+                let alone: Vec<&RowBefore> = before
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, r)| r.pool != PoolBefore::Stdin || names[*i] == names[index])
+                    .map(|(_, r)| r)
+                    .collect();
+                let keep = decide_before_phase_20(&policy, &rules, &alone)
+                    .into_iter()
+                    .find(|d| d.id == row.candidate.id)
+                    .map(|d| d.keep);
+                prop_assert_eq!(keep, Some(new[&row.candidate.id]), "row {}", index);
+            }
+        }
     }
 }

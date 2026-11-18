@@ -1873,7 +1873,7 @@ async fn restore_refuses_a_target_it_cannot_run() {
     let hub = fx.hub();
     let ids = ids(&fx).await;
     let planned = fx.plan(&["a/x"], 4, None).await;
-    let dest = fx.root.join("target");
+    let mut n = 0;
     for target in [
         Target::Guest(GuestTarget {
             node: "pve1".into(),
@@ -1885,41 +1885,50 @@ async fn restore_refuses_a_target_it_cannot_run() {
             in_place: false,
         }),
     ] {
-        let id = fx.job_id();
-        let spec = RestoreSpec {
-            destination: String::new(),
-            target: Some(target.clone()),
-            ..fx.spec(
-                &dest,
-                ConflictPolicy::SkipExisting,
-                false,
-                false,
-                ids.k_id,
-                ids.repo_id,
+        for (by_destination, in_place) in [(true, false), (true, true), (false, false)] {
+            n += 1;
+            let dest = fx.root.join(format!("target{n}"));
+            fs::create_dir(&dest).unwrap();
+            let id = fx.job_id();
+            let spec = RestoreSpec {
+                destination: if by_destination {
+                    dest.to_string_lossy().into_owned()
+                } else {
+                    String::new()
+                },
+                target: Some(target.clone()),
+                ..fx.spec(
+                    &dest,
+                    ConflictPolicy::SkipExisting,
+                    in_place,
+                    false,
+                    ids.k_id,
+                    ids.repo_id,
+                )
+            };
+            let options = RestoreOptions {
+                root: dest.clone(),
+                allow_in_place: true,
+                ..options()
+            };
+            let msgs = run(
+                &hub,
+                &id,
+                spec,
+                MemPlan::new(&planned),
+                StoreFetcher::new(&fx),
+                options,
             )
-        };
-        let options = RestoreOptions {
-            root: dest.clone(),
-            allow_in_place: true,
-            ..options()
-        };
-        let msgs = run(
-            &hub,
-            &id,
-            spec,
-            MemPlan::new(&planned),
-            StoreFetcher::new(&fx),
-            options,
-        )
-        .await;
-        let f = finished_of(&msgs, &id).unwrap();
-        assert_eq!(f.outcome, JobOutcome::Failed as i32, "{target:?} {msgs:?}");
-        assert!(
-            f.error_message
-                .contains("the destination must be an absolute path"),
-            "{target:?} {}",
-            f.error_message
-        );
+            .await;
+            let f = finished_of(&msgs, &id).unwrap();
+            let case = format!("{target:?} destination={by_destination} in_place={in_place}");
+            assert_eq!(f.outcome, JobOutcome::Failed as i32, "{case} {msgs:?}");
+            assert!(
+                f.error_message.contains("unsupported restore target"),
+                "{case} {}",
+                f.error_message
+            );
+            assert_eq!(fs::read_dir(&dest).unwrap().count(), 0, "{case}");
+        }
     }
-    assert!(!dest.exists());
 }

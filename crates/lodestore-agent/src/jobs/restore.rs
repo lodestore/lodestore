@@ -210,6 +210,12 @@ struct Prepared {
 
 impl Prepared {
     fn new(spec: &RestoreSpec, options: &RestoreOptions) -> Result<Self, Abort> {
+        if spec.target.is_some() {
+            return Err(abort(
+                "restore_failed",
+                "unsupported restore target: this agent restores only files",
+            ));
+        }
         let invalid = |what: &str| {
             abort(
                 "restore_failed",

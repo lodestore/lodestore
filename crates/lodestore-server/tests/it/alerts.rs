@@ -1341,6 +1341,37 @@ async fn alerts_gone_moment_is_stored_once() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn alerts_still_evaluate_when_the_gone_moment_cannot_be_stored() {
+    for backend in backends() {
+        let env = Env::start(&backend).await;
+        let now = now_ms();
+        env.host("h1", "web-1").await;
+        env.policy("daily", "h1", DAILY).await;
+        env.guest_snapshot("g1", "h1", "daily", &guests(1)[0], now - DAY)
+            .await;
+        env.failed_job("j1", "h1", "daily", now - HOUR, "disk full")
+            .await;
+        // A view that is readable but not writable on both backends.
+        for sql in [
+            "ALTER TABLE source_instances_gone RENAME TO source_instances_gone_rw",
+            "CREATE VIEW source_instances_gone AS SELECT DISTINCT * FROM source_instances_gone_rw",
+        ] {
+            sqlx::query(sql).execute(env.pool()).await.unwrap();
+        }
+
+        let out = alerts::tick(env.ts.state(), now).await;
+        assert!(out.is_ok(), "[{}] {out:?}", backend.name());
+        let active = env.alerts("active").await;
+        assert!(
+            active.iter().any(|a| a["type"] == "backup_failed"),
+            "[{}] {active:?}",
+            backend.name()
+        );
+        env.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn alerts_gone_moment_clears_when_expected_again() {
     for backend in backends() {
         let env = Env::start(&backend).await;
