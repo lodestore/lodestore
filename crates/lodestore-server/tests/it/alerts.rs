@@ -313,7 +313,12 @@ impl Env {
     }
 
     async fn facts(&self, host: &str, vmids: &[u32], at: i64) {
+        self.facts_of(host, vmids, false, at).await;
+    }
+
+    async fn facts_of(&self, host: &str, vmids: &[u32], truncated: bool, at: i64) {
         let facts = SourceFacts {
+            truncated,
             proxmox: Some(ProxmoxFacts {
                 cluster: "pve-prod".to_string(),
                 node: "pve1".to_string(),
@@ -1725,6 +1730,50 @@ async fn alerts_gone_needs_an_hour_and_rearms_after_a_day() {
             rows.try_get::<i64, _>("n").unwrap(),
             0,
             "[{name}] stale facts"
+        );
+        env.stop().await;
+    }
+}
+
+/// A guest the agent stops reporting while its list is incomplete (a SMBIOS
+/// uuid shared with another VM, or any other guest left out) is neither
+/// declared gone nor dropped: it stays expected, so its missed backups alert.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn alerts_guest_left_out_of_an_incomplete_list_still_alerts() {
+    for backend in backends() {
+        let name = backend.name();
+        let env = Env::start(&backend).await;
+        env.host("h1", "web-1").await;
+        env.vm_policy("vms", "h1", "101, 102").await;
+        let t = now_ms();
+        env.facts("h1", &[101, 102], t).await;
+        let (victim, other) = (
+            env.guest_key("h1", 101).await,
+            env.guest_key("h1", 102).await,
+        );
+        env.guest_snapshot("g1", "h1", "vms", &victim, t - MINUTE)
+            .await;
+        env.guest_snapshot("g2", "h1", "vms", &other, t - MINUTE)
+            .await;
+        env.tick(t).await;
+        assert!(
+            env.firing_keys("no_recent_backup").await.is_empty(),
+            "[{name}]"
+        );
+
+        let mut at = t;
+        while at < t + 3 * DAY {
+            at += 6 * HOUR;
+            env.facts_of("h1", &[102], true, at).await;
+            env.guest_snapshot(&format!("o{at}"), "h1", "vms", &other, at - MINUTE)
+                .await;
+            env.tick(at).await;
+        }
+        assert!(env.gone_rows().await.is_empty(), "[{name}]");
+        assert_eq!(
+            env.firing_keys("no_recent_backup").await,
+            [format!("no_recent_backup:h1:vms:{victim}")],
+            "[{name}]"
         );
         env.stop().await;
     }
