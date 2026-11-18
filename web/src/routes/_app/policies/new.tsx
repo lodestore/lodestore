@@ -6,6 +6,7 @@ import {
 	BLANK_LIMITS,
 	BLANK_RETENTION,
 	BLANK_SCHEDULE,
+	BLANK_SOURCE,
 	type PolicyDraft,
 } from "@/components/policies/policy-form";
 import {
@@ -34,6 +35,7 @@ function quickstart(repository: string): PolicyDraft {
 		exclude: "**/.cache\n**/node_modules",
 		oneFileSystem: false,
 		excludeCaches: false,
+		source: BLANK_SOURCE,
 		schedule: BLANK_SCHEDULE,
 		retention: BLANK_RETENTION,
 		limits: BLANK_LIMITS,
