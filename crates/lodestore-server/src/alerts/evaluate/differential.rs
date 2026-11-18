@@ -72,9 +72,11 @@ fn files_pair() -> impl Strategy<Value = PairFacts> {
         proptest::option::of(0..=10 * DAY),
         0..=30 * DAY,
         proptest::option::of((0..=10 * DAY, "[a-z ]{0,12}")),
+        proptest::option::of(0..=10 * DAY),
+        proptest::option::of(0..=10 * DAY),
     )
         .prop_map(
-            |(limit_secs, success_ago, baseline_ago, failure)| PairFacts {
+            |(limit_secs, success_ago, baseline_ago, failure, gone_ago, returned_ago)| PairFacts {
                 policy: String::new(),
                 limit: limit_secs.map(|s| Duration::from_secs(s as u64)),
                 last_success_ms: success_ago.map(|ago| NOW - ago),
@@ -83,7 +85,8 @@ fn files_pair() -> impl Strategy<Value = PairFacts> {
                 source_ref: String::new(),
                 source_label: None,
                 expected: true,
-                gone_at_ms: None,
+                gone_at_ms: gone_ago.map(|ago| NOW - ago),
+                returned_at_ms: returned_ago.map(|ago| NOW - ago),
             },
         )
 }

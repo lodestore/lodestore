@@ -3,7 +3,8 @@ use super::model::{AlertFacts, AlertType, CertKind, HostFacts, Severity, Thresho
 
 const DAY_MS: i64 = 86_400_000;
 pub const SECURITY_ALERT_WINDOW_MS: i64 = DAY_MS;
-const GONE_WINDOW_MS: i64 = DAY_MS;
+pub const GONE_AFTER_MS: i64 = 3_600_000;
+pub const GONE_WINDOW_MS: i64 = DAY_MS;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Candidate {
@@ -50,8 +51,9 @@ pub fn evaluate(
     for h in &inputs.hosts {
         for pair in h.pairs.iter().filter(|p| !p.expected) {
             if let Some(gone_at) = pair.gone_at_ms
-                && gone_at <= now_ms
-                && now_ms < gone_at + GONE_WINDOW_MS
+                && pair.returned_at_ms.is_none()
+                && gone_at + GONE_AFTER_MS <= now_ms
+                && now_ms < gone_at + GONE_AFTER_MS + GONE_WINDOW_MS
             {
                 out.push(Candidate {
                     policy: Some(pair.policy.clone()),
@@ -314,6 +316,7 @@ mod tests {
             source_label: None,
             expected: true,
             gone_at_ms: None,
+            returned_at_ms: None,
         }
     }
 
@@ -388,43 +391,75 @@ mod tests {
         assert_eq!(keys(&out), ["no_recent_backup:h1:daily:proxmox-vm/pve1/17"]);
     }
 
+    fn proxmox_policy() -> lodestore_policy::BackupPolicy {
+        lodestore_policy::parse_yaml(
+            "apiVersion: lodestore.io/v1alpha2\nkind: BackupPolicy\nmetadata:\n  name: p\n\
+             spec:\n  repository: main\n  source:\n    type: proxmox-vm\n    vmids: [101]\n",
+        )
+        .unwrap()
+    }
+
+    fn strings(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
     #[test]
-    fn expected_instances_without_discovery_are_the_known_ones() {
-        let policy = |version: &str, source: &str| {
-            let yaml = format!(
-                "apiVersion: lodestore.io/{version}\nkind: BackupPolicy\nmetadata:\n  name: p\n\
-                 spec:\n  repository: main\n{source}"
-            );
-            lodestore_policy::parse_yaml(&yaml).unwrap()
+    fn expected_instances_union_failures_and_stub() {
+        use crate::alerts::inputs::{Discovered, expected_instances};
+        let guests = proxmox_policy();
+        let files = lodestore_policy::parse_yaml(
+            "apiVersion: lodestore.io/v1alpha1\nkind: BackupPolicy\nmetadata:\n  name: p\n\
+             spec:\n  repository: main\n  paths: [/etc]\n",
+        )
+        .unwrap();
+        let found = |keys: &[&str], complete| Discovered {
+            keys: strings(keys),
+            complete,
         };
-        let guests = policy(
-            "v1alpha2",
-            "  source:\n    type: proxmox-vm\n    vmids: [101]\n",
-        );
-        let files = policy("v1alpha1", "  paths: [/etc]\n");
-        let (a, b) = (String::from("vm/a"), String::from("vm/b"));
-        let known = [a.clone(), b.clone()];
         assert_eq!(
-            super::super::inputs::expected_instances(&guests, None, &known),
-            [a.clone(), b.clone()]
-        );
-        assert_eq!(
-            super::super::inputs::expected_instances(
+            expected_instances(
                 &guests,
-                Some(std::slice::from_ref(&a)),
-                &known
+                Some(&found(&["B", "A"], true)),
+                &strings(&["C"]),
+                &strings(&[""])
             ),
-            vec![a.clone()]
+            strings(&["", "A", "B"])
         );
-        assert!(super::super::inputs::expected_instances(&guests, Some(&[]), &known).is_empty());
         assert_eq!(
-            super::super::inputs::expected_instances(
-                &files,
-                Some(std::slice::from_ref(&a)),
-                &known
-            ),
-            [String::new()]
+            expected_instances(&guests, Some(&found(&["A"], false)), &strings(&["C"]), &[]),
+            strings(&["A", "C"])
         );
+        assert_eq!(
+            expected_instances(&guests, Some(&found(&[], true)), &[], &[]),
+            strings(&[""])
+        );
+        assert_eq!(
+            expected_instances(&guests, None, &strings(&["C"]), &[]),
+            strings(&["C"])
+        );
+        assert_eq!(
+            expected_instances(&files, Some(&found(&["A"], true)), &strings(&["C"]), &[]),
+            strings(&[""])
+        );
+    }
+
+    #[test]
+    fn unknown_is_not_empty() {
+        use crate::alerts::inputs::{Discovered, expected_instances};
+        let guests = proxmox_policy();
+        let known = strings(&["C"]);
+        let unknown = expected_instances(&guests, None, &known, &[]);
+        let nothing = expected_instances(
+            &guests,
+            Some(&Discovered {
+                keys: vec![],
+                complete: true,
+            }),
+            &known,
+            &[],
+        );
+        assert_eq!(unknown, strings(&["C"]));
+        assert_eq!(nothing, strings(&[""]));
     }
 
     #[test]
@@ -468,27 +503,35 @@ mod tests {
         }
     }
 
+    fn gone_pair(
+        limit: Option<u64>,
+        success_ago_h: Option<i64>,
+        gone_at: Option<i64>,
+        returned_at: Option<i64>,
+    ) -> PairFacts {
+        let mut p = pair(None, success_ago_h);
+        p.source_ref = "proxmox-vm/pve1/7".into();
+        p.source_label = Some("VM 101 \u{b7} web".into());
+        p.limit = limit.map(|h| Duration::from_secs(h * 3600));
+        p.expected = false;
+        p.gone_at_ms = gone_at;
+        p.returned_at_ms = returned_at;
+        p
+    }
+
     #[test]
     fn gone_instance_raises_one_event_for_a_day() {
-        let gone = |limit: Option<u64>, success_ago_h: Option<i64>, gone_at: Option<i64>| {
-            let mut p = pair(None, success_ago_h);
-            p.source_ref = "proxmox-vm/pve1/7".into();
-            p.source_label = Some("VM 101 \u{b7} web".into());
-            p.limit = limit.map(|h| Duration::from_secs(h * 3600));
-            p.expected = false;
-            p.gone_at_ms = gone_at;
-            p
-        };
         let g = NOW - 30 * DAY_MS;
         for limit in [None, Some(48)] {
             for success in [None, Some(30 * 24), Some(1)] {
-                let p = gone(limit, success, Some(g));
+                let p = gone_pair(limit, success, Some(g), None);
                 for (at, raised) in [
-                    (g, true),
-                    (g + 23 * HOUR, true),
-                    (g + 24 * HOUR, false),
+                    (g + HOUR, true),
+                    (g + 24 * HOUR, true),
+                    (g + 25 * HOUR - 1, true),
                     (g + 25 * HOUR, false),
-                    (g - 1, false),
+                    (g + 26 * HOUR, false),
+                    (g, false),
                 ] {
                     let inputs = Inputs {
                         hosts: vec![host(vec![p.clone()])],
@@ -513,10 +556,26 @@ mod tests {
             }
         }
         let inputs = Inputs {
-            hosts: vec![host(vec![gone(Some(48), Some(1), None)])],
+            hosts: vec![host(vec![gone_pair(Some(48), Some(1), None, None)])],
             ..Inputs::default()
         };
         assert!(evaluate(&inputs, NOW, NOW, &T).is_empty());
+    }
+
+    #[test]
+    fn gone_event_waits_an_hour_and_is_quiet_after_a_return() {
+        let t = NOW - 10 * DAY_MS;
+        let raised = |returned: Option<i64>, at: i64| {
+            let inputs = Inputs {
+                hosts: vec![host(vec![gone_pair(Some(48), Some(1), Some(t), returned)])],
+                ..Inputs::default()
+            };
+            !evaluate(&inputs, at, at, &T).is_empty()
+        };
+        assert!(!raised(None, t + 59 * 60_000));
+        assert!(raised(None, t + 61 * 60_000));
+        assert!(!raised(Some(t + 2 * HOUR), t + 61 * 60_000));
+        assert!(!raised(None, t + HOUR + 24 * HOUR));
     }
 
     #[test]
