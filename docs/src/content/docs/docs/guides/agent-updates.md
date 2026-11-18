@@ -31,6 +31,12 @@ A version with a suffix such as `-rc.1` is a release candidate; one without a su
 - A server whose agent directory holds a pre-release does not show stable hosts as outdated and does not start an update for them, and it cancels such hosts that were already queued. Agents of 0.1 check no channel, so this filter is what protects them.
 - A new host installed from that server gets the pre-release agent, because `install.sh` and the download for it do not check the channel.
 
+## What the agent says it can back up
+
+At connection the agent lists its capabilities. For each kind of source it can back up it lists `source:<type>`; an agent of this version lists `source:files`. The agent finds Proxmox guests, PostgreSQL clusters and MySQL servers on its host and reports them, so the host page shows them in its Sources tab, but it does not list `source:proxmox-vm`, `source:proxmox-ct`, `source:postgres` or `source:mysql` until a version that backs them up exists.
+
+The host page marks a found type the agent cannot back up as **Agent too old**, the policy form counts such agents next to the type ("1 agent too old"), and a job of a policy for that type fails before it starts with `source_agent_outdated` and a message such as "The backup did not start. The agent on web-1 is too old to back up virtual machines. Update the agent on web-1, then run again." Updating the agent to a version that lists `source:<type>` clears the mark; nothing else is needed. See [Jobs that do not start](/docs/guides/policies/#jobs-that-do-not-start). An agent that reports a capability it does not have gains nothing by it: the agent checks every job against its own capabilities again, and a job still needs a policy that selects the host.
+
 ## Settings
 
 In `server.yaml`:
