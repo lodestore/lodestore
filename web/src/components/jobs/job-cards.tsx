@@ -476,6 +476,23 @@ export function backupFailureCopy(
 	return null;
 }
 
+/** Short list form for failures whose full text opens with a generic lead. */
+export function backupFailureShort(
+	job: Pick<JobDetail, "error_code"> & {
+		error_detail?: JobDetail["error_detail"];
+	},
+): string | null {
+	const s = copy.jobs.errors.short;
+	const noun = sourceTypeNoun(job.error_detail?.source_type ?? "");
+	switch (job.error_code) {
+		case "source_agent_outdated":
+			return noun ? s.source_agent_outdated(noun) : s.source_agent_outdated_any;
+		case "source_not_found":
+			return noun ? s.source_not_found(noun) : s.source_not_found_any;
+	}
+	return null;
+}
+
 export function failureText(job: JobDetail) {
 	if (job.kind === "restore") return restoreFailureText(job);
 	return (

@@ -62,6 +62,7 @@ const MAX_CLONES = 3;
 const FROM_680 = "hidden @min-[680px]:table-cell";
 const PAD = "px-2 @min-[680px]:px-4";
 const NESTED = "pl-8 @min-[680px]:pl-8";
+const SOURCE_WIDTH = "max-w-32 @min-[680px]:max-w-40 @min-[860px]:max-w-72";
 const UNPROTECTED = "unprotected";
 const ALL = "all";
 const text = copy.sources.host;
@@ -80,7 +81,7 @@ function TypeIcon({ type }: { type: string }) {
 function SourceCell({
 	type,
 	label,
-	className = "max-w-36 @min-[680px]:max-w-72",
+	className = SOURCE_WIDTH,
 }: {
 	type: string;
 	label: string;
@@ -168,10 +169,7 @@ function ItemRow({ item }: { item: SourceItem }) {
 		<TableRow className="h-12">
 			<TableCell className={cn(PAD, "text-sm font-semibold", nested && NESTED)}>
 				{nested ? (
-					<Truncated
-						text={item.name ?? item.label}
-						className="max-w-36 @min-[680px]:max-w-72"
-					/>
+					<Truncated text={item.name ?? item.label} className={SOURCE_WIDTH} />
 				) : (
 					<SourceCell type={item.source_type} label={item.label} />
 				)}

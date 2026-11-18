@@ -217,14 +217,10 @@ describe("JobsTable", () => {
 			],
 		});
 		expect(
-			within(await rowOf("old")).getByText(
-				/^The backup did not start\. The agent on web-1 is too old/,
-			),
+			within(await rowOf("old")).getByText("Agent too old for this source"),
 		).toBeInTheDocument();
 		expect(
-			within(await rowOf("none")).getByText(
-				/^The backup did not start\. Nothing the policy selects/,
-			),
+			within(await rowOf("none")).getByText("Source not found on the host"),
 		).toBeInTheDocument();
 		expect(
 			within(await rowOf("gc")).getByText(

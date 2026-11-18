@@ -9,6 +9,7 @@ import {
 import type { JobKind, JobSummary } from "@/api/gen/model";
 import {
 	backupFailureCopy,
+	backupFailureShort,
 	restoreFailureText,
 } from "@/components/jobs/job-cards";
 import { TextWithPaths } from "@/components/path-text";
@@ -510,6 +511,7 @@ export function JobResult({ job }: { job: JobRow }) {
 			);
 		case "failed": {
 			const reason =
+				backupFailureShort(job) ??
 				backupFailureCopy(job) ??
 				(job.error_message?.split("\n")[0].trim() ||
 					copy.jobs.statusHint.failed);
