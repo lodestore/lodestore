@@ -103,6 +103,7 @@ Deferred:
 - `format_version` stays 1. The golden vectors that exist did not change; `source-vectors.json` is new.
 - A server of 0.2 does not read policies of `lodestore.io/v1alpha2`, the only version that has `spec.source`. A policy of `files` is exported in the old version and byte for byte as before.
 - An older `lode` counts a record whose source it cannot decode as unreadable, and reads a snapshot of an unknown type only by id.
+- Known limit, to be closed by the discovery binding of phase 21: the server signs the instance key that the job names, and `lode latest@<key>` spans all hosts, so once non-`files` jobs exist a compromised host could claim the key of an instance of another host. Phase 20 has no such job (the server answers 422), and the API narrows `latest` to one `host`.
 - The key of an instance and the layout of an image cannot change under data already written; a change needs a new ADR.
 - A guest that migrates or fails over looks like a new instance, with a new retention history, until a later phase adds a way to say "the same guest". The old group is not deleted by this.
 
