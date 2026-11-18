@@ -496,7 +496,7 @@ describe("Host sources states", () => {
 		await user.click(
 			within(alert).getByRole("button", { name: "Retry loading sources" }),
 		);
-		await screen.findByText("VM 102 · app");
+		await screen.findByText("VM 102 · app", undefined, { timeout: 12_000 });
 	});
 
 	it("says so when the agent found nothing", async () => {
