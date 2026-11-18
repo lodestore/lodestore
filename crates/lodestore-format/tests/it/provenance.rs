@@ -16,6 +16,7 @@ use lodestore_format::attest::{
 };
 use lodestore_format::crypto::{BlobId, Entropy};
 use lodestore_format::error::Error;
+use lodestore_format::index::hex32;
 use lodestore_format::keys::{MasterKey, ReadKeys};
 use lodestore_format::locks::new_lock_id;
 use lodestore_format::pb;
@@ -23,7 +24,6 @@ use lodestore_format::provenance::{
     FUTURE_TOLERANCE_MS, LatestMode, LatestScope, LatestWarning, ProvenanceSet, Signer,
     pick_latest, pick_latest_in,
 };
-use lodestore_format::index::hex32;
 use lodestore_format::reader::Reader;
 use lodestore_format::snapshot::SnapshotEntry;
 use lodestore_format::source::{self, Meta, SourceKey};
@@ -1084,16 +1084,19 @@ fn latest_on_a_host_never_takes_an_id_as_a_name() {
             )),
             "{msg}"
         );
-        assert!(msg.contains(&format!("{VICTIM:?} (\"h2\") newest")), "{msg}");
+        assert!(
+            msg.contains(&format!("{VICTIM:?} (\"h2\") newest")),
+            "{msg}"
+        );
     }
 
     let real = pick(&[guest_record(1, VICTIM, "web"), impostor.clone()], VICTIM).unwrap();
     assert_eq!(real.entry.id, id(1));
     assert!(by_name(&real.warnings).is_empty(), "{:?}", real.warnings);
     assert!(
-        real.warnings
-            .iter()
-            .any(|w| matches!(w, LatestWarning::HostIdAlsoName { host_id, .. } if host_id == VICTIM)),
+        real.warnings.iter().any(
+            |w| matches!(w, LatestWarning::HostIdAlsoName { host_id, .. } if host_id == VICTIM)
+        ),
         "{:?}",
         real.warnings
     );

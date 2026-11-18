@@ -347,8 +347,7 @@ async fn adv_source_facts_are_bounded() {
         big.databases = bloated_servers();
         heartbeat(&agent, big).await;
         wait_stored(pool, &a.id, |d| d.truncated).await;
-        let dropped: Discovery =
-            serde_json::from_str(&stored(pool, &a.id).await.unwrap()).unwrap();
+        let dropped: Discovery = serde_json::from_str(&stored(pool, &a.id).await.unwrap()).unwrap();
         assert!(
             dropped.proxmox.is_none() && dropped.servers.is_empty(),
             "[{}] a list above the size limit is not stored",
@@ -381,7 +380,12 @@ async fn adv_source_facts_are_bounded() {
         for guest in guests {
             assert!(guest.tags.len() <= MAX_GUEST_TAGS);
             assert!(guest.name.as_ref().unwrap().len() <= MAX_NAME_BYTES);
-            assert!(guest.pool.as_ref().is_none_or(|p| p.len() <= MAX_NAME_BYTES));
+            assert!(
+                guest
+                    .pool
+                    .as_ref()
+                    .is_none_or(|p| p.len() <= MAX_NAME_BYTES)
+            );
         }
         assert_eq!(kept.servers.len(), MAX_SERVERS);
         assert!(kept.servers.iter().all(|s| {
