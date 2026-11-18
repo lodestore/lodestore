@@ -10221,6 +10221,7 @@
             "type": "object",
             "required": [
               "mounts",
+              "source_types",
               "cert_issued_at",
               "next_renewal_at",
               "repository_name"
@@ -10248,6 +10249,13 @@
               },
               "repository_name": {
                 "type": "string"
+              },
+              "source_types": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Types other than files that the agent found on the host, in the order proxmox-vm, proxmox-ct, postgres, mysql; empty when it found none or has not reported."
               },
               "uptime_s": {
                 "type": [

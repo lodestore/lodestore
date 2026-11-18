@@ -151,6 +151,8 @@ pub struct HostDetail {
     pub kernel: Option<String>,
     pub uptime_s: Option<i64>,
     pub mounts: Vec<HostMount>,
+    /// Types other than files that the agent found on the host, in the order proxmox-vm, proxmox-ct, postgres, mysql; empty when it found none or has not reported.
+    pub source_types: Vec<String>,
     pub cert_issued_at: i64,
     pub next_renewal_at: i64,
     pub repository_name: String,
@@ -158,7 +160,7 @@ pub struct HostDetail {
 
 async fn load_detail(state: &AppState, id: &str) -> Result<HostDetail, ApiError> {
     let sql = format!(
-        "SELECT {HOST_COLUMNS}, a.kernel, a.facts_json, a.cert_issued_at, r.name AS repository_name \
+        "SELECT {HOST_COLUMNS}, a.kernel, a.facts_json, a.sources_json, a.sources_collected_at, a.cert_issued_at, r.name AS repository_name \
          FROM agents a JOIN repositories r ON r.id = a.repository_id WHERE a.id = $1"
     );
     let row = sqlx::query(sqlx::AssertSqlSafe(sql))
@@ -185,7 +187,21 @@ async fn load_detail(state: &AppState, id: &str) -> Result<HostDetail, ApiError>
         })
         .unwrap_or_default();
     let cert_issued_at: i64 = row.try_get("cert_issued_at")?;
+    let source_types = crate::sources::parse_stored(
+        row.try_get::<Option<String>, _>("sources_json")?.as_deref(),
+        row.try_get("sources_collected_at")?,
+    )
+    .map(|stored| {
+        stored
+            .discovery
+            .types()
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    })
+    .unwrap_or_default();
     Ok(HostDetail {
+        source_types,
         next_renewal_at: cert_issued_at + (host.cert_not_after - cert_issued_at) * 2 / 3,
         kernel: row.try_get("kernel")?,
         uptime_s: facts["uptime_s"].as_i64(),

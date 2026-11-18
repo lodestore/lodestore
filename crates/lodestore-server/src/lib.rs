@@ -28,6 +28,7 @@ pub mod repos;
 pub mod schedule;
 pub mod secrets;
 pub mod serve;
+pub mod sources;
 pub mod state;
 pub mod system;
 

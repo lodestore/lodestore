@@ -91,6 +91,7 @@ message Heartbeat {
   repeated Mount mounts = 4;
   HookFacts hook_facts = 5;
   RestoreFacts restore_facts = 6;
+  SourceFacts source_facts = 7;
 }
 
 message Mount {
@@ -146,6 +147,61 @@ message RenewResponse {
   string leaf_pem = 1;
   int64 issued_at = 2;
   int64 expires_at = 3;
+}
+
+// The sources the agent found on its host. Absent: the agent does not know yet.
+// Empty: it looked and found none.
+message SourceFacts {
+  // How long ago the collection finished, so the server does not depend on the
+  // agent clock.
+  uint64 age_ms = 1;
+  bool truncated = 2;
+  ProxmoxFacts proxmox = 3;
+  repeated DatabaseServer databases = 4;
+}
+
+message ProxmoxFacts {
+  // Empty on a node outside a cluster.
+  string cluster = 1;
+  string node = 2;
+  repeated ProxmoxGuest guests = 3;
+}
+
+enum GuestKind {
+  GUEST_KIND_UNSPECIFIED = 0;
+  GUEST_KIND_VM = 1;
+  GUEST_KIND_CT = 2;
+}
+
+message ProxmoxGuest {
+  GuestKind kind = 1;
+  uint32 vmid = 2;
+  string name = 3;
+  string uuid = 4;
+  string pool = 5;
+  repeated string tags = 6;
+}
+
+enum DatabaseKind {
+  DATABASE_KIND_UNSPECIFIED = 0;
+  DATABASE_KIND_POSTGRES = 1;
+  DATABASE_KIND_MYSQL = 2;
+}
+
+message DatabaseServer {
+  DatabaseKind kind = 1;
+  uint32 port = 2;
+  string version = 3;
+  bool unreachable = 4;
+  // The decimal system_identifier of a PostgreSQL server or the server_uuid of
+  // a MySQL server.
+  string server_id = 5;
+  repeated Database databases = 6;
+}
+
+message Database {
+  string name = 1;
+  uint32 oid = 2;
 }
 
 message HookFacts {
