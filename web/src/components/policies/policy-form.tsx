@@ -7,6 +7,8 @@ import type {
 	RepositorySummary,
 	Retention,
 	ScheduleInfo,
+	Source,
+	SourceAvailability,
 } from "@/api/gen/model";
 import { LabelsEditor } from "@/components/labels-editor";
 import {
@@ -17,6 +19,10 @@ import {
 import { LimitsPanel } from "@/components/policies/limits-panel";
 import { RetentionPanel } from "@/components/policies/retention-panel";
 import { SchedulePanel } from "@/components/policies/schedule-panel";
+import {
+	SourceTypeCards,
+	type SourceTypeState,
+} from "@/components/policies/source-type-cards";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -46,8 +52,10 @@ import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { copy } from "@/copy";
 import type { LabelRow } from "@/lib/labels";
+import type { SourceType } from "@/lib/source-type";
 
 const API_VERSION = "lodestore.io/v1alpha1";
+const API_VERSION_SOURCES = "lodestore.io/v1alpha2";
 const KIND = "BackupPolicy";
 const HOSTS_LISTED = 10;
 export const BLANK_LABEL: LabelRow = { key: "", value: "" };
@@ -111,6 +119,88 @@ export const BLANK_LIMITS: LimitsDraft = {
 	ioniceLevel: "",
 };
 
+export type SourceDraft = {
+	type: SourceType;
+	guests: {
+		mode: "pick" | "pool" | "tags";
+		vmids: number[];
+		pool: string;
+		tags: string[];
+	};
+	databases: {
+		mode: "all" | "pick" | "except";
+		pick: string[];
+		except: string[];
+	};
+	mixed: Source | null;
+};
+
+export const BLANK_SOURCE: SourceDraft = {
+	type: "files",
+	guests: { mode: "pick", vmids: [], pool: "", tags: [] },
+	databases: { mode: "all", pick: [], except: [] },
+	mixed: null,
+};
+
+const byNumber = (a: number, b: number) => a - b;
+
+export function sourceFromDraft(draft: SourceDraft): Source | undefined {
+	const { type } = draft;
+	if (type === "files") return undefined;
+	if (draft.mixed?.type === type) return draft.mixed;
+	if (type === "proxmox-vm" || type === "proxmox-ct") {
+		const { mode, vmids, pool, tags } = draft.guests;
+		if (mode === "pick") {
+			return vmids.length > 0
+				? { type, vmids: [...vmids].sort(byNumber) }
+				: undefined;
+		}
+		if (mode === "pool") {
+			return pool.trim() !== "" ? { type, pool: pool.trim() } : undefined;
+		}
+		return tags.length > 0 ? { type, tags: [...tags].sort() } : undefined;
+	}
+	const { mode, pick, except } = draft.databases;
+	if (mode === "pick") {
+		return pick.length > 0 ? { type, databases: [...pick].sort() } : undefined;
+	}
+	if (mode === "except" && except.length > 0) {
+		return { type, excludeDatabases: [...except].sort() };
+	}
+	return { type };
+}
+
+export function sourceToDraft(source?: Source | null): SourceDraft {
+	if (!source || source.type === "files") return BLANK_SOURCE;
+	if (source.type === "proxmox-vm" || source.type === "proxmox-ct") {
+		const vmids = source.vmids ?? [];
+		const pool = source.pool ?? "";
+		const tags = source.tags ?? [];
+		const used = [vmids.length > 0, pool !== "", tags.length > 0].filter(
+			Boolean,
+		).length;
+		const mode = vmids.length > 0 ? "pick" : pool !== "" ? "pool" : "tags";
+		return {
+			...BLANK_SOURCE,
+			type: source.type,
+			guests: { mode, vmids, pool, tags },
+			mixed: used > 1 ? source : null,
+		};
+	}
+	const pick = source.databases ?? [];
+	const except = source.excludeDatabases ?? [];
+	return {
+		...BLANK_SOURCE,
+		type: source.type,
+		databases: {
+			mode: pick.length > 0 ? "pick" : except.length > 0 ? "except" : "all",
+			pick,
+			except,
+		},
+		mixed: pick.length > 0 && except.length > 0 ? source : null,
+	};
+}
+
 export type PolicyDraft = {
 	name: string;
 	repository: string;
@@ -121,12 +211,20 @@ export type PolicyDraft = {
 	exclude: string;
 	oneFileSystem: boolean;
 	excludeCaches: boolean;
+	source: SourceDraft;
 	schedule: ScheduleDraft;
 	retention: RetentionDraft;
 	limits: LimitsDraft;
 	before: HookDraft[];
 	after: HookDraft[];
 };
+
+export function sourcePickNoun(type: SourceType) {
+	if (type === "proxmox-vm" || type === "proxmox-ct") return "guest";
+	if (type === "postgres") return "database";
+	if (type === "mysql") return "schema";
+	return undefined;
+}
 
 let hookKeys = 0;
 
@@ -168,6 +266,7 @@ export function draftFromPolicy(policy: BackupPolicy): PolicyDraft {
 		exclude: (spec.exclude ?? []).join("\n"),
 		oneFileSystem: spec.oneFileSystem ?? false,
 		excludeCaches: spec.excludeCaches ?? false,
+		source: sourceToDraft(spec.source),
 		schedule: {
 			cron: spec.schedule?.cron ?? "",
 			timezone: spec.schedule?.timezone || "UTC",
@@ -267,8 +366,10 @@ function limitsFromDraft(draft: LimitsDraft): BackupPolicy["spec"]["limits"] {
 }
 
 export function policyFromDraft(draft: PolicyDraft): BackupPolicy {
+	const source = sourceFromDraft(draft.source);
+	const files = source === undefined;
 	return {
-		apiVersion: API_VERSION,
+		apiVersion: files ? API_VERSION : API_VERSION_SOURCES,
 		kind: KIND,
 		metadata: { name: draft.name.trim() },
 		spec: {
@@ -283,10 +384,11 @@ export function policyFromDraft(draft: PolicyDraft): BackupPolicy {
 									.map((l) => [l.key, l.value]),
 							),
 						},
-			paths: draft.paths,
-			exclude: lines(draft.exclude),
-			oneFileSystem: draft.oneFileSystem,
-			excludeCaches: draft.excludeCaches,
+			...(source && { source }),
+			paths: files ? draft.paths : [],
+			exclude: files ? lines(draft.exclude) : [],
+			oneFileSystem: files && draft.oneFileSystem,
+			excludeCaches: files && draft.excludeCaches,
 			schedule: scheduleFromDraft(draft.schedule),
 			alerts: alertsFromDraft(draft.schedule),
 			retention: retentionFromDraft(draft.retention),
@@ -787,7 +889,11 @@ export function PolicyForm({
 	schedule,
 	schedulePending,
 	retentionPreview,
+	availability,
+	sourceState = "failed",
 }: {
+	availability?: SourceAvailability[];
+	sourceState?: SourceTypeState;
 	draft: PolicyDraft;
 	onChange: (draft: PolicyDraft) => void;
 	problems: FieldProblems;
@@ -807,6 +913,9 @@ export function PolicyForm({
 		.join(" ");
 	const hasHooks = draft.before.length + draft.after.length > 0;
 	const repoId = useId();
+	const isFiles = draft.source.type === "files";
+	const pickNoun = sourcePickNoun(draft.source.type);
+	const nothingPicked = !isFiles && sourceFromDraft(draft.source) === undefined;
 
 	return (
 		<form
@@ -934,61 +1043,79 @@ export function PolicyForm({
 					)}
 				</FieldSet>
 
-				<FieldSet className="gap-2">
-					<FieldLegend variant="label" className="mb-0">
-						{form.paths}
-					</FieldLegend>
-					<FieldDescription>{form.pathsHelper}</FieldDescription>
-					{draft.paths.map((path, i) => (
-						<PathRow
-							key={i}
-							path={path}
-							label={form.paths}
-							placeholder={form.pathPlaceholder}
-							removeLabel={form.removePath}
-							error={pathProblem(i)}
-							errorId={`${repoId}-path-${i}`}
-							onChange={(next) =>
-								set({ paths: draft.paths.map((p, j) => (j === i ? next : p)) })
-							}
-							onRemove={() =>
-								set({ paths: draft.paths.filter((_, j) => j !== i) })
-							}
-						/>
-					))}
-					<ErrorText
-						id={`${repoId}-paths-error`}
-						message={problems.get("spec.paths")}
-					/>
-					<Button
-						type="button"
-						variant="outline"
-						size="sm"
-						className="self-start"
-						onClick={() => set({ paths: [...draft.paths, ""] })}
-					>
-						<Plus aria-hidden />
-						{form.addPath}
-					</Button>
-				</FieldSet>
+				<SourceTypeCards
+					value={draft.source.type}
+					onChange={(type) => set({ source: { ...draft.source, type } })}
+					availability={availability}
+					state={sourceState}
+					notice={
+						nothingPicked && pickNoun
+							? form.source.pickAtLeastOne(pickNoun)
+							: undefined
+					}
+				/>
 
-				<RowField
-					label={form.exclude}
-					helper={form.excludeHelper}
-					error={excludeProblem || undefined}
-				>
-					{(a11y) => (
-						<Textarea
-							{...a11y}
-							className="min-h-[4lh] font-mono"
-							rows={4}
-							spellCheck={false}
-							autoCapitalize="off"
-							value={draft.exclude}
-							onChange={(e) => set({ exclude: e.target.value })}
-						/>
-					)}
-				</RowField>
+				{isFiles && (
+					<>
+						<FieldSet className="gap-2">
+							<FieldLegend variant="label" className="mb-0">
+								{form.paths}
+							</FieldLegend>
+							<FieldDescription>{form.pathsHelper}</FieldDescription>
+							{draft.paths.map((path, i) => (
+								<PathRow
+									key={i}
+									path={path}
+									label={form.paths}
+									placeholder={form.pathPlaceholder}
+									removeLabel={form.removePath}
+									error={pathProblem(i)}
+									errorId={`${repoId}-path-${i}`}
+									onChange={(next) =>
+										set({
+											paths: draft.paths.map((p, j) => (j === i ? next : p)),
+										})
+									}
+									onRemove={() =>
+										set({ paths: draft.paths.filter((_, j) => j !== i) })
+									}
+								/>
+							))}
+							<ErrorText
+								id={`${repoId}-paths-error`}
+								message={problems.get("spec.paths")}
+							/>
+							<Button
+								type="button"
+								variant="outline"
+								size="sm"
+								className="self-start"
+								onClick={() => set({ paths: [...draft.paths, ""] })}
+							>
+								<Plus aria-hidden />
+								{form.addPath}
+							</Button>
+						</FieldSet>
+
+						<RowField
+							label={form.exclude}
+							helper={form.excludeHelper}
+							error={excludeProblem || undefined}
+						>
+							{(a11y) => (
+								<Textarea
+									{...a11y}
+									className="min-h-[4lh] font-mono"
+									rows={4}
+									spellCheck={false}
+									autoCapitalize="off"
+									value={draft.exclude}
+									onChange={(e) => set({ exclude: e.target.value })}
+								/>
+							)}
+						</RowField>
+					</>
+				)}
 
 				<SchedulePanel
 					draft={draft.schedule}
@@ -1006,37 +1133,39 @@ export function PolicyForm({
 					{retentionPreview}
 				</RetentionPanel>
 
-				<FieldSet className="gap-4">
-					<FieldLegend variant="label" className="mb-0">
-						{form.options}
-					</FieldLegend>
-					<Field orientation="horizontal">
-						<Switch
-							id={`${repoId}-one-fs`}
-							checked={draft.oneFileSystem}
-							onCheckedChange={(oneFileSystem) => set({ oneFileSystem })}
-						/>
-						<div className="flex flex-col gap-1">
-							<FieldLabel htmlFor={`${repoId}-one-fs`}>
-								{form.oneFileSystem}
-							</FieldLabel>
-							<FieldDescription>{form.oneFileSystemHelper}</FieldDescription>
-						</div>
-					</Field>
-					<Field orientation="horizontal">
-						<Switch
-							id={`${repoId}-cache-tag`}
-							checked={draft.excludeCaches}
-							onCheckedChange={(excludeCaches) => set({ excludeCaches })}
-						/>
-						<div className="flex flex-col gap-1">
-							<FieldLabel htmlFor={`${repoId}-cache-tag`}>
-								{form.cacheDirTag}
-							</FieldLabel>
-							<FieldDescription>{form.cacheDirTagHelper}</FieldDescription>
-						</div>
-					</Field>
-				</FieldSet>
+				{isFiles && (
+					<FieldSet className="gap-4">
+						<FieldLegend variant="label" className="mb-0">
+							{form.options}
+						</FieldLegend>
+						<Field orientation="horizontal">
+							<Switch
+								id={`${repoId}-one-fs`}
+								checked={draft.oneFileSystem}
+								onCheckedChange={(oneFileSystem) => set({ oneFileSystem })}
+							/>
+							<div className="flex flex-col gap-1">
+								<FieldLabel htmlFor={`${repoId}-one-fs`}>
+									{form.oneFileSystem}
+								</FieldLabel>
+								<FieldDescription>{form.oneFileSystemHelper}</FieldDescription>
+							</div>
+						</Field>
+						<Field orientation="horizontal">
+							<Switch
+								id={`${repoId}-cache-tag`}
+								checked={draft.excludeCaches}
+								onCheckedChange={(excludeCaches) => set({ excludeCaches })}
+							/>
+							<div className="flex flex-col gap-1">
+								<FieldLabel htmlFor={`${repoId}-cache-tag`}>
+									{form.cacheDirTag}
+								</FieldLabel>
+								<FieldDescription>{form.cacheDirTagHelper}</FieldDescription>
+							</div>
+						</Field>
+					</FieldSet>
+				)}
 
 				<LimitsPanel
 					draft={draft.limits}

@@ -1,3 +1,11 @@
+import {
+	agentCount,
+	databaseCount,
+	guestCount,
+	hostCount,
+	schemaCount,
+} from "@/lib/plural";
+
 export const policies = {
 	tabs: {
 		policy: "Policy",
@@ -114,6 +122,17 @@ export const policies = {
 		otherRepoHost: (name: string) => `${name} (uses another repository)`,
 		hostsFailed: "Couldn't load hosts.",
 		pickAtLeastOne: "Pick at least one host.",
+		source: {
+			label: "What to back up",
+			files: { availability: "Paths on every host" },
+			availability: (found: number, total: number) =>
+				`On ${found} of ${hostCount(total)}`,
+			tooOldAll: "agent too old",
+			tooOldSome: (k: number) => `${agentCount(k)} too old`,
+			notFound: "Not found on the selected hosts",
+			pickAtLeastOne: (noun: "guest" | "database" | "schema") =>
+				`Pick at least one ${noun}.`,
+		},
 		paths: "Paths",
 		pathsHelper:
 			"Absolute paths on the host. If a path does not exist, the job fails.",
@@ -330,6 +349,31 @@ export const policies = {
 		title: "Matching hosts",
 		summary: (n: number) =>
 			`${n} ${n === 1 ? "host" : "hosts"} will be backed up`,
+		matchSummary: (n: number, failing: number) =>
+			`${n} ${n === 1 ? "host matches" : "hosts match"} · ${failing} will fail`,
+		willFail: (n: number) => `${n} will fail`,
+		instances: {
+			guest: guestCount,
+			database: databaseCount,
+			schema: schemaCount,
+		},
+		marks: {
+			agentTooOld: (noun: string) =>
+				`The agent on this host can't back up ${noun} yet. Its jobs will fail.`,
+			notFound: {
+				proxmox: "No Proxmox found on this host. Its jobs will fail.",
+				postgres: "No PostgreSQL found on this host. Its jobs will fail.",
+				mysql: "No MySQL found on this host. Its jobs will fail.",
+			},
+			selectsNothing: {
+				guests:
+					"None of the selected guests are on this host. Its jobs will fail.",
+				databases:
+					"None of the selected databases are on this host. Its jobs will fail.",
+				schemas:
+					"None of the selected schemas are on this host. Its jobs will fail.",
+			},
+		},
 		skipped: (m: number) => `${m} use another repository and are skipped`,
 		emptySelector: "No labels selected: every host in this repository matches.",
 		zero: "No hosts match yet. Check the labels, or add a label to a host.",
