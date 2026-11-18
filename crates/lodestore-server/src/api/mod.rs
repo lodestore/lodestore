@@ -23,7 +23,7 @@ use crate::error::ErrorBody;
 use crate::state::AppState;
 use crate::{
     agent_update, alerts, assets, auth, browse, catalog, demo, download, find, fleet, hosts,
-    install, jobs, maintenance, notify, policies, repos, system,
+    install, jobs, maintenance, notify, policies, repos, sources, system,
 };
 
 mod docs;
@@ -97,6 +97,7 @@ fn api_router() -> OpenApiRouter<AppState> {
         .merge(demo::routes())
         .merge(system::routes())
         .merge(hosts::routes())
+        .merge(sources::api::routes())
         .merge(repos::routes())
         .merge(catalog::routes())
         .merge(browse::routes())

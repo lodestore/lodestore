@@ -4,7 +4,10 @@
 //! itself and drops what does not fit. It is stored as facts about the host and
 //! grants nothing.
 
-use std::collections::HashSet;
+pub mod api;
+pub mod select;
+
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use anyhow::Context as _;
@@ -431,6 +434,56 @@ pub async fn load(state: &AppState, host_id: &str) -> anyhow::Result<Option<Stor
     let json: Option<String> = row.try_get("sources_json")?;
     let collected_at: Option<i64> = row.try_get("sources_collected_at")?;
     Ok(parse_stored(json.as_deref(), collected_at))
+}
+
+/// The capability an agent declares for a source type in its last Hello.
+pub fn capability(source_type: &str) -> String {
+    format!("source:{source_type}")
+}
+
+/// Whether the agent declared the type. `files` needs no declaration: agents that
+/// predate source types do not carry one.
+pub fn declares(capabilities: &[String], source_type: &str) -> bool {
+    source_type == "files" || capabilities.contains(&capability(source_type))
+}
+
+pub struct AgentSources {
+    pub capabilities: Vec<String>,
+    pub stored: Option<Stored>,
+}
+
+pub fn parse_capabilities(json: Option<&str>) -> Vec<String> {
+    let Some(json) = json else {
+        return Vec::new();
+    };
+    serde_json::from_str(json).unwrap_or_else(|error| {
+        tracing::warn!(%error, "stored capabilities are unreadable");
+        Vec::new()
+    })
+}
+
+/// What every agent that is not revoked declared and reported, by agent id.
+pub async fn load_all(state: &AppState) -> anyhow::Result<HashMap<String, AgentSources>> {
+    let rows = sqlx::query(
+        "SELECT id, capabilities_json, sources_json, sources_collected_at FROM agents \
+         WHERE status <> 'revoked'",
+    )
+    .fetch_all(&state.db.pool)
+    .await
+    .context("reading the sources of all agents")?;
+    rows.iter()
+        .map(|row| {
+            let capabilities: Option<String> = row.try_get("capabilities_json")?;
+            let json: Option<String> = row.try_get("sources_json")?;
+            Ok((
+                row.try_get("id")?,
+                AgentSources {
+                    capabilities: parse_capabilities(capabilities.as_deref()),
+                    stored: parse_stored(json.as_deref(), row.try_get("sources_collected_at")?),
+                },
+            ))
+        })
+        .collect()
 }
 
 #[cfg(test)]

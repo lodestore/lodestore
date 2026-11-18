@@ -282,3 +282,135 @@ async fn sources_rewrites_only_on_change() {
         ts.stop().await;
     }
 }
+
+fn yaml_policy(name: &str, host: &str, spec: &str) -> String {
+    let version = if spec.contains("source:") {
+        "v1alpha2"
+    } else {
+        "v1alpha1"
+    };
+    format!(
+        "apiVersion: lodestore.io/{version}\nkind: BackupPolicy\nmetadata:\n  name: {name}\n\
+         spec:\n  repository: main\n  selector:\n    hosts: [{host}]\n{spec}"
+    )
+}
+
+async fn seed_policy(pool: &AnyPool, repo: &str, name: &str, host: &str, spec: &str) {
+    let yaml = yaml_policy(name, host, spec);
+    let policy = lodestore_policy::parse_yaml(&yaml).unwrap();
+    sqlx::query(
+        "INSERT INTO policies (id, name, repository_id, yaml, spec_json, revision, \
+         created_at, updated_at) VALUES ($1, $1, $2, $3, $4, 1, $5, $5)",
+    )
+    .bind(name)
+    .bind(repo)
+    .bind(&yaml)
+    .bind(serde_json::to_string(&policy).unwrap())
+    .bind(now_ms())
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn set_capabilities(pool: &AnyPool, host: &str, caps: &[&str]) {
+    sqlx::query("UPDATE agents SET capabilities_json = $1 WHERE id = $2")
+        .bind(serde_json::to_string(caps).unwrap())
+        .bind(host)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn sources_of(api: &Api, host: &str) -> serde_json::Value {
+    let response = api.get(&format!("/api/v1/hosts/{host}/sources")).await;
+    assert_eq!(response.status(), 200);
+    response.json().await.unwrap()
+}
+
+fn protection(item: &serde_json::Value) -> (&str, Vec<&str>) {
+    (
+        item["protection"]["state"].as_str().unwrap(),
+        item["protection"]["policies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p.as_str().unwrap())
+            .collect(),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sources_tab_lists_guests_with_protection() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let pool = &ts.state().db.pool;
+        let host = enroll(&ts, &api, &repo, "pve1").await;
+
+        let mut web = guest(GuestKind::Vm, 101, "web-01", UUID_A);
+        web.pool = "prod".to_string();
+        web.tags = vec!["web".to_string()];
+        let facts = node(vec![
+            guest(GuestKind::Ct, 200, "dns", UUID_B),
+            guest(
+                GuestKind::Vm,
+                103,
+                "db-01",
+                "33333333-3333-4333-8333-333333333333",
+            ),
+            web,
+        ]);
+        let mut last = None;
+        sources::record(ts.state(), &host.id, &facts, &mut last, now_ms())
+            .await
+            .unwrap();
+
+        let body = sources_of(&api, &host.id).await;
+        assert_eq!(
+            body["scope"],
+            serde_json::json!({ "kind": "cluster", "name": "pve-prod" })
+        );
+        assert_eq!(body["truncated"], false);
+        assert!(body["collected_at"].is_i64());
+        assert!(body["files"].is_null());
+        let items = body["items"].as_array().unwrap();
+        let labels: Vec<_> = items.iter().map(|i| i["label"].as_str().unwrap()).collect();
+        assert_eq!(
+            labels,
+            ["VM 101 · web-01", "VM 103 · db-01", "CT 200 · dns"]
+        );
+        assert_eq!(items[0]["pool"], "prod");
+        assert_eq!(items[0]["tags"], serde_json::json!(["web"]));
+        assert_eq!(items[0]["vmid"], 101);
+        assert_eq!(items[0]["source_type"], "proxmox-vm");
+        for item in items {
+            assert_eq!(protection(item), ("agent_too_old", vec![]));
+            assert!(!item.to_string().contains("proxmox-vm/"));
+            assert!(!item.to_string().contains(UUID_A));
+        }
+
+        set_capabilities(pool, &host.id, &["source:proxmox-vm", "source:proxmox-ct"]).await;
+        seed_policy(
+            pool,
+            &repo,
+            "vms",
+            &host.id,
+            "  source:\n    type: proxmox-vm\n    vmids: [101]\n",
+        )
+        .await;
+        let body = sources_of(&api, &host.id).await;
+        let items = body["items"].as_array().unwrap();
+        assert_eq!(protection(&items[0]), ("protected", vec!["vms"]));
+        assert_eq!(protection(&items[1]), ("unprotected", vec![]));
+        assert_eq!(protection(&items[2]), ("unprotected", vec![]));
+
+        seed_policy(pool, &repo, "etc", &host.id, "  paths: [/etc]\n").await;
+        let body = sources_of(&api, &host.id).await;
+        assert_eq!(body["files"]["policies"], serde_json::json!(["etc"]));
+        assert_eq!(body["files"]["paths"], serde_json::json!(["/etc"]));
+        assert!(body["files"]["last_snapshot_at"].is_null());
+
+        ts.stop().await;
+    }
+}

@@ -380,14 +380,14 @@ async fn resolve(state: &AppState, policy: BackupPolicy, yaml: String) -> Result
     })
 }
 
-struct PolicyRow {
+pub(crate) struct PolicyRow {
     id: String,
-    policy: BackupPolicy,
+    pub(crate) policy: BackupPolicy,
     yaml: String,
     revision: i64,
     created_at: i64,
     updated_at: i64,
-    repository_id: String,
+    pub(crate) repository_id: String,
     repository_name: String,
     managed_by: Option<String>,
 }
@@ -467,7 +467,7 @@ pub(crate) async fn policy_id_for_host(
         .then_some(row.id))
 }
 
-async fn all_policies(state: &AppState) -> Result<Vec<PolicyRow>, ApiError> {
+pub(crate) async fn all_policies(state: &AppState) -> Result<Vec<PolicyRow>, ApiError> {
     sqlx::query(sqlx::AssertSqlSafe(format!(
         "{POLICY_SELECT} ORDER BY p.name"
     )))
