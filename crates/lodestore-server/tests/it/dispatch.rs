@@ -16,7 +16,7 @@ use lodestore_proto::agent::v1::server_message::Body as ServerBody;
 use lodestore_proto::agent::v1::{
     ConflictPolicy, Heartbeat, HookFacts, HookScript, IoniceClass, JobAccepted, JobCreated,
     JobEvent, JobEventLevel, JobEvents, JobOutcome, JobPhase, JobPhaseKind, JobProgress,
-    JobRejected, JobReportState, JobSpec,
+    JobRejected, JobReportState, JobSpec, ProxmoxFacts, ProxmoxGuest, SourceFacts,
 };
 use lodestore_server::catalog::ingest_snapshot;
 use lodestore_server::db::now_ms;
@@ -2441,6 +2441,134 @@ async fn dispatch_token_restore_rechecks_roots_capability() {
             "[{}]",
             backend.name()
         );
+        ts.stop().await;
+    }
+}
+
+const VM_SOURCE: &str = "  source:\n    type: proxmox-vm\n    vmids: [101]\n";
+
+async fn seed_source_policy(ts: &TestServer, repo: &str, name: &str, host: &Host, spec: &str) {
+    let version = if spec.contains("source:") {
+        "v1alpha2"
+    } else {
+        "v1alpha1"
+    };
+    let yaml = format!(
+        "apiVersion: lodestore.io/{version}\nkind: BackupPolicy\nmetadata:\n  name: {name}\n\
+         spec:\n  repository: main\n  selector:\n    hosts: [{}]\n{spec}",
+        host.id
+    );
+    let policy = lodestore_policy::parse_yaml(&yaml).unwrap();
+    sqlx::query(
+        "INSERT INTO policies (id, name, repository_id, yaml, spec_json, revision, \
+         created_at, updated_at) VALUES ($1, $1, $2, $3, $4, 1, $5, $5)",
+    )
+    .bind(name)
+    .bind(repo)
+    .bind(&yaml)
+    .bind(serde_json::to_string(&policy).unwrap())
+    .bind(now_ms())
+    .execute(&ts.state().db.pool)
+    .await
+    .unwrap();
+}
+
+fn vm_facts(age_ms: u64, truncated: bool, vmids: &[u32]) -> SourceFacts {
+    SourceFacts {
+        age_ms,
+        truncated,
+        proxmox: Some(ProxmoxFacts {
+            cluster: "pve-prod".to_string(),
+            node: "pve1".to_string(),
+            guests: vmids
+                .iter()
+                .map(|vmid| ProxmoxGuest {
+                    kind: lodestore_proto::agent::v1::GuestKind::Vm as i32,
+                    vmid: *vmid,
+                    name: format!("vm-{vmid}"),
+                    uuid: format!("{vmid:08}-1111-4111-8111-111111111111"),
+                    ..Default::default()
+                })
+                .collect(),
+        }),
+        ..Default::default()
+    }
+}
+
+async fn seed_facts(ts: &TestServer, host: &Host, facts: &SourceFacts) {
+    lodestore_server::sources::record(ts.state(), &host.id, facts, &mut None, now_ms())
+        .await
+        .unwrap();
+}
+
+async fn run_now(api: &Api, name: &str) -> String {
+    let run = api
+        .post(
+            &format!("/api/v1/policies/{name}/run"),
+            &serde_json::json!({}),
+        )
+        .await;
+    assert_eq!(run.status(), 200);
+    let body: serde_json::Value = run.json().await.unwrap();
+    body["jobs"][0]["id"].as_str().unwrap().to_string()
+}
+
+async fn assert_refused(
+    ts: &TestServer,
+    api: &Api,
+    agent: &mut Fake,
+    job: &str,
+    code: &str,
+    backend: &str,
+) {
+    let pool = &ts.state().db.pool;
+    wait_state(pool, job, "failed").await;
+    assert_eq!(
+        text(pool, "SELECT error_code FROM jobs WHERE id = $1", job)
+            .await
+            .as_deref(),
+        Some(code),
+        "[{backend}]"
+    );
+    let shown: serde_json::Value = api
+        .get(&format!("/api/v1/jobs/{job}"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(shown["error_detail"]["source_type"], "proxmox-vm");
+    assert!(!shown["error_message"].as_str().unwrap().is_empty());
+    assert!(
+        agent
+            .drain(Duration::from_millis(300))
+            .await
+            .into_iter()
+            .all(|m| is_assign(m).is_none()),
+        "[{backend}] the agent got the job"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dispatch_refuses_a_source_the_agent_does_not_back_up() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let host = enroll(&ts, &api, &repo, "pve1").await;
+        seed_source_policy(&ts, &repo, "guests", &host, VM_SOURCE).await;
+        seed_facts(&ts, &host, &vm_facts(1000, false, &[101])).await;
+
+        let job = run_now(&api, "guests").await;
+        let mut agent = Fake::connect(&ts, &host, vec![]).await;
+        assert_refused(
+            &ts,
+            &api,
+            &mut agent,
+            &job,
+            "source_agent_outdated",
+            backend.name(),
+        )
+        .await;
         ts.stop().await;
     }
 }

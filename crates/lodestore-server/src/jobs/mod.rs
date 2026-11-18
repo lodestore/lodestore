@@ -5,9 +5,11 @@ use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
 
 use lodestore_format::locks::DEFAULT_MAX_RUNTIME;
+use lodestore_policy::source::{DatabaseSource, ProxmoxGuests, Source, normalized};
 use lodestore_policy::{BackupPolicy, Hook, IoniceClass, Limits, parse_duration, parse_rate};
 use lodestore_proto::agent::v1::{
     ConflictPolicy, Hook as ProtoHook, IoniceClass as ProtoIonice, JobSpec, Limits as ProtoLimits,
+    SourceSelector,
 };
 use prost::Message;
 use serde::{Deserialize, Serialize};
@@ -449,6 +451,54 @@ pub fn job_spec(policy: &BackupPolicy) -> JobSpec {
         max_runtime_s: max_runtime_of(policy).as_secs(),
         gc_locks_required: false,
         distrusted_shards: Vec::new(),
+        source: normalized(&spec.source).map(selector_of),
+    }
+}
+
+/// The selector of a source that is not files, as the agent receives it.
+pub fn selector_of(source: &Source) -> SourceSelector {
+    let mut selector = SourceSelector {
+        r#type: source.type_name().to_string(),
+        ..Default::default()
+    };
+    match source {
+        Source::Files(_) => {}
+        Source::ProxmoxVm(g) | Source::ProxmoxCt(g) => {
+            selector.vmids = g.vmids.clone();
+            selector.pool = g.pool.clone().unwrap_or_default();
+            selector.tags = g.tags.clone();
+        }
+        Source::Postgres(d) | Source::Mysql(d) => {
+            selector.databases = d.databases.clone();
+            selector.exclude_databases = d.exclude_databases.clone();
+        }
+    }
+    selector
+}
+
+#[derive(Debug)]
+pub(crate) struct UnknownSource;
+
+/// `Ok(None)` is a files job.
+pub(crate) fn source_of(spec: &JobSpec) -> Result<Option<Source>, UnknownSource> {
+    let Some(selector) = &spec.source else {
+        return Ok(None);
+    };
+    let guests = || ProxmoxGuests {
+        vmids: selector.vmids.clone(),
+        pool: Some(selector.pool.clone()).filter(|p| !p.is_empty()),
+        tags: selector.tags.clone(),
+    };
+    let databases = || DatabaseSource {
+        databases: selector.databases.clone(),
+        exclude_databases: selector.exclude_databases.clone(),
+    };
+    match selector.r#type.as_str() {
+        "proxmox-vm" => Ok(Some(Source::ProxmoxVm(guests()))),
+        "proxmox-ct" => Ok(Some(Source::ProxmoxCt(guests()))),
+        "postgres" => Ok(Some(Source::Postgres(databases()))),
+        "mysql" => Ok(Some(Source::Mysql(databases()))),
+        _ => Err(UnknownSource),
     }
 }
 
@@ -1193,5 +1243,57 @@ mod run_rate_message_tests {
             run_rate_message("web-1", 12),
             "This policy was started on web-1 6 times in the last hour. Try again in 12 minutes."
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn policy(spec: &str) -> BackupPolicy {
+        let version = if spec.contains("source:") {
+            "v1alpha2"
+        } else {
+            "v1alpha1"
+        };
+        lodestore_policy::parse_yaml(&format!(
+            "apiVersion: lodestore.io/{version}\nkind: BackupPolicy\nmetadata:\n  name: p\n\
+             spec:\n  repository: main\n  selector:\n    hosts: [h]\n{spec}"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn selector_round_trips() {
+        for spec in [
+            "  source:\n    type: proxmox-vm\n    vmids: [101, 102]\n    pool: prod\n    tags: [web, db]\n",
+            "  source:\n    type: proxmox-ct\n    pool: prod\n",
+            "  source:\n    type: postgres\n    databases: [app]\n",
+            "  source:\n    type: mysql\n    excludeDatabases: [scratch]\n",
+        ] {
+            let policy = policy(spec);
+            let sent = job_spec(&policy);
+            let back = source_of(&JobSpec::decode(sent.encode_to_vec().as_slice()).unwrap())
+                .unwrap()
+                .unwrap();
+            assert_eq!(Some(&back), policy.spec.source.as_ref(), "{spec}");
+        }
+    }
+
+    #[test]
+    fn files_jobs_carry_no_source() {
+        let files = job_spec(&policy("  paths: [/etc]\n"));
+        assert!(files.source.is_none());
+        assert!(source_of(&files).unwrap().is_none());
+        let explicit = job_spec(&policy("  source:\n    type: files\n  paths: [/etc]\n"));
+        assert_eq!(explicit, files);
+        let unknown = JobSpec {
+            source: Some(SourceSelector {
+                r#type: "tape".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(source_of(&unknown).is_err());
     }
 }
