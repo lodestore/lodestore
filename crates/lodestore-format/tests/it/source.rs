@@ -9,7 +9,8 @@ use lodestore_format::Error;
 use lodestore_format::pb;
 use lodestore_format::reader::Reader;
 use lodestore_format::source::{
-    self, MAX_META_ENTRIES, MAX_META_KEY_LEN, MAX_META_VALUE_LEN, Meta, SourceKey, SourceType,
+    self, MAX_KEY_LEN, MAX_META_ENTRIES, MAX_META_KEY_LEN, MAX_META_VALUE_LEN, Meta, SourceKey,
+    SourceType,
 };
 use lodestore_format::writer::BackupOptions;
 use proptest::prelude::*;
@@ -179,6 +180,15 @@ fn source_parse_rejects_non_canonical() {
     ));
     assert!(matches!(
         SourceKey::parse(&long_key),
+        Err(Error::InvalidInput(m)) if m.contains("too long")
+    ));
+    let prefix = format!("mysql/{UUID_A}/");
+    let fill = MAX_KEY_LEN - prefix.len();
+    let at_limit = format!("{prefix}{}{}", "%2F".repeat(fill / 3), "a".repeat(fill % 3));
+    assert_eq!(at_limit.len(), MAX_KEY_LEN);
+    assert!(SourceKey::parse(&at_limit).is_ok());
+    assert!(matches!(
+        SourceKey::parse(&format!("{at_limit}a")),
         Err(Error::InvalidInput(m)) if m.contains("too long")
     ));
     let segment_255 = format!("mysql/{UUID_A}/{}", "a".repeat(255));

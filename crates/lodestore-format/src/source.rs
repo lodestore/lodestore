@@ -216,7 +216,7 @@ fn decode_segment(segment: &str) -> Result<String> {
         }
         let mut hex = || it.next().and_then(|c| char::from(c).to_digit(16));
         match (hex(), hex()) {
-            (Some(hi), Some(lo)) => bytes.push(u8::try_from(hi << 4 | lo).unwrap_or_default()),
+            (Some(hi), Some(lo)) => bytes.push(u8::try_from(hi * 16 + lo).unwrap_or_default()),
             _ => return Err(bad("truncated percent escape")),
         }
     }

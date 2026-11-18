@@ -1,2 +1,1 @@
 test_tool = "nextest"
-exclude_re = ['source\.rs:\d+:\d+: replace \| with \^ in decode_segment$']
