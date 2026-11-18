@@ -55,7 +55,7 @@ const MAX_LOCK_BYTES: u64 = 4 << 10;
 const MAX_PG_VERSION_BYTES: u64 = 32;
 const PG_SOCKET: &str = ".s.PGSQL.";
 const MYSQL_NO_SERVER_UUID: u32 = 1193;
-const MYSQL_ACCESS_DENIED: [u32; 2] = [1045, 1698];
+const MYSQL_ACCESS_DENIED: [u32; 4] = [1045, 1698, 3118, 3955];
 const PG_ENV: [(&str, &str); 3] = [
     ("PGPASSFILE", "/dev/null"),
     ("PGCLIENTENCODING", "UTF8"),
@@ -602,7 +602,8 @@ async fn scan_mysql(
 ) -> (Option<DatabaseServer>, bool) {
     let mut socket = OsString::from("--socket=");
     socket.push(&my.socket);
-    let mut args: Vec<&OsStr> = ["--no-defaults", "--protocol=socket"]
+    // The server may ask the client for any file root can read.
+    let mut args: Vec<&OsStr> = ["--no-defaults", "--protocol=socket", "--local-infile=0"]
         .map(OsStr::new)
         .to_vec();
     args.push(&socket);
@@ -1222,6 +1223,7 @@ exit 0
         [
             "--no-defaults",
             "--protocol=socket",
+            "--local-infile=0",
             &format!("--socket={}", socket.display()),
             "--user=root",
             "--default-character-set=utf8mb4",
@@ -1783,6 +1785,23 @@ exit 0
     }
 
     #[tokio::test]
+    async fn a_locked_root_account_is_not_retried_every_poll() {
+        for reply in [
+            &b"ERROR 3118 (HY000): Access denied for user 'root'@'localhost'. Account is locked.\n"[..],
+            b"ERROR 3955 (HY000): Access denied for user 'root'@'localhost'. Account is blocked for 1 day(s) (1 day(s) remaining) due to 3 consecutive failed logins.\n",
+        ] {
+            let mut host = Host::new();
+            host.mysql_socket("mysqld.sock");
+            host.set("mysql", "", "code", b"1");
+            host.set("mysql", "", "err", reply);
+            let expected = (vec![unreachable_mysql()], false);
+            assert_eq!(host.scan().await, expected);
+            assert_eq!(host.scan().await, expected);
+            assert_eq!(host.calls("mysql").len(), 1);
+        }
+    }
+
+    #[tokio::test]
     async fn auth_denial_is_not_retried_every_poll() {
         let mut host = Host::new();
         let socket = host.mysql_socket("mysqld.sock");
@@ -1983,6 +2002,11 @@ exit 0
         );
         let mysql = &host.calls("mysql")[0];
         assert_eq!(env(mysql), ["LC_ALL=C", &path]);
+        assert!(
+            mysql.argv.iter().any(|a| a == "--local-infile=0"),
+            "{:?}",
+            mysql.argv
+        );
         for call in [psql, mysql] {
             assert!(
                 !call
