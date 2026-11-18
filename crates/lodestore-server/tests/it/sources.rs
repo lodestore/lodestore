@@ -3,7 +3,7 @@ use crate::common;
 use std::time::Duration;
 
 use common::fake_agent::{Fake, Host};
-use common::{Api, TestServer, backends, wait_until};
+use common::{Api, TestServer, backends, bearer_client, wait_until};
 use lodestore_agent::{EnrollArgs, NetOptions};
 use lodestore_proto::agent::v1::agent_message::Body as AgentBody;
 use lodestore_proto::agent::v1::{
@@ -531,6 +531,53 @@ async fn sources_tab_groups_databases_and_clones() {
         let body = sources_of(&api, &db02.id).await;
         assert_eq!(body["groups"][0]["shared_with"], serde_json::json!([]));
         assert_eq!(body["items"][0]["shared_with"], serde_json::json!([]));
+
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sources_tab_requires_hosts_read() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let host = enroll(&ts, &api, &repo, "pve1").await;
+        let facts = node(vec![guest(GuestKind::Vm, 101, "web-01", UUID_A)]);
+        sources::record(ts.state(), &host.id, &facts, &mut None, now_ms())
+            .await
+            .unwrap();
+        let base = ts.rest_url();
+        let path = format!("{base}/api/v1/hosts/{}/sources", host.id);
+
+        let anonymous = reqwest::Client::new().get(&path).send().await.unwrap();
+        assert_eq!(anonymous.status(), 401);
+
+        let without = bearer_client(&ts.issue_token(&["policies:read"]).await);
+        assert_eq!(without.get(&path).send().await.unwrap().status(), 403);
+
+        let reader = bearer_client(&ts.issue_token(&["hosts:read"]).await);
+        let allowed = reader.get(&path).send().await.unwrap();
+        assert_eq!(allowed.status(), 200);
+        let body: serde_json::Value = allowed.json().await.unwrap();
+        assert_eq!(body["items"].as_array().unwrap().len(), 1);
+
+        let unknown = reader
+            .get(format!("{base}/api/v1/hosts/nope/sources"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unknown.status(), 404);
+
+        sqlx::query("UPDATE agents SET status = 'revoked' WHERE id = $1")
+            .bind(&host.id)
+            .execute(&ts.state().db.pool)
+            .await
+            .unwrap();
+        let revoked = reader.get(&path).send().await.unwrap();
+        assert_eq!(revoked.status(), 200);
+        let body: serde_json::Value = revoked.json().await.unwrap();
+        assert_eq!(body["items"].as_array().unwrap().len(), 1);
 
         ts.stop().await;
     }
