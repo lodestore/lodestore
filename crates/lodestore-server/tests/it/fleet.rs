@@ -172,6 +172,36 @@ async fn fleet_overdue_host() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fleet_last_success_ignores_gone_instances() {
+    for backend in backends() {
+        let fleet = Fleet::start(&backend).await;
+        fleet.agent("h1", "web-1", now_ms()).await;
+        fleet.policy("daily", "h1", DAILY).await;
+        let files = now_ms() - 10 * DAY;
+        fleet.snapshot("f1", "h1", "daily", files).await;
+        fleet.snapshot("g1", "h1", "daily", now_ms() - HOUR).await;
+        sqlx::query(
+            "UPDATE snapshots SET source_type = 'proxmox-vm', \
+             source_ref = 'proxmox-vm/pve1/00000101-0000-4000-8000-000000000000' WHERE id = 'g1'",
+        )
+        .execute(fleet.pool())
+        .await
+        .unwrap();
+
+        let (status, body) = fleet.get("/api/v1/fleet").await;
+        assert_eq!(status, 200, "{body} [{}]", backend.name());
+        assert_eq!(
+            body["hosts"][0]["last_success_at"],
+            files,
+            "[{}]",
+            backend.name()
+        );
+        assert_eq!(body["hosts"][0]["state"], "overdue", "[{}]", backend.name());
+        fleet.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fleet_recent_runs() {
     for backend in backends() {
         let fleet = Fleet::start(&backend).await;

@@ -65,6 +65,8 @@ pub struct PairFacts {
     pub expected: bool,
     /// When the alert loop first saw that the policy no longer expects this instance.
     pub gone_at_ms: Option<i64>,
+    /// When the instance came back inside its gone window; a later departure in that window raises nothing.
+    pub returned_at_ms: Option<i64>,
 }
 
 impl PairFacts {
@@ -130,7 +132,7 @@ pub fn host_state(
     } else if h
         .pairs
         .iter()
-        .any(|p| p.limit.is_some() && p.last_success_ms.is_some())
+        .any(|p| p.expected && p.limit.is_some() && p.last_success_ms.is_some())
     {
         HostState::Healthy
     } else {
@@ -354,6 +356,7 @@ mod tests {
             source_label: None,
             expected: true,
             gone_at_ms: None,
+            returned_at_ms: None,
         }
     }
 
@@ -435,6 +438,23 @@ mod tests {
         assert_eq!(state(&first_run), HostState::NotProtected);
         let ok = host(vec![fresh], true, 0);
         assert_eq!(state(&ok), HostState::Healthy);
+    }
+
+    #[test]
+    fn gone_instances_do_not_make_a_host_healthy() {
+        let mut gone = pair(Some(48), Some(1));
+        gone.source_ref = "vm/a".into();
+        gone.expected = false;
+        let stub = PairFacts {
+            source_ref: String::new(),
+            ..pair(Some(48), None)
+        };
+        assert_eq!(
+            state(&host(vec![gone.clone(), stub], true, 0)),
+            HostState::NotProtected
+        );
+        gone.expected = true;
+        assert_eq!(state(&host(vec![gone], true, 0)), HostState::Healthy);
     }
 
     #[test]

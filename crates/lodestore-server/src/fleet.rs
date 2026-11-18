@@ -152,7 +152,12 @@ fn fleet_host(
         labels: h.labels.clone(),
         platform: h.platform.clone(),
         state,
-        last_success_at: h.pairs.iter().filter_map(|p| p.last_success_ms).max(),
+        last_success_at: h
+            .pairs
+            .iter()
+            .filter(|p| p.expected)
+            .filter_map(|p| p.last_success_ms)
+            .max(),
         worst: worst_pair(&h.pairs, now_ms),
         overdue_after_secs: h
             .pairs

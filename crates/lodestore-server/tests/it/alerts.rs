@@ -1,8 +1,10 @@
 use crate::common;
 
 use common::{Api, TestServer, backends, bearer_client};
+use lodestore_proto::agent::v1::{GuestKind, ProxmoxFacts, ProxmoxGuest, SourceFacts};
 use lodestore_server::alerts;
 use lodestore_server::db::now_ms;
+use lodestore_server::sources;
 use serde_json::{Value, json};
 use sqlx::{AnyPool, Row};
 
@@ -272,10 +274,14 @@ impl Env {
     }
 
     async fn guest_policy(&self, name: &str, host: &str) {
+        self.vm_policy(name, host, "101").await;
+    }
+
+    async fn vm_policy(&self, name: &str, host: &str, vmids: &str) {
         let yaml = format!(
             "apiVersion: lodestore.io/v1alpha2\nkind: BackupPolicy\nmetadata:\n  name: {name}\n\
              spec:\n  repository: main\n  selector:\n    hosts: [{host}]\n  \
-             source:\n    type: proxmox-vm\n    vmids: [101]\n{DAILY}"
+             source:\n    type: proxmox-vm\n    vmids: [{vmids}]\n{DAILY}"
         );
         let policy = lodestore_policy::parse_yaml(&yaml).unwrap();
         sqlx::query(
@@ -304,6 +310,56 @@ impl Env {
         .execute(self.pool())
         .await
         .unwrap();
+    }
+
+    async fn facts(&self, host: &str, vmids: &[u32], at: i64) {
+        let facts = SourceFacts {
+            proxmox: Some(ProxmoxFacts {
+                cluster: "pve-prod".to_string(),
+                node: "pve1".to_string(),
+                guests: vmids
+                    .iter()
+                    .map(|vmid| ProxmoxGuest {
+                        kind: GuestKind::Vm as i32,
+                        vmid: *vmid,
+                        name: format!("vm-{vmid}"),
+                        uuid: format!("{vmid:08}-1111-4111-8111-111111111111"),
+                        ..Default::default()
+                    })
+                    .collect(),
+            }),
+            ..Default::default()
+        };
+        sources::record(self.ts.state(), host, &facts, &mut None, at)
+            .await
+            .unwrap();
+    }
+
+    async fn guest_key(&self, host: &str, vmid: u32) -> String {
+        let stored = sources::load(self.ts.state(), host).await.unwrap().unwrap();
+        let guests = stored.discovery.proxmox.unwrap().guests;
+        guests.into_iter().find(|g| g.vmid == vmid).unwrap().key
+    }
+
+    async fn firing_keys(&self, kind: &str) -> Vec<String> {
+        sqlx::query("SELECT key FROM alerts WHERE type = $1 AND state = 'firing' ORDER BY key")
+            .bind(kind)
+            .fetch_all(self.pool())
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.try_get("key").unwrap())
+            .collect()
+    }
+
+    async fn alert_count(&self, kind: &str) -> i64 {
+        sqlx::query("SELECT COUNT(*) AS n FROM alerts WHERE type = $1")
+            .bind(kind)
+            .fetch_one(self.pool())
+            .await
+            .unwrap()
+            .try_get("n")
+            .unwrap()
     }
 
     async fn gone_rows(&self) -> Vec<(String, i64)> {
@@ -1220,7 +1276,14 @@ async fn alerts_dead_man_per_source_instance() {
 
         let listed = refs.clone();
         let inputs = alerts::inputs::gather_with(env.ts.state(), now, |policy, _| {
-            (policy == "vms").then(|| listed.clone())
+            policy
+                .spec
+                .source
+                .is_some()
+                .then(|| alerts::inputs::Discovered {
+                    keys: listed.clone(),
+                    complete: true,
+                })
         })
         .await
         .unwrap();
@@ -1388,10 +1451,14 @@ async fn alerts_gone_moment_clears_when_expected_again() {
         let step = |listed: Vec<String>, at: i64| {
             let state = env.ts.state();
             async move {
-                let mut inputs =
-                    alerts::inputs::gather_with(state, at, |_, _| Some(listed.clone()))
-                        .await
-                        .unwrap();
+                let mut inputs = alerts::inputs::gather_with(state, at, |_, _| {
+                    Some(alerts::inputs::Discovered {
+                        keys: listed.clone(),
+                        complete: true,
+                    })
+                })
+                .await
+                .unwrap();
                 alerts::inputs::record_gone(state, &mut inputs.hosts, at)
                     .await
                     .unwrap();
@@ -1453,6 +1520,8 @@ async fn alerts_gone_instance_opens_one_event() {
         };
 
         env.tick(t0).await;
+        assert!(rows("active").await.is_empty(), "[{name}]");
+        env.tick(t0 + HOUR).await;
         let first = rows("active").await;
         assert_eq!(first.len(), 1, "[{name}]");
         let stored: String =
@@ -1467,7 +1536,7 @@ async fn alerts_gone_instance_opens_one_event() {
             format!("source_instance_gone:h1:daily:{guest}"),
             "[{name}]"
         );
-        for at in [t0 + HOUR, t0 + 23 * HOUR] {
+        for at in [t0 + 2 * HOUR, t0 + 23 * HOUR] {
             env.tick(at).await;
             assert_eq!(rows("active").await, first, "[{name}] {at}");
         }
@@ -1497,9 +1566,166 @@ async fn alerts_gone_instance_opens_one_event() {
             .unwrap();
         env.policy("daily", "h1", DAILY).await;
         env.tick(t1 + HOUR).await;
+        assert!(rows("active").await.is_empty(), "[{name}]");
+        env.tick(t1 + 2 * HOUR).await;
         let second = rows("active").await;
         assert_eq!(second.len(), 1, "[{name}]");
         assert_ne!(second, first, "[{name}]");
+        env.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn alerts_expect_discovered_instances() {
+    for backend in backends() {
+        let name = backend.name();
+        let env = Env::start(&backend).await;
+        env.host("h1", "web-1").await;
+        env.vm_policy("vms", "h1", "101, 103").await;
+        let now = now_ms();
+        env.facts("h1", &[101, 103], now).await;
+        let (a, b) = (
+            env.guest_key("h1", 101).await,
+            env.guest_key("h1", 103).await,
+        );
+
+        env.tick(now).await;
+        let mut want = vec![
+            format!("no_recent_backup:h1:vms:{a}"),
+            format!("no_recent_backup:h1:vms:{b}"),
+        ];
+        want.sort();
+        assert_eq!(env.firing_keys("no_recent_backup").await, want, "[{name}]");
+
+        env.facts("h1", &[], now + MINUTE).await;
+        env.tick(now + MINUTE).await;
+        assert_eq!(
+            env.firing_keys("no_recent_backup").await,
+            ["no_recent_backup:h1:vms"],
+            "[{name}]"
+        );
+        env.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn alerts_refused_job_alerts_through_the_stub() {
+    for backend in backends() {
+        let name = backend.name();
+        let env = Env::start(&backend).await;
+        env.host("h1", "web-1").await;
+        env.guest_policy("vms", "h1").await;
+        let now = now_ms();
+        env.facts("h1", &[101], now).await;
+        env.failed_job(
+            "j1",
+            "h1",
+            "vms",
+            now - HOUR,
+            "The agent is too old for this source.",
+        )
+        .await;
+
+        env.tick(now).await;
+        assert_eq!(
+            env.firing_keys("backup_failed").await,
+            ["backup_failed:h1:vms"],
+            "[{name}]"
+        );
+        let active = env.alerts("active").await;
+        let failed = active
+            .iter()
+            .find(|a| a["type"] == "backup_failed")
+            .unwrap();
+        assert_eq!(
+            failed["facts"]["error"], "The agent is too old for this source.",
+            "[{name}]"
+        );
+
+        let key = env.guest_key("h1", 101).await;
+        env.guest_snapshot("g1", "h1", "vms", &key, now - MINUTE)
+            .await;
+        env.tick(now + MINUTE).await;
+        assert!(
+            env.firing_keys("backup_failed").await.is_empty(),
+            "[{name}]"
+        );
+        env.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn alerts_gone_needs_an_hour_and_rearms_after_a_day() {
+    for backend in backends() {
+        let name = backend.name();
+        let env = Env::start(&backend).await;
+        env.host("h1", "web-1").await;
+        env.guest_policy("vms", "h1").await;
+        let t = now_ms();
+        env.facts("h1", &[101], t).await;
+        let key = env.guest_key("h1", 101).await;
+        env.guest_snapshot("g1", "h1", "vms", &key, t - MINUTE)
+            .await;
+        let gone_event = "source_instance_gone";
+
+        let step = |vmids: &'static [u32], at: i64| {
+            let env = &env;
+            async move {
+                env.facts("h1", vmids, at).await;
+                env.tick(at).await;
+            }
+        };
+        step(&[105], t).await;
+        assert_eq!(env.gone_rows().await.len(), 1, "[{name}]");
+        assert!(env.firing_keys(gone_event).await.is_empty(), "[{name}]");
+
+        step(&[105], t + 61 * MINUTE).await;
+        assert_eq!(env.firing_keys(gone_event).await.len(), 1, "[{name}]");
+
+        step(&[101], t + 2 * HOUR).await;
+        assert!(env.firing_keys(gone_event).await.is_empty(), "[{name}]");
+        let returned = sqlx::query("SELECT returned_at FROM source_instances_gone")
+            .fetch_one(env.pool())
+            .await
+            .unwrap();
+        assert_eq!(
+            returned.try_get::<Option<i64>, _>("returned_at").unwrap(),
+            Some(t + 2 * HOUR),
+            "[{name}]"
+        );
+
+        step(&[105], t + 3 * HOUR).await;
+        step(&[105], t + 5 * HOUR).await;
+        assert!(env.firing_keys(gone_event).await.is_empty(), "[{name}]");
+        assert_eq!(env.alert_count(gone_event).await, 1, "[{name}]");
+
+        step(&[101], t + 26 * HOUR).await;
+        assert!(env.gone_rows().await.is_empty(), "[{name}]");
+
+        step(&[105], t + 27 * HOUR).await;
+        assert!(env.firing_keys(gone_event).await.is_empty(), "[{name}]");
+        step(&[105], t + 28 * HOUR + MINUTE).await;
+        assert_eq!(env.firing_keys(gone_event).await.len(), 1, "[{name}]");
+        assert_eq!(env.alert_count(gone_event).await, 2, "[{name}]");
+
+        env.host("h2", "web-2").await;
+        env.vm_policy("vms2", "h2", "101").await;
+        let base = t + 30 * HOUR;
+        env.facts("h2", &[101], base).await;
+        let key2 = env.guest_key("h2", 101).await;
+        env.guest_snapshot("g2", "h2", "vms2", &key2, base - MINUTE)
+            .await;
+        env.tick(base + 10 * HOUR).await;
+        let rows =
+            sqlx::query("SELECT COUNT(*) AS n FROM source_instances_gone WHERE host_id = 'h2'")
+                .fetch_one(env.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            rows.try_get::<i64, _>("n").unwrap(),
+            0,
+            "[{name}] stale facts"
+        );
         env.stop().await;
     }
 }
