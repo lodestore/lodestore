@@ -196,6 +196,12 @@ pub enum LatestWarning {
         host_id: String,
         current: String,
     },
+    /// `--host` matched a host id and is also the name of other hosts with
+    /// snapshots of the instance; the id won. `hosts` lists those hosts.
+    HostIdAlsoName {
+        host_id: String,
+        hosts: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -241,8 +247,9 @@ pub enum LatestScope {
     /// caller names the host.
     Instance(SourceKey),
     /// The snapshots of one source instance that one host made. The host is
-    /// named by its id; a name is looked up only when no signed record
-    /// carries that id, and must name exactly one host.
+    /// named by its id. A string in the form of a host id (a UUID) is only
+    /// ever an id; any other string is looked up as a name when no signed
+    /// record carries it as an id, and must name exactly one host.
     InstanceOnHost(SourceKey, String),
 }
 
@@ -283,17 +290,47 @@ fn hosts_of(provenance: &ProvenanceSet, entries: &[&SnapshotEntry]) -> Hosts {
     hosts
 }
 
-/// `"hostname" ("host_id")` per host, sorted by name, at most five shown.
-fn host_list<'a>(hosts: impl Iterator<Item = (&'a String, &'a ((i64, BlobId), String))>) -> String {
+/// The canonical text form of a UUID, in either case. Host ids have it, so
+/// such a string is never taken as a host name.
+fn is_host_id(text: &str) -> bool {
+    let b = text.as_bytes();
+    b.len() == 36
+        && b.iter().enumerate().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => *c == b'-',
+            _ => c.is_ascii_hexdigit(),
+        })
+}
+
+fn age(now_ms: i64, at_ms: i64) -> String {
+    let s = now_ms.saturating_sub(at_ms) / 1000;
+    match s {
+        ..0 => "stored in the future".into(),
+        0..120 => format!("{s}s ago"),
+        120..3600 => format!("{}m ago", s / 60),
+        3600..172_800 => format!("{}h ago", s / 3600),
+        _ => format!("{}d ago", s / 86_400),
+    }
+}
+
+/// `"hostname" ("host_id") newest <snapshot> <age>` per host, newest first,
+/// at most five shown.
+fn host_list<'a>(
+    hosts: impl Iterator<Item = (&'a String, &'a ((i64, BlobId), String))>,
+    now_ms: i64,
+) -> String {
     const SHOWN: usize = 5;
-    let mut items: Vec<(String, String)> = hosts
-        .map(|(id, (_, name))| (clip(name), clip(id)))
+    let mut items: Vec<(&(i64, BlobId), String, String)> = hosts
+        .map(|(id, (order, name))| (order, clip(name), clip(id)))
         .collect();
-    items.sort();
+    items.sort_by(|a, b| b.0.cmp(a.0).then_with(|| (&a.1, &a.2).cmp(&(&b.1, &b.2))));
     let mut out: Vec<String> = items
         .iter()
         .take(SHOWN)
-        .map(|(name, id)| format!("{name:?} ({id:?})"))
+        .map(|((at, snap), name, id)| {
+            let short = crate::index::hex32(snap);
+            let short = short.get(..8).unwrap_or_default();
+            format!("{name:?} ({id:?}) newest {short} {}", age(now_ms, *at))
+        })
         .collect();
     if items.len() > SHOWN {
         out.push(format!("and {} more", items.len() - SHOWN));
@@ -376,27 +413,40 @@ pub fn pick_latest_in(
                     return Err(Error::InvalidInput(format!(
                         "the snapshots of {} come from more than one host: {}; add --host with a host id to choose one",
                         source.as_str(),
-                        host_list(hosts.iter())
+                        host_list(hosts.iter(), now_ms)
                     )));
                 }
             }
             LatestScope::InstanceOnHost(source, host) => {
-                let chosen = if provenance.names_host(host) {
+                let hosts = hosts_of(provenance, &admitted);
+                let id_form = is_host_id(host);
+                let named: BTreeSet<&str> = admitted
+                    .iter()
+                    .filter_map(|e| provenance.get(&e.id))
+                    .filter(|r| r.hostname == *host && r.host_id != *host)
+                    .map(|r| r.host_id.as_str())
+                    .collect();
+                let others = || {
+                    host_list(
+                        hosts.iter().filter(|(id, _)| named.contains(id.as_str())),
+                        now_ms,
+                    )
+                };
+                let chosen = if id_form || provenance.names_host(host) {
+                    if !named.is_empty() {
+                        warnings.push(LatestWarning::HostIdAlsoName {
+                            host_id: clip(host),
+                            hosts: others(),
+                        });
+                    }
                     Some(host.clone())
                 } else {
-                    let hosts = hosts_of(provenance, &admitted);
-                    let named: BTreeSet<&str> = admitted
-                        .iter()
-                        .filter_map(|e| provenance.get(&e.id))
-                        .filter(|r| r.hostname == *host)
-                        .map(|r| r.host_id.as_str())
-                        .collect();
                     if named.len() > 1 {
                         return Err(Error::InvalidInput(format!(
                             "{:?} names more than one host with snapshots of {}: {}; add --host with the host id",
                             clip(host),
                             source.as_str(),
-                            host_list(hosts.iter().filter(|(id, _)| named.contains(id.as_str())))
+                            others()
                         )));
                     }
                     named.first().map(|id| {
@@ -410,6 +460,23 @@ pub fn pick_latest_in(
                     })
                 };
                 admitted.retain(|e| chosen.is_some() && host_of(e) == chosen.as_deref());
+                if admitted.is_empty() {
+                    let with = if hosts.is_empty() {
+                        "none".to_owned()
+                    } else {
+                        host_list(hosts.iter(), now_ms)
+                    };
+                    let only_id = if id_form {
+                        " (a host id is never taken as a host name)"
+                    } else {
+                        ""
+                    };
+                    return Err(Error::InvalidInput(format!(
+                        "No signed snapshot of {} comes from host {:?}{only_id}. Hosts with signed snapshots of it: {with}",
+                        source.as_str(),
+                        clip(host),
+                    )));
+                }
             }
         }
         let (kept, future): (Vec<&SnapshotEntry>, Vec<&SnapshotEntry>) =
