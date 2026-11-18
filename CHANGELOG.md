@@ -42,7 +42,7 @@ All notable changes to Lodestore are recorded here. The format follows [Keep a C
 - An instance that is no longer expected does not make a host healthy, and its old success no longer sets the last success of the fleet overview.
 - A scan that fails is not read as "nothing found": an unknown list never silences the missing-backup alert and never raises `source_instance_gone`. A guest that drops out of a list that was cut short keeps raising "No recent backup".
 - The sources tab ignores a snapshot stored ahead of the server clock when it shows the last snapshot of a source.
-- A job for a guest created while it waited in the queue is no longer refused with `source_not_found`: only a list collected after the job was queued can refuse it.
+- The server no longer refuses a job with `source_not_found` for a guest created while the job waited in the queue: only a list collected after the job was queued can refuse it there. The agent still checks the job against its own latest discovery.
 - A list of sources that is over the size limit is not stored and counts as unknown; tags past the limit and over-long cluster or node names mark the list as cut short.
 - The agent runs `mysql` with `--local-infile=0` and treats a locked account like a refused login, so it does not retry at every scan. A PostgreSQL database whose name is longer than 64 bytes or is not valid UTF-8 is no longer reported under a cut name, and the saved ids of containers past the report limit are kept.
 
