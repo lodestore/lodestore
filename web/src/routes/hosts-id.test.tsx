@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import type {
 	FleetHost,
 	HostDetail,
@@ -46,6 +46,7 @@ function makeDetail(name: string, over: Partial<HostDetail> = {}): HostDetail {
 }
 
 const jobsHostIdParams: Array<string | null> = [];
+const snapshotQueries: URLSearchParams[] = [];
 
 type Mocks = {
 	policies?: HostPolicy[];
@@ -64,6 +65,8 @@ function makeSnapshot(over: Partial<SnapshotItem> = {}): SnapshotItem {
 		policy_deleted: false,
 		received_at: Date.now() - 7_100_000,
 		verified_by: "server",
+		source_type: "files",
+		source_label: null,
 		incomplete: false,
 		errors_total: 0,
 		warnings_total: 0,
@@ -117,12 +120,23 @@ function mockDetail(detail: HostDetail, mocks: Mocks = {}) {
 		),
 		http.get(`/api/v1/hosts/${detail.id}/snapshots`, ({ request }) => {
 			const all = mocks.snapshots ?? [];
-			const page = Number(new URL(request.url).searchParams.get("page") ?? 1);
+			const params = new URL(request.url).searchParams;
+			snapshotQueries.push(params);
+			const page = Number(params.get("page") ?? 1);
+			const type = params.get("source_type");
+			const shown = type ? all.filter((s) => s.source_type === type) : all;
+			const source_counts = [...new Set(all.map((s) => s.source_type))].map(
+				(source_type) => ({
+					source_type,
+					count: all.filter((s) => s.source_type === source_type).length,
+				}),
+			);
 			return HttpResponse.json({
-				items: all.slice((page - 1) * 50, page * 50),
+				items: shown.slice((page - 1) * 50, page * 50),
 				page,
 				page_size: 50,
-				total: all.length,
+				total: shown.length,
+				source_counts,
 			});
 		}),
 		http.get("/api/v1/jobs", ({ request }) => {
@@ -784,6 +798,7 @@ describe("Host page", () => {
 						page,
 						page_size: 50,
 						total: 1,
+						source_counts: [],
 					});
 				}),
 				http.post("/api/v1/repositories/repo-1/catalog/sync", () =>
@@ -809,6 +824,7 @@ describe("Host page", () => {
 						page: 1,
 						page_size: 50,
 						total: 0,
+						source_counts: [],
 					});
 				}),
 				http.post("/api/v1/repositories/repo-1/catalog/sync", () => {
@@ -869,6 +885,7 @@ describe("Host page", () => {
 						page: 1,
 						page_size: 50,
 						total: 1,
+						source_counts: [],
 					}),
 				),
 			);
@@ -876,6 +893,142 @@ describe("Host page", () => {
 				screen.getByRole("button", { name: "Retry loading" }),
 			);
 			expect(await screen.findByText("a1b2c3d4")).toBeInTheDocument();
+		});
+
+		describe("source type", () => {
+			const vm = (id: string, over: Partial<SnapshotItem> = {}) =>
+				makeSnapshot({
+					id,
+					source_type: "proxmox-vm",
+					source_label: "VM 101 · web",
+					policy_name: "vms",
+					...over,
+				});
+			const mixed = [
+				makeSnapshot({ id: "11aaaaaaaaaaaa" }),
+				makeSnapshot({ id: "12aaaaaaaaaaaa" }),
+				makeSnapshot({ id: "13aaaaaaaaaaaa" }),
+				vm("21bbbbbbbbbbbb"),
+				vm("22bbbbbbbbbbbb", { source_label: null }),
+			];
+
+			beforeEach(() => {
+				snapshotQueries.length = 0;
+			});
+
+			it("hides the source filter for one source type", async () => {
+				await openHost(makeDetail("web-1"), "?tab=snapshots", {
+					snapshots: [makeSnapshot()],
+				});
+				const table = await screen.findByRole("table");
+				expect(screen.queryByRole("radiogroup")).toBeNull();
+				expect(screen.queryByRole("combobox")).toBeNull();
+				expect(
+					within(table).getAllByRole("row")[1].querySelectorAll("td")[2],
+				).toHaveTextContent(/^etc$/);
+			});
+
+			it("filters snapshots by source type", async () => {
+				const { router } = await openHost(
+					makeDetail("web-1"),
+					"?tab=snapshots",
+					{ snapshots: mixed },
+				);
+				const group = await screen.findByRole("radiogroup", {
+					name: "Source type",
+				});
+				expect(
+					within(group).getByRole("radio", { name: /^All\s*5$/ }),
+				).toBeChecked();
+				expect(
+					within(group).getByRole("radio", { name: /^Files\s*3$/ }),
+				).toBeInTheDocument();
+				await userEvent.click(
+					within(group).getByRole("radio", { name: /^Virtual machines\s*2$/ }),
+				);
+				await waitFor(() =>
+					expect(snapshotQueries.at(-1)?.get("source_type")).toBe("proxmox-vm"),
+				);
+				expect(router.state.location.search).toMatchObject({
+					type: "proxmox-vm",
+				});
+				const table = screen.getByRole("table");
+				await waitFor(() =>
+					expect(within(table).getAllByRole("row")).toHaveLength(3),
+				);
+				expect(
+					screen.getByRole("radio", { name: /^All\s*5$/ }),
+				).toBeInTheDocument();
+			});
+
+			it("keeps the type when the active item is pressed again", async () => {
+				await openHost(makeDetail("web-1"), "?tab=snapshots&type=files", {
+					snapshots: mixed,
+				});
+				const files = await screen.findByRole("radio", { name: /^Files\s*3$/ });
+				expect(files).toBeChecked();
+				await userEvent.click(files);
+				expect(files).toBeChecked();
+			});
+
+			it("resets the page when the source type changes", async () => {
+				const many = [
+					...Array.from({ length: 60 }, (_, i) =>
+						makeSnapshot({ id: `${String(i).padStart(2, "0")}aaaaaaaaaaaa` }),
+					),
+					vm("99bbbbbbbbbbbb"),
+				];
+				await openHost(makeDetail("web-1"), "?tab=snapshots", {
+					snapshots: many,
+				});
+				await userEvent.click(
+					await screen.findByRole("button", { name: "Next" }),
+				);
+				await waitFor(() =>
+					expect(snapshotQueries.at(-1)?.get("page")).toBe("2"),
+				);
+				await userEvent.click(
+					screen.getByRole("radio", { name: /^Virtual machines\s*1$/ }),
+				);
+				await waitFor(() =>
+					expect(snapshotQueries.at(-1)?.get("source_type")).toBe("proxmox-vm"),
+				);
+				expect(snapshotQueries.at(-1)?.get("page")).toBe("1");
+			});
+
+			it("falls back to all for an unknown type", async () => {
+				await openHost(makeDetail("web-1"), "?tab=snapshots&type=oracle", {
+					snapshots: mixed,
+				});
+				expect(
+					await screen.findByRole("radio", { name: /^All\s*5$/ }),
+				).toBeChecked();
+				expect(snapshotQueries.every((q) => !q.has("source_type"))).toBe(true);
+			});
+
+			it("offers a select with the total for narrow containers", async () => {
+				await openHost(makeDetail("web-1"), "?tab=snapshots", {
+					snapshots: mixed,
+				});
+				expect(
+					await screen.findByRole("combobox", { name: /Source type/ }),
+				).toHaveTextContent("Source type: All (5)");
+			});
+
+			it("shows the instance label in the source column", async () => {
+				await openHost(makeDetail("web-1"), "?tab=snapshots", {
+					snapshots: mixed,
+				});
+				const table = await screen.findByRole("table");
+				const cell = (row: number) =>
+					within(table).getAllByRole("row")[row].querySelectorAll("td")[2];
+				expect(cell(1)).toHaveTextContent("Files");
+				expect(cell(1)).toHaveTextContent("etc");
+				expect(cell(4)).toHaveTextContent("VM 101 · web");
+				expect(cell(4)).toHaveTextContent("vms");
+				expect(cell(5)).toHaveTextContent("Virtual machines");
+				expect(cell(5)).toHaveTextContent("vms");
+			});
 		});
 	});
 

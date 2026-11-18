@@ -3,6 +3,7 @@ use super::model::{AlertFacts, AlertType, CertKind, HostFacts, Severity, Thresho
 
 const DAY_MS: i64 = 86_400_000;
 pub const SECURITY_ALERT_WINDOW_MS: i64 = DAY_MS;
+const GONE_WINDOW_MS: i64 = DAY_MS;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Candidate {
@@ -47,18 +48,50 @@ pub fn evaluate(
 ) -> Vec<Candidate> {
     let mut out = Vec::new();
     for h in &inputs.hosts {
-        for pair in &h.pairs {
+        for pair in h.pairs.iter().filter(|p| !p.expected) {
+            if let Some(gone_at) = pair.gone_at_ms
+                && gone_at <= now_ms
+                && now_ms < gone_at + GONE_WINDOW_MS
+            {
+                out.push(Candidate {
+                    policy: Some(pair.policy.clone()),
+                    facts: AlertFacts {
+                        last_success_at: pair.last_success_ms,
+                        source_label: pair.source_label.clone(),
+                        ..AlertFacts::default()
+                    },
+                    ..Candidate::for_host(
+                        h,
+                        AlertType::SourceInstanceGone,
+                        format!(
+                            "source_instance_gone:{}:{}:{}",
+                            h.host_id, pair.policy, pair.source_ref
+                        ),
+                        Severity::Warning,
+                    )
+                });
+            }
+        }
+        for pair in h.pairs.iter().filter(|p| p.expected) {
+            let label = (!pair.source_ref.is_empty())
+                .then(|| pair.source_label.clone())
+                .flatten();
+            let suffix = match pair.source_ref.as_str() {
+                "" => String::new(),
+                instance => format!(":{instance}"),
+            };
             if let Some((_, error)) = &pair.last_failure {
                 out.push(Candidate {
                     policy: Some(pair.policy.clone()),
                     facts: AlertFacts {
                         error: Some(error.clone()),
+                        source_label: label.clone(),
                         ..AlertFacts::default()
                     },
                     ..Candidate::for_host(
                         h,
                         AlertType::BackupFailed,
-                        format!("backup_failed:{}:{}", h.host_id, pair.policy),
+                        format!("backup_failed:{}:{}{suffix}", h.host_id, pair.policy),
                         Severity::Critical,
                     )
                 });
@@ -69,12 +102,13 @@ pub fn evaluate(
                     facts: AlertFacts {
                         last_success_at: pair.last_success_ms,
                         limit_secs: pair.limit.map(|l| l.as_secs()),
+                        source_label: label,
                         ..AlertFacts::default()
                     },
                     ..Candidate::for_host(
                         h,
                         AlertType::NoRecentBackup,
-                        format!("no_recent_backup:{}:{}", h.host_id, pair.policy),
+                        format!("no_recent_backup:{}:{}{suffix}", h.host_id, pair.policy),
                         Severity::Warning,
                     )
                 });
@@ -253,6 +287,9 @@ fn cert_severity(not_after_ms: i64, now_ms: i64) -> Severity {
 }
 
 #[cfg(test)]
+mod differential;
+
+#[cfg(test)]
 mod tests {
     use std::time::Duration;
 
@@ -273,6 +310,17 @@ mod tests {
             last_success_ms: success_ago_h.map(|h| NOW - h * HOUR),
             baseline_ms: NOW - 1000 * HOUR,
             last_failure: failure.map(|e| (NOW, e.into())),
+            source_ref: String::new(),
+            source_label: None,
+            expected: true,
+            gone_at_ms: None,
+        }
+    }
+
+    fn instance(source_ref: &str, success_ago_h: i64) -> PairFacts {
+        PairFacts {
+            source_ref: source_ref.into(),
+            ..pair(None, Some(success_ago_h))
         }
     }
 
@@ -315,6 +363,160 @@ mod tests {
         assert_eq!(out[1].severity, Severity::Warning);
         assert_eq!(out[1].facts.limit_secs, Some(48 * 3600));
         assert!(run(host(vec![pair(None, Some(1))]), None).is_empty());
+    }
+
+    #[test]
+    fn files_alert_keys_are_unchanged() {
+        let out = run(host(vec![pair(Some("boom"), Some(100))]), None);
+        assert_eq!(
+            keys(&out),
+            ["backup_failed:h1:daily", "no_recent_backup:h1:daily"]
+        );
+    }
+
+    #[test]
+    fn one_of_40_instances_overdue_raises_one_alert() {
+        let pairs = (0..40)
+            .map(|n| {
+                instance(
+                    &format!("proxmox-vm/pve1/{n:02}"),
+                    if n == 17 { 100 } else { 1 },
+                )
+            })
+            .collect();
+        let out = run(host(pairs), None);
+        assert_eq!(keys(&out), ["no_recent_backup:h1:daily:proxmox-vm/pve1/17"]);
+    }
+
+    #[test]
+    fn expected_instances_without_discovery_are_the_known_ones() {
+        let policy = |version: &str, source: &str| {
+            let yaml = format!(
+                "apiVersion: lodestore.io/{version}\nkind: BackupPolicy\nmetadata:\n  name: p\n\
+                 spec:\n  repository: main\n{source}"
+            );
+            lodestore_policy::parse_yaml(&yaml).unwrap()
+        };
+        let guests = policy(
+            "v1alpha2",
+            "  source:\n    type: proxmox-vm\n    vmids: [101]\n",
+        );
+        let files = policy("v1alpha1", "  paths: [/etc]\n");
+        let (a, b) = (String::from("vm/a"), String::from("vm/b"));
+        let known = [a.clone(), b.clone()];
+        assert_eq!(
+            super::super::inputs::expected_instances(&guests, None, &known),
+            [a.clone(), b.clone()]
+        );
+        assert_eq!(
+            super::super::inputs::expected_instances(
+                &guests,
+                Some(std::slice::from_ref(&a)),
+                &known
+            ),
+            vec![a.clone()]
+        );
+        assert!(super::super::inputs::expected_instances(&guests, Some(&[]), &known).is_empty());
+        assert_eq!(
+            super::super::inputs::expected_instances(
+                &files,
+                Some(std::slice::from_ref(&a)),
+                &known
+            ),
+            [String::new()]
+        );
+    }
+
+    #[test]
+    fn instances_no_longer_expected_stay_quiet() {
+        use crate::alerts::inputs::instance_facts;
+        use crate::alerts::model::{HostState, OFFLINE_AFTER_DEFAULT};
+        let known = [
+            ("A".to_string(), NOW - HOUR, None),
+            ("B".to_string(), NOW - 30 * 24 * HOUR, None),
+        ];
+        let pairs = instance_facts(
+            "daily",
+            Some(Duration::from_secs(48 * 3600)),
+            NOW - 1000 * HOUR,
+            &["A".to_string()],
+            &known,
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+        );
+        assert_eq!(pairs.len(), 2);
+        assert!(!pairs[1].expected);
+        for later in [NOW, NOW + 365 * 24 * HOUR] {
+            let mut h = host(pairs.clone());
+            h.last_seen_ms = Some(later);
+            let inputs = Inputs {
+                hosts: vec![h.clone()],
+                ..Inputs::default()
+            };
+            let out = evaluate(&inputs, later, 0, &T);
+            let backups: Vec<_> = out
+                .iter()
+                .filter(|c| c.key.contains(":B") || c.kind == AlertType::BackupFailed)
+                .collect();
+            assert!(backups.is_empty(), "{backups:?}");
+            if later == NOW {
+                assert_ne!(
+                    crate::alerts::model::host_state(&h, later, 0, OFFLINE_AFTER_DEFAULT),
+                    HostState::Overdue
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gone_instance_raises_one_event_for_a_day() {
+        let gone = |limit: Option<u64>, success_ago_h: Option<i64>, gone_at: Option<i64>| {
+            let mut p = pair(None, success_ago_h);
+            p.source_ref = "proxmox-vm/pve1/7".into();
+            p.source_label = Some("VM 101 \u{b7} web".into());
+            p.limit = limit.map(|h| Duration::from_secs(h * 3600));
+            p.expected = false;
+            p.gone_at_ms = gone_at;
+            p
+        };
+        let g = NOW - 30 * DAY_MS;
+        for limit in [None, Some(48)] {
+            for success in [None, Some(30 * 24), Some(1)] {
+                let p = gone(limit, success, Some(g));
+                for (at, raised) in [
+                    (g, true),
+                    (g + 23 * HOUR, true),
+                    (g + 24 * HOUR, false),
+                    (g + 25 * HOUR, false),
+                    (g - 1, false),
+                ] {
+                    let inputs = Inputs {
+                        hosts: vec![host(vec![p.clone()])],
+                        ..Inputs::default()
+                    };
+                    let out = evaluate(&inputs, at, at, &T);
+                    if raised {
+                        assert_eq!(
+                            keys(&out),
+                            ["source_instance_gone:h1:daily:proxmox-vm/pve1/7"],
+                            "{limit:?} {success:?} {at}"
+                        );
+                        assert_eq!(out[0].severity, Severity::Warning);
+                        assert_eq!(
+                            out[0].facts.source_label.as_deref(),
+                            Some("VM 101 \u{b7} web")
+                        );
+                    } else {
+                        assert!(out.is_empty(), "{out:?}");
+                    }
+                }
+            }
+        }
+        let inputs = Inputs {
+            hosts: vec![host(vec![gone(Some(48), Some(1), None)])],
+            ..Inputs::default()
+        };
+        assert!(evaluate(&inputs, NOW, NOW, &T).is_empty());
     }
 
     #[test]

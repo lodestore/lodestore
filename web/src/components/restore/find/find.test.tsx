@@ -167,6 +167,8 @@ describe("Find file tab", { timeout: 30_000 }, () => {
 			policy_deleted: false,
 			received_at: Date.UTC(2026, 9, 21, 2, 1),
 			verified_by: "server",
+			source_type: "files",
+			source_label: null,
 			tags: [],
 			warnings_total: 0,
 			errors_total: 0,

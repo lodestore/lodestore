@@ -38,6 +38,7 @@ mod s3;
 mod s3_write_only;
 mod shard_limits;
 mod shard_split;
+mod source;
 mod stream;
 mod tree_cache;
 mod vectors;

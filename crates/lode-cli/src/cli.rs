@@ -89,7 +89,12 @@ pub enum Command {
         flags: BackupFlags,
     },
     /// List snapshots, oldest first
-    Snapshots,
+    Snapshots {
+        /// Only snapshots of this signed source type: files, proxmox-vm,
+        /// proxmox-ct, postgres, postgres-wal or mysql
+        #[arg(long, value_name = "TYPE")]
+        source_type: Option<String>,
+    },
     /// Repository keys
     Key {
         #[command(subcommand)]
@@ -97,8 +102,8 @@ pub enum Command {
     },
     /// List the files of a snapshot, or of one path inside it
     Ls {
-        /// `latest`, a snapshot id or unique id prefix, optionally followed by
-        /// `:<path>` to list only that path
+        /// `latest`, `latest@<source key>`, a snapshot id or unique id prefix,
+        /// optionally followed by `:<path>` to list only that path
         #[arg(value_name = "SNAPSHOT[:PATH]")]
         snapshot: String,
         /// Show type, mode, size and modification time
@@ -107,15 +112,16 @@ pub enum Command {
     },
     /// Write one file of a snapshot to stdout
     Dump {
-        /// `latest`, a snapshot id or unique id prefix
+        /// `latest`, `latest@<source key>`, a snapshot id or unique id prefix
         snapshot: String,
         /// Absolute path of a regular file as recorded in the snapshot
         path: String,
     },
     /// Restore a snapshot below a target directory
     Restore {
-        /// `latest`, a snapshot id or unique id prefix, optionally followed by
-        /// `:<path>` to restore only that path directly into the target
+        /// `latest`, `latest@<source key>`, a snapshot id or unique id prefix,
+        /// optionally followed by `:<path>` to restore only that path directly
+        /// into the target
         #[arg(value_name = "SNAPSHOT[:PATH]")]
         snapshot: String,
         /// Directory to restore into; files land at <DIR>/<original absolute path>
@@ -135,6 +141,11 @@ pub enum Command {
     },
     /// Apply policy YAML files to a Lodestore server; exits 4 when --dry-run finds changes
     Apply(ApplyArgs),
+    /// Work with policy YAML files
+    Policy {
+        #[command(subcommand)]
+        command: PolicyCommand,
+    },
     /// Free storage space of a repository on a Lodestore server (same as `lode server gc`)
     Gc {
         #[command(flatten)]
@@ -196,6 +207,16 @@ pub enum GcCommand {
         /// Unlock without asking on a terminal
         #[arg(long)]
         yes: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PolicyCommand {
+    /// Check policy YAML files offline; exits 3 when a file has problems.
+    Validate {
+        /// Policy files; each may hold several YAML documents
+        #[arg(required = true, value_name = "FILE")]
+        files: Vec<PathBuf>,
     },
 }
 
@@ -297,6 +318,12 @@ pub enum ServerSnapshotsCommand {
         /// Stop after this many snapshots
         #[arg(long, value_name = "N")]
         limit: Option<usize>,
+        /// Only snapshots of this source type: files, proxmox-vm, proxmox-ct, postgres, postgres-wal or mysql.
+        #[arg(long, value_name = "TYPE")]
+        source_type: Option<String>,
+        /// Only snapshots of this source instance (a canonical source key).
+        #[arg(long, value_name = "KEY")]
+        source: Option<String>,
     },
     /// Mark a snapshot as suspicious; retention then neither counts nor forgets it
     Mark {

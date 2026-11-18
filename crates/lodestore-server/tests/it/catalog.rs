@@ -6,9 +6,13 @@ use lodestore_format::crypto::Entropy;
 use lodestore_format::index::hex32;
 use lodestore_format::repo::Repository;
 use lodestore_format::snapshot::{open_snapshot, seal_snapshot, snapshot_object_key};
+use lodestore_format::source::{self, Meta, SourceKey};
 use lodestore_format::store::{LocalFsStore, put_named};
 use lodestore_format::writer::{BackupOptions, Writer};
 use lodestore_server::catalog::{JobLink, LinkRefused, ingest_snapshot, sync_repository};
+use proptest::prelude::{BoxedStrategy, Just, Strategy, prop_oneof};
+use proptest::strategy::ValueTree;
+use proptest::test_runner::TestRunner;
 use serde_json::{Value, json};
 use sqlx::Row;
 use std::task::Poll;
@@ -46,6 +50,17 @@ async fn write_claimed(
     agent_id: Option<&str>,
     tags: &[&str],
 ) -> String {
+    write_sourced(ts, name, hostname, agent_id, tags, None).await
+}
+
+async fn write_sourced(
+    ts: &TestServer,
+    name: &str,
+    hostname: &str,
+    agent_id: Option<&str>,
+    tags: &[&str],
+    source: Option<lodestore_format::pb::Source>,
+) -> String {
     let store = LocalFsStore::new(ts.local_repo_root(name));
     let repo = Repository::open(&store, PASSWORD).await.unwrap();
     let keys = repo.read_keys().write_keys(repo.config_hash());
@@ -60,6 +75,7 @@ async fn write_claimed(
                 hostname: Some(hostname.as_bytes().to_vec()),
                 agent_id: agent_id.map(|a| a.as_bytes().to_vec()),
                 tags: tags.iter().map(|t| t.to_string()).collect(),
+                source,
                 ..BackupOptions::default()
             },
             &|_| {},
@@ -993,6 +1009,206 @@ async fn catalog_policy_binding_same_on_both_paths() {
                 assert!(job_id.is_none(), "{describe}");
                 assert!(verified_at.is_some(), "{describe}");
             }
+        }
+        ts.stop().await;
+    }
+}
+
+type JobSource = (String, Meta);
+
+const GUEST_A: &str = "proxmox-vm/pve1/11111111-1111-4111-8111-111111111111";
+const GUEST_B: &str = "proxmox-vm/pve1/22222222-2222-4222-8222-222222222222";
+
+fn guest_a() -> JobSource {
+    (
+        GUEST_A.to_string(),
+        Meta::from([("vmid".to_string(), "101".to_string())]),
+    )
+}
+
+fn job_source_strategy() -> BoxedStrategy<JobSource> {
+    let uuid = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+    let name = "[a-z]{1,8}";
+    let guest = |key: SourceKey, vmid: u32, name: String| -> JobSource {
+        (
+            key.as_str().to_string(),
+            Meta::from([
+                ("name".to_string(), name),
+                ("vmid".to_string(), vmid.to_string()),
+            ]),
+        )
+    };
+    prop_oneof![
+        Just((String::new(), Meta::new())),
+        (uuid, 100u32..100_000, name).prop_map(move |(u, vmid, n)| {
+            guest(SourceKey::proxmox_vm("pve1", &u).unwrap(), vmid, n)
+        }),
+        (uuid, 100u32..100_000, name).prop_map(move |(u, vmid, n)| {
+            guest(SourceKey::proxmox_ct("pve1", &u).unwrap(), vmid, n)
+        }),
+        (1u64.., 1u32.., name).prop_map(|(system, oid, database)| {
+            (
+                SourceKey::postgres(system, oid)
+                    .unwrap()
+                    .as_str()
+                    .to_string(),
+                Meta::from([("database".to_string(), database)]),
+            )
+        }),
+        (uuid, name).prop_map(|(server, schema)| {
+            (
+                SourceKey::mysql(&server, &schema)
+                    .unwrap()
+                    .as_str()
+                    .to_string(),
+                Meta::new(),
+            )
+        }),
+    ]
+    .boxed()
+}
+
+fn claim_of(job: &JobSource) -> Option<lodestore_format::pb::Source> {
+    source::encode(&SourceKey::parse(&job.0).unwrap(), &job.1).unwrap()
+}
+
+fn claim_for(kind: u8, job: &JobSource, other: &JobSource) -> Option<lodestore_format::pb::Source> {
+    match kind {
+        0 => None,
+        1 => Some(lodestore_format::pb::Source::default()),
+        2 => claim_of(job),
+        3 => claim_of(other),
+        _ => Some(lodestore_format::pb::Source {
+            key: "proxmox-vm/x".to_string(),
+            meta: Vec::new(),
+        }),
+    }
+}
+
+/// The table every row of a job must follow: the job's source, whatever the manifest claims.
+fn expected_row(job: &JobSource) -> (String, String, Option<String>) {
+    let key = SourceKey::parse(&job.0).unwrap();
+    (
+        key.kind().as_str().to_string(),
+        key.as_str().to_string(),
+        source::label(&key, &job.1),
+    )
+}
+
+async fn source_job(ts: &TestServer, id: &str, host: &str, job: &JobSource) {
+    sqlx::query(
+        "INSERT INTO jobs (id, host_id, source, state, spec, queued_at, source_ref, \
+         source_meta_json) VALUES ($1, $2, 'manual', 'succeeded', $3, 0, $4, $5)",
+    )
+    .bind(id)
+    .bind(host)
+    .bind(Vec::<u8>::new())
+    .bind(&job.0)
+    .bind((!job.0.is_empty()).then(|| serde_json::to_string(&job.1).unwrap()))
+    .execute(&ts.state().db.pool)
+    .await
+    .unwrap();
+}
+
+type BoundRow = (Option<String>, String, String, Option<String>, bool);
+
+async fn linked_row(
+    ts: &TestServer,
+    repo: &str,
+    host: &str,
+    snapshot: &str,
+    job: &str,
+) -> BoundRow {
+    ingest_snapshot(
+        ts.state(),
+        repo,
+        snapshot,
+        Some(JobLink {
+            job_id: job,
+            host_id: host,
+        }),
+    )
+    .await
+    .unwrap();
+    let row = sqlx::query(
+        "SELECT job_id, source_type, source_ref, source_label, verified_at FROM snapshots \
+         WHERE id = $1",
+    )
+    .bind(snapshot)
+    .fetch_one(&ts.state().db.pool)
+    .await
+    .unwrap();
+    (
+        row.try_get("job_id").unwrap(),
+        row.try_get("source_type").unwrap(),
+        row.try_get("source_ref").unwrap(),
+        row.try_get("source_label").unwrap(),
+        row.try_get::<Option<i64>, _>("verified_at")
+            .unwrap()
+            .is_some(),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn catalog_source_binding_same_on_both_paths() {
+    let files: JobSource = (String::new(), Meta::new());
+    let mut cases: Vec<(JobSource, JobSource, u8)> = Vec::new();
+    for job in [&files, &guest_a()] {
+        let other = (GUEST_B.to_string(), Meta::new());
+        for kind in [0u8, 2, 3, 1] {
+            cases.push((job.clone(), other.clone(), kind));
+        }
+    }
+    assert_eq!(cases.len(), 8);
+    let strategy = (job_source_strategy(), job_source_strategy(), 0u8..5);
+    let mut runner = TestRunner::deterministic();
+    for _ in 0..48 {
+        cases.push(strategy.new_tree(&mut runner).unwrap().current());
+    }
+
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let host = enroll(&ts, &api, &repo, "host-a", "a").await;
+        let write = |n: usize, path: &str, claim: Option<lodestore_format::pb::Source>| {
+            let tag = format!("case-{n}-{path}");
+            let (ts, host) = (&ts, host.clone());
+            async move { write_sourced(ts, "main", "host-a", Some(&host), &[tag.as_str()], claim).await }
+        };
+        let mut known = Vec::new();
+        for (n, (job, other, kind)) in cases.iter().enumerate() {
+            known.push(write(n, "known", claim_for(*kind, job, other)).await);
+        }
+        assert_eq!(sync(&api, &repo).await["added"], cases.len() as u64);
+
+        for (n, (job, other, kind)) in cases.iter().enumerate() {
+            let fresh = write(n, "fresh", claim_for(*kind, job, other)).await;
+            let (known_job, fresh_job) = (format!("known-{n}"), format!("fresh-{n}"));
+            source_job(&ts, &known_job, &host, job).await;
+            source_job(&ts, &fresh_job, &host, job).await;
+            let (kind_name, key, label) = expected_row(job);
+            let want = |job_id: &str| -> BoundRow {
+                (
+                    Some(job_id.to_string()),
+                    kind_name.clone(),
+                    key.clone(),
+                    label.clone(),
+                    false,
+                )
+            };
+
+            let by_link = linked_row(&ts, &repo, &host, &known[n], &known_job).await;
+            let by_insert = linked_row(&ts, &repo, &host, &fresh, &fresh_job).await;
+
+            let describe = format!(
+                "[{}] case {n}: job {job:?}, claim {:?}\n  link:   {by_link:?}\n  insert: {by_insert:?}\n  want:   {:?}",
+                backend.name(),
+                claim_for(*kind, job, other),
+                want("<job>"),
+            );
+            assert_eq!(by_link, want(&known_job), "{describe}");
+            assert_eq!(by_insert, want(&fresh_job), "{describe}");
         }
         ts.stop().await;
     }

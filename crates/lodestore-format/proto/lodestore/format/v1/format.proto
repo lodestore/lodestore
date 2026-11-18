@@ -178,6 +178,8 @@ message Snapshot {
   bytes signature = 15;
   uint32 key_epoch = 16;
   string program_version = 17;
+  // The source the writing host claims. It decides nothing; the server's provenance record does.
+  Source source = 18;
 }
 
 message SnapshotEnvelope {
@@ -238,4 +240,18 @@ message ProvenanceRecord {
   string hostname = 3;
   string job_id = 4;
   Timestamp verified_at = 5;
+  // The source the server checked against the job. Absent for a files backup, so those records keep their bytes.
+  Source source = 6;
+}
+
+message SourceMeta {
+  string key = 1;
+  string value = 2;
+}
+
+// The source of a snapshot: a canonical instance key from lodestore_format::source and sorted metadata. No Source means a files backup.
+message Source {
+  string key = 1;
+  // Sorted by key; a key appears once.
+  repeated SourceMeta meta = 2;
 }

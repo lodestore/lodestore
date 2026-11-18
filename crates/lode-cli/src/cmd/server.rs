@@ -4,6 +4,7 @@ use std::time::Duration;
 use anyhow::Result;
 use data_encoding::BASE64URL_NOPAD;
 use lodestore_format::pb;
+use lodestore_format::source::{SourceKey, SourceType};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -717,6 +718,10 @@ struct Snapshot {
     #[serde(default)]
     stdin_name: Option<String>,
     #[serde(default)]
+    source_type: String,
+    #[serde(default)]
+    source_label: Option<String>,
+    #[serde(default)]
     incomplete: bool,
     #[serde(default)]
     suspicious: Option<serde_json::Value>,
@@ -851,8 +856,13 @@ undone. Storage space is freed later by garbage collection."
 }
 
 async fn snapshots(client: &Client, out: Output, command: ServerSnapshotsCommand) -> Result<()> {
-    let (host, limit) = match command {
-        ServerSnapshotsCommand::List { host, limit } => (host, limit),
+    let (host, limit, source_type, source) = match command {
+        ServerSnapshotsCommand::List {
+            host,
+            limit,
+            source_type,
+            source,
+        } => (host, limit, source_type, source),
         ServerSnapshotsCommand::Mark { id, reason } => {
             return mark_snapshot(client, out, &id, true, reason).await;
         }
@@ -863,6 +873,17 @@ async fn snapshots(client: &Client, out: Output, command: ServerSnapshotsCommand
             return delete_snapshot(client, out, &id, yes).await;
         }
     };
+    if let Some(text) = &source_type {
+        SourceType::parse(text).map_err(|_| {
+            UsageError(format!(
+                "{text:?} is not a source type. Use files, proxmox-vm, proxmox-ct, postgres, postgres-wal or mysql."
+            ))
+        })?;
+    }
+    if let Some(text) = &source {
+        SourceKey::parse(text)
+            .map_err(|_| UsageError(format!("{text:?} is not a canonical source key.")))?;
+    }
     let host = resolve_host(client, &host).await?;
     let mut found: Vec<Snapshot> = Vec::new();
     let mut before: Option<String> = None;
@@ -872,6 +893,8 @@ async fn snapshots(client: &Client, out: Output, command: ServerSnapshotsCommand
         });
         let mut query = vec![("host", host.clone()), ("limit", wanted.to_string())];
         query.extend(before.take().map(|cursor| ("before", cursor)));
+        query.extend(source_type.clone().map(|t| ("source_type", t)));
+        query.extend(source.clone().map(|k| ("source", k)));
         let page: SnapshotPage = client.get_json("/api/v1/restore/snapshots", &query).await?;
         found.extend(page.items);
         before = page.next;
@@ -895,10 +918,12 @@ async fn snapshots(client: &Client, out: Output, command: ServerSnapshotsCommand
             vec![
                 s.id.clone(),
                 time(Some(s.time)),
-                match (&s.policy_name, &s.stdin_name) {
-                    (Some(policy), _) => policy.clone(),
-                    (None, Some(name)) => format!("CLI \u{b7} {name}"),
-                    (None, None) => "-".into(),
+                match (&s.policy_name, &s.stdin_name, &s.source_label) {
+                    (Some(policy), _, Some(label)) => format!("{label} \u{b7} {policy}"),
+                    (Some(policy), _, None) => policy.clone(),
+                    (None, Some(name), _) => format!("CLI \u{b7} {name}"),
+                    (None, None, Some(label)) => label.clone(),
+                    (None, None, None) => "-".into(),
                 },
                 (stats.files_new + stats.files_changed + stats.files_unchanged).to_string(),
                 size(stats.bytes_total),

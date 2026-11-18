@@ -1297,7 +1297,12 @@ async fn migration_0029_gives_channels_with_every_type_the_security_alerts() {
             .unwrap();
         }
 
-        migrator.migrations = all;
+        migrator.migrations = all
+            .iter()
+            .filter(|m| m.version < 30)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into();
         migrator.run(&pool).await.unwrap();
 
         let types = |id: &'static str| {
@@ -1320,6 +1325,73 @@ async fn migration_0029_gives_channels_with_every_type_the_security_alerts() {
         assert_eq!(types("six").await, SIX);
         assert_eq!(types("config").await, EIGHT);
         assert_eq!(types("done").await, TEN);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn migration_0035_gives_channels_with_every_type_the_gone_alert() {
+    const EIGHT: &str = r#"["backup_failed","no_recent_backup","agent_offline","check_failed","certificate_expiring","agent_update_failed","snapshot_quarantined","repository_unavailable"]"#;
+    const TEN: &str = r#"["backup_failed","no_recent_backup","agent_offline","check_failed","certificate_expiring","agent_update_failed","snapshot_quarantined","repository_unavailable","agent_session_conflict","agent_certificate_rejected"]"#;
+    const ELEVEN: &str = r#"["backup_failed","no_recent_backup","agent_offline","check_failed","certificate_expiring","agent_update_failed","snapshot_quarantined","repository_unavailable","agent_session_conflict","agent_certificate_rejected","source_instance_gone"]"#;
+    for backend in backends() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, mut migrator) = match &backend {
+            Backend::Sqlite => (
+                format!("sqlite://{}/old.db?mode=rwc", dir.path().display()),
+                sqlx::migrate!("./migrations/sqlite"),
+            ),
+            Backend::Postgres(admin) => (
+                common::create_postgres_database(admin).await,
+                sqlx::migrate!("./migrations/postgres"),
+            ),
+        };
+        sqlx::any::install_default_drivers();
+        let pool = AnyPool::connect(&url).await.unwrap();
+        let all = migrator.migrations.clone();
+        migrator.migrations = all
+            .iter()
+            .filter(|m| m.version < 35)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into();
+        migrator.run(&pool).await.unwrap();
+        for (id, source, types) in [
+            ("full", "ui", TEN),
+            ("partial", "ui", EIGHT),
+            ("config", "config", TEN),
+            ("done", "ui", ELEVEN),
+        ] {
+            sqlx::query(
+                "INSERT INTO notification_channels (id, name, kind, source, enabled, types_json, \
+                 config_json, created_at, updated_at) VALUES ($1, $1, 'webhook', $2, 1, $3, '{}', 0, 0)",
+            )
+            .bind(id)
+            .bind(source)
+            .bind(types)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        migrator.migrations = all;
+        migrator.run(&pool).await.unwrap();
+
+        let types = |id: &'static str| {
+            let pool = pool.clone();
+            async move {
+                text(
+                    &pool,
+                    "SELECT types_json FROM notification_channels WHERE id = $1",
+                    id,
+                )
+                .await
+                .unwrap()
+            }
+        };
+        assert_eq!(types("full").await, ELEVEN, "[{}]", backend.name());
+        assert_eq!(types("partial").await, EIGHT);
+        assert_eq!(types("config").await, TEN);
+        assert_eq!(types("done").await, ELEVEN);
     }
 }
 
@@ -2137,6 +2209,90 @@ async fn agent_update_wave_offline_canary_host_does_not_hold_the_next_wave() {
             Some("running"),
             "[{}]",
             backend.name()
+        );
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn migration_0033_marks_existing_rows_as_files() {
+    for backend in backends() {
+        let mut ts = TestServer::start(&backend).await;
+        let repo = ts.create_local_repository("main").await;
+        let pool = ts.state().db.pool.clone();
+        let name = backend.name();
+        for column in [
+            "ALTER TABLE jobs DROP COLUMN source_ref",
+            "ALTER TABLE jobs DROP COLUMN source_meta_json",
+            "ALTER TABLE snapshots DROP COLUMN source_type",
+            "ALTER TABLE snapshots DROP COLUMN source_ref",
+            "ALTER TABLE snapshots DROP COLUMN source_label",
+            "DELETE FROM _sqlx_migrations WHERE version = 33",
+        ] {
+            sqlx::query(column).execute(&pool).await.unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO agents (id, hostname, repository_id, labels_json, os, arch, version, \
+             status, enrolled_at, cert_serial, cert_issued_at, cert_not_after, last_seen_at) \
+             VALUES ('host-a', 'h', $1, '[]', 'linux', 'x86_64', '0.1.0', 'active', 0, 'serial', 0, 0, 0)",
+        )
+        .bind(&repo)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO jobs (id, host_id, source, state, spec, queued_at) \
+             VALUES ('j1', 'host-a', 'manual', 'succeeded', $1, 0)",
+        )
+        .bind(Vec::<u8>::new())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO snapshots (id, repository_id, host_id, hostname, time_ms, paths_json, \
+             tags_json, job_id, incomplete, errors_total, warnings_total, stats_json, \
+             discovered_at, received_at, received_exact) \
+             VALUES ('s1', $1, 'host-a', 'h', 0, '[]', '[]', 'j1', 0, 0, 0, '{}', 0, 0, 1)",
+        )
+        .bind(&repo)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        ts.restart().await;
+        let pool = ts.state().db.pool.clone();
+
+        let job = sqlx::query("SELECT source_ref, source_meta_json FROM jobs WHERE id = 'j1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            job.try_get::<String, _>("source_ref").unwrap(),
+            "",
+            "[{name}]"
+        );
+        assert_eq!(
+            job.try_get::<Option<String>, _>("source_meta_json")
+                .unwrap(),
+            None
+        );
+        let snapshot = sqlx::query(
+            "SELECT source_type, source_ref, source_label FROM snapshots WHERE id = 's1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            snapshot.try_get::<String, _>("source_type").unwrap(),
+            "files",
+            "[{name}]"
+        );
+        assert_eq!(snapshot.try_get::<String, _>("source_ref").unwrap(), "");
+        assert_eq!(
+            snapshot
+                .try_get::<Option<String>, _>("source_label")
+                .unwrap(),
+            None
         );
         ts.stop().await;
     }

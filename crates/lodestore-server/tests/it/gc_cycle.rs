@@ -2750,6 +2750,7 @@ async fn gc_cycle_forgotten_snapshot_can_be_excluded() {
                 seconds: 1,
                 nanos: 0,
             }),
+            source: None,
         };
         let mut entropy = Entropy::os();
         let sealed = seal_provenance(&source.keys, &record, &mut entropy).unwrap();

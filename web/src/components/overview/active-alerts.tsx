@@ -83,6 +83,14 @@ function titleOf(alert: AlertDto, now: number) {
 			return { build: titles.agentSessionConflict, link: hostLink };
 		case "agent_certificate_rejected":
 			return { build: titles.agentCertificateRejected, link: hostLink };
+		case "source_instance_gone": {
+			const label = alert.facts.source_label ?? text.unknownSource;
+			const policy = alert.policy ?? text.unknownPolicy;
+			return {
+				build: (slot: string) => titles.sourceInstanceGone(slot, label, policy),
+				link: hostLink,
+			};
+		}
 		case "check_failed": {
 			const level = alert.check_level ?? "";
 			const name =

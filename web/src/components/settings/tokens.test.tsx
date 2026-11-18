@@ -227,6 +227,22 @@ describe("API tokens: create", () => {
 		expect(
 			within(rowOf("hooks:write")).getByText("Runs commands as root on hosts"),
 		).toBeVisible();
+		expect(
+			within(rowOf("restore:guest")).getByText("Root on the Proxmox node"),
+		).toBeVisible();
+		expect(
+			within(rowOf("restore:guest-in-place")).getByText(
+				"Overwrites running guests",
+			),
+		).toBeVisible();
+		expect(
+			within(rowOf("restore:db-in-place")).getByText(
+				"Overwrites live databases",
+			),
+		).toBeVisible();
+		expect(
+			within(rowOf("restore:db")).queryByText(/Overwrites|Root on/),
+		).toBeNull();
 		for (const safe of ["restore:download", "restore:host"]) {
 			expect(within(rowOf(safe)).queryByText(/hosts$|Deletes data/)).toBeNull();
 		}

@@ -17,7 +17,13 @@ use crate::state::AppState;
 
 pub async fn tick(state: &AppState, now_ms: i64) -> anyhow::Result<reconcile::Reconciled> {
     let thresholds = model::load_thresholds(state).await?;
-    let inputs = inputs::gather(state, now_ms).await?;
+    let mut inputs = inputs::gather(state, now_ms).await?;
+    if let Err(error) = inputs::record_gone(state, &mut inputs.hosts, now_ms).await {
+        tracing::warn!(
+            error = format!("{error:#}"),
+            "recording gone source instances failed"
+        );
+    }
     let candidates = evaluate::evaluate(&inputs, now_ms, state.started_at_ms, &thresholds);
     let unknown = reconcile::Unknown {
         server_cert: inputs.server_cert.is_none(),

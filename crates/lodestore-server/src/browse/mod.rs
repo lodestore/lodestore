@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use lodestore_format::index::{hex32, parse_hex32};
+use lodestore_format::source::{SourceKey, SourceType};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use utoipa::{IntoParams, ToSchema};
@@ -11,7 +12,7 @@ use utoipa_axum::routes;
 
 use crate::auth::tokens::{Scoped, SnapshotsDelete, SnapshotsRead};
 use crate::catalog::retention::{ForgetOutcome, forget_snapshot};
-use crate::catalog::{SNAPSHOT_COLUMNS, SnapshotItem, item_from_row};
+use crate::catalog::{SNAPSHOT_COLUMNS, SnapshotItem, item_from_row, parse_source_type};
 use crate::error::{ApiError, ErrorBody};
 use crate::hosts::HostStatus;
 use crate::hosts::labels::Label;
@@ -22,10 +23,10 @@ pub mod tree;
 
 pub(crate) const AGENTLESS: &str = "agentless:";
 
-/// `repository_id`, `host_id`, `verified_at` and `hostname` of snapshot `$1`. `hostname` is
+/// `repository_id`, `host_id`, `verified_at`, `source_type` and `hostname` of snapshot `$1`. `hostname` is
 /// the name the restore host list shows: the agent's name when the snapshot
 /// belongs to an enrolled agent, else the hostname stored in the snapshot.
-pub(crate) const SNAPSHOT_HOST: &str = "SELECT s.repository_id, s.host_id, s.verified_at, \
+pub(crate) const SNAPSHOT_HOST: &str = "SELECT s.repository_id, s.host_id, s.verified_at, s.source_type, \
     COALESCE(a.hostname, s.hostname) AS hostname \
     FROM snapshots s LEFT JOIN agents a ON a.id = s.host_id WHERE s.id = $1";
 const DEFAULT_LIMIT: u32 = 50;
@@ -82,7 +83,7 @@ pub struct RestoreSnapshotPage {
     pub items: Vec<RestoreSnapshot>,
     pub total: u64,
     pub next: Option<String>,
-    /// Id of the newest signed snapshot of the host by server time, whatever the page; null when the host has none.
+    /// Id of the newest signed snapshot of the requested source type or instance by server time, whatever the page; files by default; never a WAL batch; null when there is none.
     pub latest_verified_id: Option<String>,
 }
 
@@ -95,6 +96,63 @@ pub struct RestoreQuery {
     pub before: Option<String>,
     /// Page size, 1 to 200; 50 by default.
     pub limit: Option<u32>,
+    /// Only snapshots of this source type: files, proxmox-vm, proxmox-ct, postgres, postgres-wal or mysql.
+    pub source_type: Option<String>,
+    /// Canonical source instance key; narrows the list and latest_verified_id to that instance on this host. The same key on another host, as after a migration, is another instance.
+    pub source: Option<String>,
+}
+
+/// Narrowing of a host's snapshots to a source type or one instance.
+struct SourceFilter {
+    kind: SourceType,
+    key: Option<SourceKey>,
+}
+
+impl SourceFilter {
+    fn parse(source_type: Option<&str>, source: Option<&str>) -> Result<Self, ApiError> {
+        let kind = source_type
+            .filter(|t| !t.is_empty())
+            .map(parse_source_type)
+            .transpose()?;
+        let key = source
+            .filter(|k| !k.is_empty())
+            .map(|k| {
+                SourceKey::parse(k)
+                    .map_err(|_| ApiError::Validation(format!("Unknown source key: {k}")))
+            })
+            .transpose()?;
+        if let (Some(kind), Some(key)) = (kind, &key)
+            && key.kind() != kind
+        {
+            return Err(ApiError::Validation(
+                "The source key does not belong to the source type.".into(),
+            ));
+        }
+        Ok(SourceFilter {
+            kind: kind
+                .or(key.as_ref().map(SourceKey::kind))
+                .unwrap_or(SourceType::Files),
+            key,
+        })
+    }
+
+    fn requested(&self, source_type: Option<&str>) -> bool {
+        self.key.is_some() || source_type.is_some_and(|t| !t.is_empty())
+    }
+
+    fn column(&self) -> &'static str {
+        if self.key.is_some() {
+            "source_ref"
+        } else {
+            "source_type"
+        }
+    }
+
+    fn value(&self) -> &str {
+        self.key
+            .as_ref()
+            .map_or(self.kind.as_str(), SourceKey::as_str)
+    }
 }
 
 fn count(row: &sqlx::any::AnyRow, column: &str) -> Result<u64, ApiError> {
@@ -260,7 +318,7 @@ fn restore_snapshot(row: &sqlx::any::AnyRow) -> Result<RestoreSnapshot, ApiError
     responses(
         (status = 200, description = "One page of snapshots", body = RestoreSnapshotPage),
         (status = 404, description = "Unknown host", body = ErrorBody),
-        (status = 422, description = "Missing host, bad cursor or limit", body = ErrorBody),
+        (status = 422, description = "Missing host, bad cursor or limit, unknown source type or key, or a key that does not match the type", body = ErrorBody),
     )
 )]
 async fn list_restore_snapshots(
@@ -280,41 +338,67 @@ async fn list_restore_snapshots(
         .filter(|h| !h.is_empty())
         .ok_or_else(|| ApiError::Validation("The host is required.".into()))?;
     let filter = resolve_host(&state, &key).await?;
+    let source = SourceFilter::parse(query.source_type.as_deref(), query.source.as_deref())?;
+    let narrowed = source.requested(query.source_type.as_deref());
+    let narrow = if narrowed {
+        format!(" AND {} = $2", source.column())
+    } else {
+        String::new()
+    };
 
     let total = sqlx::query(sqlx::AssertSqlSafe(format!(
-        "SELECT COUNT(*) AS n FROM snapshots WHERE {}",
+        "SELECT COUNT(*) AS n FROM snapshots WHERE {}{narrow}",
         filter.condition()
     )))
-    .bind(filter.value())
+    .bind(filter.value());
+    let total = if narrowed {
+        total.bind(source.value())
+    } else {
+        total
+    }
     .fetch_one(&state.db.pool)
     .await?;
     let total = count(&total, "n")?;
 
     let select = format!(
-        "SELECT {SNAPSHOT_COLUMNS}, repository_id, host_id FROM snapshots WHERE {}",
+        "SELECT {SNAPSHOT_COLUMNS}, repository_id, host_id FROM snapshots WHERE {}{narrow}",
         filter.condition()
     );
+    let first = if narrowed { 3 } else { 2 };
     let rows = match cursor {
         Some((time, id)) => {
-            sqlx::query(sqlx::AssertSqlSafe(format!(
-                "{select} AND (received_at < $2 OR (received_at = $2 AND id < $3)) \
-                 ORDER BY received_at DESC, id DESC LIMIT $4"
+            let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "{select} AND (received_at < ${first} OR (received_at = ${first} AND id < ${})) \
+                 ORDER BY received_at DESC, id DESC LIMIT ${}",
+                first + 1,
+                first + 2
             )))
-            .bind(filter.value())
-            .bind(time)
-            .bind(id)
-            .bind(i64::from(limit) + 1)
-            .fetch_all(&state.db.pool)
-            .await?
+            .bind(filter.value());
+            let rows = if narrowed {
+                rows.bind(source.value())
+            } else {
+                rows
+            };
+            rows.bind(time)
+                .bind(id)
+                .bind(i64::from(limit) + 1)
+                .fetch_all(&state.db.pool)
+                .await?
         }
         None => {
-            sqlx::query(sqlx::AssertSqlSafe(format!(
-                "{select} ORDER BY received_at DESC, id DESC LIMIT $2"
+            let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "{select} ORDER BY received_at DESC, id DESC LIMIT ${}",
+                first
             )))
-            .bind(filter.value())
-            .bind(i64::from(limit) + 1)
-            .fetch_all(&state.db.pool)
-            .await?
+            .bind(filter.value());
+            let rows = if narrowed {
+                rows.bind(source.value())
+            } else {
+                rows
+            };
+            rows.bind(i64::from(limit) + 1)
+                .fetch_all(&state.db.pool)
+                .await?
         }
     };
 
@@ -328,16 +412,22 @@ async fn list_restore_snapshots(
         .last()
         .filter(|_| more)
         .map(|last| format!("{}.{}", last.item.received_at, last.item.id));
-    let latest_verified_id = sqlx::query(sqlx::AssertSqlSafe(format!(
-        "SELECT id FROM snapshots WHERE {} AND verified_at IS NOT NULL \
-         ORDER BY received_at DESC, id DESC LIMIT 1",
-        filter.condition()
-    )))
-    .bind(filter.value())
-    .fetch_optional(&state.db.pool)
-    .await?
-    .map(|row| row.try_get("id"))
-    .transpose()?;
+    let latest_verified_id = if source.kind.is_wal_batch() {
+        None
+    } else {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT id FROM snapshots WHERE {} AND {} = $2 AND verified_at IS NOT NULL \
+             ORDER BY received_at DESC, id DESC LIMIT 1",
+            filter.condition(),
+            source.column()
+        )))
+        .bind(filter.value())
+        .bind(source.value())
+        .fetch_optional(&state.db.pool)
+        .await?
+        .map(|row| row.try_get("id"))
+        .transpose()?
+    };
     Ok(Json(RestoreSnapshotPage {
         items,
         total,

@@ -13,8 +13,8 @@ const ADDED_FLOOR: f64 = 0.25;
 const SPIKE_MIN_BASE: usize = 3;
 const MIN_USUAL_SHARE: f64 = 0.01;
 const BASE_SQL: &str = "SELECT stats_json FROM snapshots WHERE repository_id = $1 \
-     AND policy_name = $2 AND host_id = $3 AND paths_json = $4 AND id <> $5 AND stdin_name IS NULL \
-     AND received_at < $6 AND incomplete = 0 AND suspicious = 0 AND verified_at IS NOT NULL \
+     AND policy_name = $2 AND host_id = $3 AND paths_json = $4 AND source_ref = $8 AND id <> $5 \
+     AND stdin_name IS NULL AND received_at < $6 AND incomplete = 0 AND suspicious = 0 AND verified_at IS NOT NULL \
      ORDER BY received_at DESC LIMIT $7";
 
 #[derive(Default, Deserialize)]
@@ -141,7 +141,7 @@ impl Reason {
 pub async fn evaluate(state: &AppState, snapshot_id: &str) -> anyhow::Result<Option<Vec<Reason>>> {
     let Some(row) = sqlx::query(
         "SELECT repository_id, host_id, policy_name, paths_json, incomplete, suspicious, \
-         stats_json, received_at, suspicious_cleared_at FROM snapshots WHERE id = $1",
+         stats_json, received_at, suspicious_cleared_at, source_ref FROM snapshots WHERE id = $1",
     )
     .bind(snapshot_id)
     .fetch_optional(&state.db.pool)
@@ -174,6 +174,7 @@ pub async fn evaluate(state: &AppState, snapshot_id: &str) -> anyhow::Result<Opt
         .bind(snapshot_id)
         .bind(row.try_get::<i64, _>("received_at")?)
         .bind(BASE_SIZE)
+        .bind(row.try_get::<String, _>("source_ref")?)
         .fetch_all(&state.db.pool)
         .await?
         .iter()

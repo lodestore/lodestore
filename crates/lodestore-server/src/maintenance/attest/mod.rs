@@ -17,6 +17,7 @@ use lodestore_format::index::{hex32, parse_hex32};
 use lodestore_format::keys::ReadKeys;
 use lodestore_format::pb;
 use lodestore_format::provenance::{ProvenanceSet, Signer};
+use lodestore_format::source;
 use lodestore_format::store::BlobStore;
 use sqlx::Row;
 use tokio::sync::Mutex;
@@ -89,7 +90,7 @@ pub async fn ensure_provenance_backfilled(
          LEFT JOIN jobs j ON j.id = s.job_id JOIN agents a ON a.id = s.host_id \
          WHERE s.repository_id = $1 AND s.host_id IS NOT NULL AND s.job_id IS NOT NULL \
          AND s.unverified_reason IS NULL AND s.verified_at IS NULL \
-         AND s.agent_id_claim = s.host_id \
+         AND s.agent_id_claim = s.host_id AND s.source_ref = '' \
          AND (j.id IS NULL OR (j.state IN ('succeeded', 'warnings') \
          AND (j.verify_state IS NULL OR j.verify_state = 'verified'))) ORDER BY s.id",
     )
@@ -111,6 +112,7 @@ pub async fn ensure_provenance_backfilled(
             hostname: row.try_get("hostname")?,
             job_id: row.try_get("job_id")?,
             verified_at: Some(verify::timestamp_ms(at)),
+            source: None,
         };
         sealed.push((id, seal_provenance(&source.keys, &record, &mut entropy)?));
     }
@@ -197,7 +199,7 @@ pub async fn reconcile_provenance<S: BlobStore>(
     }
     let set = ProvenanceSet::from_attested(&attested, keys);
     let rows = sqlx::query(
-        "SELECT id, host_id, job_id, agent_id_claim FROM snapshots \
+        "SELECT id, host_id, job_id, agent_id_claim, source_ref FROM snapshots \
          WHERE repository_id = $1 AND verified_at IS NULL AND unverified_reason IS NULL",
     )
     .bind(repository_id)
@@ -205,6 +207,7 @@ pub async fn reconcile_provenance<S: BlobStore>(
     .await?;
     let mut marked = 0;
     let mut other_host = 0;
+    let mut other_source = 0;
     for row in rows {
         let id: String = row.try_get("id")?;
         let Some(snapshot) = parse_hex32(&id) else {
@@ -225,18 +228,38 @@ pub async fn reconcile_provenance<S: BlobStore>(
                     other_host += 1;
                     continue;
                 }
-                sqlx::query(
-                    "UPDATE snapshots SET verified_at = $1, verified_by = 'server' \
-                     WHERE id = $2 AND repository_id = $3 AND verified_at IS NULL",
+                let (key, meta) = match source::decode(record.source.as_ref()) {
+                    Ok(source) => source,
+                    Err(error) => {
+                        tracing::warn!(repository = repository_id, %error, "a signed record names an invalid source");
+                        continue;
+                    }
+                };
+                let job: Option<String> = row.try_get("job_id")?;
+                if job.is_some() && row.try_get::<String, _>("source_ref")? != key.as_str() {
+                    other_source += 1;
+                    continue;
+                }
+                let done = sqlx::query(
+                    "UPDATE snapshots SET verified_at = $1, verified_by = 'server', \
+                     source_type = $4, source_ref = $5, source_label = $6 \
+                     WHERE id = $2 AND repository_id = $3 AND verified_at IS NULL \
+                     AND (job_id IS NULL OR source_ref = $5)",
                 )
                 .bind(at)
                 .bind(&id)
                 .bind(repository_id)
+                .bind(key.kind().as_str())
+                .bind(key.as_str())
+                .bind(source::label(&key, &meta))
                 .execute(&state.db.pool)
                 .await?;
-                marked += 1;
+                marked += usize::try_from(done.rows_affected()).unwrap_or(0);
             }
             Signer::Owner => {
+                if !source::decode(record.source.as_ref()).is_ok_and(|(key, _)| key.is_files()) {
+                    continue;
+                }
                 let job: Option<String> = row.try_get("job_id")?;
                 let claim: Option<String> = row.try_get("agent_id_claim")?;
                 let host: Option<String> = row.try_get("host_id")?;
@@ -257,6 +280,13 @@ pub async fn reconcile_provenance<S: BlobStore>(
             "left snapshots unverified: the catalog names another host than their signature"
         );
     }
+    if other_source > 0 {
+        tracing::warn!(
+            repository = repository_id,
+            snapshots = other_source,
+            "left snapshots unverified: their job names another source than their signature"
+        );
+    }
     Ok(marked)
 }
 
@@ -270,7 +300,7 @@ pub async fn mark_owner_signed(
     let done = sqlx::query(
         "UPDATE snapshots SET verified_at = $1, verified_by = 'owner' \
          WHERE id = $2 AND repository_id = $3 AND verified_at IS NULL \
-         AND (job_id IS NULL OR agent_id_claim = host_id)",
+         AND source_ref = '' AND (job_id IS NULL OR agent_id_claim = host_id)",
     )
     .bind(at_ms)
     .bind(snapshot_id)

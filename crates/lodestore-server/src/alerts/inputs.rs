@@ -87,13 +87,81 @@ struct Policy {
 }
 
 type Pair = (String, String);
+type Instance = (String, i64, Option<String>);
+
+/// Files expect the host itself. Other sources expect what discovery lists, and every instance with snapshots while there is no discovery, so an unknown list never silences the dead-man.
+// shortcut: without discovery an instance the selector dropped keeps alerting; discovery (phase 21) passes the selected list
+pub fn expected_instances(
+    policy: &BackupPolicy,
+    discovered: Option<&[String]>,
+    known: &[String],
+) -> Vec<String> {
+    if lodestore_policy::source::normalized(&policy.spec.source).is_none() {
+        return vec![String::new()];
+    }
+    let mut out = discovered.unwrap_or(known).to_vec();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The expected instances first, then the known ones the policy no longer expects, by `source_ref`.
+pub fn instance_facts(
+    policy: &str,
+    limit: Option<std::time::Duration>,
+    baseline_ms: i64,
+    expected: &[String],
+    known: &[Instance],
+    failures: &HashMap<String, (i64, String)>,
+    gone: &HashMap<String, i64>,
+) -> Vec<PairFacts> {
+    let facts = |source_ref: &str, expected_now: bool| {
+        let found = known.iter().find(|(r, ..)| r == source_ref);
+        let last_success_ms = found.map(|(_, at, _)| *at);
+        PairFacts {
+            policy: policy.to_owned(),
+            limit,
+            last_success_ms,
+            baseline_ms,
+            last_failure: failures
+                .get(source_ref)
+                .filter(|(at, _)| expected_now && last_success_ms.is_none_or(|ok| *at > ok))
+                .cloned(),
+            source_ref: source_ref.to_owned(),
+            source_label: found.and_then(|(_, _, label)| label.clone()),
+            expected: expected_now,
+            gone_at_ms: gone.get(source_ref).copied(),
+        }
+    };
+    let mut out: Vec<PairFacts> = expected.iter().map(|r| facts(r, true)).collect();
+    let mut dropped: Vec<&str> = known
+        .iter()
+        .map(|(r, ..)| r.as_str())
+        .filter(|r| !expected.iter().any(|e| e == r))
+        .collect();
+    dropped.sort_unstable();
+    out.extend(dropped.into_iter().map(|r| facts(r, false)));
+    out
+}
 
 pub async fn gather(state: &AppState, now_ms: i64) -> anyhow::Result<Inputs> {
+    gather_with(state, now_ms, |_, _| None).await
+}
+
+/// `discovered(policy, host)` is the instances a source lists on the host, `None` while the list is unknown.
+pub async fn gather_with(
+    state: &AppState,
+    now_ms: i64,
+    discovered: impl Fn(&str, &str) -> Option<Vec<String>>,
+) -> anyhow::Result<Inputs> {
     let agents = load_agents(state).await?;
     let (policies, unreadable_policies) = load_policies(state).await?;
     let successes = last_successes(state).await?;
-    let mut failures = last_failures(state).await?;
+    let failures = last_failures(state).await?;
+    let gone = gone_moments(state).await?;
     let mut snapshots = last_snapshots(state).await?;
+    let no_failures = HashMap::new();
+    let no_gone = HashMap::new();
     let now = Timestamp::from_millisecond(now_ms).context("the clock is out of range")?;
     let limits: Vec<_> = policies
         .iter()
@@ -107,19 +175,21 @@ pub async fn gather(state: &AppState, now_ms: i64) -> anyhow::Result<Inputs> {
                 .iter()
                 .zip(&limits)
                 .filter(|(p, _)| agent.row.applies(&p.repository_id, &p.policy.spec.selector))
-                .map(|(p, limit)| {
+                .flat_map(|(p, limit)| {
                     let key = (p.name.clone(), id.clone());
-                    let last_success_ms = successes.get(&key).copied();
-                    let last_failure = failures
-                        .remove(&key)
-                        .filter(|(at, _)| last_success_ms.is_none_or(|ok| *at > ok));
-                    PairFacts {
-                        policy: p.name.clone(),
-                        limit: *limit,
-                        last_success_ms,
-                        baseline_ms: agent.enrolled_at.max(p.created_at),
-                        last_failure,
-                    }
+                    let known = successes.get(&key).map_or(&[][..], Vec::as_slice);
+                    let known_refs: Vec<String> = known.iter().map(|(r, ..)| r.clone()).collect();
+                    let found = discovered(&p.name, &id);
+                    let expected = expected_instances(&p.policy, found.as_deref(), &known_refs);
+                    instance_facts(
+                        &p.name,
+                        *limit,
+                        agent.enrolled_at.max(p.created_at),
+                        &expected,
+                        known,
+                        failures.get(&key).unwrap_or(&no_failures),
+                        gone.get(&key).unwrap_or(&no_gone),
+                    )
                 })
                 .collect();
             HostFacts {
@@ -393,40 +463,48 @@ async fn load_policies(state: &AppState) -> anyhow::Result<(Vec<Policy>, Vec<Str
     Ok((out, unreadable))
 }
 
-async fn last_successes(state: &AppState) -> anyhow::Result<HashMap<Pair, i64>> {
+async fn last_successes(state: &AppState) -> anyhow::Result<HashMap<Pair, Vec<Instance>>> {
     let rows = sqlx::query(
-        "SELECT policy_name, host_id, MAX(received_at) AS at FROM snapshots \
+        "SELECT policy_name, host_id, source_ref, MAX(received_at) AS at, \
+         MAX(source_label) AS label FROM snapshots \
          WHERE incomplete = 0 AND verified_at IS NOT NULL AND stdin_name IS NULL \
          AND policy_name IS NOT NULL AND host_id IS NOT NULL \
-         GROUP BY policy_name, host_id",
+         GROUP BY policy_name, host_id, source_ref",
     )
     .fetch_all(&state.db.pool)
     .await
     .context("reading the last successful backups")?;
-    rows.iter()
-        .map(|row| {
-            Ok((
-                (row.try_get("policy_name")?, row.try_get("host_id")?),
+    let mut out: HashMap<Pair, Vec<Instance>> = HashMap::new();
+    for row in &rows {
+        // shortcut: label of any snapshot of the instance, replace with the discovered label in phase 21
+        out.entry((row.try_get("policy_name")?, row.try_get("host_id")?))
+            .or_default()
+            .push((
+                row.try_get("source_ref")?,
                 row.try_get("at")?,
-            ))
-        })
-        .collect()
+                row.try_get("label")?,
+            ));
+    }
+    Ok(out)
 }
 
-async fn last_failures(state: &AppState) -> anyhow::Result<HashMap<Pair, (i64, String)>> {
+async fn last_failures(
+    state: &AppState,
+) -> anyhow::Result<HashMap<Pair, HashMap<String, (i64, String)>>> {
     let rows = sqlx::query(
-        "SELECT j.policy_name, j.host_id, j.state, j.finished_at, j.error_message \
+        "SELECT j.policy_name, j.host_id, j.source_ref, j.state, j.finished_at, j.error_message \
          FROM jobs j JOIN ( \
-             SELECT policy_name, host_id, MAX(finished_at) AS at FROM jobs \
+             SELECT policy_name, host_id, source_ref, MAX(finished_at) AS at FROM jobs \
              WHERE kind = 'backup' AND policy_name IS NOT NULL AND finished_at IS NOT NULL \
-             GROUP BY policy_name, host_id \
-         ) l ON l.policy_name = j.policy_name AND l.host_id = j.host_id AND l.at = j.finished_at \
+             GROUP BY policy_name, host_id, source_ref \
+         ) l ON l.policy_name = j.policy_name AND l.host_id = j.host_id \
+             AND l.source_ref = j.source_ref AND l.at = j.finished_at \
          WHERE j.kind = 'backup'",
     )
     .fetch_all(&state.db.pool)
     .await
     .context("reading the last backup jobs")?;
-    let mut out = HashMap::new();
+    let mut out: HashMap<Pair, HashMap<String, (i64, String)>> = HashMap::new();
     for row in &rows {
         let job_state: String = row.try_get("state")?;
         let message: Option<String> = row.try_get("error_message")?;
@@ -436,11 +514,70 @@ async fn last_failures(state: &AppState) -> anyhow::Result<HashMap<Pair, (i64, S
             _ => continue,
         };
         out.entry((row.try_get("policy_name")?, row.try_get("host_id")?))
+            .or_default()
+            .entry(row.try_get("source_ref")?)
             .or_insert((row.try_get("finished_at")?, message));
     }
     Ok(out)
 }
 
+async fn gone_moments(state: &AppState) -> anyhow::Result<HashMap<Pair, HashMap<String, i64>>> {
+    let rows =
+        sqlx::query("SELECT policy_name, host_id, source_ref, gone_at FROM source_instances_gone")
+            .fetch_all(&state.db.pool)
+            .await
+            .context("reading when source instances stopped being expected")?;
+    let mut out: HashMap<Pair, HashMap<String, i64>> = HashMap::new();
+    for row in &rows {
+        out.entry((row.try_get("policy_name")?, row.try_get("host_id")?))
+            .or_default()
+            .insert(row.try_get("source_ref")?, row.try_get("gone_at")?);
+    }
+    Ok(out)
+}
+
+/// Remembers when the policy stopped expecting an instance, once, so the gone event starts there and a restart does not move it.
+// shortcut: rows of deleted policies and hosts stay; prune them if the table ever grows
+pub async fn record_gone(
+    state: &AppState,
+    hosts: &mut [HostFacts],
+    now_ms: i64,
+) -> anyhow::Result<()> {
+    const CONTEXT: &str = "recording a source instance that is no longer expected";
+    for host in hosts {
+        for pair in &mut host.pairs {
+            if !pair.expected && pair.gone_at_ms.is_none() {
+                sqlx::query(
+                    "INSERT INTO source_instances_gone (policy_name, host_id, source_ref, gone_at) \
+                     VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+                )
+                .bind(&pair.policy)
+                .bind(&host.host_id)
+                .bind(&pair.source_ref)
+                .bind(now_ms)
+                .execute(&state.db.pool)
+                .await
+                .context(CONTEXT)?;
+                pair.gone_at_ms = Some(now_ms);
+            } else if pair.expected && pair.gone_at_ms.is_some() {
+                sqlx::query(
+                    "DELETE FROM source_instances_gone \
+                     WHERE policy_name = $1 AND host_id = $2 AND source_ref = $3",
+                )
+                .bind(&pair.policy)
+                .bind(&host.host_id)
+                .bind(&pair.source_ref)
+                .execute(&state.db.pool)
+                .await
+                .context(CONTEXT)?;
+                pair.gone_at_ms = None;
+            }
+        }
+    }
+    Ok(())
+}
+
+// shortcut: the newest snapshot of any source of the host; split it per source when other sources back up (phase 22).
 async fn last_snapshots(state: &AppState) -> anyhow::Result<HashMap<String, SnapshotFacts>> {
     let rows = sqlx::query(
         "SELECT s.host_id, s.received_at, s.stats_json FROM snapshots s JOIN ( \

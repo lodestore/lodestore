@@ -362,6 +362,26 @@ message RestoreSpec {
   bool in_place = 5;
   ConflictPolicy conflict = 6;
   bool restore_owners = 7;
+  // Unset for a files restore by destination and in_place. The server sends a guest or database target with an empty destination and in_place false, so an agent that cannot run it refuses it.
+  oneof target {
+    GuestTarget guest = 8;
+    DatabaseTarget database = 9;
+  }
+}
+
+message GuestTarget {
+  // The node and VMID of the guest to create.
+  string node = 1;
+  uint32 vmid = 2;
+  // Write over the live guest.
+  bool in_place = 3;
+}
+
+message DatabaseTarget {
+  // The database to restore into.
+  string database = 1;
+  // Write over the live database.
+  bool in_place = 2;
 }
 
 message RestoreStats {

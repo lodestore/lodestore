@@ -63,6 +63,11 @@ export const snapshots = {
 		status: "Status",
 		actions: "Actions",
 	},
+	filter: {
+		all: "All",
+		label: "Source type",
+		selectValue: (label: string, n: number) => `Source type: ${label} (${n})`,
+	},
 	browseFiles: "Browse files",
 	browseFilesFor: (id: string) => `Browse files in snapshot ${id}`,
 	cliSource: (name: string) => `CLI · ${name}`,

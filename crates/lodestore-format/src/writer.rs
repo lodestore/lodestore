@@ -97,6 +97,9 @@ pub struct BackupOptions<'a> {
     /// checked again right before the snapshot is written, so no snapshot is
     /// ever written past it.
     pub deadline: Option<Deadline>,
+    /// Recorded in the manifest as the source this host claims; only the
+    /// server's provenance record makes it count.
+    pub source: Option<pb::Source>,
 }
 
 /// A time limit that survives a suspended machine: it counts as elapsed the
@@ -172,6 +175,7 @@ impl Default for BackupOptions<'_> {
             tree_sink: None,
             agent_id: None,
             deadline: None,
+            source: None,
         }
     }
 }
@@ -545,6 +549,7 @@ impl<S: BlobStore> Writer<S> {
             warnings_total: run.warnings_total,
             index_refs: run.refs.iter().map(|r| r.to_vec()).collect(),
             agent_id: options.agent_id.unwrap_or_default(),
+            source: options.source,
             program_version: format!("lodestore-format {}", env!("CARGO_PKG_VERSION")),
             ..Default::default()
         };
@@ -660,6 +665,7 @@ impl<S: BlobStore> Writer<S> {
             stats: Some(stats),
             index_refs: run.refs.iter().map(|r| r.to_vec()).collect(),
             agent_id: options.agent_id.unwrap_or_default(),
+            source: options.source,
             program_version: format!("lodestore-format {}", env!("CARGO_PKG_VERSION")),
             ..Default::default()
         };

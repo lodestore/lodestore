@@ -1,0 +1,16 @@
+apiVersion: lodestore.io/v1alpha1
+kind: BackupPolicy
+metadata:
+  name: archive-sync
+spec:
+  repository: demo
+  selector:
+    matchLabels:
+      role: archive
+  paths:
+  - /srv/archive
+  schedule:
+    cron: "15 2 * * *"
+    timezone: UTC
+  retention:
+    keepLast: 7

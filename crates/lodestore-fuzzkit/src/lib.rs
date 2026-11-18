@@ -33,6 +33,7 @@ use lodestore_format::locks::{
 use lodestore_format::pack::{PACK_PREFIX_LEN, parse_entries, parse_prefix, parse_trailer};
 use lodestore_format::pb;
 use lodestore_format::snapshot::{ENVELOPE_VERSION, open_snapshot};
+use lodestore_format::source::{self, SourceKey};
 use lodestore_format::tree::{decode_tree, hooks};
 use prost::Message;
 use rand_chacha::ChaCha20Rng;
@@ -261,6 +262,26 @@ pub fn provenance_open(data: &[u8]) {
     let _ = open_provenance(keys, data);
 }
 
+pub fn source_decode(data: &[u8]) {
+    if let Ok(claimed) = pb::Source::decode(data)
+        && let Ok((key, meta)) = source::decode(Some(&claimed))
+    {
+        let again = source::encode(&key, &meta).expect("a decoded source encodes");
+        assert_eq!(
+            source::decode(again.as_ref()).ok(),
+            Some((key, meta)),
+            "an encoded source must decode to what was encoded"
+        );
+    }
+    if let Ok(key) = SourceKey::parse(&String::from_utf8_lossy(data)) {
+        assert_eq!(
+            SourceKey::parse(key.as_str()).ok(),
+            Some(key),
+            "a parsed key must parse again to itself"
+        );
+    }
+}
+
 const PASSWORD_WORK_BUDGET: u64 = 1 << 10;
 
 fn fixed_recovery_key() -> &'static RecoveryKey {
@@ -352,6 +373,7 @@ pub const TARGETS: &[(&str, Target)] = &[
     ("writer_marker", writer_marker),
     ("attest_open", attest_open),
     ("provenance_open", provenance_open),
+    ("source_decode", source_decode),
     ("verify_shard", verify_shard),
     ("snapshot_resolves", snapshot_resolves),
     ("restore_plan", restore_plan),

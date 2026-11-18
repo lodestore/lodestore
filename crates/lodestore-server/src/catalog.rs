@@ -11,6 +11,7 @@ use lodestore_format::index::{hex32, parse_hex32};
 use lodestore_format::keys::{MasterKey, ReadKeys};
 use lodestore_format::pb;
 use lodestore_format::snapshot::{MAX_SNAPSHOT_SIZE, open_snapshot, snapshot_object_key};
+use lodestore_format::source::{self, Meta, SourceKey, SourceType};
 use lodestore_format::store::{BlobDelete, BlobError, BlobStore, Store, read_bounded};
 use lodestore_format::{Error as FormatError, Result as FormatResult};
 use serde::{Deserialize, Serialize};
@@ -49,7 +50,7 @@ const READ_CONCURRENCY: usize = 8;
 pub(crate) const SNAPSHOT_COLUMNS: &str = "id, time_ms, hostname, paths_json, tags_json, \
      policy_name, stdin_name, job_id, parent_id, incomplete, errors_total, warnings_total, \
      stats_json, received_at, suspicious, suspicious_by, suspicious_reason, suspicious_at, \
-     anomaly_json, unverified_reason, verified_by, CAST(CASE WHEN policy_name IS NOT NULL AND NOT EXISTS \
+     anomaly_json, unverified_reason, verified_by, source_type, source_label, CAST(CASE WHEN policy_name IS NOT NULL AND NOT EXISTS \
      (SELECT 1 FROM policies p WHERE p.name = snapshots.policy_name) THEN 1 ELSE 0 END AS BIGINT) \
      AS policy_deleted";
 
@@ -216,23 +217,64 @@ async fn bind_host(
 struct JobBinding {
     policy_name: Option<String>,
     stdin_name: Option<String>,
+    source: SourceKey,
+    meta: Meta,
+}
+
+/// The source a job row names, as the catalog and the signed record carry it.
+pub(crate) fn job_source(
+    job_id: &str,
+    source_ref: &str,
+    meta_json: Option<&str>,
+) -> anyhow::Result<(SourceKey, Meta)> {
+    let malformed = || format!("job {job_id} has a malformed source");
+    let key = SourceKey::parse(source_ref).with_context(malformed)?;
+    let meta = match meta_json {
+        Some(json) => serde_json::from_str::<Meta>(json).with_context(malformed)?,
+        None => Meta::new(),
+    };
+    Ok((key, meta))
 }
 
 async fn job_binding(state: &AppState, job_id: &str) -> anyhow::Result<JobBinding> {
-    let row = sqlx::query("SELECT policy_name, stdin_name FROM jobs WHERE id = $1")
-        .bind(job_id)
-        .fetch_optional(&state.db.pool)
-        .await?;
+    let row = sqlx::query(
+        "SELECT policy_name, stdin_name, source_ref, source_meta_json FROM jobs WHERE id = $1",
+    )
+    .bind(job_id)
+    .fetch_optional(&state.db.pool)
+    .await?;
     Ok(match row {
-        Some(row) => JobBinding {
-            policy_name: row.try_get("policy_name")?,
-            stdin_name: row.try_get("stdin_name")?,
-        },
+        Some(row) => {
+            let (source, meta) = job_source(
+                job_id,
+                &row.try_get::<String, _>("source_ref")?,
+                row.try_get::<Option<String>, _>("source_meta_json")?
+                    .as_deref(),
+            )?;
+            JobBinding {
+                policy_name: row.try_get("policy_name")?,
+                stdin_name: row.try_get("stdin_name")?,
+                source,
+                meta,
+            }
+        }
         None => JobBinding {
             policy_name: None,
             stdin_name: None,
+            source: SourceKey::files(),
+            meta: Meta::new(),
         },
     })
+}
+
+impl JobBinding {
+    fn source_columns(&self) -> (&'static str, &str, Option<String>) {
+        (
+            self.source.kind().as_str(),
+            self.source.as_str(),
+            source::label(&self.source, &self.meta),
+        )
+    }
 }
 
 fn check_policy_tags(tags: &[String], job: &JobBinding) -> Result<(), LinkRefused> {
@@ -281,13 +323,17 @@ async fn insert_snapshot(
     let parent = <[u8; 32]>::try_from(snapshot.parent.as_slice())
         .ok()
         .map(|p| hex32(&p));
+    let (source_type, source_ref, source_label) = match binding {
+        Some(binding) => binding.source_columns(),
+        None => ("files", "", None),
+    };
     let result = sqlx::query(
         "INSERT INTO snapshots (id, repository_id, host_id, hostname, time_ms, paths_json, \
          tags_json, policy_name, stdin_name, job_id, parent_id, incomplete, errors_total, \
          warnings_total, stats_json, agent_id_claim, discovered_at, received_at, received_exact, \
-         origin) \
+         source_type, source_ref, source_label, origin) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, \
-         $18, $19, (SELECT CASE WHEN j.stdin_name IS NOT NULL OR j.source = 'cli' THEN 'stdin' ELSE j.origin END \
+         $18, $19, $20, $21, $22, (SELECT CASE WHEN j.stdin_name IS NOT NULL OR j.source = 'cli' THEN 'stdin' ELSE j.origin END \
          FROM jobs j WHERE j.id = $10)) \
          ON CONFLICT (id) DO NOTHING",
     )
@@ -320,6 +366,9 @@ async fn insert_snapshot(
     .bind(discovered)
     .bind(received.unwrap_or(discovered))
     .bind(i64::from(received.is_some() || link.is_some()))
+    .bind(source_type)
+    .bind(source_ref)
+    .bind(source_label)
     .execute(&state.db.pool)
     .await?;
     Ok(result.rows_affected() == 1)
@@ -419,8 +468,10 @@ async fn link_snapshot(
     link: &JobLink<'_>,
     binding: &JobBinding,
 ) -> anyhow::Result<()> {
+    let (source_type, source_ref, source_label) = binding.source_columns();
     let done = sqlx::query(
         "UPDATE snapshots SET job_id = $1, host_id = $2, policy_name = $5, stdin_name = $6, \
+         source_type = $7, source_ref = $8, source_label = $9, \
          verified_at = CASE WHEN job_id IS NULL THEN NULL ELSE verified_at END, \
          verified_by = CASE WHEN job_id IS NULL THEN NULL ELSE verified_by END, \
          origin = (SELECT CASE WHEN j.stdin_name IS NOT NULL OR j.source = 'cli' THEN 'stdin' ELSE j.origin END \
@@ -434,6 +485,9 @@ async fn link_snapshot(
     .bind(repository_id)
     .bind(binding.policy_name.as_deref())
     .bind(binding.stdin_name.as_deref())
+    .bind(source_type)
+    .bind(source_ref)
+    .bind(source_label)
     .execute(&state.db.pool)
     .await?;
     if done.rows_affected() == 0 {
@@ -1153,7 +1207,17 @@ pub struct SnapshotItem {
     pub unverified_reason: Option<String>,
     /// Who signed this snapshot's provenance: `server` (the server checked a backup job of the host named by its certificate) or `owner` (a `lode backup` run with the repository password). Null when nothing signed it; such a snapshot is never the latest, is not counted by retention and cannot be restored in place.
     pub verified_by: Option<String>,
+    /// What the snapshot backs up: `files`, `proxmox-vm`, `proxmox-ct`, `postgres`, `postgres-wal` or `mysql`.
+    pub source_type: String,
+    /// Human label of the source instance, taken from the signed source; null for `files`.
+    pub source_label: Option<String>,
     pub policy_deleted: bool,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct SourceCount {
+    pub source_type: String,
+    pub count: u64,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -1162,6 +1226,8 @@ pub struct SnapshotPage {
     pub total: u64,
     pub page: u64,
     pub page_size: u64,
+    /// Snapshot counts of the host by source type, in the order files, proxmox-vm, proxmox-ct, postgres, postgres-wal, mysql; only types the host has. Not narrowed by `source_type`.
+    pub source_counts: Vec<SourceCount>,
 }
 
 #[derive(Deserialize, IntoParams)]
@@ -1169,6 +1235,16 @@ pub struct SnapshotPage {
 pub struct PageQuery {
     /// One-based page number.
     pub page: Option<u64>,
+    /// Only snapshots of this source type: files, proxmox-vm, proxmox-ct, postgres, postgres-wal or mysql.
+    pub source_type: Option<String>,
+}
+
+pub(crate) fn parse_source_type(text: &str) -> Result<SourceType, ApiError> {
+    SourceType::parse(text).map_err(|_| {
+        ApiError::Validation(format!(
+            "Unknown source type \"{text}\". Use files, proxmox-vm, proxmox-ct, postgres, postgres-wal or mysql."
+        ))
+    })
 }
 
 fn sync_error(error: anyhow::Error) -> ApiError {
@@ -1231,6 +1307,8 @@ pub(crate) fn item_from_row(row: &sqlx::any::AnyRow) -> Result<SnapshotItem, Api
         suspicious: suspicion_from_row(row)?,
         unverified_reason: row.try_get("unverified_reason")?,
         verified_by: row.try_get("verified_by")?,
+        source_type: row.try_get("source_type")?,
+        source_label: row.try_get("source_label")?,
         policy_deleted: row.try_get::<i64, _>("policy_deleted")? != 0,
     })
 }
@@ -1245,6 +1323,7 @@ pub(crate) fn item_from_row(row: &sqlx::any::AnyRow) -> Result<SnapshotItem, Api
     responses(
         (status = 200, description = "Snapshots of the host, newest first", body = SnapshotPage),
         (status = 404, description = "Unknown host", body = ErrorBody),
+        (status = 422, description = "Unknown source type", body = ErrorBody),
     )
 )]
 async fn list_host_snapshots(
@@ -1259,20 +1338,61 @@ async fn list_host_snapshots(
         .await?
         .ok_or_else(|| ApiError::NotFound("host not found".into()))?;
     let page = query.page.unwrap_or(1).max(1);
-    let total: i64 = sqlx::query("SELECT COUNT(*) AS n FROM snapshots WHERE host_id = $1")
-        .bind(&id)
-        .fetch_one(&state.db.pool)
-        .await?
-        .try_get("n")?;
-    let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
-        "SELECT {SNAPSHOT_COLUMNS} FROM snapshots \
-         WHERE host_id = $1 ORDER BY received_at DESC, id DESC LIMIT $2 OFFSET $3"
+    let source_type = query
+        .source_type
+        .as_deref()
+        .map(parse_source_type)
+        .transpose()?
+        .map(SourceType::as_str);
+    let filter = if source_type.is_some() {
+        " AND source_type = $2"
+    } else {
+        ""
+    };
+    let mut count = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SELECT COUNT(*) AS n FROM snapshots WHERE host_id = $1{filter}"
     )))
+    .bind(&id);
+    let (limit, offset) = if source_type.is_some() {
+        ("$3", "$4")
+    } else {
+        ("$2", "$3")
+    };
+    let mut select = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SELECT {SNAPSHOT_COLUMNS} FROM snapshots WHERE host_id = $1{filter} \
+         ORDER BY received_at DESC, id DESC LIMIT {limit} OFFSET {offset}"
+    )))
+    .bind(&id);
+    if let Some(kind) = source_type {
+        count = count.bind(kind);
+        select = select.bind(kind);
+    }
+    let total: i64 = count.fetch_one(&state.db.pool).await?.try_get("n")?;
+    let rows = select
+        .bind(PAGE_SIZE)
+        .bind(clamp(page - 1).saturating_mul(PAGE_SIZE))
+        .fetch_all(&state.db.pool)
+        .await?;
+    let mut source_counts = sqlx::query(
+        "SELECT source_type, COUNT(*) AS n FROM snapshots WHERE host_id = $1 GROUP BY source_type",
+    )
     .bind(&id)
-    .bind(PAGE_SIZE)
-    .bind(clamp(page - 1).saturating_mul(PAGE_SIZE))
     .fetch_all(&state.db.pool)
-    .await?;
+    .await?
+    .iter()
+    .map(|row| {
+        Ok(SourceCount {
+            source_type: row.try_get("source_type")?,
+            count: row.try_get::<i64, _>("n")?.max(0) as u64,
+        })
+    })
+    .collect::<Result<Vec<_>, ApiError>>()?;
+    source_counts.sort_by_key(|c| {
+        SourceType::ALL
+            .iter()
+            .position(|t| t.as_str() == c.source_type)
+            .unwrap_or(SourceType::ALL.len())
+    });
     Ok(Json(SnapshotPage {
         items: rows
             .iter()
@@ -1281,6 +1401,7 @@ async fn list_host_snapshots(
         total: total.max(0) as u64,
         page,
         page_size: PAGE_SIZE as u64,
+        source_counts,
     }))
 }
 

@@ -1,9 +1,10 @@
 use anyhow::Result;
 use lodestore_format::index::hex32;
 use lodestore_format::provenance::Signer;
+use lodestore_format::source::SourceType;
 use serde::Serialize;
 
-use crate::cli::SecretArgs;
+use crate::cli::{SecretArgs, UsageError};
 use crate::open::open_for_read;
 use crate::output::{JsonPath, Output, StatsJson, hex, rfc3339, utc, warn_skipped};
 
@@ -19,6 +20,8 @@ struct SnapshotJson<'a> {
     parent: Option<String>,
     stats: StatsJson,
     verified_by: Option<&'static str>,
+    source_type: &'static str,
+    source_label: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -26,12 +29,30 @@ struct SnapshotsJson<'a> {
     snapshots: Vec<SnapshotJson<'a>>,
 }
 
-pub async fn run(url: &str, args: &SecretArgs, out: Output) -> Result<()> {
+pub async fn run(
+    url: &str,
+    args: &SecretArgs,
+    out: Output,
+    source_type: Option<&str>,
+) -> Result<()> {
+    let wanted = source_type
+        .map(|t| {
+            SourceType::parse(t).map_err(|_| {
+                UsageError(format!(
+                    "unknown source type {t:?}; use files, proxmox-vm, proxmox-ct, postgres, postgres-wal or mysql"
+                ))
+            })
+        })
+        .transpose()?;
     let reader = open_for_read(url, args).await?;
     let list = reader.list_snapshots().await?;
     warn_skipped(&list.skipped);
-    let entries = list.entries;
     let provenance = reader.provenance().await?;
+    let entries: Vec<_> = list
+        .entries
+        .into_iter()
+        .filter(|e| wanted.is_none_or(|t| provenance.source_of(&e.id).kind() == t))
+        .collect();
     let strict = provenance.attested_any();
     let verified_by = |id: &[u8; 32]| match provenance.signer(id) {
         Some(Signer::Server) => Some("server"),
@@ -55,6 +76,8 @@ pub async fn run(url: &str, args: &SecretArgs, out: Output) -> Result<()> {
                     parent: Some(hex(&snap.parent)).filter(|p| !p.is_empty()),
                     stats: snap.stats.as_ref().into(),
                     verified_by: verified_by(&e.id),
+                    source_type: provenance.source_of(&e.id).kind().as_str(),
+                    source_label: provenance.label_of(&e.id),
                 }
             })
             .collect();

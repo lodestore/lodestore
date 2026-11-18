@@ -236,7 +236,7 @@ describe("Policy editor tabs", () => {
 	it("validates form edits after a pause and shows the server YAML", async () => {
 		const requests = mockValidate((body) =>
 			validResponse({
-				yaml: `paths: ${body.policy?.spec.paths.join(",")}\n`,
+				yaml: `paths: ${body.policy?.spec.paths?.join(",")}\n`,
 			}),
 		);
 		const user = await openNew();
@@ -263,7 +263,7 @@ describe("Policy editor tabs", () => {
 	it("never opens the YAML tab with a document older than the form", async () => {
 		mockValidate((body) =>
 			validResponse({
-				yaml: `paths: ${body.policy?.spec.paths.join(",")}\n`,
+				yaml: `paths: ${body.policy?.spec.paths?.join(",")}\n`,
 			}),
 		);
 		const user = await openNew();
@@ -279,7 +279,7 @@ describe("Policy editor tabs", () => {
 
 	it("stays on the form when it is invalid and says why", async () => {
 		mockValidate((body) =>
-			body.policy?.spec.paths.some((p) => !p.startsWith("/"))
+			body.policy?.spec.paths?.some((p) => !p.startsWith("/"))
 				? {
 						valid: false,
 						errors: [{ path: "spec.paths[0]", message: "Bad path." }],
@@ -365,7 +365,7 @@ describe("Policy editor tabs", () => {
 
 	it("shows field errors under the field", async () => {
 		mockValidate((body) =>
-			body.policy?.spec.paths.some((p) => !p.startsWith("/"))
+			body.policy?.spec.paths?.some((p) => !p.startsWith("/"))
 				? {
 						valid: false,
 						errors: [
@@ -503,7 +503,7 @@ describe("Split policy editor", () => {
 	it("form edit rewrites yaml after debounce", async () => {
 		const requests = mockValidate((body) =>
 			validResponse({
-				yaml: `paths: ${body.policy?.spec.paths.join(",")}\n`,
+				yaml: `paths: ${body.policy?.spec.paths?.join(",")}\n`,
 			}),
 		);
 		const user = await openNew();
@@ -539,7 +539,7 @@ describe("Split policy editor", () => {
 
 	it("sync status announces state", async () => {
 		mockValidate((body) =>
-			body.policy?.spec.paths.some((p) => !p.startsWith("/"))
+			body.policy?.spec.paths?.some((p) => !p.startsWith("/"))
 				? {
 						valid: false,
 						errors: [{ path: "spec.paths[0]", message: "Bad path." }],
@@ -619,7 +619,7 @@ describe("Split editor states", () => {
 
 	it("invalid form keeps last valid yaml", async () => {
 		mockValidate((body) =>
-			body.policy?.spec.paths.some((p) => !p.startsWith("/"))
+			body.policy?.spec.paths?.some((p) => !p.startsWith("/"))
 				? {
 						valid: false,
 						errors: [{ path: "spec.paths[0]", message: "Bad path." }],
@@ -2280,6 +2280,9 @@ function previewOf(over: Partial<RetentionPreview> = {}): RetentionPreview {
 		suspicious: 0,
 		truncated: 0,
 		hosts: [previewHost("web-1", 12, 3), previewHost("db-1", 8, 1)],
+		multi_instance: false,
+		instances: [],
+		instances_truncated: 0,
 		...over,
 	};
 }
@@ -2335,7 +2338,7 @@ describe("Retention section", () => {
 		).toBeVisible();
 		expect(
 			screen.getByText(
-				"Applied per host to this policy's snapshots after each successful backup. Snapshots from lode runs and other policies are never touched.",
+				"Applied per host and source to this policy's snapshots after each successful backup. Snapshots from lode runs and other policies are never touched.",
 			),
 		).toBeVisible();
 		const keepWithin = screen.getByRole("textbox", { name: "Keep within" });
@@ -2604,14 +2607,14 @@ describe("Retention preview", () => {
 			"Couldn't calculate the preview. Check that the server is reachable, then retry.",
 		);
 		expect(alert).toBeVisible();
-		await user.click(screen.getByRole("button", { name: "Retry loading" }));
+		await user.click(screen.getByRole("button", { name: "Retry preview" }));
 
 		expect(
 			await screen.findByText("Would forget 4 of 20 snapshots on 2 hosts."),
 		).toBeVisible();
 		expect(bodies).toHaveLength(2);
 		expect(
-			screen.queryByRole("button", { name: "Retry loading" }),
+			screen.queryByRole("button", { name: "Retry preview" }),
 		).not.toBeInTheDocument();
 	}, 20_000);
 });
@@ -2632,7 +2635,7 @@ describe("Retention preview rejected", () => {
 			),
 		).toBeVisible();
 		expect(
-			screen.getByRole("button", { name: "Retry loading" }),
+			screen.getByRole("button", { name: "Retry preview" }),
 		).toBeInTheDocument();
 	}, 20_000);
 });
@@ -2846,4 +2849,256 @@ describe("Saving retention rules", () => {
 			(created[0] as { policy: BackupPolicy }).policy.spec.retention,
 		).toEqual({ keepLast: 4 });
 	}, 20_000);
+});
+
+describe("Retention preview by source", () => {
+	const instance = (
+		hostname: string,
+		type: string,
+		label: string | null,
+		forget: number,
+		keep: number,
+	) => ({
+		host_id: `${hostname}-id`,
+		hostname,
+		source_type: type,
+		source_label: label,
+		forget,
+		keep,
+		snapshots: [],
+	});
+
+	it("keeps the preview inside the form for one instance", async () => {
+		mockPreview("nightly", () =>
+			previewOf({ instances: [instance("web-1", "files", null, 4, 2)] }),
+		);
+		await openRetained();
+
+		await screen.findByText("Would forget 4 of 20 snapshots on 2 hosts.");
+		expect(
+			screen.queryByRole("tab", { name: /Retention preview/ }),
+		).not.toBeInTheDocument();
+		expect(screen.queryByRole("table")).not.toBeInTheDocument();
+	}, 20_000);
+
+	it("shows the preview tab when a pair has several sources", async () => {
+		mockPreview("nightly", () =>
+			previewOf({
+				multi_instance: true,
+				instances: [
+					instance("web-1", "proxmox-vm", "guest-one", 3, 2),
+					instance("db-1", "files", null, 1, 2),
+				],
+			}),
+		);
+		useSignedIn();
+		mockValidate();
+		mockPolicy(makeDetail("nightly", {}, { retention: { keepLast: 3 } }));
+		const user = userEvent.setup();
+		const { router } = renderApp("/policies/nightly");
+
+		expect(await screen.findByRole("tab", { name: "Policy" })).toHaveAttribute(
+			"aria-selected",
+			"true",
+		);
+		await user.click(screen.getByRole("tab", { name: /^Retention preview/ }));
+
+		expect(router.state.location.search).toEqual({ tab: "preview" });
+		const table = await screen.findByRole("table");
+		expect(
+			within(table)
+				.getAllByRole("columnheader")
+				.map((h) => h.textContent),
+		).toEqual(["Source", "Host", "Forget", "Keep"]);
+		const rows = within(table).getAllByRole("row").slice(1);
+		expect(rows.map((r) => r.textContent)).toEqual([
+			"guest-oneweb-132",
+			"Filesdb-112",
+		]);
+		expect(
+			within(rows[0]).getByRole("link", { name: "web-1" }),
+		).toHaveAttribute("href", "/hosts/web-1-id");
+	}, 20_000);
+
+	const snapshotsOf = (id: string, n: number) =>
+		Array.from({ length: n }, (_, i) => ({
+			id: `${id}${i}`,
+			received_at: Date.UTC(2026, 10, 14 - i, 2, 10),
+			time: Date.UTC(2026, 10, 14 - i, 2, 10),
+		}));
+
+	const fortyInstances = () =>
+		Array.from({ length: 40 }, (_, i) => ({
+			...instance(
+				i < 28 ? "pve-01" : "pve-02",
+				"proxmox-vm",
+				`VM ${100 + i}`,
+				40 - i,
+				2,
+			),
+			snapshots: i === 0 ? snapshotsOf("vm100", 2) : [],
+		}));
+
+	async function openMulti(over: Partial<RetentionPreview>, tab?: "preview") {
+		mockPreview("nightly", () => previewOf({ multi_instance: true, ...over }));
+		useSignedIn();
+		mockValidate();
+		mockPolicy(makeDetail("nightly", {}, { retention: { keepLast: 3 } }));
+		const user = userEvent.setup();
+		const view = renderApp(
+			tab ? `/policies/nightly?tab=${tab}` : "/policies/nightly",
+		);
+		return { user, ...view };
+	}
+
+	it("opens the preview from the summary", async () => {
+		const { user, router } = await openMulti({
+			total: 412,
+			forget: 46,
+			instances: fortyInstances(),
+		});
+
+		await screen.findByText(
+			"Would forget 46 of 412 snapshots in 40 sources on 2 hosts.",
+		);
+		await user.click(screen.getByRole("button", { name: "Open preview" }));
+
+		expect(router.state.location.search).toEqual({ tab: "preview" });
+		expect(
+			screen.getByRole("tab", { name: /^Retention preview/ }),
+		).toHaveAttribute("aria-selected", "true");
+		expect(await screen.findByRole("table")).toBeVisible();
+		expect(
+			screen.getByRole("tab", { name: /^Retention preview/ }),
+		).toHaveTextContent("forget 46");
+	}, 20_000);
+
+	it("shows the heavy warning above the summary on the Policy tab", async () => {
+		await openMulti({
+			total: 60,
+			forget: 40,
+			instances: [instance("web-1", "proxmox-vm", "guest", 40, 2)],
+		});
+
+		const summary = await screen.findByText(
+			"Would forget 40 of 60 snapshots in 1 source on 1 host.",
+		);
+		const warning = screen.getByText(/This forgets 67% of the snapshots/);
+		expect(
+			warning.compareDocumentPosition(summary) &
+				Node.DOCUMENT_POSITION_FOLLOWING,
+		).toBeTruthy();
+	}, 20_000);
+
+	it("filters and pages sources on the preview tab", async () => {
+		const { user } = await openMulti(
+			{
+				total: 412,
+				forget: 46,
+				instances: fortyInstances(),
+				instances_truncated: 3,
+			},
+			"preview",
+		);
+
+		const table = await screen.findByRole("table");
+		expect(screen.getByText("Showing 1–25 of 40 sources")).toBeVisible();
+		expect(within(table).getAllByRole("row")).toHaveLength(26);
+		expect(screen.getByText("and 3 more snapshots not listed")).toBeVisible();
+		expect(screen.getByRole("button", { name: "Previous" })).toBeDisabled();
+
+		await user.click(screen.getByRole("button", { name: "Next" }));
+		expect(screen.getByText("Showing 26–40 of 40 sources")).toBeVisible();
+		expect(screen.getByRole("button", { name: "Next" })).toBeDisabled();
+		await user.click(screen.getByRole("button", { name: "Previous" }));
+
+		await user.click(screen.getByRole("combobox", { name: /^Host:/ }));
+		await user.click(await screen.findByRole("option", { name: "pve-02" }));
+		expect(screen.getByText("Showing 1–12 of 12 sources")).toBeVisible();
+		expect(within(screen.getByRole("table")).getAllByRole("row")).toHaveLength(
+			13,
+		);
+
+		await user.click(screen.getByRole("combobox", { name: /^Host:/ }));
+		await user.click(await screen.findByRole("option", { name: "pve-01" }));
+		expect(screen.getByText("Showing 1–25 of 28 sources")).toBeVisible();
+		await user.click(
+			screen.getByRole("button", { name: /Snapshots to forget in VM 100/ }),
+		);
+		expect(await screen.findAllByText("Not kept by any rule")).toHaveLength(2);
+		expect(screen.getByText("vm1000")).toBeVisible();
+	}, 30_000);
+
+	it("shows singular forms for one source", async () => {
+		const { user } = await openMulti({
+			total: 1,
+			forget: 1,
+			hosts: [previewHost("web-1", 1, 1)],
+			instances: [instance("web-1", "proxmox-vm", "guest", 1, 0)],
+			instances_truncated: 1,
+		});
+
+		await screen.findByText(
+			"Would forget 1 of 1 snapshot in 1 source on 1 host.",
+		);
+		await user.click(screen.getByRole("button", { name: "Open preview" }));
+		expect(await screen.findByText("Showing 1 of 1 source")).toBeVisible();
+		expect(screen.getByText("and 1 more snapshot not listed")).toBeVisible();
+	}, 20_000);
+
+	it("shows nothing to forget without a table", async () => {
+		await openMulti(
+			{ total: 9, forget: 0, instances: [], hosts: [] },
+			"preview",
+		);
+
+		expect(
+			await screen.findByRole("tab", { name: /nothing to forget/ }),
+		).toBeVisible();
+		expect(
+			screen.getAllByText("Nothing would be forgotten right now.").length,
+		).toBeGreaterThan(0);
+		expect(screen.queryByRole("table")).not.toBeInTheDocument();
+	}, 20_000);
+
+	it("retries the preview on both tabs", async () => {
+		const bodies = mockPreview("nightly", (_, call) =>
+			call === 1 || call === 3
+				? HttpResponse.json(
+						{ code: "internal", message: "boom" },
+						{ status: 500 },
+					)
+				: previewOf({
+						multi_instance: true,
+						instances: [instance("web-1", "proxmox-vm", "guest", 3, 2)],
+					}),
+		);
+		useSignedIn();
+		mockValidate();
+		mockPolicy(makeDetail("nightly", {}, { retention: { keepLast: 3 } }));
+		const user = userEvent.setup();
+		renderApp("/policies/nightly");
+
+		await user.click(
+			await screen.findByRole("button", { name: "Retry preview" }),
+		);
+		await screen.findByText(/Would forget 4 of 20 snapshots in 1 source/);
+
+		await user.type(screen.getByRole("textbox", { name: "Keep last" }), "0");
+		await screen.findByRole("button", { name: "Retry preview" });
+		await user.click(screen.getByRole("tab", { name: /^Retention preview/ }));
+		expect(screen.queryByText("Leave without saving?")).not.toBeInTheDocument();
+		const [onPreviewTab] = await screen.findAllByRole("button", {
+			name: "Retry preview",
+		});
+		expect(
+			screen
+				.getByRole("tab", { name: /^Retention preview/ })
+				.getAttribute("aria-selected"),
+		).toBe("true");
+		await user.click(onPreviewTab);
+
+		expect(await screen.findByRole("table")).toBeVisible();
+		await waitFor(() => expect(bodies).toHaveLength(4));
+	}, 30_000);
 });

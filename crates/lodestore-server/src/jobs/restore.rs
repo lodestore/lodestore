@@ -202,6 +202,12 @@ pub async fn enqueue_restore(
         .fetch_optional(&state.db.pool)
         .await?
         .ok_or_else(|| ApiError::NotFound("The snapshot was not found.".into()))?;
+    let source_type: String = snapshot.try_get("source_type")?;
+    if source_type != "files" {
+        return Err(ApiError::Validation(format!(
+            "This snapshot is a {source_type} backup and cannot be restored as files."
+        )));
+    }
     if snapshot.try_get::<Option<i64>, _>("verified_at")?.is_none() {
         if req.in_place {
             return Err(ApiError::BadRequest(
@@ -268,6 +274,7 @@ pub async fn enqueue_restore(
         in_place: req.in_place,
         conflict: req.conflict as i32,
         restore_owners: req.restore_owners,
+        target: None,
     };
     let id = uuid::Uuid::now_v7().to_string();
     sqlx::query(

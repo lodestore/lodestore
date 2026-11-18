@@ -39,6 +39,7 @@ import {
 } from "@/components/policies/policy-yaml";
 import { hasRetention } from "@/components/policies/retention-panel";
 import {
+	InstancePreview,
 	RetentionPreview,
 	useRetentionPreviewState,
 } from "@/components/policies/retention-preview";
@@ -102,6 +103,8 @@ export function PolicyEditor({
 	repositories,
 	onChangedChange,
 	leaving,
+	previewTab = "policy",
+	onPreviewTab,
 	children,
 }: {
 	detail?: PolicyDetail;
@@ -109,6 +112,8 @@ export function PolicyEditor({
 	repositories: RepositorySummary[];
 	onChangedChange?: (changed: boolean) => void;
 	leaving?: RefObject<boolean>;
+	previewTab?: "policy" | "preview";
+	onPreviewTab?: (tab: "policy" | "preview") => void;
 	children?: ReactNode;
 }) {
 	const isNew = detail === undefined;
@@ -255,6 +260,8 @@ export function PolicyEditor({
 		timezone: draft.schedule.timezone || "UTC",
 		enabled: !isNew && !retentionFailing,
 	});
+	const multiInstance = preview.data?.multi_instance === true;
+	const outerTab = multiInstance ? previewTab : "policy";
 	const previewPending = !isNew && rulesChanged && rules && !preview.fresh;
 
 	const nameTaken = isNew && result?.name_taken === true;
@@ -335,7 +342,8 @@ export function PolicyEditor({
 	}
 
 	const blocker = useBlocker({
-		shouldBlockFn: () => changed && !bypass.current,
+		shouldBlockFn: ({ current, next }) =>
+			changed && !bypass.current && current.pathname !== next.pathname,
 		enableBeforeUnload: () => changed && !bypass.current,
 		withResolver: true,
 	});
@@ -386,7 +394,42 @@ export function PolicyEditor({
 					)
 				}
 			/>
-			<div className="@container flex flex-col gap-6">
+			{multiInstance && preview.data && (
+				<Tabs
+					value={outerTab}
+					onValueChange={(value) =>
+						onPreviewTab?.(value as "policy" | "preview")
+					}
+				>
+					<TabsList variant="line">
+						<TabsTrigger value="policy" className="after:bg-primary-strong">
+							{text.tabs.policy}
+						</TabsTrigger>
+						<TabsTrigger value="preview" className="after:bg-primary-strong">
+							{text.tabs.preview}
+							<span
+								className={cn(
+									"text-sm font-normal text-muted-foreground",
+									outerTab === "preview" && "text-primary-strong",
+								)}
+							>
+								{preview.data.forget > 0
+									? text.retention.preview.tabCount(preview.data.forget)
+									: text.retention.preview.tabCountZero}
+							</span>
+						</TabsTrigger>
+					</TabsList>
+				</Tabs>
+			)}
+			{outerTab === "preview" && preview.data && (
+				<InstancePreview state={preview} rules={rules} changed={rulesChanged} />
+			)}
+			<div
+				className={cn(
+					"@container flex flex-col gap-6",
+					outerTab === "preview" && "hidden",
+				)}
+			>
 				<Tabs value={tab} onValueChange={changeTab} className="gap-4">
 					<TabsList variant="line" className="@min-[960px]:hidden">
 						<TabsTrigger value="form" className="after:bg-primary-strong">
@@ -432,6 +475,7 @@ export function PolicyEditor({
 												isNew={isNew}
 												hasRules={hasRetention(draft.retention)}
 												changed={rulesChanged}
+												onOpen={() => onPreviewTab?.("preview")}
 											/>
 										}
 									/>

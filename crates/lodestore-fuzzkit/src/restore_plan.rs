@@ -209,6 +209,7 @@ pub fn restore_plan(data: &[u8]) {
         in_place: false,
         conflict: conflict as i32,
         restore_owners: flags & 4 != 0,
+        target: None,
     };
     let zeros = flags & 8 != 0;
     for round in 0..=usize::from(flags & 16 != 0) {

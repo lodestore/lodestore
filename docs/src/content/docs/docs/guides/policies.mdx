@@ -7,7 +7,7 @@ import ThemeImage from '../../../../components/site/ThemeImage.astro';
 import policyLight from '../../../../assets/media/policy.light.webp';
 import policyDark from '../../../../assets/media/policy.dark.webp';
 
-A `BackupPolicy` is one strict YAML document shared by the UI, `lode apply` and CI. This page covers the four blocks that make a policy run on its own and tell you when it does not: `spec.schedule`, `spec.retention`, `spec.limits` and `spec.alerts`. All four are optional. A policy without them runs only when started by hand, keeps every snapshot and uploads without limits. The `apiVersion` stays `lodestore.io/v1alpha1`.
+A `BackupPolicy` is one strict YAML document shared by the UI, `lode apply` and CI. This page covers the four blocks that make a policy run on its own and tell you when it does not: `spec.schedule`, `spec.retention`, `spec.limits` and `spec.alerts`. All four are optional. A policy without them runs only when started by hand, keeps every snapshot and uploads without limits. The `apiVersion` is `lodestore.io/v1alpha1` for a policy of files; a policy with a `spec.source` uses `lodestore.io/v1alpha2` (see [source](#source-what-a-policy-backs-up)).
 
 ```yaml
 apiVersion: lodestore.io/v1alpha1
@@ -46,6 +46,32 @@ Unknown fields are rejected with the line and column of the typo.
   <figcaption>The same kind of policy in the web interface. The form and its YAML stay in sync.</figcaption>
 </figure>
 
+## source: what a policy backs up
+
+Without `spec.source` a policy backs up the files in `spec.paths`, and every policy on this page so far does. `spec.source` names another kind of source and needs `apiVersion: lodestore.io/v1alpha2`; a `v1alpha1` document that has a `source` is refused. The `type` selects the block, and the other fields of the block sit next to it:
+
+| `type` | Fields | Selects |
+| --- | --- | --- |
+| `files` | none | The files in `spec.paths`, as without a source. `paths`, `exclude`, `oneFileSystem` and `excludeCaches` belong to this type only; the other types refuse them. |
+| `proxmox-vm`, `proxmox-ct` | `vmids` (100 to 999999999, up to 1000), `pool`, `tags` (up to 20) | Guests of a Proxmox node by id, pool or tag. At least one of the three is required. |
+| `postgres`, `mysql` | `databases`, `excludeDatabases` (names of 1 to 64 bytes, up to 1000 each) | Databases of a server. `excludeDatabases` is used only when `databases` is empty. |
+
+```yaml
+apiVersion: lodestore.io/v1alpha2
+kind: BackupPolicy
+metadata:
+  name: nightly-guests
+spec:
+  repository: main
+  source:
+    type: proxmox-vm
+    tags: [prod]
+```
+
+This version of the server runs only `files`. A policy with another type is checked like any other, and a create, update or `lode apply` that carries one is refused with 422 `spec.source.type`, after the permission checks and also on `--dry-run`, so no such policy is stored. The block is there so that policies and tools written for it already validate. A policy of `files` is exported in the old form: without `source` and with `apiVersion: lodestore.io/v1alpha1`, the same bytes as before. A policy with another source is exported as `v1alpha2`. A server of 0.2 does not read `v1alpha2`.
+
+`lode policy validate FILE...` checks policy files offline, with the same rules as the server, and prints the path, line and column of each problem. It exits 0 when every file is valid and 3 when one is not; it needs no server and no token.
+
 ## Durations and rates
 
 A duration is a whole number and one unit: `s`, `m`, `h`, `d` (24 hours), `w` (7 days) or `y` (365 days). Fractions and signs are not accepted.
@@ -76,7 +102,7 @@ Schedules that are not a single fixed time of day, such as `*/30 * * * *` or `0,
 
 ## retention
 
-Retention follows `restic forget`. It runs per host, on the snapshots of this policy only, after each successful backup. Snapshots made by `lode` or by other policies are never touched.
+Retention follows `restic forget`. It runs per host and per source instance (a source instance is one guest, one database or the files of the host), on the snapshots of this policy only, after each successful backup. Snapshots made by `lode` or by other policies are never touched. For a policy of files there is one instance on each host, so nothing changes; for a policy of guests, each guest has its own history, and a guest backed up often does not push out the history of another.
 
 | Field | Keeps |
 | --- | --- |
@@ -90,17 +116,17 @@ Counts are whole numbers of 1 or more. A snapshot is kept if any rule keeps it. 
 
 ### Scheduled and manual snapshots
 
-The snapshots of a policy on a host form up to three pools, and the rules above apply to each pool on its own:
+The snapshots of a policy on a host form, for each source instance, up to three kinds of pool, and the rules above apply to each pool on its own:
 
 - **Scheduled**: backups started by the schedule, including catch-up backups.
 - **Manual**: backups started by hand, from the web interface, `lode server policies run`, `lode server jobs run` or the API.
-- **Stdin**: snapshots of `lode backup --stdin --policy NAME` through the agent, only when the policy sets `includeStdin` (see below).
+- **Stdin**: snapshots of `lode backup --stdin --policy NAME` through the agent, only when the policy sets `includeStdin` (see below). Each stream name (`--name`) has its own pool.
 
 A series of manual runs therefore rotates only the manual snapshots and never touches the scheduled history. A manual backup taken before a risky change stays until later manual backups push it out of the rules. Snapshots that were made before the server recorded how they started, and whose job records the server had already deleted (jobs are kept for 90 days), count as scheduled.
 
 ### Stdin snapshots
 
-A snapshot made with `lode backup --stdin --policy NAME` is outside retention by default: it takes no slot in any rule and is never forgotten, like a stdin snapshot without a policy. It also does not count as the last successful backup of the policy for alerts and metrics. The name `NAME` must be a policy that selects the host, both when the stream starts and when it ends; otherwise the job fails on the server with `snapshot_policy_mismatch` and the snapshot is not counted under that policy. To let retention rotate them, set `includeStdin: true` under `retention`; they then form a pool of their own and push out neither manual nor scheduled snapshots. Setting it needs the `snapshots:delete` scope for a token, like any other retention change. Clearing every retention rule in the policy form also turns `includeStdin` off, so rules added again in the same session do not bring it back.
+A snapshot made with `lode backup --stdin --policy NAME` is outside retention by default: it takes no slot in any rule and is never forgotten, like a stdin snapshot without a policy. It also does not count as the last successful backup of the policy for alerts and metrics. The name `NAME` must be a policy that selects the host, both when the stream starts and when it ends; otherwise the job fails on the server with `snapshot_policy_mismatch` and the snapshot is not counted under that policy. To let retention rotate them, set `includeStdin: true` under `retention`; they then form a pool for each stream name and push out neither manual nor scheduled snapshots, nor the snapshots of a stream of another name: a weekly `etcd.snap` is not rotated by an hourly `pg.dump`. Setting it needs the `snapshots:delete` scope for a token, like any other retention change. Clearing every retention rule in the policy form also turns `includeStdin` off, so rules added again in the same session do not bring it back.
 
 ```yaml
   retention:
@@ -110,13 +136,19 @@ A snapshot made with `lode backup --stdin --policy NAME` is outside retention by
 
 Details that matter:
 
-- Days, weeks and months are counted in the schedule's `timezone`, or in UTC when the policy has no schedule.
+- Days, weeks and months are counted in the schedule's `timezone`, or in UTC when the policy has no schedule. Changing the time zone of a policy with retention moves the boundaries, so it needs `snapshots:delete` for a token.
 - The time of a snapshot is the time the server received it (the storage object's modification time), not the time the backup started. This survives a catalog rebuild.
 - Two snapshots with the same time are ordered by id.
-- The two newest good snapshots of each pool of a host are always kept, whatever the rules say, so a bad rule or a run of failed backups cannot empty a host. A good snapshot is one that is neither suspicious nor incomplete. Incomplete snapshots take part in the rules like any other, but do not count towards these two.
+- The two newest good snapshots of each pool of each source instance on a host are always kept, whatever the rules say, so a bad rule or a run of failed backups cannot empty a host. A good snapshot is one that is neither suspicious nor incomplete. Incomplete snapshots take part in the rules like any other, but do not count towards these two.
 - Suspicious snapshots (flagged by the anomaly detector or by an administrator) take no slot in any rule and are never forgotten. The good snapshots around them are counted as if they were not there.
+- An instance that stops getting snapshots (a deleted guest, a reused VMID, a recreated database) keeps its two newest good snapshots for good; the other rules apply to it as always. A guest that moves to another node is a new instance on that node, with its own retention, and the old one keeps its two snapshots. Remove them by hand with `snapshots:delete` when you no longer need them. A policy that stops selecting an instance raises one alert, [Source no longer selected](/docs/guides/alerts/#source-no-longer-selected).
+- The anomaly detector compares a snapshot with the history of its own source instance only.
 - If a policy is deleted, its snapshots stay. A new policy with the same name in the same repository takes them into its pool.
 - Forgetting removes only the snapshot manifest. The data it referenced stays in the repository until garbage collection frees the space.
+
+### Retention preview
+
+Before you save a tighter rule, the policy page shows what it would forget. When the policy has more than one source instance on its hosts, the page has two tabs, **Policy** and **Retention preview**. The Policy tab keeps a summary (for example "Would forget 46 of 412 snapshots in 40 sources on 2 hosts") and an **Open preview** button. The preview tab lists the sources that have something to forget with the columns Source, Host, Forget and Keep, a filter by host and 25 sources per page; a row opens the list of snapshots to forget, and the floor of two and the snapshots that are suspicious are noted above the table. A policy with one instance shows the list inside the form, as before. The API answers with the same data (see [the API reference](/docs/reference/api/#retention-preview)), and `lode server policies retention` prints the preview per host.
 
 ## limits
 
@@ -151,7 +183,7 @@ A web session may change everything on this page. An API token, for example in a
 | Add, change or remove `retention`, or `includeStdin` | `snapshots:delete`, because retention makes the server delete snapshots |
 | Run a policy with retention more often | `snapshots:delete`. The server compares the shortest gap between two runs of the schedule over the next 366 days, in the time zone of the policy, before and after the change. That also catches `0 3 * 12 *`, which runs daily but only in December, in place of a weekly schedule, and a schedule with no two runs in that year, such as `* * 29 2 *`, in place of a daily one. A schedule that runs less often, or at another time of day, needs only `policies:write` |
 | Add, change or remove `hooks`, or widen a policy that has hooks: change its `repository`, or its selector in any way other than a shorter `hosts` list or more `matchLabels` added (an empty selector, a changed or removed label and a host id that is not enrolled yet all count as wider), or change host labels so that a host joins it | `hooks:write`, because hooks run commands as root on the hosts. It does not matter which hosts are enrolled at that moment. Deleting a whole policy without retention needs only `policies:write` |
-| Change `paths`, `exclude`, `oneFileSystem`, `excludeCaches` or `repository` of a policy with retention (before or after the edit) | `snapshots:delete`, because narrower paths or another repository make the next backups hold less or sit in another pool, and retention then forgets real snapshots. Paths compare as a set, so reordering them needs only `policies:write`; excludes compare as an ordered list, because a later `!` pattern can bring back what an earlier one excluded, so reordering or repeating one counts as a change; `/etc` and `/etc/` count as different paths. A policy without retention needs only `policies:write` |
+| Change `paths`, `exclude`, `oneFileSystem`, `excludeCaches`, `source`, `schedule.timezone` or `repository` of a policy with retention (before or after the edit) | `snapshots:delete`, because narrower paths, another source, another time zone or another repository make the next backups hold less or sit in another pool, or move the day and week boundaries, and retention then forgets real snapshots. A missing time zone is UTC, and the name of the zone is compared as written. Paths compare as a set, so reordering them needs only `policies:write`; excludes compare as an ordered list, because a later `!` pattern can bring back what an earlier one excluded, so reordering or repeating one counts as a change; `/etc` and `/etc/` count as different paths. A policy without retention needs only `policies:write` |
 | Delete a policy with retention, also with `lode apply --prune` | `snapshots:delete`, because a new policy with the same name and repository takes over its snapshots |
 
 The server answers 403 and names the scope; for hooks it also lists the policies. `lode apply` refuses the whole run in these cases, and `--dry-run` shows the refusal beforehand.

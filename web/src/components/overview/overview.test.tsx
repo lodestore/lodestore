@@ -765,6 +765,28 @@ describe("active alerts", () => {
 		).toHaveAttribute("href", "/hosts/host-1");
 	});
 
+	it("shows a source that is no longer selected on the host", async () => {
+		await openHostAlerts([
+			alertFixture("s1", {
+				type: "source_instance_gone",
+				severity: "warning",
+				policy: "daily",
+				detail: "Policy daily no longer selects this source.",
+				facts: { source_label: "VM 101 · web" },
+			}),
+		]);
+		await screen.findByRole("list", { name: HOST_ALERTS });
+		expect(rows(HOST_ALERTS).map(titleOf)).toContain(
+			"VM 101 · web of web-1 is no longer backed up by daily",
+		);
+		expect(
+			within(screen.getByRole("list", { name: HOST_ALERTS })).getAllByRole(
+				"link",
+				{ name: "web-1" },
+			)[0],
+		).toHaveAttribute("href", "/hosts/host-1");
+	});
+
 	it("silences and resumes a host", async () => {
 		const user = userEvent.setup();
 		let body: unknown;

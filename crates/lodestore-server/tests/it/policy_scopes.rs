@@ -890,3 +890,116 @@ async fn step_up_labels_that_gain_hooks() {
         ts.stop().await;
     }
 }
+
+const CONTENT_REFUSED: &str = "The token needs the snapshots:delete scope to change what or where a policy with retention backs up.";
+const VM_SOURCE: &str = "  source:\n    type: proxmox-vm\n    vmids: [101]\n";
+const NOT_SUPPORTED: &str = "not supported by this server version yet";
+
+fn sourced(name: &str, extra: &str) -> String {
+    format!(
+        "apiVersion: lodestore.io/v1alpha2\nkind: BackupPolicy\nmetadata:\n  name: {name}\n\
+         spec:\n  repository: main\n  selector:\n    matchLabels:\n      role: db\n{extra}"
+    )
+}
+
+fn apply_body(yaml: &str, dry_run: bool) -> Value {
+    json!({
+        "documents": [{ "source": "p.yaml", "yaml": yaml }],
+        "adopt": true,
+        "dry_run": dry_run,
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn policy_scopes_unsupported_source_is_refused_after_gates() {
+    for backend in backends() {
+        let what = backend.name();
+        let ts = TestServer::start(&backend).await;
+        ts.create_local_repository("main").await;
+        let session = Session {
+            api: ts.api().await,
+            ts: &ts,
+        };
+        session.create(yaml("plain", "main", "db", "")).await;
+        let rows = policy_rows(&ts).await;
+
+        let (status, body) = session
+            .post(
+                "/api/v1/policies",
+                &json!({ "yaml": sourced("vm", VM_SOURCE) }),
+            )
+            .await;
+        assert_eq!(status, 422, "[{what}] create: {body}");
+        let message = body["message"].as_str().unwrap();
+        assert!(message.contains("spec.source.type"), "[{what}] {message}");
+        assert!(message.contains(NOT_SUPPORTED), "[{what}] {message}");
+
+        let (status, body) = session
+            .put(
+                "/api/v1/policies/plain",
+                &update(sourced("plain", VM_SOURCE), 1),
+            )
+            .await;
+        assert_eq!(status, 422, "[{what}] update: {body}");
+        assert!(body["message"].as_str().unwrap().contains(NOT_SUPPORTED));
+        assert_eq!(policy_rows(&ts).await, rows, "[{what}] nothing stored");
+        let (_, current) = session
+            .send(reqwest::Method::GET, "/api/v1/policies/plain", None)
+            .await;
+        assert_eq!(current["revision"], 1, "[{what}]");
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn policy_scopes_source_change_needs_snapshots_delete() {
+    for backend in backends() {
+        let what = backend.name();
+        let ts = TestServer::start(&backend).await;
+        ts.create_local_repository("main").await;
+        let session = Session {
+            api: ts.api().await,
+            ts: &ts,
+        };
+        session.create(yaml("kept", "main", "db", KEEP_THREE)).await;
+        let plain = Token::new(&ts, &["policies:read", "policies:write"]).await;
+        let strong = Token::new(
+            &ts,
+            &["policies:read", "policies:write", "snapshots:delete"],
+        )
+        .await;
+        let refused = |got: &(u16, Value), what: &str| {
+            assert_eq!(got.0, 403, "{what}: {}", got.1);
+            assert_eq!(got.1["message"], CONTENT_REFUSED, "{what}");
+        };
+        let sourced_vm = sourced("kept", &format!("{VM_SOURCE}{KEEP_THREE}"));
+
+        let got = plain
+            .put("/api/v1/policies/kept", &update(sourced_vm.clone(), 1))
+            .await;
+        refused(&got, &format!("update [{what}]"));
+        for dry_run in [true, false] {
+            let got = plain
+                .post("/api/v1/policies/apply", &apply_body(&sourced_vm, dry_run))
+                .await;
+            refused(&got, &format!("apply dry_run={dry_run} [{what}]"));
+        }
+        let (_, current) = session
+            .send(reqwest::Method::GET, "/api/v1/policies/kept", None)
+            .await;
+        assert_eq!(current["revision"], 1, "[{what}] unchanged");
+
+        let got = strong
+            .put("/api/v1/policies/kept", &update(sourced_vm.clone(), 1))
+            .await;
+        assert_eq!(got.0, 422, "[{what}] {}", got.1);
+        assert!(got.1["message"].as_str().unwrap().contains(NOT_SUPPORTED));
+
+        let files = yaml("kept", "main", "db", KEEP_THREE)
+            .replace("v1alpha1", "v1alpha2")
+            .replace("  retention:", "  source:\n    type: files\n  retention:");
+        let got = plain.put("/api/v1/policies/kept", &update(files, 1)).await;
+        assert_eq!(got.0, 200, "[{what}] files is no change: {}", got.1);
+        ts.stop().await;
+    }
+}

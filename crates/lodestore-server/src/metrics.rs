@@ -265,7 +265,9 @@ fn pair_series(
         .hosts
         .iter()
         .flat_map(|host| {
-            host.pairs.iter().map(move |pair| PairRow {
+            // shortcut: per-pair series cover the files instance; add a source label when other sources back up (phase 22).
+            let files = host.pairs.iter().filter(|p| p.source_ref.is_empty());
+            files.map(move |pair| PairRow {
                 host,
                 pair,
                 detail: details.get(&(pair.policy.clone(), host.host_id.clone())),
@@ -330,10 +332,11 @@ async fn pair_details(state: &AppState) -> anyhow::Result<HashMap<Pair, PairDeta
         "SELECT s.policy_name, s.host_id, s.stats_json FROM snapshots s JOIN ( \
              SELECT policy_name, host_id, MAX(received_at) AS at FROM snapshots \
              WHERE incomplete = 0 AND verified_at IS NOT NULL AND stdin_name IS NULL \
-                 AND policy_name IS NOT NULL AND host_id IS NOT NULL \
+                 AND source_ref = '' AND policy_name IS NOT NULL AND host_id IS NOT NULL \
              GROUP BY policy_name, host_id \
          ) l ON l.policy_name = s.policy_name AND l.host_id = s.host_id AND l.at = s.received_at \
-         WHERE s.incomplete = 0 AND s.verified_at IS NOT NULL AND s.stdin_name IS NULL",
+         WHERE s.incomplete = 0 AND s.verified_at IS NOT NULL AND s.stdin_name IS NULL \
+             AND s.source_ref = ''",
     )
     .fetch_all(&state.db.pool)
     .await
@@ -785,7 +788,7 @@ async fn check_series(x: &mut Exposition, state: &AppState) -> anyhow::Result<()
     Ok(())
 }
 
-const ALERT_TYPES: [AlertType; 10] = [
+const ALERT_TYPES: [AlertType; 11] = [
     AlertType::BackupFailed,
     AlertType::NoRecentBackup,
     AlertType::AgentOffline,
@@ -796,6 +799,7 @@ const ALERT_TYPES: [AlertType; 10] = [
     AlertType::RepositoryUnavailable,
     AlertType::AgentSessionConflict,
     AlertType::AgentCertificateRejected,
+    AlertType::SourceInstanceGone,
 ];
 
 async fn alert_series(x: &mut Exposition, state: &AppState, now_ms: i64) -> anyhow::Result<()> {

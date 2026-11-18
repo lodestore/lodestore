@@ -269,3 +269,57 @@ async fn adv_policies_write_cannot_change_what_a_retention_policy_backs_up() {
         ts.stop().await;
     }
 }
+
+const RETENTION_REFUSED: &str =
+    "The token needs the snapshots:delete scope to set or change retention.";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adv_policies_write_cannot_swap_the_source_or_zone_of_a_retention_policy() {
+    for backend in backends() {
+        let what = backend.name();
+        let ts = TestServer::start(&backend).await;
+        ts.create_local_repository("main").await;
+        let session = Caller::session(&ts).await;
+        let schedule = |zone: &str| {
+            format!("  schedule:\n    cron: \"0 3 * * *\"\n    jitter: 0m\n    timezone: {zone}\n")
+        };
+        let base = format!("{PATHS}{}", schedule("UTC"));
+        session.create(kept("main", &base)).await;
+        let weak = Caller::token(&ts, &["policies:read", "policies:write"]).await;
+
+        let shifted = kept(
+            "main",
+            &format!("{PATHS}{}", schedule("Pacific/Kiritimati")),
+        );
+        let got = weak.put("kept", shifted.clone(), 1).await;
+        assert_refused(&got, RETENTION_REFUSED, &format!("[{what}] PUT zone"));
+        for dry_run in [true, false] {
+            let got = weak.apply(std::slice::from_ref(&shifted), dry_run).await;
+            assert_refused(
+                &got,
+                RETENTION_REFUSED,
+                &format!("[{what}] apply zone dry_run={dry_run}"),
+            );
+        }
+
+        let swapped = kept("main", &base)
+            .replace("v1alpha1", "v1alpha2")
+            .replace(
+                "  retention:",
+                "  source:\n    type: proxmox-vm\n    vmids: [101]\n  retention:",
+            )
+            .replace(PATHS, "");
+        let got = weak.put("kept", swapped.clone(), 1).await;
+        assert_refused(&got, CONTENT_REFUSED, &format!("[{what}] PUT source"));
+        for dry_run in [true, false] {
+            let got = weak.apply(std::slice::from_ref(&swapped), dry_run).await;
+            assert_refused(
+                &got,
+                CONTENT_REFUSED,
+                &format!("[{what}] apply source dry_run={dry_run}"),
+            );
+        }
+        assert_eq!(weak.revision("kept").await, 1, "[{what}] unchanged");
+        ts.stop().await;
+    }
+}

@@ -4,15 +4,32 @@ All notable changes to Lodestore are recorded here. The format follows [Keep a C
 
 ## [Unreleased]
 
+### Added
+
+- `spec.source` in a backup policy, with `apiVersion: lodestore.io/v1alpha2`: `files`, `proxmox-vm`, `proxmox-ct`, `postgres` and `mysql` blocks. A policy of files is exported without it and as `v1alpha1`, byte for byte as before. This version of the server runs only `files`: a policy with another type is refused with 422 `spec.source.type` on create, update and apply, dry runs included. See [Backup policies](https://lodestore.dev/docs/guides/policies/).
+- `lode policy validate FILE...` checks policy files offline with the rules of the server and exits 3 when a file has problems.
+- Snapshots carry a source type and a label. `GET /api/v1/hosts/{id}/snapshots` and `GET /api/v1/restore/snapshots` accept `source_type` (and the latter `source`, a source instance on the host) and report `source_type`, `source_label` and `source_counts`; `lode server snapshots list` takes `--source-type` and `--source`, `lode snapshots` takes `--source-type`. The host page filters its Snapshots tab by source type when a host has more than one.
+- `latest@<source key>` in `lode restore`, `lode ls` and `lode dump` selects the newest signed snapshot of one source instance on any host of the repository.
+- Four restore scopes, `restore:guest`, `restore:guest-in-place`, `restore:db` and `restore:db-in-place`, independent of `restore:host`, `restore:in-place` and `restore:download`. They are reserved: no endpoint uses them yet. `RestoreSpec` carries a `target` for a guest or a database.
+- The alert `source_instance_gone` (`LodestoreSourceInstanceGone` in the Prometheus rules): one warning for 24 hours when a policy stops expecting a source it backed up.
+- The retention preview lists every source instance with something to forget, with a Retention preview tab on the policy page when a host has more than one.
+- [ADR 0007](https://lodestore.dev/docs/adr/0007-source-model/): the source model, canonical keys of source instances, retention and `latest` per instance, restore scopes and the layout of disk images.
+
 ### Changed
+
+- Retention, the floor of two newest good snapshots, `latest` and the missing-backup alert work per source instance (a guest, a database, or the files of a host) instead of per host. A policy of files has one instance per host and behaves as before, which tests check against the previous code. A guest that migrates to another node, or a database that fails over to another host, is a new instance on the new host.
+- `latest` in `lode` and the server chooses among `files` snapshots; a snapshot of another source is chosen only by `latest@<source key>`, and a WAL batch never. A repository without signatures skips snapshots whose manifest claims a source other than `files`.
+- The anomaly baseline of a snapshot is the history of its own source instance.
+- A files restore of a snapshot of a guest or a database is refused with 422.
 
 - The comparison pages show the date the facts about each competitor were checked and a list of sources with their versions.
 - `lode backup --stdin --policy X` through the agent, where `X` does not select the host or does not exist, now ends on the server as a `failed` job with `snapshot_policy_mismatch` instead of a snapshot under policy `X`.
-- With `includeStdin: true`, the stdin snapshots of a policy are counted in a retention pool of their own, not in the manual pool.
+- With `includeStdin: true`, the stdin snapshots of a policy are counted in a retention pool of their own, not in the manual pool, and each stdin stream name has its own pool, so a weekly `etcd.snap` is not rotated by an hourly `pg.dump`.
 
 ### Security
 
-- A token needs `snapshots:delete` in addition to `policies:write` to change `spec.paths`, `spec.exclude`, `spec.oneFileSystem`, `spec.excludeCaches` or `spec.repository` of a policy that has retention before or after the edit, and to delete a policy with retention (`DELETE /api/v1/policies/{name}`, `lode server policies delete`, `lode apply --prune`), dry runs included. Without it the server answers 403 and `lode` exits with code 13; a session needs its password entered in the last 15 minutes. Reordering paths is not a change, reordering or repeating an exclude is. See [API tokens and scopes](https://lodestore.dev/docs/security/threat-model/).
+- The server compares the source a snapshot claims in its manifest with the source of its job when it checks the job. A mismatch, an invalid claim or a claim in a job of another type fails the check with `verification_failed`: no signature and no place in retention. The signed record names the source the server took from the job, and a record with an invalid source does not open. A files restore refuses snapshots of guests and databases.
+- A token needs `snapshots:delete` in addition to `policies:write` to change `spec.paths`, `spec.exclude`, `spec.oneFileSystem`, `spec.excludeCaches`, `spec.source`, the effective `spec.schedule.timezone` or `spec.repository` of a policy that has retention before or after the edit, and to delete a policy with retention (`DELETE /api/v1/policies/{name}`, `lode server policies delete`, `lode apply --prune`), dry runs included. Without it the server answers 403 and `lode` exits with code 13; a session needs its password entered in the last 15 minutes. Reordering paths is not a change, reordering or repeating an exclude is. See [API tokens and scopes](https://lodestore.dev/docs/security/threat-model/).
 - The server takes the policy and the stdin name of a snapshot from the job that created it, not from the tags of the manifest. A snapshot tagged for another policy, also one that a catalog sync had already found, is refused and the job fails with `snapshot_policy_mismatch`, so a compromised agent cannot put a snapshot into the retention pool of another policy. A stream job is refused a snapshot that is not a stream of its name, so it cannot pull an older backup of its host into the stdin pool. Binding a snapshot the catalog already knows checks the host of the manifest as binding a new one does; a signature of the repository password does not mark a snapshot that the job of another host claimed, and the server's signature at the upgrade from 0.1 is not given to a snapshot whose manifest does not name the host of its job. A CLI job keeps its policy only when the policy selects the host, at creation and at completion, and a CLI job without a stream is not recorded. On upgrade the server takes out of the pools the snapshots whose policy, stdin name or manifest host disagrees with their job, moves the snapshots of CLI jobs to the stdin pool and logs the number of rows it changed. See [Retention and forgetting snapshots](https://lodestore.dev/docs/security/threat-model/#retention-and-forgetting-snapshots).
 
 ## [0.2.0] - 2026-11-12

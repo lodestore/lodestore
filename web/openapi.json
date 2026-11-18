@@ -2082,6 +2082,15 @@
               "format": "int64",
               "minimum": 0
             }
+          },
+          {
+            "name": "source_type",
+            "in": "query",
+            "description": "Only snapshots of this source type: files, proxmox-vm, proxmox-ct, postgres, postgres-wal or mysql.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -2097,6 +2106,16 @@
           },
           "404": {
             "description": "Unknown host",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unknown source type",
             "content": {
               "application/json": {
                 "schema": {
@@ -3196,7 +3215,7 @@
             }
           },
           "403": {
-            "description": "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention, a more frequent cron, a change of paths, exclude, oneFileSystem, excludeCaches or repository of a policy with retention, or a --prune that deletes a policy with retention. A session needs the password entered in the last 15 minutes for those changes (code step_up_required)",
+            "description": "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention, a more frequent cron, a change of source, paths, exclude, oneFileSystem, excludeCaches, repository or schedule.timezone of a policy with retention, or a --prune that deletes a policy with retention. A session needs the password entered in the last 15 minutes for those changes (code step_up_required)",
             "content": {
               "application/json": {
                 "schema": {
@@ -3371,7 +3390,7 @@
             }
           },
           "403": {
-            "description": "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention, a more frequent cron, or a change of paths, exclude, oneFileSystem, excludeCaches or repository of a policy with retention. A session needs the password entered in the last 15 minutes for those changes (code step_up_required)",
+            "description": "The token lacks a scope this change needs: hooks:write for hooks or a wider selector or repository, snapshots:delete for retention, a more frequent cron, or a change of source, paths, exclude, oneFileSystem, excludeCaches, repository or schedule.timezone of a policy with retention. A session needs the password entered in the last 15 minutes for those changes (code step_up_required)",
             "content": {
               "application/json": {
                 "schema": {
@@ -5398,6 +5417,24 @@
               "format": "int32",
               "minimum": 0
             }
+          },
+          {
+            "name": "source_type",
+            "in": "query",
+            "description": "Only snapshots of this source type: files, proxmox-vm, proxmox-ct, postgres, postgres-wal or mysql.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "source",
+            "in": "query",
+            "description": "Canonical source instance key; narrows the list and latest_verified_id to that instance on this host. The same key on another host, as after a migration, is another instance.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -5422,7 +5459,7 @@
             }
           },
           "422": {
-            "description": "Missing host, bad cursor or limit",
+            "description": "Missing host, bad cursor or limit, unknown source type or key, or a key that does not match the type",
             "content": {
               "application/json": {
                 "schema": {
@@ -5503,7 +5540,7 @@
             }
           },
           "422": {
-            "description": "The selection, destination or host is not valid",
+            "description": "The selection, destination or host is not valid, or the snapshot is not a files backup",
             "content": {
               "application/json": {
                 "schema": {
@@ -6764,6 +6801,12 @@
               "string",
               "null"
             ]
+          },
+          "source_label": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -6856,7 +6899,8 @@
           "snapshot_quarantined",
           "repository_unavailable",
           "agent_session_conflict",
-          "agent_certificate_rejected"
+          "agent_certificate_rejected",
+          "source_instance_gone"
         ]
       },
       "Alerts": {
@@ -8297,6 +8341,24 @@
           }
         }
       },
+      "DatabaseSource": {
+        "type": "object",
+        "properties": {
+          "databases": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "excludeDatabases": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
       "DeletedSnapshot": {
         "type": "object",
         "required": [
@@ -8580,6 +8642,10 @@
             }
           }
         }
+      },
+      "FilesSource": {
+        "type": "object",
+        "additionalProperties": false
       },
       "FindFieldErrors": {
         "type": "object",
@@ -10419,6 +10485,50 @@
           "rolled_back"
         ]
       },
+      "InstanceRetentionPreview": {
+        "type": "object",
+        "required": [
+          "host_id",
+          "hostname",
+          "source_type",
+          "forget",
+          "keep",
+          "snapshots"
+        ],
+        "properties": {
+          "forget": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "host_id": {
+            "type": "string"
+          },
+          "hostname": {
+            "type": "string"
+          },
+          "keep": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "snapshots": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PreviewSnapshot"
+            }
+          },
+          "source_label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source_type": {
+            "type": "string"
+          }
+        }
+      },
       "IoniceClass": {
         "type": "string",
         "enum": [
@@ -11616,8 +11726,7 @@
       "PolicySpec": {
         "type": "object",
         "required": [
-          "repository",
-          "paths"
+          "repository"
         ],
         "properties": {
           "alerts": {
@@ -11686,6 +11795,16 @@
           },
           "selector": {
             "$ref": "#/components/schemas/Selector"
+          },
+          "source": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Source"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "additionalProperties": false
@@ -11890,6 +12009,32 @@
             ]
           }
         }
+      },
+      "ProxmoxGuests": {
+        "type": "object",
+        "properties": {
+          "pool": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "vmids": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        },
+        "additionalProperties": false
       },
       "QueueReason": {
         "type": "string",
@@ -12386,7 +12531,7 @@
               "string",
               "null"
             ],
-            "description": "Id of the newest signed snapshot of the host by server time, whatever the page; null when the host has none."
+            "description": "Id of the newest signed snapshot of the requested source type or instance by server time, whatever the page; files by default; never a WAL batch; null when there is none."
           },
           "next": {
             "type": [
@@ -12496,7 +12641,10 @@
           "floor",
           "suspicious",
           "truncated",
-          "hosts"
+          "hosts",
+          "multi_instance",
+          "instances",
+          "instances_truncated"
         ],
         "properties": {
           "floor": {
@@ -12515,6 +12663,23 @@
             "items": {
               "$ref": "#/components/schemas/HostRetentionPreview"
             }
+          },
+          "instances": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InstanceRetentionPreview"
+            },
+            "description": "Every source instance with something to forget, sorted by snapshots to forget, then by label."
+          },
+          "instances_truncated": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Snapshots left out of the instance lists, which share a limit of 200.",
+            "minimum": 0
+          },
+          "multi_instance": {
+            "type": "boolean",
+            "description": "Some host of the policy has more than one source instance."
           },
           "suspicious": {
             "type": "integer",
@@ -12954,7 +13119,11 @@
           "snapshots:delete",
           "restore:download",
           "restore:host",
-          "restore:in-place"
+          "restore:in-place",
+          "restore:guest",
+          "restore:guest-in-place",
+          "restore:db",
+          "restore:db-in-place"
         ]
       },
       "SearchDone": {
@@ -13307,6 +13476,7 @@
           "warnings_total",
           "stats",
           "received_at",
+          "source_type",
           "policy_deleted"
         ],
         "properties": {
@@ -13354,6 +13524,17 @@
           "received_at": {
             "type": "integer",
             "format": "int64"
+          },
+          "source_label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Human label of the source instance, taken from the signed source; null for `files`."
+          },
+          "source_type": {
+            "type": "string",
+            "description": "What the snapshot backs up: `files`, `proxmox-vm`, `proxmox-ct`, `postgres`, `postgres-wal` or `mysql`."
           },
           "stats": {
             "$ref": "#/components/schemas/SnapshotStatsDto"
@@ -13411,7 +13592,8 @@
           "items",
           "total",
           "page",
-          "page_size"
+          "page_size",
+          "source_counts"
         ],
         "properties": {
           "items": {
@@ -13429,6 +13611,13 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          },
+          "source_counts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SourceCount"
+            },
+            "description": "Snapshot counts of the host by source type, in the order files, proxmox-vm, proxmox-ct, postgres, postgres-wal, mysql; only types the host has. Not narrowed by `source_type`."
           },
           "total": {
             "type": "integer",
@@ -13483,6 +13672,133 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          }
+        }
+      },
+      "Source": {
+        "oneOf": [
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/FilesSource"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "files"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ProxmoxGuests"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "proxmox-vm"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ProxmoxGuests"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "proxmox-ct"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/DatabaseSource"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "postgres"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/DatabaseSource"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "mysql"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        ],
+        "description": "The `type` selects the variant and the other fields of the block sit next to it."
+      },
+      "SourceCount": {
+        "type": "object",
+        "required": [
+          "source_type",
+          "count"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "source_type": {
+            "type": "string"
           }
         }
       },

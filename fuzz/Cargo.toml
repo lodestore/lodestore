@@ -103,6 +103,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "source_decode"
+path = "fuzz_targets/source_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "verify_shard"
 path = "fuzz_targets/verify_shard.rs"
 test = false

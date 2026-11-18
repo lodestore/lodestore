@@ -48,7 +48,10 @@ const TABS = ["overview", "snapshots", "jobs"] as const;
 const JOBS_REFRESH_MS = 5_000;
 
 export const Route = createFileRoute("/_app/hosts/$id")({
-	validateSearch: z.object({ tab: z.enum(TABS).optional().catch(undefined) }),
+	validateSearch: z.object({
+		tab: z.enum(TABS).optional().catch(undefined),
+		type: z.string().optional().catch(undefined),
+	}),
 	component: HostPage,
 });
 
