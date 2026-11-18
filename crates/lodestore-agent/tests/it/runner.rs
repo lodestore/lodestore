@@ -11,6 +11,7 @@ use lodestore_proto::agent::v1::agent_message::Body as AgentBody;
 use lodestore_proto::agent::v1::server_message::Body as ServerBody;
 use lodestore_proto::agent::v1::{
     AgentMessage, Hook, JobAssign, JobEvent, JobEventLevel, JobFinished, JobOutcome, JobSpec,
+    SourceSelector,
 };
 
 const WAIT: Duration = Duration::from_secs(120);
@@ -136,6 +137,39 @@ async fn runner_pre_hook_runs_before_path_check() {
     let msgs = run_job(&hub, "job-1", job).await;
     assert_eq!(outcome(&msgs), JobOutcome::Succeeded, "{msgs:?}");
     assert_eq!(snapshots(&agent).await.len(), 1);
+}
+
+#[tokio::test]
+async fn runner_refuses_a_source_job_before_hooks() {
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = local_agent(tmp.path()).await;
+    let hub = open_hub(&agent);
+    let marker = tmp.path().join("hook-ran");
+    install_hook(&agent, "mark", &format!("touch {}", marker.display()));
+
+    let mut job = JobSpec {
+        policy_name: "guests".into(),
+        source: Some(SourceSelector {
+            r#type: "proxmox-vm".into(),
+            vmids: vec![101],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    job.before = vec![script("mark")];
+    job.after = vec![script("mark")];
+    let msgs = run_job(&hub, "job-1", job).await;
+
+    let f = finished(&msgs).unwrap();
+    assert_eq!(f.outcome, JobOutcome::Failed as i32);
+    assert_eq!(f.error_code, "source_agent_outdated");
+    assert_eq!(f.error_detail["source_type"], "proxmox-vm");
+    assert!(!marker.exists(), "a hook ran");
+    assert!(
+        events(&msgs).iter().all(|e| !e.kind.contains("hook")),
+        "{msgs:?}"
+    );
+    assert!(snapshots(&agent).await.is_empty());
 }
 
 #[tokio::test]

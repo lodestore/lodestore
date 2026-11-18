@@ -242,6 +242,17 @@ message JobSpec {
   // Shards the server caught lying; writers must not deduplicate against them.
   // The full current list, newest first.
   repeated bytes distrusted_shards = 13;
+  // What the policy backs up when it is not files. Absent: the files in paths.
+  SourceSelector source = 14;
+}
+
+message SourceSelector {
+  string type = 1;
+  repeated uint32 vmids = 2;
+  string pool = 3;
+  repeated string tags = 4;
+  repeated string databases = 5;
+  repeated string exclude_databases = 6;
 }
 
 enum IoniceClass {

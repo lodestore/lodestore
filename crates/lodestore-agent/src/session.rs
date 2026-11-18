@@ -144,6 +144,7 @@ pub async fn run_with(
         socket_stop.clone(),
     ));
     let discovery = Discovery::spawn(discovery, args.paths.clone(), args.shutdown.clone());
+    hub.set_discovery(discovery.clone());
     let result = run_sessions(&args, &hub, &runtime, &discovery).await;
     socket_stop.cancel();
     hub.shutdown();

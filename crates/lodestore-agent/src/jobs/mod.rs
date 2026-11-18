@@ -8,7 +8,7 @@ use std::os::unix::net::UnixStream;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use lodestore_proto::agent::v1::agent_message::Body as AgentBody;
@@ -16,10 +16,11 @@ use lodestore_proto::agent::v1::server_message::Body as ServerBody;
 use lodestore_proto::agent::v1::{
     AgentMessage, JobAccepted, JobCreated, JobEvent, JobEventLevel, JobEvents, JobFinished,
     JobOutcome, JobPhase, JobPhaseKind, JobProgress, JobRejected, JobReport, JobReportState,
-    JobSpec, RestoreSpec,
+    JobSpec, RestoreSpec, SourceFacts,
 };
 use tokio::sync::Notify;
 
+use crate::discovery::Discovery;
 use crate::shared_channel::SharedChannel;
 use crate::socket::StdinHeader;
 use crate::{AgentError, NetOptions, Paths};
@@ -120,6 +121,7 @@ pub struct JobHub {
     net: Mutex<NetOptions>,
     channel: Arc<SharedChannel>,
     stdin_max_runtime_s: AtomicU64,
+    discovery: OnceLock<Discovery>,
 }
 
 /// What a job executor gets: report phases, events and the final result, and
@@ -142,6 +144,11 @@ impl JobCtx {
 
     pub fn agent_id(&self) -> &str {
         &self.hub.agent_id
+    }
+
+    /// What this host's discovery found last; `None` without discovery or before its first success.
+    pub fn sources(&self) -> Option<SourceFacts> {
+        self.hub.discovery.get().and_then(Discovery::current)
     }
 
     /// Proxy settings the session was started with, for connections a job
@@ -294,6 +301,7 @@ impl JobHub {
             net: Mutex::new(NetOptions::default()),
             channel: Arc::new(SharedChannel::new(paths)),
             stdin_max_runtime_s: AtomicU64::new(0),
+            discovery: OnceLock::new(),
         }))
     }
 
@@ -304,6 +312,11 @@ impl JobHub {
     pub fn set_stdin_max_runtime(&self, limit: Duration) {
         self.stdin_max_runtime_s
             .store(limit.as_secs(), Ordering::Relaxed);
+    }
+
+    /// The discovery whose latest result jobs check their source against; set once.
+    pub fn set_discovery(&self, discovery: Discovery) {
+        let _ = self.discovery.set(discovery);
     }
 
     /// The server channel jobs and update downloads share; the session loop keeps it current.

@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use lodestore_format::keys::{MasterKey, ReadKeys};
 use lodestore_format::locks::{DEFAULT_MAX_RUNTIME, RUNTIME_MARGIN};
+use lodestore_policy::source::Source;
 use lodestore_proto::agent::v1::server_message::Body as ServerBody;
 use lodestore_proto::agent::v1::{
     JobAssign, JobCancel, JobSpec, Limits, RestoreSpec, ServerMessage,
@@ -18,9 +19,11 @@ use crate::catalog::RepositoryUnavailable;
 use crate::db::now_ms;
 use crate::grpc::registry::{CAP_GC, CAP_LIMITS, CAP_RESTORE};
 use crate::jobs::restore::RestoreRecord;
+use crate::jobs::source_of;
 use crate::maintenance::attest::load_distrusted;
 use crate::maintenance::gc::db as gc_db;
 use crate::repos::db::server_access_checked;
+use crate::sources::{self, select::Selection};
 use crate::state::AppState;
 
 const KIND_RESTORE: &str = "restore";
@@ -239,6 +242,28 @@ pub async fn assign_queued(state: &AppState, only_agent: Option<&str>) -> anyhow
                     if spec.max_runtime_s == 0 {
                         spec.max_runtime_s = DEFAULT_MAX_RUNTIME.as_secs();
                     }
+                    match source_of(&spec) {
+                        Ok(Some(source)) => {
+                            if let Some((code, message)) =
+                                source_gate(state, &host_id, &source).await?
+                            {
+                                fail_job_with_detail(
+                                    state,
+                                    &job_id,
+                                    code,
+                                    &message,
+                                    source.type_name(),
+                                )
+                                .await?;
+                                continue;
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(_) => {
+                            fail_unreadable(state, &job_id, &kind).await?;
+                            continue;
+                        }
+                    }
                     if let Some(reason) = host_open_error(state, &host_id).await? {
                         fail_job(
                             state,
@@ -393,17 +418,78 @@ pub async fn requeue_assigned(state: &AppState, job_id: &str, host_id: &str) -> 
 }
 
 async fn fail_job(state: &AppState, job_id: &str, code: &str, message: &str) -> anyhow::Result<()> {
+    fail_with(state, job_id, code, message, None).await
+}
+
+async fn fail_job_with_detail(
+    state: &AppState,
+    job_id: &str,
+    code: &str,
+    message: &str,
+    source_type: &str,
+) -> anyhow::Result<()> {
+    let detail = serde_json::json!({ "source_type": source_type }).to_string();
+    fail_with(state, job_id, code, message, Some(detail)).await
+}
+
+async fn fail_with(
+    state: &AppState,
+    job_id: &str,
+    code: &str,
+    message: &str,
+    detail: Option<String>,
+) -> anyhow::Result<()> {
     sqlx::query(
-        "UPDATE jobs SET state = 'failed', finished_at = $1, error_code = $2, error_message = $3 \
-         WHERE id = $4 AND state IN ('queued', 'assigned')",
+        "UPDATE jobs SET state = 'failed', finished_at = $1, error_code = $2, error_message = $3, \
+         error_detail_json = $4 WHERE id = $5 AND state IN ('queued', 'assigned')",
     )
     .bind(now_ms())
     .bind(code)
     .bind(message)
+    .bind(detail)
     .bind(job_id)
     .execute(&state.db.pool)
     .await?;
     Ok(())
+}
+
+fn source_noun(source_type: &str) -> &'static str {
+    match source_type {
+        "proxmox-vm" => "virtual machines",
+        "proxmox-ct" => "containers",
+        "postgres" => "PostgreSQL databases",
+        _ => "MySQL schemas",
+    }
+}
+
+/// Why a job for a source that is not files must not reach the agent: the agent
+/// cannot back the type up, or a fresh, complete list shows nothing to back up.
+/// Stale, unknown or partial data sends the job on; the agent checks again.
+async fn source_gate(
+    state: &AppState,
+    host_id: &str,
+    source: &Source,
+) -> anyhow::Result<Option<(&'static str, String)>> {
+    let noun = source_noun(source.type_name());
+    if !state
+        .registry
+        .supports(host_id, &sources::capability(source.type_name()))
+    {
+        return Ok(Some((
+            "source_agent_outdated",
+            format!("The agent on this host does not back up {noun} yet. Update the agent."),
+        )));
+    }
+    let stored = sources::load(state, host_id).await?;
+    Ok(
+        match sources::select::select(source, stored.as_ref(), now_ms()) {
+            Selection::NoSource | Selection::Nothing => Some((
+                "source_not_found",
+                format!("No {noun} were found on this host, or the policy selects none of them."),
+            )),
+            Selection::Unknown | Selection::Some { .. } => None,
+        },
+    )
 }
 
 async fn log_limits_ignored(state: &AppState, job_id: &str) -> anyhow::Result<()> {
