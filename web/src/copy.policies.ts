@@ -230,7 +230,7 @@ export const policies = {
 	retention: {
 		legend: "Retention",
 		helper:
-			"Applied per host to this policy's snapshots after each successful backup. Snapshots from lode runs and other policies are never touched.",
+			"Applied per host and source to this policy's snapshots after each successful backup. Snapshots from lode runs and other policies are never touched.",
 		none: "Keeps everything. Nothing is forgotten until you set a rule.",
 		keepLast: "Keep last",
 		keepWithin: "Keep within",
