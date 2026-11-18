@@ -10,7 +10,6 @@ import {
 } from "@/api/gen/endpoints";
 import type { HostDetail, SnapshotItem, SourceCount } from "@/api/gen/model";
 import { Illustration } from "@/components/brand/illustration";
-import { TextWithPaths } from "@/components/path-text";
 import { RelativeTime } from "@/components/relative-time";
 import { SnapshotActionsMenu } from "@/components/snapshots/snapshot-actions-menu";
 import {
@@ -23,6 +22,7 @@ import {
 	SuspiciousBadge,
 } from "@/components/snapshots/suspicious-badge";
 import { StatusBadge } from "@/components/status-badge";
+import { Truncated } from "@/components/truncated";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
@@ -49,11 +49,6 @@ import {
 	TableRow,
 } from "@/components/ui/table";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
-import {
-	Tooltip,
-	TooltipContent,
-	TooltipTrigger,
-} from "@/components/ui/tooltip";
 import { copy } from "@/copy";
 import { formatBytes, formatCount } from "@/lib/format";
 import {
@@ -95,19 +90,6 @@ const contents = (snapshot: SnapshotItem) =>
 
 const fileTotal = ({ stats }: SnapshotItem) =>
 	stats.files_new + stats.files_changed + stats.files_unchanged;
-
-function Truncated({ text, className }: { text: string; className?: string }) {
-	return (
-		<Tooltip>
-			<TooltipTrigger asChild>
-				<span className={cn("block truncate", className)}>{text}</span>
-			</TooltipTrigger>
-			<TooltipContent className="max-w-lg wrap-anywhere">
-				<TextWithPaths text={text} />
-			</TooltipContent>
-		</Tooltip>
-	);
-}
 
 function SourceTypeFilter({
 	counts,

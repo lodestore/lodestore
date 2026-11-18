@@ -41,6 +41,7 @@ function makeDetail(name: string, over: Partial<HostDetail> = {}): HostDetail {
 		kernel: "6.8.0-45-generic",
 		uptime_s: 3 * 86_400 + 4 * 3_600,
 		mounts: [],
+		source_types: [],
 		...over,
 	};
 }

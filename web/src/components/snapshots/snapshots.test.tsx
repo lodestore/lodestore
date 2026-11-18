@@ -45,6 +45,7 @@ const detail: HostDetail = {
 	kernel: "6.8.0-45-generic",
 	uptime_s: 3_600,
 	mounts: [],
+	source_types: [],
 };
 
 function makeSnapshot(over: Partial<SnapshotItem> = {}): SnapshotItem {
