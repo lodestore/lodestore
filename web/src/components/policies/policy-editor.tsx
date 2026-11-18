@@ -80,6 +80,7 @@ function initialState(
 			matching: detail.matching,
 			warnings: detail.warnings,
 			schedule: detail.schedule,
+			availability: [],
 		};
 		return {
 			draft,

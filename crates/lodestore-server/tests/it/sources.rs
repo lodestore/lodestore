@@ -582,3 +582,205 @@ async fn sources_tab_requires_hosts_read() {
         ts.stop().await;
     }
 }
+
+const OPTIONS: &str = "/api/v1/policies/source-options";
+
+async fn options_of(api: &Api, hosts: &[&Host], source_type: &str) -> (u16, serde_json::Value) {
+    let ids: Vec<_> = hosts.iter().map(|h| h.id.as_str()).collect();
+    let response = api
+        .post(
+            OPTIONS,
+            &serde_json::json!({
+                "repository": "main",
+                "selector": { "hosts": ids },
+                "source_type": source_type,
+            }),
+        )
+        .await;
+    (response.status().as_u16(), response.json().await.unwrap())
+}
+
+fn vmids(body: &serde_json::Value) -> Vec<u64> {
+    body["guests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| g["vmid"].as_u64().unwrap())
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sources_options_list_guests_pools_and_tags() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let one = enroll(&ts, &api, &repo, "pve-01").await;
+        let two = enroll(&ts, &api, &repo, "pve-02").await;
+
+        let mut web = guest(GuestKind::Vm, 101, "web-01", UUID_A);
+        web.pool = "prod".to_string();
+        web.tags = vec!["web".to_string()];
+        let facts = node(vec![
+            web,
+            guest(
+                GuestKind::Vm,
+                103,
+                "db-01",
+                "33333333-3333-4333-8333-333333333333",
+            ),
+            guest(GuestKind::Ct, 200, "dns", UUID_B),
+        ]);
+        sources::record(ts.state(), &one.id, &facts, &mut None, now_ms())
+            .await
+            .unwrap();
+        let mut copy = guest(GuestKind::Vm, 101, "web-01-copy", UUID_A);
+        copy.pool = "dev".to_string();
+        let mut db = guest(
+            GuestKind::Vm,
+            210,
+            "db-02",
+            "44444444-4444-4444-8444-444444444444",
+        );
+        db.pool = "prod".to_string();
+        db.tags = vec!["db".to_string(), "web".to_string()];
+        let facts = node(vec![copy, db]);
+        sources::record(ts.state(), &two.id, &facts, &mut None, now_ms())
+            .await
+            .unwrap();
+
+        let (status, body) = options_of(&api, &[&one, &two], "proxmox-vm").await;
+        assert_eq!(status, 200, "[{}] {body}", backend.name());
+        assert_eq!(vmids(&body), [101, 103, 210]);
+        let first = &body["guests"][0];
+        assert_eq!(first["name"], "web-01");
+        assert_eq!(first["kind"], "vm");
+        assert_eq!(first["hosts"], serde_json::json!(["pve-01", "pve-02"]));
+        assert_eq!(
+            body["pools"],
+            serde_json::json!([{ "name": "prod", "count": 2 }])
+        );
+        assert_eq!(
+            body["tags"],
+            serde_json::json!([{ "name": "db", "count": 1 }, { "name": "web", "count": 2 }])
+        );
+        assert_eq!(body["databases"], serde_json::json!([]));
+        assert!(!body.to_string().contains(UUID_A));
+
+        let (_, body) = options_of(&api, &[&one, &two], "proxmox-ct").await;
+        assert_eq!(vmids(&body), [200]);
+        assert_eq!(body["guests"][0]["kind"], "ct");
+
+        let (_, body) = options_of(&api, &[&two], "proxmox-vm").await;
+        assert_eq!(body["guests"][0]["name"], "web-01-copy");
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sources_options_list_databases_and_unreachable_hosts() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let db01 = enroll(&ts, &api, &repo, "db-01").await;
+        let db02 = enroll(&ts, &api, &repo, "db-02").await;
+
+        let facts = SourceFacts {
+            truncated: true,
+            databases: vec![postgres_server(
+                5432,
+                "7",
+                &[("billing", 16385), ("app", 16384)],
+            )],
+            ..Default::default()
+        };
+        sources::record(ts.state(), &db01.id, &facts, &mut None, now_ms())
+            .await
+            .unwrap();
+        let down = SourceFacts {
+            databases: vec![DatabaseServer {
+                kind: DatabaseKind::Postgres as i32,
+                port: 5432,
+                unreachable: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        sources::record(ts.state(), &db02.id, &down, &mut None, now_ms())
+            .await
+            .unwrap();
+
+        let (status, body) = options_of(&api, &[&db01, &db02], "postgres").await;
+        assert_eq!(status, 200, "[{}] {body}", backend.name());
+        let names: Vec<_> = body["databases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["app", "billing"]);
+        assert_eq!(body["databases"][0]["hosts"], serde_json::json!(["db-01"]));
+        assert_eq!(body["databases"][0]["source_type"], "postgres");
+        assert_eq!(
+            body["truncated_hosts"],
+            serde_json::json!([{ "hostname": "db-01", "count": 2 }])
+        );
+        assert_eq!(body["unreachable_hosts"], serde_json::json!(["db-02"]));
+        assert_eq!(body["guests"], serde_json::json!([]));
+
+        let (_, body) = options_of(&api, &[&db01, &db02], "mysql").await;
+        assert_eq!(body["databases"], serde_json::json!([]));
+        assert_eq!(body["unreachable_hosts"], serde_json::json!([]));
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sources_options_require_policies_read() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let host = enroll(&ts, &api, &repo, "pve-01").await;
+        let url = format!("{}{OPTIONS}", ts.rest_url());
+        let body = serde_json::json!({
+            "repository": "main",
+            "selector": { "hosts": [host.id] },
+            "source_type": "proxmox-vm",
+        });
+
+        let anonymous = reqwest::Client::new()
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(anonymous.status(), 401);
+
+        let without = bearer_client(&ts.issue_token(&["hosts:read"]).await);
+        let got = without.post(&url).json(&body).send().await.unwrap();
+        assert_eq!(got.status(), 403);
+
+        let reader = bearer_client(&ts.issue_token(&["policies:read"]).await);
+        let got = reader.post(&url).json(&body).send().await.unwrap();
+        assert_eq!(got.status(), 200);
+
+        let no_csrf = reqwest::Client::new()
+            .post(&url)
+            .header("cookie", api.cookie())
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(no_csrf.status(), 403);
+
+        let mut files = body.clone();
+        files["source_type"] = "files".into();
+        assert_eq!(api.post(OPTIONS, &files).await.status(), 422);
+        let mut unknown = body.clone();
+        unknown["repository"] = "nowhere".into();
+        assert_eq!(api.post(OPTIONS, &unknown).await.status(), 422);
+        ts.stop().await;
+    }
+}

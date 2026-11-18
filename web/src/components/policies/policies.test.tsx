@@ -105,6 +105,7 @@ function validResponse(
 		yaml: "kind: BackupPolicy\n",
 		policy: makePolicy("etc-and-home"),
 		matching: { hosts, other_repository: [] },
+		availability: [],
 		...over,
 	};
 }
@@ -285,6 +286,7 @@ describe("Policy editor tabs", () => {
 						errors: [{ path: "spec.paths[0]", message: "Bad path." }],
 						name_taken: false,
 						warnings: [],
+						availability: [],
 					}
 				: validResponse(),
 		);
@@ -315,6 +317,7 @@ describe("Policy editor tabs", () => {
 						errors: [{ line: 4, message: "unknown field `schedule`" }],
 						name_taken: false,
 						warnings: [],
+						availability: [],
 					}
 				: validResponse(),
 		);
@@ -376,6 +379,7 @@ describe("Policy editor tabs", () => {
 						],
 						name_taken: false,
 						warnings: [],
+						availability: [],
 					}
 				: validResponse(),
 		);
@@ -467,6 +471,7 @@ describe("Dead-man threshold", () => {
 						],
 						name_taken: false,
 						warnings: [],
+						availability: [],
 					}
 				: validResponse(),
 		);
@@ -545,6 +550,7 @@ describe("Split policy editor", () => {
 						errors: [{ path: "spec.paths[0]", message: "Bad path." }],
 						name_taken: false,
 						warnings: [],
+						availability: [],
 					}
 				: validResponse(),
 		);
@@ -573,6 +579,7 @@ const invalidYaml = (body: ValidateRequest): ValidateResponse | undefined =>
 				errors: [{ line: 4, message: "unknown field `schedule`" }],
 				name_taken: false,
 				warnings: [],
+				availability: [],
 			}
 		: undefined;
 
@@ -625,6 +632,7 @@ describe("Split editor states", () => {
 						errors: [{ path: "spec.paths[0]", message: "Bad path." }],
 						name_taken: false,
 						warnings: [],
+						availability: [],
 					}
 				: validResponse({ yaml: "last: valid\n" }),
 		);
@@ -1713,6 +1721,7 @@ describe("Schedule section", () => {
 						],
 						name_taken: false,
 						warnings: [],
+						availability: [],
 					}
 				: scheduled(body),
 		);
@@ -1962,6 +1971,7 @@ describe("Limits section", () => {
 						],
 						name_taken: false,
 						warnings: [],
+						availability: [],
 					}
 				: validResponse(),
 		);
@@ -2034,6 +2044,7 @@ describe("Limits section", () => {
 						],
 						name_taken: false,
 						warnings: [],
+						availability: [],
 					}
 				: validResponse(),
 		);
@@ -2409,6 +2420,7 @@ describe("Retention section", () => {
 						],
 						name_taken: false,
 						warnings: [],
+						availability: [],
 					}
 				: validResponse(),
 		);

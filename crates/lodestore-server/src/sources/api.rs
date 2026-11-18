@@ -1,12 +1,13 @@
 //! The Sources tab of a host: what the agent found and whether a policy covers it.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use axum::Json;
 use axum::extract::{Path, State};
 use lodestore_format::source::{Meta, SourceKey, label};
+use lodestore_policy::Selector;
 use lodestore_policy::source::{Source, normalized};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use utoipa::ToSchema;
 use utoipa_axum::router::OpenApiRouter;
@@ -14,11 +15,13 @@ use utoipa_axum::routes;
 
 use super::select::{selects_db, selects_guest};
 use super::{
-    DbServer, DbType, Discovery, GuestType, ScopeKind, declares, parse_capabilities, parse_stored,
+    DbServer, DbType, Discovery, GuestType, SOURCE_TYPES, ScopeKind, declares, load_all,
+    parse_capabilities, parse_stored,
 };
-use crate::auth::tokens::{HostsRead, Scoped};
+use crate::auth::tokens::{HostsRead, PoliciesRead, Scoped};
 use crate::error::{ApiError, ErrorBody};
 use crate::hosts::labels::Label;
+use crate::policies::matching::load_agents;
 use crate::policies::{PolicyRow, all_policies};
 use crate::state::AppState;
 
@@ -403,6 +406,190 @@ pub(crate) async fn host_sources(
     }))
 }
 
+#[derive(Deserialize, ToSchema)]
+pub struct SourceOptionsRequest {
+    /// Repository name, as in `spec.repository`.
+    pub repository: String,
+    pub selector: Selector,
+    /// `proxmox-vm`, `proxmox-ct`, `postgres` or `mysql`.
+    pub source_type: String,
+}
+
+/// A guest found on the selected hosts, one row per VMID.
+#[derive(Serialize, ToSchema)]
+pub struct GuestOption {
+    pub vmid: u32,
+    /// `vm` or `ct`.
+    pub kind: String,
+    /// Name, pool and tags come from the first host by name that reports the guest.
+    pub name: Option<String>,
+    pub pool: Option<String>,
+    pub tags: Vec<String>,
+    pub hosts: Vec<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct NamedCount {
+    pub name: String,
+    /// How many guest rows carry it.
+    pub count: u32,
+}
+
+/// A database found on the selected hosts, one row per name.
+#[derive(Serialize, ToSchema)]
+pub struct DatabaseOption {
+    pub name: String,
+    pub source_type: String,
+    pub hosts: Vec<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct TruncatedHost {
+    pub hostname: String,
+    /// How many instances the server received from the host.
+    pub count: u32,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct SourceOptions {
+    pub guests: Vec<GuestOption>,
+    pub pools: Vec<NamedCount>,
+    pub tags: Vec<NamedCount>,
+    pub databases: Vec<DatabaseOption>,
+    /// Hosts whose list was cut short, so it may miss instances.
+    pub truncated_hosts: Vec<TruncatedHost>,
+    /// Hosts with a database server of the type whose databases the agent could not list.
+    pub unreachable_hosts: Vec<String>,
+}
+
+fn counted(names: BTreeMap<String, u32>) -> Vec<NamedCount> {
+    names
+        .into_iter()
+        .map(|(name, count)| NamedCount { name, count })
+        .collect()
+}
+
+#[utoipa::path(
+    post,
+    tag = "Policies",
+    summary = "List the guests and databases a policy form can offer",
+    description = "What the agents of the hosts a selector takes found, for the given source type. An unreachable database server is listed apart: it is not an empty one.",
+    security(("session" = [], "csrf" = []), ("bearer" = ["policies:read"])),
+    path = "/api/v1/policies/source-options",
+    request_body = SourceOptionsRequest,
+    responses(
+        (status = 200, description = "Found instances", body = SourceOptions),
+        (status = 422, description = "Unknown repository or unsupported type", body = ErrorBody),
+    )
+)]
+pub(crate) async fn source_options(
+    State(state): State<AppState>,
+    _auth: Scoped<PoliciesRead>,
+    Json(req): Json<SourceOptionsRequest>,
+) -> Result<Json<SourceOptions>, ApiError> {
+    let source_type = req.source_type.as_str();
+    if !SOURCE_TYPES.contains(&source_type) {
+        return Err(ApiError::Validation(format!(
+            "source_type: \"{source_type}\" has no instances to choose from"
+        )));
+    }
+    let repository = sqlx::query("SELECT id FROM repositories WHERE name = $1")
+        .bind(&req.repository)
+        .fetch_optional(&state.db.pool)
+        .await?
+        .ok_or_else(|| {
+            ApiError::Validation(format!("Repository \"{}\" does not exist.", req.repository))
+        })?;
+    let repository_id: String = repository.try_get("id")?;
+    let agents = load_agents(&state).await?;
+    let sources = load_all(&state).await?;
+    let wanted = match source_type {
+        "proxmox-vm" => Some(GuestType::Vm),
+        "proxmox-ct" => Some(GuestType::Ct),
+        _ => None,
+    };
+    let db_kind = match source_type {
+        "postgres" => Some(DbType::Postgres),
+        "mysql" => Some(DbType::Mysql),
+        _ => None,
+    };
+    let mut guests: BTreeMap<u32, GuestOption> = BTreeMap::new();
+    let mut databases: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut truncated_hosts = Vec::new();
+    let mut unreachable_hosts = Vec::new();
+    for agent in agents
+        .iter()
+        .filter(|a| a.applies(&repository_id, &req.selector))
+    {
+        let Some(stored) = sources.get(&agent.id).and_then(|s| s.stored.as_ref()) else {
+            continue;
+        };
+        let found = &stored.discovery;
+        if found.truncated {
+            truncated_hosts.push(TruncatedHost {
+                hostname: agent.hostname.clone(),
+                count: u32::try_from(found.keys().len()).unwrap_or(u32::MAX),
+            });
+        }
+        let node = found.proxmox.iter().flat_map(|p| &p.guests);
+        for guest in node.filter(|g| Some(g.kind) == wanted) {
+            guests
+                .entry(guest.vmid)
+                .or_insert_with(|| GuestOption {
+                    vmid: guest.vmid,
+                    kind: if guest.kind == GuestType::Vm {
+                        "vm"
+                    } else {
+                        "ct"
+                    }
+                    .to_string(),
+                    name: guest.name.clone(),
+                    pool: guest.pool.clone(),
+                    tags: guest.tags.clone(),
+                    hosts: Vec::new(),
+                })
+                .hosts
+                .push(agent.hostname.clone());
+        }
+        for server in found.servers.iter().filter(|s| Some(s.kind) == db_kind) {
+            if server.unreachable && !unreachable_hosts.contains(&agent.hostname) {
+                unreachable_hosts.push(agent.hostname.clone());
+            }
+            for db in server.databases.iter().flatten() {
+                let hosts = databases.entry(db.name.clone()).or_default();
+                if !hosts.contains(&agent.hostname) {
+                    hosts.push(agent.hostname.clone());
+                }
+            }
+        }
+    }
+    let mut pools = BTreeMap::new();
+    let mut tags = BTreeMap::new();
+    for guest in guests.values() {
+        if let Some(pool) = &guest.pool {
+            *pools.entry(pool.clone()).or_default() += 1;
+        }
+        for tag in &guest.tags {
+            *tags.entry(tag.clone()).or_default() += 1;
+        }
+    }
+    Ok(Json(SourceOptions {
+        guests: guests.into_values().collect(),
+        pools: counted(pools),
+        tags: counted(tags),
+        databases: databases
+            .into_iter()
+            .map(|(name, hosts)| DatabaseOption {
+                name,
+                source_type: source_type.to_string(),
+                hosts,
+            })
+            .collect(),
+        truncated_hosts,
+        unreachable_hosts,
+    }))
+}
+
 pub fn routes() -> OpenApiRouter<AppState> {
-    OpenApiRouter::new().routes(routes!(host_sources))
+    OpenApiRouter::new().routes(routes!(host_sources, source_options))
 }

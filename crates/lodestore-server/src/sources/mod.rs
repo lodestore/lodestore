@@ -30,6 +30,8 @@ pub const MAX_DATABASES: usize = 1000;
 pub const MAX_NAME_BYTES: usize = 64;
 /// Longest server version string.
 pub const MAX_VERSION_BYTES: usize = 32;
+/// The source types besides files, in the order lists show them.
+pub const SOURCE_TYPES: [&str; 4] = ["proxmox-vm", "proxmox-ct", "postgres", "mysql"];
 /// How long a collection counts as current.
 pub const FRESH_FOR: Duration = Duration::from_secs(15 * 60);
 
@@ -173,10 +175,7 @@ impl Discovery {
     }
 
     pub fn types(&self) -> Vec<&'static str> {
-        ["proxmox-vm", "proxmox-ct", "postgres", "mysql"]
-            .into_iter()
-            .filter(|t| self.has(t))
-            .collect()
+        SOURCE_TYPES.into_iter().filter(|t| self.has(t)).collect()
     }
 
     pub fn keys(&self) -> Vec<String> {
