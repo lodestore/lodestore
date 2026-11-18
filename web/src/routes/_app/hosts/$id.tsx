@@ -11,6 +11,7 @@ import {
 	HostOverviewSkeleton,
 	useHostHealth,
 } from "@/components/hosts/host-overview";
+import { HostSources } from "@/components/hosts/host-sources";
 import { RevokeHostDialog } from "@/components/hosts/revoke-host-dialog";
 import { RunBackupButton } from "@/components/hosts/run-backup-button";
 import { SnapshotsTable } from "@/components/hosts/snapshots-table";
@@ -44,13 +45,14 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { copy } from "@/copy";
 
-const TABS = ["overview", "snapshots", "jobs"] as const;
+const TABS = ["overview", "sources", "snapshots", "jobs"] as const;
 const JOBS_REFRESH_MS = 5_000;
 
 export const Route = createFileRoute("/_app/hosts/$id")({
 	validateSearch: z.object({
 		tab: z.enum(TABS).optional().catch(undefined),
 		type: z.string().optional().catch(undefined),
+		show: z.enum(["unprotected"]).optional().catch(undefined),
 	}),
 	component: HostPage,
 });
@@ -148,10 +150,12 @@ function HostJobs({ host }: { host: HostDetail }) {
 
 function HostPage() {
 	const { id } = Route.useParams();
-	const { tab = "overview" } = Route.useSearch();
+	const { tab: requested = "overview" } = Route.useSearch();
 	const navigate = Route.useNavigate();
 	const query = useGetHost(id);
 	const host = query.data;
+	const hasSources = (host?.source_types ?? []).length > 0;
+	const tab = requested === "sources" && !hasSources ? "overview" : requested;
 	const notFound =
 		query.error instanceof ApiError && query.error.status === 404;
 	const [editing, setEditing] = useState<HostDetail>();
@@ -272,19 +276,26 @@ function HostPage() {
 						}
 					>
 						<TabsList variant="line">
-							{TABS.map((name) => (
-								<TabsTrigger
-									key={name}
-									value={name}
-									className="after:bg-primary-strong"
-								>
-									{copy.hostPage.tabs[name]}
-								</TabsTrigger>
-							))}
+							{TABS.filter((name) => name !== "sources" || hasSources).map(
+								(name) => (
+									<TabsTrigger
+										key={name}
+										value={name}
+										className="after:bg-primary-strong"
+									>
+										{copy.hostPage.tabs[name]}
+									</TabsTrigger>
+								),
+							)}
 						</TabsList>
 						<TabsContent value="overview" className="pt-4">
 							<HostOverview host={host} />
 						</TabsContent>
+						{hasSources && (
+							<TabsContent value="sources">
+								<HostSources key={host.id} host={host} />
+							</TabsContent>
+						)}
 						<TabsContent value="snapshots">
 							<SnapshotsTable key={host.id} host={host} />
 						</TabsContent>

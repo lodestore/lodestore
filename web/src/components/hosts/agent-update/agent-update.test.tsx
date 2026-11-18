@@ -750,6 +750,7 @@ describe("agent update on the host page", () => {
 		cert_issued_at: Date.now() - 30 * DAY,
 		next_renewal_at: Date.now() + 30 * DAY,
 		repository_name: "main",
+		source_types: [],
 		kernel: null,
 		uptime_s: null,
 		mounts: [],

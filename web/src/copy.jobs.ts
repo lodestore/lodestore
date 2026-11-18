@@ -364,6 +364,10 @@ export const jobs = {
 			`A hook timed out. ${script} ran longer than ${timeout}. Raise the timeout in the policy or fix the script, then run again.`,
 		gc_agent_outdated: (host: string) =>
 			`The agent on ${host} is too old for cleanup. A cleanup cycle is running in this repository, and this agent can't see the data it marked for deletion. Update the agent on ${host}, then run again.`,
+		source_agent_outdated: (host: string, noun: string) =>
+			`The backup did not start. The agent on ${host} is too old to back up ${noun}. Update the agent on ${host}, then run again.`,
+		source_not_found: (host: string, noun: string) =>
+			`The backup did not start. No ${noun} were found on ${host}, or the policy selects none of them. Check what the policy backs up, then run again.`,
 		interrupted:
 			"The agent stopped while this job ran. Run it again; data already uploaded is not sent twice.",
 		restoreFailed: (message: string) =>

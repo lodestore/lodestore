@@ -66,3 +66,15 @@ export const repositoryCount = (n: number) =>
 
 export const markerCount = (n: number) =>
 	`${count.format(n)} ${noun(n, "marker", "markers")}`;
+
+export const guestCount = (n: number) =>
+	`${count.format(n)} ${noun(n, "guest", "guests")}`;
+
+export const databaseCount = (n: number) =>
+	`${count.format(n)} ${noun(n, "database", "databases")}`;
+
+export const schemaCount = (n: number) =>
+	`${count.format(n)} ${noun(n, "schema", "schemas")}`;
+
+export const agentCount = (n: number) =>
+	`${count.format(n)} ${noun(n, "agent", "agents")}`;

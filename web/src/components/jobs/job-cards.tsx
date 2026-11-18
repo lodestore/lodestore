@@ -23,6 +23,7 @@ import {
 } from "@/lib/format";
 import { itemCount } from "@/lib/plural";
 import { shortId } from "@/lib/snapshot";
+import { sourceTypeNoun } from "@/lib/source-type";
 
 type Fact = [label: string, value: ReactNode | null | undefined];
 
@@ -449,6 +450,16 @@ export function failureText(job: JobDetail) {
 			return e.inline_not_allowed(host);
 		case "gc_agent_outdated":
 			return e.gc_agent_outdated(host);
+		case "source_agent_outdated": {
+			const noun = sourceTypeNoun(detail.source_type ?? "");
+			if (noun) return e.source_agent_outdated(host, noun);
+			break;
+		}
+		case "source_not_found": {
+			const noun = sourceTypeNoun(detail.source_type ?? "");
+			if (noun) return e.source_not_found(host, noun);
+			break;
+		}
 		case "hook_timeout":
 			if (has("script", "timeout")) {
 				return e.hook_timeout(detail.script, detail.timeout);

@@ -568,6 +568,59 @@ describe("Job page result", () => {
 		expect(alert).not.toHaveTextContent("Check the log");
 	});
 
+	it("tells to update an agent that cannot back up the source type", async () => {
+		mockJob(
+			makeDetail({
+				state: "failed",
+				error_code: "source_agent_outdated",
+				error_detail: { source_type: "proxmox-ct" },
+				error_message: "agent lacks source:proxmox-ct",
+				snapshot_id: null,
+				stats: null,
+			}),
+		);
+		await openJob();
+
+		expect(await screen.findByRole("alert")).toHaveTextContent(
+			"The backup did not start. The agent on web-1 is too old to back up containers. Update the agent on web-1, then run again.",
+		);
+	});
+
+	it("says when the policy finds nothing to back up", async () => {
+		mockJob(
+			makeDetail({
+				state: "failed",
+				error_code: "source_not_found",
+				error_detail: { source_type: "postgres" },
+				error_message: "nothing selected",
+				snapshot_id: null,
+				stats: null,
+			}),
+		);
+		await openJob();
+
+		expect(await screen.findByRole("alert")).toHaveTextContent(
+			"The backup did not start. No PostgreSQL databases were found on web-1, or the policy selects none of them. Check what the policy backs up, then run again.",
+		);
+	});
+
+	it("falls back to the server message when the source type is missing", async () => {
+		mockJob(
+			makeDetail({
+				state: "failed",
+				error_code: "source_not_found",
+				error_message: "nothing selected.",
+				snapshot_id: null,
+				stats: null,
+			}),
+		);
+		await openJob();
+
+		expect(await screen.findByRole("alert")).toHaveTextContent(
+			"The backup failed. nothing selected. Check the log, then run again.",
+		);
+	});
+
 	it("falls back to the server message for other failures", async () => {
 		mockJob(
 			makeDetail({

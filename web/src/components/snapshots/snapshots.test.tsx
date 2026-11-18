@@ -45,6 +45,7 @@ const detail: HostDetail = {
 	kernel: "6.8.0-45-generic",
 	uptime_s: 3_600,
 	mounts: [],
+	source_types: [],
 };
 
 function makeSnapshot(over: Partial<SnapshotItem> = {}): SnapshotItem {
@@ -630,5 +631,74 @@ describe("Restore: suspicious", () => {
 		await user.click(screen.getByRole("button", { name: "Restore…" }));
 		const dialog = await screen.findByRole("dialog");
 		expect(within(dialog).queryByText(/marked suspicious/)).toBeNull();
+	});
+});
+
+describe("Host snapshots: instance label", () => {
+	async function openWithCounts(
+		items: SnapshotItem[],
+		source_counts: { source_type: string; count: number }[],
+	) {
+		mockHost(items);
+		server.use(
+			http.get(`/api/v1/hosts/${detail.id}/snapshots`, () =>
+				HttpResponse.json({
+					items,
+					page: 1,
+					page_size: 50,
+					total: items.length,
+					source_counts,
+				}),
+			),
+		);
+		useSignedIn();
+		renderApp(`/hosts/${detail.id}?tab=snapshots`);
+		await screen.findByRole("heading", { level: 1, name: "web-1" });
+		const table = await screen.findByRole("table");
+		return within(table).getAllByRole("row").slice(1);
+	}
+
+	it("puts the instance label under Created for a host with only VM snapshots", async () => {
+		const rows = await openWithCounts(
+			[
+				makeSnapshot({
+					source_type: "proxmox-vm",
+					source_label: "VM 101 · web-01",
+					policy_name: "vms",
+				}),
+			],
+			[{ source_type: "proxmox-vm", count: 1 }],
+		);
+
+		const [created, , source] = Array.from(rows[0].querySelectorAll("td"));
+		expect(created).toHaveTextContent("VM 101 · web-01");
+		expect(created.querySelector("span.mt-1")).toHaveClass(
+			"@min-[680px]:hidden",
+		);
+		expect(source).toHaveClass("hidden", "@min-[680px]:table-cell");
+		expect(source).toHaveTextContent("VM 101 · web-01");
+		expect(source).toHaveTextContent("vms");
+		expect(screen.queryByRole("radiogroup")).toBeNull();
+	});
+
+	it("falls back to the type name when a snapshot has no label", async () => {
+		const rows = await openWithCounts(
+			[makeSnapshot({ source_type: "proxmox-ct", source_label: null })],
+			[{ source_type: "proxmox-ct", count: 1 }],
+		);
+
+		expect(rows[0].querySelector("td")).toHaveTextContent("Containers");
+	});
+
+	it("leaves a files-only host as it was", async () => {
+		const rows = await openWithCounts(
+			[makeSnapshot()],
+			[{ source_type: "files", count: 1 }],
+		);
+
+		const [created, , source] = Array.from(rows[0].querySelectorAll("td"));
+		expect(created.querySelector("span.mt-1")).toBeNull();
+		expect(source).not.toHaveClass("hidden");
+		expect(source).toHaveTextContent(/^etc$/);
 	});
 });
