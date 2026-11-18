@@ -6,6 +6,12 @@ import {
 	schemaCount,
 } from "@/lib/plural";
 
+const pickCount = {
+	guest: guestCount,
+	database: databaseCount,
+	schema: schemaCount,
+};
+
 export const policies = {
 	tabs: {
 		policy: "Policy",
@@ -132,6 +138,61 @@ export const policies = {
 			notFound: "Not found on the selected hosts",
 			pickAtLeastOne: (noun: "guest" | "database" | "schema") =>
 				`Pick at least one ${noun}.`,
+			plural: { guest: "guests", database: "databases", schema: "schemas" },
+			selected: (n: number, noun: "guest" | "database" | "schema") =>
+				`${pickCount[noun](n)} selected`,
+			excluded: (n: number, noun: "guest" | "database" | "schema") =>
+				`${pickCount[noun](n)} excluded`,
+			search: (n: number, noun: string) => `Search ${n} ${noun}`,
+			noMatch: (query: string, noun: string) => `No ${noun} match "${query}".`,
+			nothingFound: (noun: string) => `No ${noun} found on the selected hosts.`,
+			selectAll: (noun: string) => `Select all ${noun}`,
+			showMore: (n: number) => `Show ${n} more`,
+			showing: (shown: number, total: number, noun: string) =>
+				`Showing ${shown} of ${total} ${noun}`,
+			guestRow: (kind: string, vmid: number, name?: string | null) =>
+				`${kind === "ct" ? "CT" : "VM"} ${vmid}${name ? ` · ${name}` : ""}`,
+			guests: {
+				label: "Guests",
+				modes: { pick: "Pick guests", pool: "By pool", tags: "By tags" },
+				poolPlaceholder: "Choose a pool",
+				noPools: "No pools found on the selected hosts.",
+				noTags: "No tags found on the selected hosts.",
+				tagLimit: "At most 20 tags.",
+				mixed:
+					"This selection combines VMIDs, pool or tags. Edit it in the YAML tab.",
+				hostColumn: "Host",
+				guestColumn: "Guest",
+				truncatedHint: "Use a pool or tags to include the rest.",
+			},
+			databases: {
+				label: { postgres: "Databases", mysql: "Schemas" },
+				column: { postgres: "Database", mysql: "Schema" },
+				modes: {
+					all: { postgres: "All databases", mysql: "All schemas" },
+					pick: { postgres: "Pick databases", mysql: "Pick schemas" },
+					except: { postgres: "All except", mysql: "All except" },
+				},
+				allHelper: {
+					postgres:
+						"Every database on each selected host, including ones created later.",
+					mysql:
+						"Every schema on each selected host, including ones created later.",
+				},
+				mixed:
+					"This selection combines picked and excluded names. Edit it in the YAML tab.",
+				truncatedHint: "Use All except to include the rest.",
+			},
+			notFoundRow: "Not found on the selected hosts",
+			truncated: (host: string, n: number, noun: string, hint: string) =>
+				`The agent on ${host} reported the first ${n} ${noun} only. ${hint}`,
+			unreachable: (host: string, noun: string) =>
+				`The agent can't list the ${noun} on ${host}, so they are not in this list.`,
+			selectHostsFirst:
+				"Select hosts first to see what the agent found on them.",
+			loadFailed:
+				"Couldn't load the discovered sources. Check that the server is reachable, then retry.",
+			retry: "Retry loading discovered sources",
 		},
 		paths: "Paths",
 		pathsHelper:
