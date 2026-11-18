@@ -465,6 +465,17 @@ fn latest_is_per_source_instance() {
 }
 
 #[test]
+fn label_comes_from_the_signed_record() {
+    let mut named = record(id(2), "h", "j", 10);
+    let meta = Meta::from([("vmid".into(), "101".into()), ("name".into(), "web".into())]);
+    named.source = source::encode(&guest(), &meta).unwrap();
+    let set = signed(&[record(id(1), "h", "j", 10), named]);
+    assert_eq!(set.label_of(&id(2)).as_deref(), Some("VM 101 · web"));
+    assert_eq!(set.label_of(&id(1)), None);
+    assert_eq!(set.label_of(&id(3)), None);
+}
+
+#[test]
 fn latest_legacy_skips_claimed_other_sources() {
     let k = guest();
     let plain = entry(1, Some(NOW_MS - 2 * HOUR_MS), 0);

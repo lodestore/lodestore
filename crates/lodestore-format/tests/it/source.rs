@@ -146,6 +146,9 @@ fn source_parse_rejects_non_canonical() {
         "postgres/1/4294967296",
         "postgres/a/1",
         "postgres/%31/1",
+        "postgres/%2B1/1",
+        "postgres/1/%2B1",
+        "postgres-wal/%2B1",
         "postgres-wal/0",
         "postgres-wal/1/2",
         "mysql/abc/shop",
@@ -169,6 +172,10 @@ fn source_parse_rejects_non_canonical() {
     assert!(matches!(
         SourceKey::parse(&segment_256),
         Err(Error::InvalidInput(m)) if m.contains("1 to 255")
+    ));
+    assert!(matches!(
+        SourceKey::parse("mysql/abc/shop"),
+        Err(Error::InvalidInput(m)) if m.contains("server is identified by its uuid")
     ));
     assert!(matches!(
         SourceKey::parse(&long_key),
@@ -337,6 +344,14 @@ async fn writer_records_the_claimed_source() {
         .backup(&[src], BackupOptions::default(), &|_| {})
         .await
         .unwrap();
+    let options = BackupOptions {
+        source: claimed.clone(),
+        ..Default::default()
+    };
+    let stream = w
+        .backup_stream(b"dump", &mut &b"rows"[..], options, &|_| {})
+        .await
+        .unwrap();
 
     let reader =
         Reader::open(&fx.store, fx.repo.read_keys().duplicate(), fx.repo.config()).unwrap();
@@ -349,5 +364,9 @@ async fn writer_records_the_claimed_source() {
     assert_eq!(
         reader.snapshot(&without.snapshot_id).await.unwrap().source,
         None
+    );
+    assert_eq!(
+        reader.snapshot(&stream.snapshot_id).await.unwrap().source,
+        claimed
     );
 }
