@@ -338,6 +338,7 @@ const MATRIX: &[(&str, &str, &str)] = &[
         "agents:update",
     ),
     ("GET", "/api/v1/hosts/nope", "hosts:read"),
+    ("GET", "/api/v1/hosts/nope/sources", "hosts:read"),
     ("PUT", "/api/v1/hosts/nope/labels", "hosts:write"),
     ("POST", "/api/v1/hosts/nope/revoke", "hosts:write"),
     ("PUT", "/api/v1/hosts/nope/silence", "alerts:write"),
