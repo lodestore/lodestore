@@ -714,6 +714,11 @@ fn latest_of_an_instance_refuses_two_hosts() {
     assert!(!msg.contains(r#"("h6")"#), "{msg}");
     assert!(msg.contains("and 2 more"), "{msg}");
 
+    let entries = (1..=5).map(|n| hours_ago(n, i64::from(n))).collect();
+    let msg = text(pick(&records[..5], entries).unwrap_err());
+    assert!(msg.contains(r#""host5" ("h5")"#), "{msg}");
+    assert!(!msg.contains("more;"), "all five shown: {msg}");
+
     let other = SourceKey::proxmox_vm("pve1", "11111111-1111-4111-8111-111111111111").unwrap();
     let records = [
         guest_record(1, "h1", "web"),
