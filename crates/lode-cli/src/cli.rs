@@ -106,6 +106,10 @@ pub enum Command {
         /// optionally followed by `:<path>` to list only that path
         #[arg(value_name = "SNAPSHOT[:PATH]")]
         snapshot: String,
+        /// With latest@<source key>, choose among the snapshots this host
+        /// made: its id, or its name when that is unique
+        #[arg(long, value_name = "HOST")]
+        host: Option<String>,
         /// Show type, mode, size and modification time
         #[arg(long)]
         long: bool,
@@ -114,6 +118,10 @@ pub enum Command {
     Dump {
         /// `latest`, `latest@<source key>`, a snapshot id or unique id prefix
         snapshot: String,
+        /// With latest@<source key>, choose among the snapshots this host
+        /// made: its id, or its name when that is unique
+        #[arg(long, value_name = "HOST")]
+        host: Option<String>,
         /// Absolute path of a regular file as recorded in the snapshot
         path: String,
     },
@@ -124,6 +132,10 @@ pub enum Command {
         /// into the target
         #[arg(value_name = "SNAPSHOT[:PATH]")]
         snapshot: String,
+        /// With latest@<source key>, choose among the snapshots this host
+        /// made: its id, or its name when that is unique
+        #[arg(long, value_name = "HOST")]
+        host: Option<String>,
         /// Directory to restore into; files land at <DIR>/<original absolute path>
         #[arg(long, required = true, value_name = "DIR")]
         target: PathBuf,

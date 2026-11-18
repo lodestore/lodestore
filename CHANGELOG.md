@@ -6,10 +6,15 @@ All notable changes to Lodestore are recorded here. The format follows [Keep a C
 
 ### Added
 
-- `spec.source` in a backup policy, with `apiVersion: lodestore.io/v1alpha2`: `files`, `proxmox-vm`, `proxmox-ct`, `postgres` and `mysql` blocks. A policy of files is exported without it and as `v1alpha1`, byte for byte as before. This version of the server runs only `files`: a policy with another type is refused with 422 `spec.source.type` on create, update and apply, dry runs included. See [Backup policies](https://lodestore.dev/docs/guides/policies/).
+- `spec.source` in a backup policy, with `apiVersion: lodestore.io/v1alpha2`: `files`, `proxmox-vm`, `proxmox-ct`, `postgres` and `mysql` blocks. A policy of files is exported without it and as `v1alpha1`, byte for byte as before. The server stores a policy of every type; a job of a type the agent cannot run yet is refused before it starts with `source_agent_outdated`. See [Backup policies](https://lodestore.dev/docs/guides/policies/).
+- The agent finds the sources of its host and reports them to the server: the guests of a Proxmox node (VM and container, with id, name, tags, pool and a stable UUID), the PostgreSQL clusters (system identifier, port, version and databases) and the MySQL servers (server UUID, port, version and schemas) that run on it. It reads `/etc/pve` and talks to a database only through its local socket, without a password, and repeats the scan every five minutes. The new agent capability `source:files` is the first of the `source:<type>` capabilities that decide which jobs a host may get.
+- A Sources tab on the host page lists the guests and databases found on the host, with the policies that select each one, a "Not protected" filter, "Agent too old" for a type the agent cannot back up yet, a note when the same guest or database is also found on another host, and the point where a list was cut short. The Snapshots table shows the source label under the date on a phone.
+- A "What to back up" field in the policy form offers a type only when an agent has found it on the selected hosts, and lets you pick guests (by id, pool or tag) and databases from what the agents found, or take all of them. The YAML tab shows the same `spec.source` that `lode apply` takes. The Matching hosts list shows how many instances the policy selects on each host and marks the hosts where its jobs will fail. `POST /api/v1/policies/validate` answers with `availability`, and `POST /api/v1/policies/source-options` and `GET /api/v1/hosts/{id}/sources` serve the form and the tab.
+- `lode ls`, `lode dump` and `lode restore` take `--host HOST` with `latest@<source key>`, to choose among the snapshots one host made.
+- The jobs `source_agent_outdated` (the agent has no `source:<type>` capability for the policy) and `source_not_found` (the host has no source the policy selects) fail before any hook runs, with a message that says what to do, and raise the usual "Backup failed" alert.
 - `lode policy validate FILE...` checks policy files offline with the rules of the server and exits 3 when a file has problems.
 - Snapshots carry a source type and a label. `GET /api/v1/hosts/{id}/snapshots` and `GET /api/v1/restore/snapshots` accept `source_type` (and the latter `source`, a source instance on the host) and report `source_type`, `source_label` and `source_counts`; `lode server snapshots list` takes `--source-type` and `--source`, `lode snapshots` takes `--source-type`. The host page filters its Snapshots tab by source type when a host has more than one.
-- `latest@<source key>` in `lode restore`, `lode ls` and `lode dump` selects the newest signed snapshot of one source instance on any host of the repository.
+- `latest@<source key>` in `lode restore`, `lode ls` and `lode dump` selects the newest signed snapshot of one source instance. When snapshots of the key come from more than one host, `lode` refuses and asks for `--host` (see below).
 - Four restore scopes, `restore:guest`, `restore:guest-in-place`, `restore:db` and `restore:db-in-place`, independent of `restore:host`, `restore:in-place` and `restore:download`. They are reserved: no endpoint uses them yet. `RestoreSpec` carries a `target` for a guest or a database.
 - The alert `source_instance_gone` (`LodestoreSourceInstanceGone` in the Prometheus rules): one warning for 24 hours when a policy stops expecting a source it backed up.
 - The retention preview lists every source instance with something to forget, with a Retention preview tab on the policy page when a host has more than one.
@@ -21,10 +26,25 @@ All notable changes to Lodestore are recorded here. The format follows [Keep a C
 - `latest` in `lode` and the server chooses among `files` snapshots; a snapshot of another source is chosen only by `latest@<source key>`, and a WAL batch never. A repository without signatures skips snapshots whose manifest claims a source other than `files`.
 - The anomaly baseline of a snapshot is the history of its own source instance.
 - A files restore of a snapshot of a guest or a database is refused with 422.
+- `lode ls`, `lode dump` and `lode restore` with `latest@<source key>` exit with code 1 when the signed snapshots of the key come from more than one host, as with a cloned guest or a database and its standby, and name the hosts with the id and age of the newest snapshot of each; `--host` chooses one. A value of `--host` in the form of a UUID is a host id and is never looked up as a name. A key held by one host behaves as before.
+- A job for a source other than `files` is refused when the agent has no `source:<type>` capability, and when the agent has reported a complete, recent list of sources, collected after the job was queued, that holds none the policy selects. An agent that is offline or has no recent list is sent the job and decides itself.
+- The missing-backup alert of a policy for guests or databases waits for the instances the agents found, plus any instance whose latest job failed. When nothing is known about a host it waits for one placeholder instance, so a failing job still raises an alert.
+- `source_instance_gone` opens an hour after an instance stops being expected and not before, and does not open again within 24 hours of the last event, so a guest that disappears from one scan does not raise an alert.
 
 - The comparison pages show the date the facts about each competitor were checked and a list of sources with their versions.
 - `lode backup --stdin --policy X` through the agent, where `X` does not select the host or does not exist, now ends on the server as a `failed` job with `snapshot_policy_mismatch` instead of a snapshot under policy `X`.
 - With `includeStdin: true`, the stdin snapshots of a policy are counted in a retention pool of their own, not in the manual pool, and each stdin stream name has its own pool, so a weekly `etcd.snap` is not rotated by an hourly `pg.dump`.
+
+### Fixed
+
+- A snapshot that the storage stored ahead of the server clock is skipped when the server picks the latest snapshot of a source, as `lode` already did; the two no longer disagree.
+- A job whose snapshot claims a malformed source fails at once, with `verification_failed` or `snapshot_policy_mismatch`, instead of being retried by the verification forever.
+- An instance that is no longer expected does not make a host healthy, and its old success no longer sets the last success of the fleet overview.
+- A scan that fails is not read as "nothing found": an unknown list never silences the missing-backup alert and never raises `source_instance_gone`. A guest that drops out of a list that was cut short keeps raising "No recent backup".
+- The sources tab ignores a snapshot stored ahead of the server clock when it shows the last snapshot of a source.
+- The server no longer refuses a job with `source_not_found` for a guest created while the job waited in the queue: only a list collected after the job was queued can refuse it there. The agent still checks the job against its own latest discovery.
+- A list of sources that is over the size limit is not stored and counts as unknown; tags past the limit and over-long cluster or node names mark the list as cut short.
+- The agent runs `mysql` with `--local-infile=0` and treats a locked account like a refused login, so it does not retry at every scan. A PostgreSQL database whose name is longer than 64 bytes or is not valid UTF-8 is no longer reported under a cut name, and the saved ids of containers past the report limit are kept.
 
 ### Security
 

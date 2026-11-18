@@ -3,13 +3,17 @@ use std::collections::HashMap;
 use anyhow::Context;
 use lodestore_policy::BackupPolicy;
 use lodestore_policy::jiff::Timestamp;
+use lodestore_policy::source;
 use serde_json::Value;
 use sqlx::Row;
 
+use super::evaluate::{GONE_AFTER_MS, GONE_WINDOW_MS};
 use super::model::{AlertFacts, AlertType, HostFacts, PairFacts, SnapshotFacts, overdue_limit};
 use crate::agent_update::reached;
 use crate::maintenance::check::CheckLevel;
 use crate::policies::matching::AgentRow;
+use crate::sources;
+use crate::sources::select::{Selection, select};
 use crate::state::AppState;
 
 #[derive(Debug, Default)]
@@ -88,21 +92,65 @@ struct Policy {
 
 type Pair = (String, String);
 type Instance = (String, i64, Option<String>);
+type Failures = HashMap<String, (i64, String)>;
+/// When an instance stopped being expected, and when it came back inside its gone window.
+type Gone = (i64, Option<i64>);
 
-/// Files expect the host itself. Other sources expect what discovery lists, and every instance with snapshots while there is no discovery, so an unknown list never silences the dead-man.
-// shortcut: without discovery an instance the selector dropped keeps alerting; discovery (phase 21) passes the selected list
+/// The instances a source selects on a host; `complete` is false when the list may hold more.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Discovered {
+    pub keys: Vec<String>,
+    pub complete: bool,
+}
+
+/// Files expect the host itself. Other sources expect what discovery selects plus the instances whose last job failed, and every known instance while the list is unknown or incomplete, so missing data never silences the dead-man. With nothing expected, one stub (`''`) stands for the policy so it still alerts.
 pub fn expected_instances(
     policy: &BackupPolicy,
-    discovered: Option<&[String]>,
+    discovered: Option<&Discovered>,
     known: &[String],
+    failed: &[String],
 ) -> Vec<String> {
-    if lodestore_policy::source::normalized(&policy.spec.source).is_none() {
+    if source::normalized(&policy.spec.source).is_none() {
         return vec![String::new()];
     }
-    let mut out = discovered.unwrap_or(known).to_vec();
+    let mut out: Vec<String> = failed.to_vec();
+    match discovered {
+        Some(d) => out.extend(d.keys.iter().cloned()),
+        None => out.extend(known.iter().cloned()),
+    }
+    if discovered.is_some_and(|d| !d.complete) {
+        out.extend(known.iter().cloned());
+    }
     out.sort();
     out.dedup();
+    if out.is_empty() {
+        out.push(String::new());
+    }
     out
+}
+
+/// A failure counts only while it is newer than the last success of its instance; the stub's failure must also be newer than any success of the policy, or an old refusal would burn for ever.
+fn live_failures(
+    policy: &BackupPolicy,
+    failures: Option<&Failures>,
+    known: &[Instance],
+) -> Failures {
+    let stub = source::normalized(&policy.spec.source).is_some();
+    let any_success = known.iter().map(|(_, at, _)| *at).max();
+    failures
+        .into_iter()
+        .flatten()
+        .filter(|(source_ref, (at, _))| {
+            let own = known.iter().find(|(r, ..)| r == *source_ref);
+            let ok = if stub && source_ref.is_empty() {
+                any_success
+            } else {
+                own.map(|(_, at, _)| *at)
+            };
+            ok.is_none_or(|ok| *at > ok)
+        })
+        .map(|(r, f)| (r.clone(), f.clone()))
+        .collect()
 }
 
 /// The expected instances first, then the known ones the policy no longer expects, by `source_ref`.
@@ -112,12 +160,13 @@ pub fn instance_facts(
     baseline_ms: i64,
     expected: &[String],
     known: &[Instance],
-    failures: &HashMap<String, (i64, String)>,
-    gone: &HashMap<String, i64>,
+    failures: &Failures,
+    gone: &HashMap<String, Gone>,
 ) -> Vec<PairFacts> {
     let facts = |source_ref: &str, expected_now: bool| {
         let found = known.iter().find(|(r, ..)| r == source_ref);
         let last_success_ms = found.map(|(_, at, _)| *at);
+        let moment = gone.get(source_ref);
         PairFacts {
             policy: policy.to_owned(),
             limit,
@@ -130,7 +179,8 @@ pub fn instance_facts(
             source_ref: source_ref.to_owned(),
             source_label: found.and_then(|(_, _, label)| label.clone()),
             expected: expected_now,
-            gone_at_ms: gone.get(source_ref).copied(),
+            gone_at_ms: moment.map(|(at, _)| *at),
+            returned_at_ms: moment.and_then(|(_, back)| *back),
         }
     };
     let mut out: Vec<PairFacts> = expected.iter().map(|r| facts(r, true)).collect();
@@ -145,14 +195,27 @@ pub fn instance_facts(
 }
 
 pub async fn gather(state: &AppState, now_ms: i64) -> anyhow::Result<Inputs> {
-    gather_with(state, now_ms, |_, _| None).await
+    let sources = sources::load_all(state).await?;
+    gather_with(state, now_ms, |policy, host| {
+        let source = source::normalized(&policy.spec.source)?;
+        let stored = sources.get(host).and_then(|a| a.stored.as_ref());
+        match select(source, stored, now_ms) {
+            Selection::Unknown => None,
+            Selection::NoSource | Selection::Nothing => Some(Discovered {
+                keys: Vec::new(),
+                complete: true,
+            }),
+            Selection::Some { keys, complete } => Some(Discovered { keys, complete }),
+        }
+    })
+    .await
 }
 
-/// `discovered(policy, host)` is the instances a source lists on the host, `None` while the list is unknown.
+/// `discovered(policy, host)` is what the policy's source selects on the host, `None` while that is unknown.
 pub async fn gather_with(
     state: &AppState,
     now_ms: i64,
-    discovered: impl Fn(&str, &str) -> Option<Vec<String>>,
+    discovered: impl Fn(&BackupPolicy, &str) -> Option<Discovered>,
 ) -> anyhow::Result<Inputs> {
     let agents = load_agents(state).await?;
     let (policies, unreadable_policies) = load_policies(state).await?;
@@ -160,7 +223,6 @@ pub async fn gather_with(
     let failures = last_failures(state).await?;
     let gone = gone_moments(state).await?;
     let mut snapshots = last_snapshots(state).await?;
-    let no_failures = HashMap::new();
     let no_gone = HashMap::new();
     let now = Timestamp::from_millisecond(now_ms).context("the clock is out of range")?;
     let limits: Vec<_> = policies
@@ -179,15 +241,18 @@ pub async fn gather_with(
                     let key = (p.name.clone(), id.clone());
                     let known = successes.get(&key).map_or(&[][..], Vec::as_slice);
                     let known_refs: Vec<String> = known.iter().map(|(r, ..)| r.clone()).collect();
-                    let found = discovered(&p.name, &id);
-                    let expected = expected_instances(&p.policy, found.as_deref(), &known_refs);
+                    let live = live_failures(&p.policy, failures.get(&key), known);
+                    let failed: Vec<String> = live.keys().cloned().collect();
+                    let found = discovered(&p.policy, &id);
+                    let expected =
+                        expected_instances(&p.policy, found.as_ref(), &known_refs, &failed);
                     instance_facts(
                         &p.name,
                         *limit,
                         agent.enrolled_at.max(p.created_at),
                         &expected,
                         known,
-                        failures.get(&key).unwrap_or(&no_failures),
+                        &live,
                         gone.get(&key).unwrap_or(&no_gone),
                     )
                 })
@@ -521,22 +586,26 @@ async fn last_failures(
     Ok(out)
 }
 
-async fn gone_moments(state: &AppState) -> anyhow::Result<HashMap<Pair, HashMap<String, i64>>> {
-    let rows =
-        sqlx::query("SELECT policy_name, host_id, source_ref, gone_at FROM source_instances_gone")
-            .fetch_all(&state.db.pool)
-            .await
-            .context("reading when source instances stopped being expected")?;
-    let mut out: HashMap<Pair, HashMap<String, i64>> = HashMap::new();
+async fn gone_moments(state: &AppState) -> anyhow::Result<HashMap<Pair, HashMap<String, Gone>>> {
+    let rows = sqlx::query(
+        "SELECT policy_name, host_id, source_ref, gone_at, returned_at FROM source_instances_gone",
+    )
+    .fetch_all(&state.db.pool)
+    .await
+    .context("reading when source instances stopped being expected")?;
+    let mut out: HashMap<Pair, HashMap<String, Gone>> = HashMap::new();
     for row in &rows {
         out.entry((row.try_get("policy_name")?, row.try_get("host_id")?))
             .or_default()
-            .insert(row.try_get("source_ref")?, row.try_get("gone_at")?);
+            .insert(
+                row.try_get("source_ref")?,
+                (row.try_get("gone_at")?, row.try_get("returned_at")?),
+            );
     }
     Ok(out)
 }
 
-/// Remembers when the policy stopped expecting an instance, once, so the gone event starts there and a restart does not move it.
+/// Remembers when the policy stopped expecting an instance, once, so the gone event starts an hour later and a restart does not move it. A return before the event, or after its window, forgets the row; a return inside the window keeps it, marked, so a flapping instance raises one event a day.
 // shortcut: rows of deleted policies and hosts stay; prune them if the table ever grows
 pub async fn record_gone(
     state: &AppState,
@@ -546,31 +615,53 @@ pub async fn record_gone(
     const CONTEXT: &str = "recording a source instance that is no longer expected";
     for host in hosts {
         for pair in &mut host.pairs {
-            if !pair.expected && pair.gone_at_ms.is_none() {
-                sqlx::query(
-                    "INSERT INTO source_instances_gone (policy_name, host_id, source_ref, gone_at) \
-                     VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
-                )
-                .bind(&pair.policy)
-                .bind(&host.host_id)
-                .bind(&pair.source_ref)
-                .bind(now_ms)
-                .execute(&state.db.pool)
-                .await
-                .context(CONTEXT)?;
-                pair.gone_at_ms = Some(now_ms);
-            } else if pair.expected && pair.gone_at_ms.is_some() {
-                sqlx::query(
-                    "DELETE FROM source_instances_gone \
-                     WHERE policy_name = $1 AND host_id = $2 AND source_ref = $3",
-                )
-                .bind(&pair.policy)
-                .bind(&host.host_id)
-                .bind(&pair.source_ref)
-                .execute(&state.db.pool)
-                .await
-                .context(CONTEXT)?;
-                pair.gone_at_ms = None;
+            match (pair.expected, pair.gone_at_ms) {
+                (false, None) => {
+                    sqlx::query(
+                        "INSERT INTO source_instances_gone (policy_name, host_id, source_ref, gone_at) \
+                         VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+                    )
+                    .bind(&pair.policy)
+                    .bind(&host.host_id)
+                    .bind(&pair.source_ref)
+                    .bind(now_ms)
+                    .execute(&state.db.pool)
+                    .await
+                    .context(CONTEXT)?;
+                    pair.gone_at_ms = Some(now_ms);
+                }
+                (true, Some(gone_at)) => {
+                    let opens = gone_at + GONE_AFTER_MS;
+                    if now_ms < opens || now_ms >= opens + GONE_WINDOW_MS {
+                        sqlx::query(
+                            "DELETE FROM source_instances_gone \
+                             WHERE policy_name = $1 AND host_id = $2 AND source_ref = $3",
+                        )
+                        .bind(&pair.policy)
+                        .bind(&host.host_id)
+                        .bind(&pair.source_ref)
+                        .execute(&state.db.pool)
+                        .await
+                        .context(CONTEXT)?;
+                        pair.gone_at_ms = None;
+                        pair.returned_at_ms = None;
+                    } else if pair.returned_at_ms.is_none() {
+                        sqlx::query(
+                            "UPDATE source_instances_gone SET returned_at = $1 \
+                             WHERE policy_name = $2 AND host_id = $3 AND source_ref = $4 \
+                             AND returned_at IS NULL",
+                        )
+                        .bind(now_ms)
+                        .bind(&pair.policy)
+                        .bind(&host.host_id)
+                        .bind(&pair.source_ref)
+                        .execute(&state.db.pool)
+                        .await
+                        .context(CONTEXT)?;
+                        pair.returned_at_ms = Some(now_ms);
+                    }
+                }
+                _ => {}
             }
         }
     }

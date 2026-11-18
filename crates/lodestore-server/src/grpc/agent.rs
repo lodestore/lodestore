@@ -21,6 +21,7 @@ use crate::db::now_ms;
 use crate::grpc::{internal, peer_agent_id, restore, select_version, status_with};
 use crate::maintenance::attest::load_distrusted;
 use crate::repos::db::writer_material;
+use crate::sources::{self, Discovery};
 use crate::state::AppState;
 
 const SEEN_WRITE_INTERVAL: Duration = Duration::from_secs(30);
@@ -188,7 +189,12 @@ type RestorePlanStream = Pin<Box<dyn Stream<Item = Result<RestorePlanBatch, Stat
 type ReadPackRangeStream = Pin<Box<dyn Stream<Item = Result<PackBytes, Status>> + Send>>;
 type FetchAgentUpdateStream = Pin<Box<dyn Stream<Item = Result<UpdateChunk, Status>> + Send>>;
 
-async fn write_seen(state: &AppState, agent_id: &str, heartbeat: Option<&Heartbeat>) {
+async fn write_seen(
+    state: &AppState,
+    agent_id: &str,
+    heartbeat: Option<&Heartbeat>,
+    last_sources: &mut Option<Discovery>,
+) {
     let now = now_ms();
     let result = match heartbeat {
         None => {
@@ -240,6 +246,11 @@ async fn write_seen(state: &AppState, agent_id: &str, heartbeat: Option<&Heartbe
     };
     if let Err(error) = result {
         tracing::warn!(%error, agent_id, "could not record agent activity");
+    }
+    if let Some(facts) = heartbeat.and_then(|hb| hb.source_facts.as_ref())
+        && let Err(error) = sources::record(state, agent_id, facts, last_sources, now).await
+    {
+        tracing::warn!(%error, agent_id, "could not record the agent's sources");
     }
 }
 
@@ -382,6 +393,7 @@ impl Agent for AgentService {
 
         tokio::spawn(async move {
             let mut last_write: Option<Instant> = None;
+            let mut last_sources: Option<Discovery> = None;
             loop {
                 tokio::select! {
                     _ = cancel.cancelled() => break,
@@ -409,7 +421,7 @@ impl Agent for AgentService {
                                 break;
                             }
                             if last_write.is_none_or(|t| t.elapsed() >= SEEN_WRITE_INTERVAL) {
-                                write_seen(&state, &agent_id, Some(&hb)).await;
+                                write_seen(&state, &agent_id, Some(&hb), &mut last_sources).await;
                                 last_write = Some(Instant::now());
                             }
                         }
@@ -421,7 +433,7 @@ impl Agent for AgentService {
                     }
                 }
             }
-            write_seen(&state, &agent_id, None).await;
+            write_seen(&state, &agent_id, None, &mut last_sources).await;
             tracing::info!(agent_id = %agent_id, "agent session closed");
             drop(guard);
         });

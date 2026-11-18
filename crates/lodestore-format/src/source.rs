@@ -23,6 +23,17 @@
 //! cluster name, or the node name on a node outside a cluster; a node that
 //! joins a cluster later gives its guests new keys.
 //!
+//! A VM uses the uuid of its `smbios1` line. A container has no uuid of its
+//! own: the agent of the node generates one and keeps it in its state
+//! (`/var/lib/lodestore/source-ids.json`), writes nothing into the Proxmox
+//! configs, and reports a new uuid only once it is saved. A reinstalled node,
+//! a migrated container, a switch between container and VM under one VMID and
+//! a VMID missing from at least one successful discovery run all give a new
+//! uuid and so a new instance, as a migration does. A container destroyed and
+//! created again under the same VMID within one discovery interval keeps the
+//! old uuid. A VM whose SMBIOS uuid is nil or shared with another VM of the
+//! same node is not an instance and is not reported.
+//!
 //! The key groups retention, `latest` and the dead-man check, so two
 //! different identities must never share a key: the encoding is injective.
 

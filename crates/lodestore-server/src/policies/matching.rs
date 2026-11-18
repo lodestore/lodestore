@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+
+use lodestore_policy::source::Source;
 use lodestore_policy::{BackupPolicy, Selector};
 use serde::Serialize;
 use serde_json::Value;
@@ -6,6 +9,8 @@ use utoipa::ToSchema;
 
 use crate::error::ApiError;
 use crate::hosts::labels::Label;
+use crate::sources::select::{Selection, select};
+use crate::sources::{AgentSources, SOURCE_TYPES, declares};
 use crate::state::AppState;
 
 pub struct AgentRow {
@@ -59,6 +64,18 @@ pub async fn load_agents(state: &AppState) -> Result<Vec<AgentRow>, ApiError> {
         .collect()
 }
 
+/// Why a job of this policy will fail on the host, from what the agent reported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceMark {
+    /// The agent does not declare support for the source type.
+    AgentTooOld,
+    /// The host has no source of the type.
+    NotFound,
+    /// The host has the type but the policy selects none of it.
+    SelectsNothing,
+}
+
 #[derive(Serialize, ToSchema)]
 pub struct MatchHost {
     pub id: String,
@@ -66,6 +83,9 @@ pub struct MatchHost {
     pub online: bool,
     pub repository_id: String,
     pub repository_name: String,
+    /// How many found instances the policy selects on the host; null when unknown, stale or marked.
+    pub instances: Option<u32>,
+    pub source_mark: Option<SourceMark>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -74,35 +94,131 @@ pub struct Matching {
     pub other_repository: Vec<MatchHost>,
 }
 
-fn match_host(state: &AppState, agent: &AgentRow) -> MatchHost {
+fn source_state(
+    source: &Source,
+    host: Option<&AgentSources>,
+    now_ms: i64,
+) -> (Option<u32>, Option<SourceMark>) {
+    let capabilities = host.map_or(&[][..], |h| h.capabilities.as_slice());
+    if !declares(capabilities, source.type_name()) {
+        return (None, Some(SourceMark::AgentTooOld));
+    }
+    let stored = host.and_then(|h| h.stored.as_ref());
+    match select(source, stored, now_ms) {
+        Selection::Unknown => (None, None),
+        Selection::NoSource => {
+            let guests = matches!(source, Source::ProxmoxVm(_) | Source::ProxmoxCt(_));
+            let node = stored.is_some_and(|s| s.discovery.proxmox.is_some());
+            let mark = if guests && node {
+                SourceMark::SelectsNothing
+            } else {
+                SourceMark::NotFound
+            };
+            (None, Some(mark))
+        }
+        Selection::Nothing => (None, Some(SourceMark::SelectsNothing)),
+        Selection::Some { keys, .. } => (u32::try_from(keys.len()).ok(), None),
+    }
+}
+
+fn match_host(
+    state: &AppState,
+    agent: &AgentRow,
+    source: Option<(&Source, &HashMap<String, AgentSources>)>,
+    now_ms: i64,
+) -> MatchHost {
+    let (instances, source_mark) = source.map_or((None, None), |(source, sources)| {
+        source_state(source, sources.get(&agent.id), now_ms)
+    });
     MatchHost {
         id: agent.id.clone(),
         hostname: agent.hostname.clone(),
         online: state.registry.is_online(&agent.id),
         repository_id: agent.repository_id.clone(),
         repository_name: agent.repository_name.clone(),
+        instances,
+        source_mark,
     }
 }
 
+/// `source` is the policy's source unless it is files; only hosts of the policy's repository
+/// are marked, the others stay null.
 pub fn matching(
     state: &AppState,
     agents: &[AgentRow],
     repository_id: &str,
     selector: &Selector,
+    source: Option<&Source>,
+    sources: &HashMap<String, AgentSources>,
+    now_ms: i64,
 ) -> Matching {
     let mut out = Matching {
         hosts: Vec::new(),
         other_repository: Vec::new(),
     };
     for agent in agents.iter().filter(|a| a.selected_by(selector)) {
-        let host = match_host(state, agent);
         if agent.repository_id == repository_id {
-            out.hosts.push(host);
+            let marked = source.map(|source| (source, sources));
+            out.hosts.push(match_host(state, agent, marked, now_ms));
         } else {
-            out.other_repository.push(host);
+            out.other_repository
+                .push(match_host(state, agent, None, now_ms));
         }
     }
     out
+}
+
+/// How many of the hosts a policy takes can run a source type.
+#[derive(Serialize, ToSchema)]
+pub struct SourceAvailability {
+    pub source_type: String,
+    /// Hosts of the repository that the selector takes.
+    pub hosts_total: u32,
+    /// Of those, the hosts where the agent found the type.
+    pub hosts_with: u32,
+    /// Of those, the hosts whose agent does not declare support for the type.
+    pub hosts_agent_outdated: u32,
+}
+
+/// The types the form may offer: every type some host reported, plus the draft's own.
+pub fn availability(
+    agents: &[AgentRow],
+    sources: &HashMap<String, AgentSources>,
+    repository_id: &str,
+    selector: &Selector,
+    own_type: Option<&str>,
+) -> Vec<SourceAvailability> {
+    let found = |agent: &AgentRow, source_type: &str| {
+        sources
+            .get(&agent.id)
+            .and_then(|s| s.stored.as_ref())
+            .is_some_and(|s| s.discovery.has(source_type))
+    };
+    let taken: Vec<&AgentRow> = agents
+        .iter()
+        .filter(|a| a.applies(repository_id, selector))
+        .collect();
+    let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+    SOURCE_TYPES
+        .into_iter()
+        .filter(|t| Some(*t) == own_type || agents.iter().any(|a| found(a, t)))
+        .map(|source_type| {
+            let with: Vec<&&AgentRow> = taken.iter().filter(|a| found(a, source_type)).collect();
+            let outdated = with
+                .iter()
+                .filter(|a| {
+                    let caps = sources.get(&a.id).map_or(&[][..], |s| &s.capabilities[..]);
+                    !declares(caps, source_type)
+                })
+                .count();
+            SourceAvailability {
+                source_type: source_type.to_string(),
+                hosts_total: count(taken.len()),
+                hosts_with: count(with.len()),
+                hosts_agent_outdated: count(outdated),
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]

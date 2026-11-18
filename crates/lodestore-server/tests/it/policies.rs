@@ -2,7 +2,12 @@ use crate::common;
 
 use common::{ADMIN_PASSWORD, TestServer, backends};
 use lodestore_agent::{EnrollArgs, NetOptions};
-use lodestore_proto::agent::v1::JobSpec;
+use lodestore_proto::agent::v1::{
+    Database, DatabaseKind, DatabaseServer, GuestKind, JobSpec, ProxmoxFacts, ProxmoxGuest,
+    SourceFacts,
+};
+use lodestore_server::db::now_ms;
+use lodestore_server::sources;
 use prost::Message;
 use reqwest::Method;
 use serde_json::{Value, json};
@@ -796,6 +801,282 @@ async fn policies_host_next_run() {
             .as_millis() as i64;
         assert!(next("timed").as_i64().unwrap() > now - 5000);
         assert!(next("manual").is_null());
+        ts.stop().await;
+    }
+}
+
+fn source_yaml(name: &str, repo: &str, source: &str) -> String {
+    format!(
+        "apiVersion: lodestore.io/v1alpha2\nkind: BackupPolicy\nmetadata:\n  name: {name}\n\
+         spec:\n  repository: {repo}\n  selector:\n    matchLabels:\n      env: prod\n{source}"
+    )
+}
+
+const VM_SOURCE: &str = "  source:\n    type: proxmox-vm\n    vmids: [101, 103]\n";
+
+fn pve_guest(kind: GuestKind, vmid: u32) -> ProxmoxGuest {
+    ProxmoxGuest {
+        kind: kind as i32,
+        vmid,
+        name: format!("guest-{vmid}"),
+        uuid: format!("{vmid:08x}-1111-4111-8111-111111111111"),
+        ..Default::default()
+    }
+}
+
+fn pve(guests: Vec<ProxmoxGuest>, age_ms: u64, truncated: bool) -> SourceFacts {
+    SourceFacts {
+        age_ms,
+        truncated,
+        proxmox: Some(ProxmoxFacts {
+            cluster: "pve-prod".to_string(),
+            node: "pve".to_string(),
+            guests,
+        }),
+        ..Default::default()
+    }
+}
+
+async fn report_sources(ts: &TestServer, host: &str, facts: &SourceFacts, caps: &[&str]) {
+    sources::record(ts.state(), host, facts, &mut None, now_ms())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE agents SET capabilities_json = $1 WHERE id = $2")
+        .bind(serde_json::to_string(caps).unwrap())
+        .bind(host)
+        .execute(&ts.state().db.pool)
+        .await
+        .unwrap();
+}
+
+fn host_named<'a>(hosts: &'a Value, name: &str) -> &'a Value {
+    hosts
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["hostname"] == name)
+        .unwrap_or_else(|| panic!("{name} in {hosts}"))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn policies_store_a_guest_policy_and_mark_its_hosts() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let http = Http::login(&ts).await;
+        let main = ts.create_local_repository("main").await;
+        let host = enroll(&ts, &http, &main, "pve-01", prod()).await;
+        let facts = pve(vec![pve_guest(GuestKind::Vm, 101)], 1000, false);
+        report_sources(&ts, &host, &facts, &[]).await;
+
+        let (status, created) = http
+            .post(
+                "/api/v1/policies",
+                &json!({ "yaml": source_yaml("vms", "main", VM_SOURCE) }),
+            )
+            .await;
+        assert_eq!(status, 201, "[{}] {created}", backend.name());
+        let (_, detail) = http.get("/api/v1/policies/vms").await;
+        let hosts = &detail["matching"]["hosts"];
+        assert_eq!(hosts[0]["source_mark"], "agent_too_old", "{detail}");
+        assert!(hosts[0]["instances"].is_null());
+        assert!(
+            detail["yaml"]
+                .as_str()
+                .unwrap()
+                .starts_with("apiVersion: lodestore.io/v1alpha2"),
+            "{detail}"
+        );
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn policies_mark_hosts_that_will_fail() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let http = Http::login(&ts).await;
+        let main = ts.create_local_repository("main").await;
+        let other = ts.create_local_repository("other").await;
+        let vm = ["source:proxmox-vm"];
+        let stale = 20 * 60 * 1000;
+        let vms = |ids: &[u32]| ids.iter().map(|id| pve_guest(GuestKind::Vm, *id)).collect();
+        let ct = || vec![pve_guest(GuestKind::Ct, 200)];
+        let fleet = [
+            ("pve-01", pve(vms(&[101, 103]), 1000, false), &vm[..]),
+            ("pve-02", SourceFacts::default(), &vm[..]),
+            ("pve-03", pve(vms(&[105]), 1000, false), &vm[..]),
+            ("pve-04", pve(vms(&[101]), stale, false), &vm[..]),
+            ("pve-05", SourceFacts::default(), &[][..]),
+            ("pve-06", pve(ct(), 1000, false), &vm[..]),
+            ("pve-07", pve(ct(), 1000, true), &vm[..]),
+        ];
+        for (name, facts, caps) in &fleet {
+            let id = enroll(&ts, &http, &main, name, prod()).await;
+            report_sources(&ts, &id, facts, caps).await;
+        }
+        let foreign = enroll(&ts, &http, &other, "pve-other", prod()).await;
+        report_sources(&ts, &foreign, &pve(vms(&[101]), 1000, false), &vm).await;
+
+        let (_, got) = http
+            .post(
+                "/api/v1/policies/validate",
+                &json!({ "yaml": source_yaml("vms", "main", VM_SOURCE) }),
+            )
+            .await;
+        assert_eq!(got["valid"], true, "{got}");
+        let hosts = &got["matching"]["hosts"];
+        let expect = [
+            ("pve-01", json!(2), Value::Null),
+            ("pve-02", Value::Null, json!("not_found")),
+            ("pve-03", Value::Null, json!("selects_nothing")),
+            ("pve-04", Value::Null, Value::Null),
+            ("pve-05", Value::Null, json!("agent_too_old")),
+            ("pve-06", Value::Null, json!("selects_nothing")),
+            ("pve-07", Value::Null, Value::Null),
+        ];
+        for (name, instances, mark) in expect {
+            let host = host_named(hosts, name);
+            assert_eq!(host["instances"], instances, "[{}] {name}", backend.name());
+            assert_eq!(host["source_mark"], mark, "[{}] {name}", backend.name());
+        }
+        let foreign = host_named(&got["matching"]["other_repository"], "pve-other");
+        assert!(foreign["instances"].is_null() && foreign["source_mark"].is_null());
+
+        let files = policy_yaml("etc", "main", "");
+        let (_, got) = http
+            .post("/api/v1/policies/validate", &json!({ "yaml": files }))
+            .await;
+        for host in got["matching"]["hosts"].as_array().unwrap() {
+            assert!(
+                host["instances"].is_null() && host["source_mark"].is_null(),
+                "{host}"
+            );
+        }
+        ts.stop().await;
+    }
+}
+
+fn availability_of<'a>(got: &'a Value, source_type: &str) -> Option<&'a Value> {
+    got["availability"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["source_type"] == source_type)
+}
+
+fn counts(entry: Option<&Value>) -> (u64, u64, u64) {
+    let entry = entry.expect("the type is listed");
+    (
+        entry["hosts_total"].as_u64().unwrap(),
+        entry["hosts_with"].as_u64().unwrap(),
+        entry["hosts_agent_outdated"].as_u64().unwrap(),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn policies_report_source_availability() {
+    for backend in backends() {
+        let name = backend.name();
+        let ts = TestServer::start(&backend).await;
+        let http = Http::login(&ts).await;
+        let main = ts.create_local_repository("main").await;
+        let one = enroll(&ts, &http, &main, "pve-01", prod()).await;
+        let two = enroll(&ts, &http, &main, "pve-02", prod()).await;
+        let db = enroll(&ts, &http, &main, "db-01", prod()).await;
+        let both = pve(
+            vec![pve_guest(GuestKind::Vm, 101), pve_guest(GuestKind::Ct, 200)],
+            1000,
+            false,
+        );
+        let caps = ["source:proxmox-vm", "source:proxmox-ct"];
+        report_sources(&ts, &one, &both, &caps).await;
+        let only_vm = pve(vec![pve_guest(GuestKind::Vm, 102)], 1000, false);
+        report_sources(&ts, &two, &only_vm, &[]).await;
+        let postgres = SourceFacts {
+            databases: vec![DatabaseServer {
+                kind: DatabaseKind::Postgres as i32,
+                port: 5432,
+                server_id: "7".to_string(),
+                databases: vec![Database {
+                    name: "app".to_string(),
+                    oid: 16384,
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        report_sources(&ts, &db, &postgres, &["source:postgres"]).await;
+
+        let validate = |yaml: String| {
+            let http = &http;
+            async move {
+                http.post("/api/v1/policies/validate", &json!({ "yaml": yaml }))
+                    .await
+                    .1
+            }
+        };
+        let got = validate(source_yaml("vms", "main", VM_SOURCE)).await;
+        assert_eq!(
+            counts(availability_of(&got, "proxmox-vm")),
+            (3, 2, 1),
+            "[{name}] {got}"
+        );
+        assert_eq!(
+            counts(availability_of(&got, "proxmox-ct")),
+            (3, 1, 0),
+            "[{name}]"
+        );
+        assert_eq!(
+            counts(availability_of(&got, "postgres")),
+            (3, 1, 0),
+            "[{name}]"
+        );
+        assert!(availability_of(&got, "mysql").is_none(), "[{name}]");
+        let order: Vec<_> = got["availability"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["source_type"].as_str().unwrap())
+            .collect();
+        assert_eq!(order, ["proxmox-vm", "proxmox-ct", "postgres"]);
+
+        let mysql = "  source:\n    type: mysql\n    databases: [app]\n";
+        let got = validate(source_yaml("my", "main", mysql)).await;
+        assert_eq!(
+            counts(availability_of(&got, "mysql")),
+            (3, 0, 0),
+            "[{name}]"
+        );
+
+        let no_ct = pve(vec![pve_guest(GuestKind::Vm, 101)], 1000, false);
+        report_sources(&ts, &one, &no_ct, &["source:proxmox-vm"]).await;
+        let got = validate(source_yaml("vms", "main", VM_SOURCE)).await;
+        assert!(
+            availability_of(&got, "proxmox-ct").is_none(),
+            "[{name}] {got}"
+        );
+        assert!(availability_of(&got, "proxmox-vm").is_some());
+
+        let draft = json!({
+            "apiVersion": "lodestore.io/v1alpha2",
+            "kind": "BackupPolicy",
+            "metadata": { "name": "" },
+            "spec": {
+                "repository": "main",
+                "selector": { "matchLabels": { "env": "prod" } },
+                "source": { "type": "proxmox-vm", "vmids": [101] }
+            }
+        });
+        let (_, got) = http
+            .post("/api/v1/policies/validate", &json!({ "policy": draft }))
+            .await;
+        assert_eq!(got["valid"], false, "[{name}] {got}");
+        assert!(got["matching"].is_null());
+        assert_eq!(
+            counts(availability_of(&got, "proxmox-vm")),
+            (3, 2, 1),
+            "[{name}] {got}"
+        );
         ts.stop().await;
     }
 }

@@ -3,6 +3,7 @@
 
 pub mod config;
 pub mod connect;
+pub mod discovery;
 pub mod enroll;
 pub mod facts;
 pub mod hooks;

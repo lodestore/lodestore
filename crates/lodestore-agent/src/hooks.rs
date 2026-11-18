@@ -228,7 +228,7 @@ fn read_into(
     })
 }
 
-async fn terminate(child: &mut tokio::process::Child, pgid: Pid) {
+pub(crate) async fn terminate(child: &mut tokio::process::Child, pgid: Pid) {
     let _ = kill_process_group(pgid, Signal::TERM);
     let deadline = tokio::time::Instant::now() + KILL_GRACE;
     loop {

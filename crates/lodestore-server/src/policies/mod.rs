@@ -19,7 +19,10 @@ use utoipa::ToSchema;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use self::matching::{AgentRow, HookWarning, Matching, hook_warnings, load_agents, matching};
+use self::matching::{
+    AgentRow, HookWarning, Matching, SourceAvailability, availability, hook_warnings, load_agents,
+    matching,
+};
 use crate::auth::tokens::{JobsRun, PoliciesRead, PoliciesWrite, Principal, Scope, Scoped};
 use crate::db::now_ms;
 use crate::error::{ApiError, ErrorBody};
@@ -69,19 +72,6 @@ fn zone(policy: &BackupPolicy) -> &str {
 /// in. Another spelling of the same zone counts as a change: doubt goes to the gate.
 pub(crate) fn shifts_retention_buckets(old: &BackupPolicy, new: &BackupPolicy) -> bool {
     (retention_of(old).is_some() || retention_of(new).is_some()) && zone(old) != zone(new)
-}
-
-/// A source this server version does not run is refused rather than stored: a stored
-/// policy that never produces a backup would still look protected.
-pub(crate) fn unsupported_source(policy: &BackupPolicy) -> Option<Problem> {
-    let source = source::normalized(&policy.spec.source)?;
-    Some(problem(
-        "spec.source.type",
-        format!(
-            "source type \"{}\" is not supported by this server version yet",
-            source.type_name()
-        ),
-    ))
 }
 
 const SHORTEST_GAP: SignedDuration = SignedDuration::from_secs(60);
@@ -200,6 +190,8 @@ pub struct ValidateResponse {
     pub matching: Option<Matching>,
     pub warnings: Vec<HookWarning>,
     pub schedule: Option<ScheduleInfo>,
+    /// Which source types the selected hosts of the repository can run; empty when the draft names no repository.
+    pub availability: Vec<SourceAvailability>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -380,14 +372,14 @@ async fn resolve(state: &AppState, policy: BackupPolicy, yaml: String) -> Result
     })
 }
 
-struct PolicyRow {
+pub(crate) struct PolicyRow {
     id: String,
-    policy: BackupPolicy,
+    pub(crate) policy: BackupPolicy,
     yaml: String,
     revision: i64,
     created_at: i64,
     updated_at: i64,
-    repository_id: String,
+    pub(crate) repository_id: String,
     repository_name: String,
     managed_by: Option<String>,
 }
@@ -467,7 +459,7 @@ pub(crate) async fn policy_id_for_host(
         .then_some(row.id))
 }
 
-async fn all_policies(state: &AppState) -> Result<Vec<PolicyRow>, ApiError> {
+pub(crate) async fn all_policies(state: &AppState) -> Result<Vec<PolicyRow>, ApiError> {
     sqlx::query(sqlx::AssertSqlSafe(format!(
         "{POLICY_SELECT} ORDER BY p.name"
     )))
@@ -515,6 +507,7 @@ pub(crate) async fn hook_policies_gained_by_labels(
 
 async fn detail(state: &AppState, row: PolicyRow) -> Result<PolicyDetail, ApiError> {
     let agents = load_agents(state).await?;
+    let sources = crate::sources::load_all(state).await?;
     let selector = &row.policy.spec.selector;
     let own: Vec<&AgentRow> = agents
         .iter()
@@ -522,7 +515,15 @@ async fn detail(state: &AppState, row: PolicyRow) -> Result<PolicyDetail, ApiErr
         .collect();
     Ok(PolicyDetail {
         name: row.policy.metadata.name.clone(),
-        matching: matching(state, &agents, &row.repository_id, selector),
+        matching: matching(
+            state,
+            &agents,
+            &row.repository_id,
+            selector,
+            source::normalized(&row.policy.spec.source),
+            &sources,
+            now_ms(),
+        ),
         warnings: hook_warnings(&row.policy, &own),
         schedule: schedule_info(&row.policy, now_ms()),
         managed_by: row.managed_by,
@@ -579,6 +580,7 @@ pub async fn validate_policy(
     _auth: Scoped<PoliciesRead>,
     Json(req): Json<ValidateRequest>,
 ) -> Result<Json<ValidateResponse>, ApiError> {
+    let draft = req.policy.clone();
     let checked = match check(&state, req.yaml, req.policy).await {
         Ok(checked) => checked,
         Err(Failure::Problems(errors)) => {
@@ -591,6 +593,7 @@ pub async fn validate_policy(
                 matching: None,
                 warnings: Vec::new(),
                 schedule: None,
+                availability: draft_availability(&state, draft.as_ref()).await?,
             }));
         }
         Err(Failure::Api(e)) => return Err(e),
@@ -599,7 +602,9 @@ pub async fn validate_policy(
     let name_taken =
         req.original_name.as_deref() != Some(name) && policy_exists(&state, name).await?;
     let agents = load_agents(&state).await?;
+    let sources = crate::sources::load_all(&state).await?;
     let selector = &checked.policy.spec.selector;
+    let source = source::normalized(&checked.policy.spec.source);
     let own: Vec<&AgentRow> = agents
         .iter()
         .filter(|a| a.applies(&checked.repository_id, selector))
@@ -608,12 +613,51 @@ pub async fn validate_policy(
         valid: true,
         errors: Vec::new(),
         name_taken,
-        matching: Some(matching(&state, &agents, &checked.repository_id, selector)),
+        matching: Some(matching(
+            &state,
+            &agents,
+            &checked.repository_id,
+            selector,
+            source,
+            &sources,
+            now_ms(),
+        )),
+        availability: availability(
+            &agents,
+            &sources,
+            &checked.repository_id,
+            selector,
+            source.map(source::Source::type_name),
+        ),
         warnings: hook_warnings(&checked.policy, &own),
         schedule: schedule_info(&checked.policy, now_ms()),
         yaml: Some(checked.yaml),
         policy: Some(checked.policy),
     }))
+}
+
+async fn draft_availability(
+    state: &AppState,
+    draft: Option<&BackupPolicy>,
+) -> Result<Vec<SourceAvailability>, ApiError> {
+    let Some(draft) = draft else {
+        return Ok(Vec::new());
+    };
+    let Some(repository) = sqlx::query("SELECT id FROM repositories WHERE name = $1")
+        .bind(&draft.spec.repository)
+        .fetch_optional(&state.db.pool)
+        .await?
+    else {
+        return Ok(Vec::new());
+    };
+    let repository_id: String = repository.try_get("id")?;
+    Ok(availability(
+        &load_agents(state).await?,
+        &crate::sources::load_all(state).await?,
+        &repository_id,
+        &draft.spec.selector,
+        source::normalized(&draft.spec.source).map(source::Source::type_name),
+    ))
 }
 
 #[utoipa::path(
@@ -689,9 +733,6 @@ pub async fn create_policy(
             Scope::HooksWrite,
             hooks_purpose(std::slice::from_ref(&name)),
         )?;
-    }
-    if let Some(p) = unsupported_source(&checked.policy) {
-        return Err(Failure::Problems(vec![p]).into());
     }
     let now = now_ms();
     let inserted = sqlx::query(
@@ -786,9 +827,6 @@ pub async fn update_policy(
             Scope::HooksWrite,
             hooks_purpose(std::slice::from_ref(&name)),
         )?;
-    }
-    if let Some(p) = unsupported_source(&checked.policy) {
-        return Err(Failure::Problems(vec![p]).into());
     }
     let updated = sqlx::query(
         "UPDATE policies SET repository_id = $1, yaml = $2, spec_json = $3, \
@@ -1120,14 +1158,6 @@ mod tests {
                 "no retention, no gate"
             );
         }
-        assert_eq!(
-            unsupported_source(&sourced(VM_101, false))
-                .unwrap()
-                .path
-                .as_deref(),
-            Some("spec.source.type")
-        );
-        assert!(unsupported_source(&sourced(FILES_SRC, false)).is_none());
     }
 
     #[test]

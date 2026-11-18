@@ -917,6 +917,9 @@ async fn link_outcome(
                 Some(LinkRefused::Foreign) => Err(Expect::Foreign),
                 Some(LinkRefused::Policy { .. }) => Err(Expect::Policy),
                 Some(LinkRefused::Stream { .. }) => Err(Expect::Stream),
+                Some(LinkRefused::Source) => {
+                    panic!("an unexpected malformed-source refusal: {error:#}")
+                }
                 None => panic!("not a refusal: {error:#}"),
             }
         }

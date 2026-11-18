@@ -20,6 +20,7 @@ import type {
 	PolicyInput,
 	RepositorySummary,
 	RetentionPreview as RetentionPreviewData,
+	SourceAvailability,
 	ValidateResponse,
 } from "@/api/gen/model";
 import { EditorFooter } from "@/components/policies/editor-footer";
@@ -32,6 +33,7 @@ import {
 	PolicyForm,
 	policyFromDraft,
 	retentionFromDraft,
+	sourceFromDraft,
 } from "@/components/policies/policy-form";
 import {
 	PolicyYamlEditor,
@@ -80,6 +82,7 @@ function initialState(
 			matching: detail.matching,
 			warnings: detail.warnings,
 			schedule: detail.schedule,
+			availability: [],
 		};
 		return {
 			draft,
@@ -130,6 +133,9 @@ export function PolicyEditor({
 	const [blocked, setBlocked] = useState(false);
 	const [formRefused, setFormRefused] = useState(false);
 	const [checkFailed, setCheckFailed] = useState(false);
+	const [availability, setAvailability] = useState<SourceAvailability[]>();
+	const [probeFailed, setProbeFailed] = useState(false);
+	const checked = useRef(false);
 	const [confirming, setConfirming] = useState<RetentionPreviewData>();
 	const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
 	const latest = useRef(0);
@@ -137,6 +143,7 @@ export function PolicyEditor({
 	const bypass = leaving ?? ownBypass;
 	const yamlField = useRef<HTMLTextAreaElement>(null);
 	const validate = useValidatePolicy();
+	const probe = useValidatePolicy();
 	const create = useCreatePolicy();
 	const update = useUpdatePolicy();
 	const saving = create.isPending || update.isPending;
@@ -151,6 +158,8 @@ export function PolicyEditor({
 			{
 				onSuccess: (response) => {
 					if (ticket !== latest.current) return;
+					checked.current = true;
+					setAvailability(response.availability);
 					setResult(response);
 					setSettled(true);
 					if (response.valid && input.yaml != null && response.policy) {
@@ -176,6 +185,22 @@ export function PolicyEditor({
 
 	useEffect(() => {
 		if (isNew) check({ policy: policyFromDraft(initial.draft) });
+		else {
+			probe.mutate(
+				{
+					data: {
+						policy: policyFromDraft(initial.draft),
+						original_name: detail?.name,
+					},
+				},
+				{
+					onSuccess: (response) => {
+						if (!checked.current) setAvailability(response.availability);
+					},
+					onError: () => setProbeFailed(true),
+				},
+			);
+		}
 		return () => {
 			clearTimeout(timer.current);
 			latest.current += 1;
@@ -267,8 +292,13 @@ export function PolicyEditor({
 	const nameTaken = isNew && result?.name_taken === true;
 	const noHostsPicked =
 		source === "form" && draft.hostMode === "list" && draft.hosts.length === 0;
+	const noSourcePicked =
+		source === "form" &&
+		draft.source.type !== "files" &&
+		sourceFromDraft(draft.source) === undefined;
 	const canSave =
 		!noHostsPicked &&
+		!noSourcePicked &&
 		(isNew || changed) &&
 		settled &&
 		result?.valid === true &&
@@ -385,6 +415,9 @@ export function PolicyEditor({
 				warnings={result?.valid ? result.warnings : []}
 				selectorEmpty={draft.hostMode === "labels" && !hasLabels}
 				notice={noHostsPicked ? text.form.pickAtLeastOne : undefined}
+				sourceType={
+					result?.valid ? result.policy?.spec.source?.type : undefined
+				}
 				invalid={failure !== undefined}
 				refreshing={!settled && !checkFailed}
 				failed={checkFailed}
@@ -467,6 +500,14 @@ export function PolicyEditor({
 										repositories={repositories}
 										nameLocked={!isNew}
 										nameTaken={nameTaken}
+										availability={availability}
+										sourceState={
+											checkFailed || probeFailed
+												? "failed"
+												: availability === undefined
+													? "loading"
+													: "ready"
+										}
 										schedule={result?.valid ? result.schedule : undefined}
 										schedulePending={!settled && !checkFailed}
 										retentionPreview={

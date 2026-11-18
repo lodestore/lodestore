@@ -11,7 +11,7 @@ Until 0.2 a snapshot is a set of files of one host. Retention, `latest` and the 
 
 The format also has to name the source before the first guest or database backup is written. After that, the key of an instance and the layout of an image are data in users' buckets and cannot be changed under them.
 
-This ADR records the decisions that are one-way for that reason, and marks as provisional the few that need a test bench that does not exist yet. Phase 20 ships the model, the retention, `latest`, alert and restore-scope machinery and the formats. It does not ship a backup of a guest or a database: the server answers 422 to a policy whose `spec.source` it cannot run, and no agent writes such a snapshot.
+This ADR records the decisions that are one-way for that reason, and marks as provisional the few that need a test bench that does not exist yet. Phase 20 ships the model, the retention, `latest`, alert and restore-scope machinery and the formats. It does not ship a backup of a guest or a database: no agent writes such a snapshot, and a job for such a source is refused before it starts.
 
 ## Decision
 
@@ -46,7 +46,7 @@ The type is the prefix. A reader that does not know a prefix treats the record a
 
 Identity by type:
 
-- `proxmox-vm` and `proxmox-ct` are (cluster, canonical lower-case UUID). A guest is never told apart by its VMID, so a reused VMID or CTID is a new instance. The cluster segment is the corosync cluster name, or the node name on a node outside a cluster. A node that joins a cluster later gives its guests keys with the cluster name: they become new instances, as after a migration (below). A container without a UUID of its own gets one that discovery generates and stores (phase 21); a key built from the container id alone is refused.
+- `proxmox-vm` and `proxmox-ct` are (cluster, canonical lower-case UUID). A guest is never told apart by its VMID, so a reused VMID or CTID is a new instance. The cluster segment is the corosync cluster name, or the node name on a node outside a cluster. A node that joins a cluster later gives its guests keys with the cluster name: they become new instances, as after a migration (below). A container has no UUID of its own, so the agent of the node generates one and stores it (below); a key built from the container id alone is refused.
 - `postgres` is (cluster `system_identifier`, database OID); a recreated database has a new OID. `postgres-wal` is the cluster alone.
 - `mysql` is (server UUID, schema).
 
@@ -56,7 +56,7 @@ Metadata (`SourceMeta`, sorted by key, a key once) is at most 32 entries, keys `
 
 This is a one-way decision. Retention, the floor of two, the missing-backup alert and the departure event are computed per (policy, host, key). A guest that migrates to another node by HA, or a PostgreSQL that fails over to another host, starts a new group on the new host with its own retention and alert; the old group keeps its floor of two newest good snapshots (nothing new deletes them) and raises one `source_instance_gone` event. Groups are not merged across hosts. History under live data does not change.
 
-`latest` follows the same split. In the API the key narrows a list only inside the mandatory `host`, and the same key on another host is another instance. In `lode` the newest signed snapshot of a key is chosen across every host of the repository, as `latest` for `files` is in 0.2 (whichever host made it). `lode` writes it `latest@<key>`: a colon already separates the path in `SNAPSHOT[:PATH]`, and `@` cannot occur in a canonical key.
+`latest` follows the same split. In the API the key narrows a list only inside the mandatory `host`, and the same key on another host is another instance. In `lode` the newest signed snapshot of a key is chosen across the hosts of the repository, as `latest` for `files` is in 0.2 (whichever host made it), but only while one host made them; with several hosts `lode` refuses (see "A key is not bound to a host"). `lode` writes it `latest@<key>`: a colon already separates the path in `SNAPSHOT[:PATH]`, and `@` cannot occur in a canonical key.
 
 ### Retention, latest and the missing-backup alert per instance
 
@@ -66,7 +66,19 @@ An instance that stopped receiving snapshots (a guest deleted, a VMID reused, a 
 
 `latest` chooses among `files` snapshots by default. A named instance is chosen with `latest@<key>` in `lode` and with the `source` parameter in the API. A WAL batch (`postgres-wal`) is never `latest`: it is not a point-in-time image. A `lode` of this version in a repository without readable signatures (the legacy mode of ADR 0006) skips snapshots whose manifest claims a source other than `files`, and answers "no verified snapshot" for a named instance. A `lode` 0.2 does not know fields 18 and 6; in a repository that holds guest or database snapshots it chooses `latest` among all snapshots.
 
-The missing-backup alert is raised per expected instance. For `files` that is the host. For other types it is the list that discovery supplies (phase 21); until it does, every instance of the policy that has snapshots is expected, so that an unknown list never silences the alert. The moment an instance stopped being expected (the first alert cycle in which the policy no longer selects it) is stored in `source_instances_gone`. From that moment the server raises exactly one `source_instance_gone` warning for 24 hours, whatever the time of the last success and whatever limit the policy sets. The row is removed when the instance is expected again, and a later departure opens a new event. The alert key of a `files` pair is unchanged from 0.2.
+The missing-backup alert is raised per expected instance. For `files` that is the host. For other types it is the list that discovery supplies, below. The moment an instance stopped being expected (the first alert cycle in which the policy no longer selects it) is stored in `source_instances_gone`. An hour after that moment the server raises exactly one `source_instance_gone` warning for 24 hours, whatever the time of the last success and whatever limit the policy sets. The row is removed when the instance is expected again before the warning opens, or after its window has passed; an instance that returns while the warning is open keeps the row, marked as returned, so a scan that blinks does not open a second warning. A later departure opens a new event. The alert key of a `files` pair is unchanged from 0.2.
+
+### Discovery of sources
+
+The agent finds the sources of its host and reports them; the server stores the list as agent facts. The list is untrusted: it is clipped (1000 guests, 20 tags per guest, 16 database servers, 1000 databases per server, 64 bytes per name, 256 KiB), an item with an invalid or repeated key is dropped, and the server builds every instance key itself with the functions of `lodestore_format::source`, never taking one from the agent. A list that was cut is marked as such, and a list that is over the size limit is not stored and counts as unknown. It offers instances to the form, it narrows which jobs are handed out, and it gives the list of expected instances for the missing-backup alert. It grants no scope, changes no selector, and a signed record still takes its source from the job the server holds.
+
+The agent scans at start and every five minutes. A scan that fails leaves the previous list in place, and a list older than 15 minutes counts as unknown, not as empty. An empty list means a successful scan that found nothing.
+
+**Container identity.** Proxmox gives a virtual machine a UUID but a container none. The agent generates a UUID for each container, keeps it in `/var/lib/lodestore/source-ids.json` (mode 0600) and writes nothing to the Proxmox configuration. The entry is dropped when the container is gone from a scan, so a reused VMID gets a new UUID, and so does a container that changes into a VM and back. A reinstalled node, a container migrated to another node and a reused VMID are therefore new instances, the same semantics as a guest that migrates. A container recreated with the same VMID between two scans, five minutes apart at most, is not told apart; the backup of containers will check the identity again when it exists. A VM whose SMBIOS UUID is zero, invalid or shared with another VM of the node (a copy restored without a new UUID) is not reported, because its key would not be unique.
+
+**A key is not bound to a host.** The key stays (host, key) for retention and alerts, and a clone, a PostgreSQL standby or a restored copy keeps being backed up under the key it has. `lode latest@<key>` refuses when the signed snapshots of the key come from more than one host, names the hosts with their newest snapshot and asks for `--host`; `--host` takes a host id, or a name that belongs to one host (a value in the form of a UUID is only ever a host id), and then chooses among the snapshots that host made. With one host nothing changes. The API already requires `host`. The Sources tab of a host notes an instance that another host reports too.
+
+**Expected instances.** For a policy of guests or databases the missing-backup alert expects the instances that its selector chooses from the fresh, complete list, together with every instance whose latest job failed. With no list (agent offline, scan failed, list older than 15 minutes) or with a list that was cut short, it also expects every instance that has snapshots, so that an unknown list never silences the alert. When a host has no known instance, one placeholder pair stands for the policy on that host, so a job that is refused still raises an alert. An instance that is no longer expected does not make its host healthy and does not set the last success of the fleet overview.
 
 ### Restore scopes and targets
 
@@ -94,16 +106,16 @@ Provisional, reversible until the first image is written:
 
 Deferred:
 
-- `JobSpec.source` and a `source_ref` column in `jobs_coalesce_idx`: phase 22. Until then the job columns of the source are filled only by tests.
+- A `source_ref` column in `jobs_coalesce_idx`: phase 22. Until then the job columns of the source are filled only by tests. `JobSpec.source` already carries the selector of the policy, so the agent can check it against its own scan.
 - Series of the `lodestore_backup_*` metrics per instance with a source label, and the last snapshot of a host by source: phase 22. Today the series cover `files`, and the last snapshot of a host is the newest of any source (`shortcut`).
-- "Replaced" as a state separate from "gone", the list of expected instances and the cluster segment: phase 21, from discovery.
+- "Replaced" as a state separate from "gone": a later phase.
 
 ## Consequences
 
 - `format_version` stays 1. The golden vectors that exist did not change; `source-vectors.json` is new.
 - A server of 0.2 does not read policies of `lodestore.io/v1alpha2`, the only version that has `spec.source`. A policy of `files` is exported in the old version and byte for byte as before.
 - An older `lode` counts a record whose source it cannot decode as unreadable, and reads a snapshot of an unknown type only by id.
-- Known limit, to be closed by the discovery binding of phase 21: the server signs the instance key that the job names, and `lode latest@<key>` spans all hosts, so once non-`files` jobs exist a compromised host could claim the key of an instance of another host. Phase 20 has no such job (the server answers 422), and the API narrows `latest` to one `host`.
+- The key of an instance is not bound to the host that may claim it (see "A key is not bound to a host"). A compromised host that reports the key of an instance of another host can end up with signed snapshots under that key; `lode latest@<key>` then refuses and names both hosts, and does not choose the newer snapshot.
 - The key of an instance and the layout of an image cannot change under data already written; a change needs a new ADR.
 - A guest that migrates or fails over looks like a new instance, with a new retention history, until a later phase adds a way to say "the same guest". The old group is not deleted by this.
 

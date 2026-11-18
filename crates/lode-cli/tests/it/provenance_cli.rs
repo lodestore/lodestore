@@ -423,13 +423,43 @@ async fn cli_latest_of_a_source_instance() {
     .await;
 
     let spec = format!("latest@{GUEST}");
-    let listed = stdout_of(lode(&fx.repo).args(["ls", &spec]));
-    assert!(listed.contains("marker4"), "{listed}");
-    assert!(!listed.contains("marker3"), "{listed}");
+    let refused = lode(&fx.repo)
+        .args(["ls", &spec])
+        .assert()
+        .failure()
+        .code(1);
+    let stderr = String::from_utf8_lossy(&refused.get_output().stderr).into_owned();
+    assert!(stderr.contains("more than one host"), "{stderr}");
+    assert!(
+        stderr.contains(r#"("h1")"#) && stderr.contains(r#"("h2")"#),
+        "{stderr}"
+    );
+    assert!(stderr.contains("--host"), "{stderr}");
 
+    let on = |host: &str, spec: &str| stdout_of(lode(&fx.repo).args(["ls", "--host", host, spec]));
+    let h2 = on("h2", &spec);
+    assert!(h2.contains("marker4") && !h2.contains("marker3"), "{h2}");
+    let h1 = on("h1", &spec);
+    assert!(h1.contains("marker3") && !h1.contains("marker4"), "{h1}");
     let path = dirs[3].to_str().unwrap();
-    let narrowed = stdout_of(lode(&fx.repo).args(["ls", &format!("{spec}:{path}")]));
+    let narrowed = on("h2", &format!("{spec}:{path}"));
     assert!(narrowed.contains("marker4"), "{narrowed}");
+
+    lode(&fx.repo)
+        .args(["restore", "--host", "h1", &spec, "--target"])
+        .arg(&fx.target)
+        .assert()
+        .success();
+    assert!(restored_path(&fx.target, &dirs[2]).join("marker3").exists());
+    assert!(!restored_path(&fx.target, &dirs[3]).exists());
+
+    let shared = lode(&fx.repo)
+        .args(["ls", "--host", "h", &spec])
+        .assert()
+        .failure()
+        .code(1);
+    let stderr = String::from_utf8_lossy(&shared.get_output().stderr).into_owned();
+    assert!(stderr.contains("names more than one host"), "{stderr}");
 
     let files = stdout_of(lode(&fx.repo).args(["ls", "latest"]));
     assert!(
@@ -444,6 +474,40 @@ async fn cli_latest_of_a_source_instance() {
         .assert()
         .failure()
         .code(2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cli_host_without_latest_key_is_a_usage_error() {
+    let fx = fixture();
+    let id = backup(&fx.repo, &fx.src);
+    sign(&fx.repo, &[record(id, "", "")]).await;
+    let guest = format!("latest@{GUEST}");
+    let short = lodestore_format::index::hex32(&id)[..8].to_owned();
+    for (args, want) in [
+        (
+            vec!["--host", "h1", "latest"],
+            "--host only applies to latest@<source key>",
+        ),
+        (
+            vec!["--host", "h1", short.as_str()],
+            "--host only applies to latest@<source key>",
+        ),
+        (vec!["latest@"], "needs a source key"),
+        (vec!["--host", "h1", "latest@"], "needs a source key"),
+        (
+            vec!["--host", "", guest.as_str()],
+            "--host needs a host id or name",
+        ),
+    ] {
+        let refused = lode(&fx.repo)
+            .arg("ls")
+            .args(&args)
+            .assert()
+            .failure()
+            .code(2);
+        let stderr = String::from_utf8_lossy(&refused.get_output().stderr).into_owned();
+        assert!(stderr.contains(want), "{args:?}: {stderr}");
+    }
 }
 
 async fn claiming_backup(repo: &Path, src: &Path, claim: &str) -> BlobId {
@@ -474,9 +538,19 @@ async fn cli_snapshots_filter_by_signed_source_type() {
     let first = backup(&fx.repo, &fx.src);
     let vm = backup(&fx.repo, &second);
     let claimed = claiming_backup(&fx.repo, &fx.forged_src, GUEST).await;
+    let third = fx.src.with_file_name("third");
+    std::fs::create_dir(&third).unwrap();
+    std::fs::write(third.join("f"), b"third").unwrap();
+    let unknown = backup(&fx.repo, &third);
+    let mut unreadable = record(unknown, "host", "job");
+    unreadable.source = Some(pb::Source {
+        key: "zfs/pool/x".into(),
+        meta: Vec::new(),
+    });
     sign(
         &fx.repo,
         &[
+            unreadable,
             record(first, "host", "job"),
             from_source(
                 record(vm, "host", "job"),
@@ -505,13 +579,18 @@ async fn cli_snapshots_filter_by_signed_source_type() {
         .map(|s| s["id"].as_str().unwrap().to_owned())
         .collect();
     files.sort();
-    let mut want = vec![hex(&first), hex(&claimed)];
+    let mut want = vec![hex(&first), hex(&claimed), hex(&unknown)];
     want.sort();
     assert_eq!(files, want, "an unsigned claim counted as a guest");
 
     let all = list(&[]);
-    assert_eq!(all.len(), 3);
+    assert_eq!(all.len(), 4);
     assert!(all.iter().all(|s| s["source_type"].is_string()));
+    let unread = all
+        .iter()
+        .find(|s| s["id"] == hex(&unknown).as_str())
+        .unwrap();
+    assert!(unread["verified_by"].is_null(), "{unread}");
 
     lode(&fx.repo)
         .args(["snapshots", "--source-type", "oracle"])

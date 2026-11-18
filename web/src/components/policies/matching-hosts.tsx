@@ -19,6 +19,8 @@ import {
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { copy } from "@/copy";
+import { sourceTypeNoun } from "@/lib/source-type";
+import { cn } from "@/lib/utils";
 
 const VISIBLE = 10;
 
@@ -58,15 +60,52 @@ function Warnings({ warnings }: { warnings: HookWarning[] }) {
 	});
 }
 
+const isGuests = (type?: string) =>
+	type === "proxmox-vm" || type === "proxmox-ct";
+
+function instanceText(type: string | undefined, n: number | null | undefined) {
+	if (n == null) return undefined;
+	const text = copy.policies.matching.instances;
+	if (isGuests(type)) return text.guest(n);
+	if (type === "postgres") return text.database(n);
+	if (type === "mysql") return text.schema(n);
+	return undefined;
+}
+
+function markText(host: MatchHost, type: string | undefined) {
+	if (type === undefined || type === "files") return undefined;
+	const marks = copy.policies.matching.marks;
+	switch (host.source_mark) {
+		case "agent_too_old":
+			return marks.agentTooOld(sourceTypeNoun(type ?? "") ?? "");
+		case "not_found":
+			if (isGuests(type)) return marks.notFound.proxmox;
+			return type === "mysql" ? marks.notFound.mysql : marks.notFound.postgres;
+		case "selects_nothing":
+			if (isGuests(type)) return marks.selectsNothing.guests;
+			return type === "mysql"
+				? marks.selectsNothing.schemas
+				: marks.selectsNothing.databases;
+		default:
+			return undefined;
+	}
+}
+
 function HostRow({
 	host,
 	warnings,
+	sourceType,
 	muted = false,
 }: {
 	host: MatchHost;
 	warnings: HookWarning[];
+	sourceType?: string;
 	muted?: boolean;
 }) {
+	const mark = muted ? undefined : markText(host, sourceType);
+	const instances = muted
+		? undefined
+		: instanceText(sourceType, host.instances);
 	return (
 		<li className="flex flex-col gap-1 py-2">
 			<div className="flex items-center justify-between gap-2">
@@ -86,9 +125,20 @@ function HostRow({
 						{copy.policies.matching.usesRepo(host.repository_name)}
 					</Badge>
 				) : (
-					<StatusBadge status={host.online ? "online" : "offline"} />
+					<span className="flex shrink-0 items-center gap-2">
+						{instances && (
+							<span className="text-sm text-muted-foreground">{instances}</span>
+						)}
+						<StatusBadge status={host.online ? "online" : "offline"} />
+					</span>
 				)}
 			</div>
+			{mark && (
+				<p className="flex items-start gap-1 text-sm text-warning">
+					<TriangleAlert aria-hidden className="mt-1 size-4 shrink-0" />
+					{mark}
+				</p>
+			)}
 			{warnings.length > 0 && <Warnings warnings={warnings} />}
 		</li>
 	);
@@ -97,10 +147,12 @@ function HostRow({
 function HostList({
 	hosts,
 	warnings,
+	sourceType,
 	muted,
 }: {
 	hosts: MatchHost[];
 	warnings: HookWarning[];
+	sourceType?: string;
 	muted?: boolean;
 }) {
 	const [all, setAll] = useState(false);
@@ -113,6 +165,7 @@ function HostList({
 						key={host.id}
 						host={host}
 						muted={muted}
+						sourceType={sourceType}
 						warnings={warnings.filter((w) => w.host_id === host.id)}
 					/>
 				))}
@@ -140,9 +193,11 @@ export function MatchingHosts({
 	refreshing,
 	failed,
 	notice,
+	sourceType,
 	onRetry,
 }: {
 	notice?: string;
+	sourceType?: string;
 	matching?: Matching;
 	warnings: HookWarning[];
 	selectorEmpty: boolean;
@@ -152,9 +207,11 @@ export function MatchingHosts({
 	onRetry: () => void;
 }) {
 	const text = copy.policies.matching;
-	const [open, setOpen] = useState(false);
+	const [chosen, setChosen] = useState<boolean>();
 	const own = matching?.hosts ?? [];
 	const other = matching?.other_repository ?? [];
+	const failing = own.filter((host) => markText(host, sourceType)).length;
+	const open = chosen ?? failing > 0;
 	const expandable =
 		!failed && !notice && !invalid && own.length + other.length > 0;
 
@@ -180,7 +237,9 @@ export function MatchingHosts({
 		line = (
 			<p className="min-w-0 text-sm font-semibold">
 				{[
-					text.summary(own.length),
+					failing > 0
+						? text.matchSummary(own.length, failing)
+						: text.summary(own.length),
 					other.length > 0 ? text.skipped(other.length) : null,
 				]
 					.filter(Boolean)
@@ -192,7 +251,7 @@ export function MatchingHosts({
 	return (
 		<Card size="sm" className="@container">
 			<h2 className="sr-only">{text.title}</h2>
-			<Collapsible open={open && expandable} onOpenChange={setOpen}>
+			<Collapsible open={open && expandable} onOpenChange={setChosen}>
 				<div className="flex items-center gap-2 px-(--card-spacing)">
 					{refreshing ? (
 						<Spinner />
@@ -203,6 +262,12 @@ export function MatchingHosts({
 						/>
 					)}
 					<div className="min-w-0 flex-1">{line}</div>
+					{expandable && !open && failing > 0 && (
+						<span className="flex shrink-0 items-center gap-1 text-sm text-warning">
+							<TriangleAlert aria-hidden className="size-4" />
+							{text.willFail(failing)}
+						</span>
+					)}
 					{expandable && warnings.length > 0 && (
 						<span className="flex shrink-0 items-center gap-1 text-sm text-warning">
 							<TriangleAlert aria-hidden className="size-4" />
@@ -222,14 +287,25 @@ export function MatchingHosts({
 						</CollapsibleTrigger>
 					)}
 				</div>
-				<CollapsibleContent className="grid gap-6 px-(--card-spacing) pt-4 @min-[960px]:grid-cols-2">
+				<CollapsibleContent
+					className={cn(
+						"grid gap-6 px-(--card-spacing) pt-4",
+						other.length > 0 && "@min-[960px]:grid-cols-2",
+					)}
+				>
 					<div className="flex min-w-0 flex-col gap-4">
 						{selectorEmpty && (
 							<p className="text-sm text-muted-foreground">
 								{text.emptySelector}
 							</p>
 						)}
-						{own.length > 0 && <HostList hosts={own} warnings={warnings} />}
+						{own.length > 0 && (
+							<HostList
+								hosts={own}
+								warnings={warnings}
+								sourceType={sourceType}
+							/>
+						)}
 					</div>
 					{other.length > 0 && (
 						<section className="flex min-w-0 flex-col gap-1">

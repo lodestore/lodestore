@@ -186,6 +186,52 @@ describe("JobsTable", () => {
 		expect(bad.queryByText(/second line/)).toBeNull();
 	});
 
+	it("explains a failed backup the way the job page does", async () => {
+		renderTable({
+			jobs: [
+				job({
+					id: "old",
+					state: "failed",
+					error_code: "source_agent_outdated",
+					error_message:
+						"The agent on this host does not back up containers yet. Update the agent.",
+				}),
+				job({
+					id: "none",
+					state: "failed",
+					error_code: "source_not_found",
+					error_message: "No containers were found on this host.",
+				}),
+				job({
+					id: "gc",
+					state: "failed",
+					error_code: "gc_agent_outdated",
+					error_message: "Update the agent on this host.",
+				}),
+				job({
+					id: "path",
+					state: "failed",
+					error_code: "path_missing",
+					error_message: "path /srv is missing",
+				}),
+			],
+		});
+		expect(
+			within(await rowOf("old")).getByText("Agent too old for this source"),
+		).toBeInTheDocument();
+		expect(
+			within(await rowOf("none")).getByText("Source not found on the host"),
+		).toBeInTheDocument();
+		expect(
+			within(await rowOf("gc")).getByText(
+				/^The agent on web-1 is too old for cleanup\./,
+			),
+		).toBeInTheDocument();
+		expect(
+			within(await rowOf("path")).getByText("path /srv is missing"),
+		).toBeInTheDocument();
+	});
+
 	it("jobs table origin suffix and suspicious icon", async () => {
 		renderTable({
 			jobs: [

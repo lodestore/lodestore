@@ -96,7 +96,12 @@ export const copy = {
 	},
 	hostPage: {
 		agent: { online: "Agent online", offline: "Agent offline" },
-		tabs: { overview: "Overview", snapshots: "Snapshots", jobs: "Jobs" },
+		tabs: {
+			overview: "Overview",
+			sources: "Sources",
+			snapshots: "Snapshots",
+			jobs: "Jobs",
+		},
 		editLabels: "Edit labels",
 		revoke: "Revoke host",
 		notFound: {

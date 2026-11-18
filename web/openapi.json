@@ -2137,6 +2137,59 @@
         ]
       }
     },
+    "/api/v1/hosts/{id}/sources": {
+      "get": {
+        "tags": [
+          "Hosts"
+        ],
+        "summary": "List the sources of a host",
+        "description": "What the agent found on the host besides files, whether a policy covers each instance, and which other hosts report the same instance. Revoked hosts keep their last data.",
+        "operationId": "host_sources",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Host id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sources of the host",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostSources"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown host",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "bearer": [
+              "hosts:read"
+            ]
+          }
+        ]
+      }
+    },
     "/api/v1/jobs": {
       "get": {
         "tags": [
@@ -3253,6 +3306,59 @@
           {
             "bearer": [
               "policies:write"
+            ]
+          }
+        ]
+      }
+    },
+    "/api/v1/policies/source-options": {
+      "post": {
+        "tags": [
+          "Policies"
+        ],
+        "summary": "List the guests and databases a policy form can offer",
+        "description": "What the agents of the hosts a selector takes found, for the given source type. An unreachable database server is listed apart: it is not an empty one.",
+        "operationId": "source_options",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SourceOptionsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Found instances",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceOptions"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unknown repository or unsupported type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          },
+          {
+            "bearer": [
+              "policies:read"
             ]
           }
         ]
@@ -8341,6 +8447,29 @@
           }
         }
       },
+      "DatabaseOption": {
+        "type": "object",
+        "description": "A database found on the selected hosts, one row per name.",
+        "required": [
+          "name",
+          "source_type",
+          "hosts"
+        ],
+        "properties": {
+          "hosts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "name": {
+            "type": "string"
+          },
+          "source_type": {
+            "type": "string"
+          }
+        }
+      },
       "DatabaseSource": {
         "type": "object",
         "properties": {
@@ -8646,6 +8775,36 @@
       "FilesSource": {
         "type": "object",
         "additionalProperties": false
+      },
+      "FilesSummary": {
+        "type": "object",
+        "description": "The policies that back up the files of the host.",
+        "required": [
+          "policies",
+          "paths"
+        ],
+        "properties": {
+          "last_snapshot_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Reception time of the latest complete, verified files snapshot, in milliseconds."
+          },
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "policies": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
       },
       "FindFieldErrors": {
         "type": "object",
@@ -10066,6 +10225,52 @@
           }
         }
       },
+      "GuestOption": {
+        "type": "object",
+        "description": "A guest found on the selected hosts, one row per VMID.",
+        "required": [
+          "vmid",
+          "kind",
+          "tags",
+          "hosts"
+        ],
+        "properties": {
+          "hosts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "kind": {
+            "type": "string",
+            "description": "`vm` or `ct`."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Name, pool and tags come from the first host by name that reports the guest."
+          },
+          "pool": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "vmid": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
       "Hook": {
         "type": "object",
         "properties": {
@@ -10221,6 +10426,7 @@
             "type": "object",
             "required": [
               "mounts",
+              "source_types",
               "cert_issued_at",
               "next_renewal_at",
               "repository_name"
@@ -10248,6 +10454,13 @@
               },
               "repository_name": {
                 "type": "string"
+              },
+              "source_types": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Types other than files that the agent found on the host, in the order proxmox-vm, proxmox-ct, postgres, mysql; empty when it found none or has not reported."
               },
               "uptime_s": {
                 "type": [
@@ -10375,6 +10588,61 @@
             "items": {
               "type": "string"
             }
+          }
+        }
+      },
+      "HostSources": {
+        "type": "object",
+        "required": [
+          "truncated",
+          "groups",
+          "items"
+        ],
+        "properties": {
+          "collected_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When the agent collected the list, in milliseconds; absent until it reports."
+          },
+          "files": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/FilesSummary",
+                "description": "Present only when a files policy covers the host."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SourceGroup"
+            }
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SourceItem"
+            }
+          },
+          "scope": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ProxmoxScope"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "The agent cut the list short, so it may miss instances."
           }
         }
       },
@@ -11441,6 +11709,15 @@
           "id": {
             "type": "string"
           },
+          "instances": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "How many found instances the policy selects on the host; null when unknown, stale or marked.",
+            "minimum": 0
+          },
           "online": {
             "type": "boolean"
           },
@@ -11449,6 +11726,16 @@
           },
           "repository_name": {
             "type": "string"
+          },
+          "source_mark": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SourceMark"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         }
       },
@@ -11484,6 +11771,24 @@
           }
         },
         "additionalProperties": false
+      },
+      "NamedCount": {
+        "type": "object",
+        "required": [
+          "name",
+          "count"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many guest rows carry it.",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          }
+        }
       },
       "NewToken": {
         "type": "object",
@@ -12010,6 +12315,33 @@
           }
         }
       },
+      "Protection": {
+        "type": "object",
+        "required": [
+          "state",
+          "policies"
+        ],
+        "properties": {
+          "policies": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Names of the policies that select the instance; empty unless protected."
+          },
+          "state": {
+            "$ref": "#/components/schemas/ProtectionState"
+          }
+        }
+      },
+      "ProtectionState": {
+        "type": "string",
+        "enum": [
+          "protected",
+          "unprotected",
+          "agent_too_old"
+        ]
+      },
       "ProxmoxGuests": {
         "type": "object",
         "properties": {
@@ -12035,6 +12367,22 @@
           }
         },
         "additionalProperties": false
+      },
+      "ProxmoxScope": {
+        "type": "object",
+        "description": "The Proxmox cluster or the single node the guests belong to.",
+        "required": [
+          "kind",
+          "name"
+        ],
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/ScopeKindDto"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
       },
       "QueueReason": {
         "type": "string",
@@ -13126,6 +13474,13 @@
           "restore:db-in-place"
         ]
       },
+      "ScopeKindDto": {
+        "type": "string",
+        "enum": [
+          "cluster",
+          "node"
+        ]
+      },
       "SearchDone": {
         "type": "object",
         "required": [
@@ -13785,6 +14140,39 @@
         ],
         "description": "The `type` selects the variant and the other fields of the block sit next to it."
       },
+      "SourceAvailability": {
+        "type": "object",
+        "description": "How many of the hosts a policy takes can run a source type.",
+        "required": [
+          "source_type",
+          "hosts_total",
+          "hosts_with",
+          "hosts_agent_outdated"
+        ],
+        "properties": {
+          "hosts_agent_outdated": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Of those, the hosts whose agent does not declare support for the type.",
+            "minimum": 0
+          },
+          "hosts_total": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Hosts of the repository that the selector takes.",
+            "minimum": 0
+          },
+          "hosts_with": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Of those, the hosts where the agent found the type.",
+            "minimum": 0
+          },
+          "source_type": {
+            "type": "string"
+          }
+        }
+      },
       "SourceCount": {
         "type": "object",
         "required": [
@@ -13799,6 +14187,210 @@
           },
           "source_type": {
             "type": "string"
+          }
+        }
+      },
+      "SourceGroup": {
+        "type": "object",
+        "description": "A database server on the host. Its databases are items with this `id` as `group_id`.",
+        "required": [
+          "id",
+          "source_type",
+          "port",
+          "unreachable",
+          "shared_with"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "`<type>:<port>`."
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "shared_with": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Names of other hosts whose agents found one of the same databases."
+          },
+          "source_type": {
+            "type": "string"
+          },
+          "unreachable": {
+            "type": "boolean",
+            "description": "The agent found the server but could not list its databases."
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "SourceItem": {
+        "type": "object",
+        "description": "A guest or a database found on the host.",
+        "required": [
+          "source_type",
+          "label",
+          "tags",
+          "protection",
+          "shared_with"
+        ],
+        "properties": {
+          "group_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `id` of the database server a database belongs to."
+          },
+          "label": {
+            "type": "string",
+            "description": "What a person calls it, like `VM 101 · web-01`."
+          },
+          "last_snapshot_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Reception time of the latest complete, verified snapshot, in milliseconds."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "oid": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The PostgreSQL database OID.",
+            "minimum": 0
+          },
+          "pool": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "protection": {
+            "$ref": "#/components/schemas/Protection"
+          },
+          "shared_with": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Names of other hosts whose agents found the same instance, like a cloned guest."
+          },
+          "source_type": {
+            "type": "string",
+            "description": "`proxmox-vm`, `proxmox-ct`, `postgres` or `mysql`."
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "vmid": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "SourceMark": {
+        "type": "string",
+        "description": "Why a job of this policy will fail on the host, from what the agent reported.",
+        "enum": [
+          "agent_too_old",
+          "not_found",
+          "selects_nothing"
+        ]
+      },
+      "SourceOptions": {
+        "type": "object",
+        "required": [
+          "guests",
+          "pools",
+          "tags",
+          "databases",
+          "truncated_hosts",
+          "unreachable_hosts"
+        ],
+        "properties": {
+          "databases": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DatabaseOption"
+            }
+          },
+          "guests": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GuestOption"
+            }
+          },
+          "pools": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NamedCount"
+            }
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NamedCount"
+            }
+          },
+          "truncated_hosts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TruncatedHost"
+            },
+            "description": "Hosts whose list was cut short, so it may miss instances."
+          },
+          "unreachable_hosts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Hosts with a database server of the type whose databases the agent could not list."
+          }
+        }
+      },
+      "SourceOptionsRequest": {
+        "type": "object",
+        "required": [
+          "repository",
+          "selector",
+          "source_type"
+        ],
+        "properties": {
+          "repository": {
+            "type": "string",
+            "description": "Repository name, as in `spec.repository`."
+          },
+          "selector": {
+            "$ref": "#/components/schemas/Selector"
+          },
+          "source_type": {
+            "type": "string",
+            "description": "`proxmox-vm`, `proxmox-ct`, `postgres` or `mysql`."
           }
         }
       },
@@ -13930,6 +14522,24 @@
           "expired"
         ]
       },
+      "TruncatedHost": {
+        "type": "object",
+        "required": [
+          "hostname",
+          "count"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many instances the server received from the host.",
+            "minimum": 0
+          },
+          "hostname": {
+            "type": "string"
+          }
+        }
+      },
       "ValidateRequest": {
         "type": "object",
         "properties": {
@@ -13963,9 +14573,17 @@
           "valid",
           "errors",
           "name_taken",
-          "warnings"
+          "warnings",
+          "availability"
         ],
         "properties": {
+          "availability": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SourceAvailability"
+            },
+            "description": "Which source types the selected hosts of the repository can run; empty when the draft names no repository."
+          },
           "errors": {
             "type": "array",
             "items": {

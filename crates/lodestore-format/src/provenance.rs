@@ -4,7 +4,7 @@
 //! written by the host being backed up, so its time and names never decide
 //! the order of a verified repository.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::attest::{AttestedSet, open_provenance};
 use crate::crypto::BlobId;
@@ -105,9 +105,15 @@ impl ProvenanceSet {
         self.records.contains_key(id)
     }
 
+    /// Some signed record, of any source, carries this `host_id`.
+    pub fn names_host(&self, host: &str) -> bool {
+        self.records.values().any(|r| r.host_id == host)
+    }
+
     /// The source of a snapshot, from its signed record only; the manifest's
     /// own claim never counts. No record, or a record without the field, is
-    /// `files`.
+    /// `files`. A record whose source this build cannot read does not open
+    /// (`open_provenance`), so its snapshot counts as unsigned.
     pub fn source_of(&self, id: &BlobId) -> SourceKey {
         self.records
             .get(id)
@@ -183,6 +189,19 @@ pub enum LatestWarning {
     UnreadableProvenance {
         count: usize,
     },
+    /// `--host` matched no host id and was taken as the name of one host;
+    /// `current` is the name on its newest record. Cut to 64 characters.
+    HostByName {
+        name: String,
+        host_id: String,
+        current: String,
+    },
+    /// `--host` matched a host id and is also the name of other hosts with
+    /// snapshots of the instance; the id won. `hosts` lists those hosts.
+    HostIdAlsoName {
+        host_id: String,
+        hosts: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -223,8 +242,15 @@ fn newest_of<'a>(
 pub enum LatestScope {
     /// Snapshots of files only.
     Files,
-    /// The snapshots of one source instance, whichever host wrote them.
+    /// The snapshots of one source instance. Refused when their signed
+    /// records name more than one host: clones and copies share a key, so the
+    /// caller names the host.
     Instance(SourceKey),
+    /// The snapshots of one source instance that one host made. The host is
+    /// named by its id. A string in the form of a host id (a UUID) is only
+    /// ever an id; any other string is looked up as a name when no signed
+    /// record carries it as an id, and must name exactly one host.
+    InstanceOnHost(SourceKey, String),
 }
 
 impl LatestScope {
@@ -232,9 +258,83 @@ impl LatestScope {
     fn admits(&self, source: &SourceKey) -> bool {
         match self {
             LatestScope::Files => source.is_files(),
-            LatestScope::Instance(key) => source == key && !key.kind().is_wal_batch(),
+            LatestScope::Instance(key) | LatestScope::InstanceOnHost(key, _) => {
+                source == key && !key.kind().is_wal_batch()
+            }
         }
     }
+}
+
+/// Host names and ids come from agents; they are shown cut short and escaped.
+fn clip(text: &str) -> String {
+    text.chars().take(64).collect()
+}
+
+type Hosts = BTreeMap<String, ((i64, BlobId), String)>;
+
+/// Each `host_id` of `entries` with the hostname of its newest record.
+fn hosts_of(provenance: &ProvenanceSet, entries: &[&SnapshotEntry]) -> Hosts {
+    let mut hosts = Hosts::new();
+    for e in entries {
+        let Some(record) = provenance.get(&e.id) else {
+            continue;
+        };
+        let order = provenance.stored_order(e);
+        let newest = (order, record.hostname.clone());
+        hosts
+            .entry(record.host_id.clone())
+            .and_modify(|seen| *seen = seen.clone().max(newest.clone()))
+            .or_insert(newest);
+    }
+    hosts
+}
+
+/// The canonical text form of a UUID, in either case. Host ids have it, so
+/// such a string is never taken as a host name.
+fn is_host_id(text: &str) -> bool {
+    let b = text.as_bytes();
+    b.len() == 36
+        && b.iter().enumerate().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => *c == b'-',
+            _ => c.is_ascii_hexdigit(),
+        })
+}
+
+fn age(now_ms: i64, at_ms: i64) -> String {
+    let s = now_ms.saturating_sub(at_ms) / 1000;
+    match s {
+        ..0 => "stored in the future".into(),
+        0..120 => format!("{s}s ago"),
+        120..3600 => format!("{}m ago", s / 60),
+        3600..172_800 => format!("{}h ago", s / 3600),
+        _ => format!("{}d ago", s / 86_400),
+    }
+}
+
+/// `"hostname" ("host_id") newest <snapshot> <age>` per host, newest first,
+/// at most five shown.
+fn host_list<'a>(
+    hosts: impl Iterator<Item = (&'a String, &'a ((i64, BlobId), String))>,
+    now_ms: i64,
+) -> String {
+    const SHOWN: usize = 5;
+    let mut items: Vec<(&(i64, BlobId), String, String)> = hosts
+        .map(|(id, (order, name))| (order, clip(name), clip(id)))
+        .collect();
+    items.sort_by(|a, b| b.0.cmp(a.0).then_with(|| (&a.1, &a.2).cmp(&(&b.1, &b.2))));
+    let mut out: Vec<String> = items
+        .iter()
+        .take(SHOWN)
+        .map(|((at, snap), name, id)| {
+            let short = crate::index::hex32(snap);
+            let short = short.get(..8).unwrap_or_default();
+            format!("{name:?} ({id:?}) newest {short} {}", age(now_ms, *at))
+        })
+        .collect();
+    if items.len() > SHOWN {
+        out.push(format!("and {} more", items.len() - SHOWN));
+    }
+    out.join(", ")
 }
 
 /// Picks `latest`. Only files snapshots count; another source needs
@@ -277,7 +377,7 @@ pub fn pick_latest_in(
     let entries = if provenance.attested_any() {
         entries
     } else {
-        if matches!(scope, LatestScope::Instance(_)) {
+        if !matches!(scope, LatestScope::Files) {
             return Err(Error::InvalidInput(NO_VERIFIED_SNAPSHOT.into()));
         }
         let claims = |e: &SnapshotEntry| {
@@ -299,10 +399,87 @@ pub fn pick_latest_in(
 
     let (mode, chosen) = if provenance.attested_any() {
         let key = |e: &SnapshotEntry| provenance.stored_order(e);
-        let (kept, future): (Vec<&SnapshotEntry>, Vec<&SnapshotEntry>) = entries
+        let mut admitted: Vec<&SnapshotEntry> = entries
             .iter()
             .filter(|e| provenance.contains(&e.id) && scope.admits(&provenance.source_of(&e.id)))
-            .partition(|e| key(e).0 <= limit);
+            .collect();
+        let host_of = |e: &SnapshotEntry| provenance.get(&e.id).map(|r| r.host_id.as_str());
+        match scope {
+            LatestScope::Files => {}
+            LatestScope::Instance(source) => {
+                let hosts = hosts_of(provenance, &admitted);
+                if hosts.len() > 1 {
+                    return Err(Error::InvalidInput(format!(
+                        "the snapshots of {} come from more than one host: {}; add --host with a host id to choose one",
+                        source.as_str(),
+                        host_list(hosts.iter(), now_ms)
+                    )));
+                }
+            }
+            LatestScope::InstanceOnHost(source, host) => {
+                let hosts = hosts_of(provenance, &admitted);
+                let id_form = is_host_id(host);
+                let named: BTreeSet<&str> = admitted
+                    .iter()
+                    .filter_map(|e| provenance.get(&e.id))
+                    .filter(|r| r.hostname == *host && r.host_id != *host)
+                    .map(|r| r.host_id.as_str())
+                    .collect();
+                let others = || {
+                    host_list(
+                        hosts.iter().filter(|(id, _)| named.contains(id.as_str())),
+                        now_ms,
+                    )
+                };
+                let chosen = if id_form || provenance.names_host(host) {
+                    if !named.is_empty() {
+                        warnings.push(LatestWarning::HostIdAlsoName {
+                            host_id: clip(host),
+                            hosts: others(),
+                        });
+                    }
+                    Some(host.clone())
+                } else {
+                    if named.len() > 1 {
+                        return Err(Error::InvalidInput(format!(
+                            "{:?} names more than one host with snapshots of {}: {}; add --host with the host id",
+                            clip(host),
+                            source.as_str(),
+                            others()
+                        )));
+                    }
+                    named.first().map(|id| {
+                        let current = hosts.get(*id).map_or("", |(_, name)| name.as_str());
+                        warnings.push(LatestWarning::HostByName {
+                            name: clip(host),
+                            host_id: clip(id),
+                            current: clip(current),
+                        });
+                        (*id).to_owned()
+                    })
+                };
+                admitted.retain(|e| chosen.is_some() && host_of(e) == chosen.as_deref());
+                if admitted.is_empty() {
+                    let with = if hosts.is_empty() {
+                        "none".to_owned()
+                    } else {
+                        host_list(hosts.iter(), now_ms)
+                    };
+                    let only_id = if id_form {
+                        " (a host id is never taken as a host name)"
+                    } else {
+                        ""
+                    };
+                    return Err(Error::InvalidInput(format!(
+                        "No signed snapshot of {} comes from host {:?}{only_id}. Hosts with signed snapshots of it: {with}",
+                        source.as_str(),
+                        clip(host),
+                    )));
+                }
+            }
+        }
+        let (kept, future): (Vec<&SnapshotEntry>, Vec<&SnapshotEntry>) =
+            admitted.into_iter().partition(|e| key(e).0 <= limit);
         if kept.is_empty() && !future.is_empty() {
             return Err(Error::InvalidInput(ALL_SIGNED_STORED_IN_FUTURE.into()));
         }
@@ -349,4 +526,21 @@ pub fn pick_latest_in(
         mode,
         warnings,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::age;
+
+    #[test]
+    fn age_names_each_range() {
+        let now = 1_000_000_000;
+        assert_eq!(age(now, now + 1000), "stored in the future");
+        assert_eq!(age(now, now), "0s ago");
+        assert_eq!(age(now, now - 119_000), "119s ago");
+        assert_eq!(age(now, now - 120_000), "2m ago");
+        assert_eq!(age(now, now - 3_599_000), "59m ago");
+        assert_eq!(age(now, now - 3_600_000), "1h ago");
+        assert_eq!(age(now, now - 172_800_000), "2d ago");
+    }
 }

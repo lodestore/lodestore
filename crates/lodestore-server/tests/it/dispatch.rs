@@ -16,8 +16,9 @@ use lodestore_proto::agent::v1::server_message::Body as ServerBody;
 use lodestore_proto::agent::v1::{
     ConflictPolicy, Heartbeat, HookFacts, HookScript, IoniceClass, JobAccepted, JobCreated,
     JobEvent, JobEventLevel, JobEvents, JobOutcome, JobPhase, JobPhaseKind, JobProgress,
-    JobRejected, JobReportState, JobSpec,
+    JobRejected, JobReportState, JobSpec, ProxmoxFacts, ProxmoxGuest, SourceFacts,
 };
+use lodestore_proto::agent::v1::{Database, DatabaseKind, DatabaseServer, GuestKind};
 use lodestore_server::catalog::ingest_snapshot;
 use lodestore_server::db::now_ms;
 use lodestore_server::grpc::dispatch::janitor_once;
@@ -2441,6 +2442,526 @@ async fn dispatch_token_restore_rechecks_roots_capability() {
             "[{}]",
             backend.name()
         );
+        ts.stop().await;
+    }
+}
+
+const VM_SOURCE: &str = "  source:\n    type: proxmox-vm\n    vmids: [101]\n";
+
+async fn seed_source_policy(ts: &TestServer, repo: &str, name: &str, host: &Host, spec: &str) {
+    let version = if spec.contains("source:") {
+        "v1alpha2"
+    } else {
+        "v1alpha1"
+    };
+    let yaml = format!(
+        "apiVersion: lodestore.io/{version}\nkind: BackupPolicy\nmetadata:\n  name: {name}\n\
+         spec:\n  repository: main\n  selector:\n    hosts: [{}]\n{spec}",
+        host.id
+    );
+    let policy = lodestore_policy::parse_yaml(&yaml).unwrap();
+    sqlx::query(
+        "INSERT INTO policies (id, name, repository_id, yaml, spec_json, revision, \
+         created_at, updated_at) VALUES ($1, $1, $2, $3, $4, 1, $5, $5)",
+    )
+    .bind(name)
+    .bind(repo)
+    .bind(&yaml)
+    .bind(serde_json::to_string(&policy).unwrap())
+    .bind(now_ms())
+    .execute(&ts.state().db.pool)
+    .await
+    .unwrap();
+}
+
+fn vm_facts(age_ms: u64, truncated: bool, vmids: &[u32]) -> SourceFacts {
+    SourceFacts {
+        age_ms,
+        truncated,
+        proxmox: Some(ProxmoxFacts {
+            cluster: "pve-prod".to_string(),
+            node: "pve1".to_string(),
+            guests: vmids
+                .iter()
+                .map(|vmid| ProxmoxGuest {
+                    kind: lodestore_proto::agent::v1::GuestKind::Vm as i32,
+                    vmid: *vmid,
+                    name: format!("vm-{vmid}"),
+                    uuid: format!("{vmid:08}-1111-4111-8111-111111111111"),
+                    ..Default::default()
+                })
+                .collect(),
+        }),
+        ..Default::default()
+    }
+}
+
+async fn seed_facts(ts: &TestServer, host: &Host, facts: &SourceFacts) {
+    lodestore_server::sources::record(ts.state(), &host.id, facts, &mut None, now_ms())
+        .await
+        .unwrap();
+}
+
+async fn run_now(api: &Api, name: &str) -> String {
+    let run = api
+        .post(
+            &format!("/api/v1/policies/{name}/run"),
+            &serde_json::json!({}),
+        )
+        .await;
+    assert_eq!(run.status(), 200);
+    let body: serde_json::Value = run.json().await.unwrap();
+    body["jobs"][0]["id"].as_str().unwrap().to_string()
+}
+
+async fn assert_refused(
+    ts: &TestServer,
+    api: &Api,
+    agent: &mut Fake,
+    job: &str,
+    code: &str,
+    backend: &str,
+) {
+    let pool = &ts.state().db.pool;
+    wait_state(pool, job, "failed").await;
+    assert_eq!(
+        text(pool, "SELECT error_code FROM jobs WHERE id = $1", job)
+            .await
+            .as_deref(),
+        Some(code),
+        "[{backend}]"
+    );
+    let shown: serde_json::Value = api
+        .get(&format!("/api/v1/jobs/{job}"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(shown["error_detail"]["source_type"], "proxmox-vm");
+    assert!(!shown["error_message"].as_str().unwrap().is_empty());
+    assert!(
+        agent
+            .drain(Duration::from_millis(300))
+            .await
+            .into_iter()
+            .all(|m| is_assign(m).is_none()),
+        "[{backend}] the agent got the job"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dispatch_refuses_a_source_the_agent_does_not_back_up() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let host = enroll(&ts, &api, &repo, "pve1").await;
+        seed_source_policy(&ts, &repo, "guests", &host, VM_SOURCE).await;
+        seed_facts(&ts, &host, &vm_facts(1000, false, &[101])).await;
+
+        let job = run_now(&api, "guests").await;
+        let mut agent = Fake::connect(&ts, &host, vec![]).await;
+        assert_refused(
+            &ts,
+            &api,
+            &mut agent,
+            &job,
+            "source_agent_outdated",
+            backend.name(),
+        )
+        .await;
+        ts.stop().await;
+    }
+}
+
+const VM_CAPABILITY: &str = "source:proxmox-vm";
+const STALE_MS: u64 = 16 * 60 * 1000;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dispatch_refuses_a_source_missing_on_the_host() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let cases = [
+            ("no-proxmox", SourceFacts::default()),
+            ("no-guest", vm_facts(0, false, &[102])),
+        ];
+        for (name, facts) in cases {
+            let host = enroll(&ts, &api, &repo, name).await;
+            seed_source_policy(&ts, &repo, name, &host, VM_SOURCE).await;
+            let job = run_now(&api, name).await;
+            seed_facts(&ts, &host, &facts).await;
+            let mut agent = Fake::connect_with(&ts, &host, &[VM_CAPABILITY]).await;
+            assert_refused(
+                &ts,
+                &api,
+                &mut agent,
+                &job,
+                "source_not_found",
+                backend.name(),
+            )
+            .await;
+        }
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dispatch_sends_on_stale_or_incomplete_discovery() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let cases = [
+            ("stale", Some(vm_facts(STALE_MS, false, &[102]))),
+            ("truncated", Some(vm_facts(0, true, &[102]))),
+            ("older-than-the-job", Some(vm_facts(1000, false, &[102]))),
+            ("unknown", None),
+        ];
+        for (name, facts) in cases {
+            let host = enroll(&ts, &api, &repo, name).await;
+            seed_source_policy(&ts, &repo, name, &host, VM_SOURCE).await;
+            if let Some(facts) = &facts {
+                seed_facts(&ts, &host, facts).await;
+            }
+            run_now(&api, name).await;
+            let mut agent = Fake::connect_with(&ts, &host, &[VM_CAPABILITY]).await;
+            let spec = agent.recv(assigned_spec).await;
+            let source = spec.source.unwrap_or_else(|| panic!("[{name}] no source"));
+            assert_eq!(source.r#type, "proxmox-vm", "[{name}]");
+            assert_eq!(source.vmids, [101], "[{name}]");
+            assert!(spec.paths.is_empty(), "[{name}]");
+        }
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dispatch_files_jobs_are_unchanged() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let host = enroll(&ts, &api, &repo, "plain").await;
+        seed_source_policy(&ts, &repo, "etc", &host, "  paths: [/etc]\n").await;
+        run_now(&api, "etc").await;
+        let mut agent = Fake::connect(&ts, &host, vec![]).await;
+        let spec = agent.recv(assigned_spec).await;
+        assert!(spec.source.is_none(), "[{}]", backend.name());
+        assert_eq!(spec.paths, ["/etc"]);
+        ts.stop().await;
+    }
+}
+
+fn tagged_guest(kind: GuestKind, vmid: u32, pool: &str, tags: &[&str]) -> ProxmoxGuest {
+    ProxmoxGuest {
+        kind: kind as i32,
+        vmid,
+        name: format!("guest-{vmid}"),
+        uuid: format!("{vmid:08}-1111-4111-8111-111111111111"),
+        pool: pool.to_string(),
+        tags: tags.iter().map(|t| t.to_string()).collect(),
+    }
+}
+
+fn node_facts(age_ms: u64, truncated: bool, guests: Vec<ProxmoxGuest>) -> SourceFacts {
+    SourceFacts {
+        age_ms,
+        truncated,
+        proxmox: Some(ProxmoxFacts {
+            cluster: "pve-prod".to_string(),
+            node: "pve1".to_string(),
+            guests,
+        }),
+        ..Default::default()
+    }
+}
+
+fn db_server(kind: DatabaseKind, unreachable: bool, names: &[&str]) -> DatabaseServer {
+    let (port, server_id) = match kind {
+        DatabaseKind::Mysql => (3306, "33333333-3333-4333-8333-333333333333"),
+        _ => (5432, "7"),
+    };
+    DatabaseServer {
+        kind: kind as i32,
+        port,
+        version: "16.4".to_string(),
+        unreachable,
+        server_id: server_id.to_string(),
+        databases: if unreachable {
+            Vec::new()
+        } else {
+            names
+                .iter()
+                .zip(16384u32..)
+                .map(|(name, oid)| Database {
+                    name: (*name).to_string(),
+                    oid,
+                })
+                .collect()
+        },
+    }
+}
+
+fn db_facts(servers: Vec<DatabaseServer>) -> SourceFacts {
+    SourceFacts {
+        age_ms: 1000,
+        databases: servers,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn dispatch_agent_and_server_agree_on_missing_sources() {
+    use lodestore_policy::source::{DatabaseSource, ProxmoxGuests, Source};
+    use lodestore_server::jobs::selector_of;
+    use lodestore_server::sources::select::{Selection, select};
+    use lodestore_server::sources::{Discovery, Stored};
+
+    let guests = |vmids: &[u32], pool: Option<&str>, tags: &[&str]| ProxmoxGuests {
+        vmids: vmids.to_vec(),
+        pool: pool.map(str::to_string),
+        tags: tags.iter().map(|t| t.to_string()).collect(),
+    };
+    let dbs = |databases: &[&str], exclude: &[&str]| DatabaseSource {
+        databases: databases.iter().map(|d| d.to_string()).collect(),
+        exclude_databases: exclude.iter().map(|d| d.to_string()).collect(),
+    };
+    let vm = |g| Source::ProxmoxVm(g);
+    let ct = |g| Source::ProxmoxCt(g);
+    let host = || {
+        vec![
+            tagged_guest(GuestKind::Vm, 101, "prod", &["web", "db"]),
+            tagged_guest(GuestKind::Ct, 200, "dev", &["dns"]),
+        ]
+    };
+    let fresh = node_facts(1000, false, host());
+    let stale = node_facts(STALE_MS, false, host());
+    let partial = node_facts(1000, true, host());
+    let pg = |unreachable| db_server(DatabaseKind::Postgres, unreachable, &["app", "billing"]);
+    let my = db_server(DatabaseKind::Mysql, false, &["shop"]);
+    let cases: Vec<(&str, Source, SourceFacts, bool)> = vec![
+        (
+            "vmid hit",
+            vm(guests(&[101], None, &[])),
+            fresh.clone(),
+            false,
+        ),
+        (
+            "vmid miss",
+            vm(guests(&[102], None, &[])),
+            fresh.clone(),
+            true,
+        ),
+        (
+            "pool hit",
+            vm(guests(&[], Some("prod"), &[])),
+            fresh.clone(),
+            false,
+        ),
+        (
+            "pool miss",
+            vm(guests(&[], Some("dev"), &[])),
+            fresh.clone(),
+            true,
+        ),
+        (
+            "any tag",
+            vm(guests(&[], None, &["x", "db"])),
+            fresh.clone(),
+            false,
+        ),
+        ("no tag", vm(guests(&[], None, &["x"])), fresh.clone(), true),
+        (
+            "vmid or tag",
+            vm(guests(&[999], None, &["web"])),
+            fresh.clone(),
+            false,
+        ),
+        (
+            "vm selector, ct guest",
+            vm(guests(&[200], None, &[])),
+            fresh.clone(),
+            true,
+        ),
+        (
+            "ct selector, ct guest",
+            ct(guests(&[200], None, &[])),
+            fresh.clone(),
+            false,
+        ),
+        (
+            "ct selector, vm guest",
+            ct(guests(&[101], None, &[])),
+            fresh.clone(),
+            true,
+        ),
+        (
+            "no proxmox",
+            vm(guests(&[101], None, &[])),
+            SourceFacts {
+                age_ms: 1000,
+                ..Default::default()
+            },
+            true,
+        ),
+        ("stale", vm(guests(&[102], None, &[])), stale, false),
+        (
+            "partial, miss",
+            vm(guests(&[102], None, &[])),
+            partial.clone(),
+            false,
+        ),
+        (
+            "partial, hit",
+            vm(guests(&[101], None, &[])),
+            partial,
+            false,
+        ),
+        (
+            "pg all",
+            Source::Postgres(dbs(&[], &[])),
+            db_facts(vec![pg(false)]),
+            false,
+        ),
+        (
+            "pg pick hit",
+            Source::Postgres(dbs(&["app"], &[])),
+            db_facts(vec![pg(false)]),
+            false,
+        ),
+        (
+            "pg pick miss",
+            Source::Postgres(dbs(&["nope"], &[])),
+            db_facts(vec![pg(false)]),
+            true,
+        ),
+        (
+            "pg except one",
+            Source::Postgres(dbs(&[], &["app"])),
+            db_facts(vec![pg(false)]),
+            false,
+        ),
+        (
+            "pg except all",
+            Source::Postgres(dbs(&[], &["app", "billing"])),
+            db_facts(vec![pg(false)]),
+            true,
+        ),
+        (
+            "pg empty server",
+            Source::Postgres(dbs(&[], &[])),
+            db_facts(vec![db_server(DatabaseKind::Postgres, false, &[])]),
+            true,
+        ),
+        (
+            "pg unreachable",
+            Source::Postgres(dbs(&["app"], &[])),
+            db_facts(vec![pg(true)]),
+            false,
+        ),
+        (
+            "pg unreachable and hit",
+            Source::Postgres(dbs(&["app"], &[])),
+            db_facts(vec![pg(true), db_server_two()]),
+            false,
+        ),
+        (
+            "pg on a mysql host",
+            Source::Postgres(dbs(&[], &[])),
+            db_facts(vec![my.clone()]),
+            true,
+        ),
+        (
+            "mysql hit",
+            Source::Mysql(dbs(&["shop"], &[])),
+            db_facts(vec![my.clone()]),
+            false,
+        ),
+        (
+            "mysql miss",
+            Source::Mysql(dbs(&["blog"], &[])),
+            db_facts(vec![my]),
+            true,
+        ),
+        (
+            "no databases at all",
+            Source::Mysql(dbs(&[], &[])),
+            db_facts(Vec::new()),
+            true,
+        ),
+    ];
+    for (name, source, facts, missing) in cases {
+        let agent =
+            lodestore_agent::jobs::runner::source_missing(&selector_of(&source), Some(&facts));
+        let stored = Stored {
+            discovery: Discovery::from_proto(&facts),
+            collected_at: Some(now_ms() - i64::try_from(facts.age_ms).unwrap()),
+        };
+        let server = matches!(
+            select(&source, Some(&stored), now_ms()),
+            Selection::NoSource | Selection::Nothing
+        );
+        assert_eq!(server, missing, "server: {name}");
+        assert_eq!(agent, missing, "agent: {name}");
+    }
+}
+
+fn db_server_two() -> DatabaseServer {
+    DatabaseServer {
+        port: 5433,
+        server_id: "8".to_string(),
+        ..db_server(DatabaseKind::Postgres, false, &["app"])
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dispatch_finish_of_a_job_with_malformed_source_is_refused() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let host = enroll(&ts, &api, &repo, "host-m").await;
+        let pool = &ts.state().db.pool;
+        let mut agent = Fake::connect(&ts, &host, vec![]).await;
+        insert_job(pool, "job-m", &host.id, "cli", "running", now_ms()).await;
+        sqlx::query(
+            "UPDATE jobs SET source_ref = 'proxmox-vm/pve1/11111111-1111-4111-8111-111111111111', \
+             source_meta_json = '{\"BAD\":\"x\"}' WHERE id = 'job-m'",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        let snapshot = write_snapshot_for(&ts, "host-m", Some(&host.id)).await;
+
+        agent
+            .send(AgentBody::JobFinished(finished(
+                "job-m",
+                JobOutcome::Succeeded,
+                &snapshot,
+            )))
+            .await;
+        assert_eq!(agent.recv(is_ack).await, "job-m");
+        wait_state(pool, "job-m", "failed").await;
+        let at = backend.name();
+        let sql = "SELECT error_code FROM jobs WHERE id = $1";
+        assert_eq!(
+            text(pool, sql, "job-m").await.as_deref(),
+            Some("snapshot_policy_mismatch"),
+            "[{at}]"
+        );
+        let sql = "SELECT error_message FROM jobs WHERE id = $1";
+        let message = text(pool, sql, "job-m").await.unwrap_or_default();
+        assert!(message.contains("malformed source"), "[{at}] {message}");
+        let sql = "SELECT snapshot_id FROM jobs WHERE id = $1";
+        assert_eq!(text(pool, sql, "job-m").await, None, "[{at}]");
+        let sql = "SELECT verify_state FROM jobs WHERE id = $1";
+        assert_eq!(text(pool, sql, "job-m").await, None, "[{at}]");
+        let sql = "SELECT COUNT(*) FROM snapshots WHERE job_id = $1";
+        assert_eq!(number(pool, sql, "job-m").await, 0, "[{at}]");
+        assert!(!signed(&ts, &repo, &snapshot).await, "[{at}]");
+        drop(agent);
         ts.stop().await;
     }
 }

@@ -60,7 +60,7 @@ lode restore latest --target ./restored --verify
 ```
 
 - `lode ls` lists the files of a snapshot, or of one path with `latest:/etc`.
-- A snapshot of another source, such as a guest or a database, is not `latest`. The server API chooses `latest_verified_id` for a source inside one host only, while `lode latest@<source key>` takes the newest signed snapshot of that key on any host of the repository. Name it by its id, or take the newest of one instance with `latest@<source key>`, for example `lode ls latest@postgres/7123456789012345678/16384`. `lode snapshots --source-type postgres` lists the snapshots of one type.
+- A snapshot of another source, such as a guest or a database, is not `latest`. The server API chooses `latest_verified_id` for a source inside one host only. Name a snapshot by its id, or take the newest of one instance with `latest@<source key>`, for example `lode ls latest@postgres/7123456789012345678/16384`. If the snapshots of that key come from more than one host, as with a clone or a standby, `lode` refuses and lists the hosts; add `--host` with a host id (or a name that belongs to one host) to choose among the snapshots that host made. `lode snapshots --source-type postgres` lists the snapshots of one type.
 - `lode dump` writes one file to standard output.
 - `SNAPSHOT:PATH` restores only that path, directly into the target.
 - `--include` takes a path or a `.gitignore`-style pattern, anchored at `/`, and may be repeated.

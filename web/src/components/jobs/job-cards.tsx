@@ -23,6 +23,7 @@ import {
 } from "@/lib/format";
 import { itemCount } from "@/lib/plural";
 import { shortId } from "@/lib/snapshot";
+import { sourceTypeNoun } from "@/lib/source-type";
 
 type Fact = [label: string, value: ReactNode | null | undefined];
 
@@ -424,8 +425,13 @@ export function restoreFailureText(
 		.replace(/\s{2,}/g, " ");
 }
 
-export function failureText(job: JobDetail) {
-	if (job.kind === "restore") return restoreFailureText(job);
+/** Friendly text for a backup error code, or null when the code is unknown
+ * or its details are missing. The jobs list has no `error_detail`. */
+export function backupFailureCopy(
+	job: Pick<JobDetail, "hostname" | "error_code"> & {
+		error_detail?: JobDetail["error_detail"];
+	},
+): string | null {
 	const host = job.hostname;
 	const detail = job.error_detail ?? {};
 	const e = copy.jobs.errors;
@@ -449,13 +455,52 @@ export function failureText(job: JobDetail) {
 			return e.inline_not_allowed(host);
 		case "gc_agent_outdated":
 			return e.gc_agent_outdated(host);
+		case "source_agent_outdated": {
+			const noun = sourceTypeNoun(detail.source_type ?? "");
+			return noun
+				? e.source_agent_outdated(host, noun)
+				: e.source_agent_outdated_any(host);
+		}
+		case "source_not_found": {
+			const noun = sourceTypeNoun(detail.source_type ?? "");
+			return noun
+				? e.source_not_found(host, noun)
+				: e.source_not_found_any(host);
+		}
 		case "hook_timeout":
 			if (has("script", "timeout")) {
 				return e.hook_timeout(detail.script, detail.timeout);
 			}
 			break;
 	}
-	return e.failed(job.error_message?.trim() ?? "").replace(/\s{2,}/g, " ");
+	return null;
+}
+
+/** Short list form for failures whose full text opens with a generic lead. */
+export function backupFailureShort(
+	job: Pick<JobDetail, "error_code"> & {
+		error_detail?: JobDetail["error_detail"];
+	},
+): string | null {
+	const s = copy.jobs.errors.short;
+	const noun = sourceTypeNoun(job.error_detail?.source_type ?? "");
+	switch (job.error_code) {
+		case "source_agent_outdated":
+			return noun ? s.source_agent_outdated(noun) : s.source_agent_outdated_any;
+		case "source_not_found":
+			return noun ? s.source_not_found(noun) : s.source_not_found_any;
+	}
+	return null;
+}
+
+export function failureText(job: JobDetail) {
+	if (job.kind === "restore") return restoreFailureText(job);
+	return (
+		backupFailureCopy(job) ??
+		copy.jobs.errors
+			.failed(job.error_message?.trim() ?? "")
+			.replace(/\s{2,}/g, " ")
+	);
 }
 
 function outcomeText(job: JobDetail) {

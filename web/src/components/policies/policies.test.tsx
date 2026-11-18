@@ -21,16 +21,21 @@ import type {
 	PolicySummary,
 	RetentionPreview,
 	ScheduleInfo,
+	Source,
 	ValidateRequest,
 	ValidateResponse,
 } from "@/api/gen/model";
 import { HostPolicies } from "@/components/hosts/host-policies";
 import { PoliciesTable } from "@/components/policies/policies-table";
 import {
+	BLANK_SOURCE,
 	draftFromPolicy,
 	policyFromDraft,
 	type RetentionDraft,
 	retentionFromDraft,
+	type SourceDraft,
+	sourceFromDraft,
+	sourceToDraft,
 } from "@/components/policies/policy-form";
 import { RetentionPanel } from "@/components/policies/retention-panel";
 import { ThemeProvider } from "@/components/theme/theme-provider";
@@ -105,6 +110,7 @@ function validResponse(
 		yaml: "kind: BackupPolicy\n",
 		policy: makePolicy("etc-and-home"),
 		matching: { hosts, other_repository: [] },
+		availability: [],
 		...over,
 	};
 }
@@ -285,6 +291,7 @@ describe("Policy editor tabs", () => {
 						errors: [{ path: "spec.paths[0]", message: "Bad path." }],
 						name_taken: false,
 						warnings: [],
+						availability: [],
 					}
 				: validResponse(),
 		);
@@ -315,6 +322,7 @@ describe("Policy editor tabs", () => {
 						errors: [{ line: 4, message: "unknown field `schedule`" }],
 						name_taken: false,
 						warnings: [],
+						availability: [],
 					}
 				: validResponse(),
 		);
@@ -376,6 +384,7 @@ describe("Policy editor tabs", () => {
 						],
 						name_taken: false,
 						warnings: [],
+						availability: [],
 					}
 				: validResponse(),
 		);
@@ -467,6 +476,7 @@ describe("Dead-man threshold", () => {
 						],
 						name_taken: false,
 						warnings: [],
+						availability: [],
 					}
 				: validResponse(),
 		);
@@ -545,6 +555,7 @@ describe("Split policy editor", () => {
 						errors: [{ path: "spec.paths[0]", message: "Bad path." }],
 						name_taken: false,
 						warnings: [],
+						availability: [],
 					}
 				: validResponse(),
 		);
@@ -573,6 +584,7 @@ const invalidYaml = (body: ValidateRequest): ValidateResponse | undefined =>
 				errors: [{ line: 4, message: "unknown field `schedule`" }],
 				name_taken: false,
 				warnings: [],
+				availability: [],
 			}
 		: undefined;
 
@@ -625,6 +637,7 @@ describe("Split editor states", () => {
 						errors: [{ path: "spec.paths[0]", message: "Bad path." }],
 						name_taken: false,
 						warnings: [],
+						availability: [],
 					}
 				: validResponse({ yaml: "last: valid\n" }),
 		);
@@ -958,6 +971,9 @@ describe("Matching hosts", () => {
 		expect(screen.getByText("2 hook warnings")).toBeInTheDocument();
 		await user.click(screen.getByRole("button", { name: "Show hosts" }));
 		expect(screen.getByText("Other repository")).toBeInTheDocument();
+		expect(
+			screen.getByRole("link", { name: "web-1" }).closest(".grid"),
+		).toHaveClass("@min-[960px]:grid-cols-2");
 		expect(screen.getByText("Uses archive")).toBeInTheDocument();
 		expect(
 			screen.getByRole("img", {
@@ -984,6 +1000,10 @@ describe("Matching hosts", () => {
 
 		await user.click(toggle);
 		expect(screen.getByRole("link", { name: "web-1" })).toBeInTheDocument();
+		// Without another repository the host list spans the whole card.
+		expect(
+			screen.getByRole("link", { name: "web-1" }).closest(".grid"),
+		).not.toHaveClass("@min-[960px]:grid-cols-2");
 		const hide = screen.getByRole("button", { name: "Hide hosts" });
 		expect(hide).toHaveAttribute("aria-expanded", "true");
 
@@ -1713,6 +1733,7 @@ describe("Schedule section", () => {
 						],
 						name_taken: false,
 						warnings: [],
+						availability: [],
 					}
 				: scheduled(body),
 		);
@@ -1962,6 +1983,7 @@ describe("Limits section", () => {
 						],
 						name_taken: false,
 						warnings: [],
+						availability: [],
 					}
 				: validResponse(),
 		);
@@ -2034,6 +2056,7 @@ describe("Limits section", () => {
 						],
 						name_taken: false,
 						warnings: [],
+						availability: [],
 					}
 				: validResponse(),
 		);
@@ -2409,6 +2432,7 @@ describe("Retention section", () => {
 						],
 						name_taken: false,
 						warnings: [],
+						availability: [],
 					}
 				: validResponse(),
 		);
@@ -3101,4 +3125,499 @@ describe("Retention preview by source", () => {
 		expect(await screen.findByRole("table")).toBeVisible();
 		await waitFor(() => expect(bodies).toHaveLength(4));
 	}, 30_000);
+});
+
+function availableOf(
+	type: string,
+	total: number,
+	withType: number,
+	outdated = 0,
+) {
+	return {
+		source_type: type,
+		hosts_total: total,
+		hosts_with: withType,
+		hosts_agent_outdated: outdated,
+	};
+}
+
+describe("What to back up", () => {
+	it("offers the discovered type and swaps the files fields for it", async () => {
+		const requests = mockValidate((body) =>
+			validResponse({
+				availability: [availableOf("postgres", 1, 1, 1)],
+				yaml: `apiVersion: ${body.policy?.apiVersion}\ntype: ${body.policy?.spec.source?.type}\n`,
+			}),
+		);
+		const created: unknown[] = [];
+		server.use(
+			http.post("/api/v1/policies", async ({ request }) => {
+				created.push(await request.json());
+				return HttpResponse.json(makeDetail("etc-and-home"), { status: 201 });
+			}),
+			http.get("/api/v1/policies/etc-and-home", () =>
+				HttpResponse.json(makeDetail("etc-and-home")),
+			),
+		);
+		const user = await openNew();
+
+		const files = await screen.findByRole("radio", { name: /Files/ });
+		expect(files).toHaveTextContent("Paths on every host");
+		expect(files).toBeChecked();
+		const postgres = screen.getByRole("radio", { name: /PostgreSQL/ });
+		expect(postgres).toHaveTextContent("On 1 of 1 host · agent too old");
+		await user.click(postgres);
+
+		expect(postgres).toBeChecked();
+		expect(
+			screen.queryByRole("textbox", { name: "Paths" }),
+		).not.toBeInTheDocument();
+		expect(screen.queryByLabelText("Exclude")).not.toBeInTheDocument();
+		expect(screen.queryByText("One file system")).not.toBeInTheDocument();
+		await waitFor(() =>
+			expect(requests.at(-1)?.policy?.apiVersion).toBe("lodestore.io/v1alpha2"),
+		);
+		expect(requests.at(-1)?.policy?.spec.source).toEqual({ type: "postgres" });
+
+		await user.click(screen.getByRole("tab", { name: "YAML" }));
+		const yaml = await screen.findByRole("textbox", { name: "Policy YAML" });
+		await waitFor(() =>
+			expect(yaml).toHaveValue(
+				"apiVersion: lodestore.io/v1alpha2\ntype: postgres\n",
+			),
+		);
+		await user.click(screen.getByRole("tab", { name: "Form" }));
+
+		const save = screen.getByRole("button", { name: "Save policy" });
+		await waitFor(() => expect(save).toBeEnabled());
+		await user.click(save);
+		await waitFor(() => expect(created).toHaveLength(1));
+		expect(created[0]).toMatchObject({
+			policy: {
+				apiVersion: "lodestore.io/v1alpha2",
+				spec: { source: { type: "postgres" }, paths: [], exclude: [] },
+			},
+		});
+	});
+
+	it("leaves the form as it was when only files are available", async () => {
+		mockValidate();
+		await openNew();
+
+		await screen.findByText("2 hosts will be backed up");
+		expect(
+			screen.queryByRole("radiogroup", { name: "What to back up" }),
+		).not.toBeInTheDocument();
+		expect(screen.getAllByRole("textbox", { name: "Paths" })).toHaveLength(2);
+		expect(screen.getByLabelText("Exclude")).toBeVisible();
+	});
+});
+
+describe("Source draft mapping", () => {
+	const guests = (patch: Partial<SourceDraft["guests"]>): SourceDraft => ({
+		...BLANK_SOURCE,
+		type: "proxmox-vm",
+		guests: { ...BLANK_SOURCE.guests, ...patch },
+	});
+	const databases = (
+		type: "postgres" | "mysql",
+		patch: Partial<SourceDraft["databases"]>,
+	): SourceDraft => ({
+		...BLANK_SOURCE,
+		type,
+		databases: { ...BLANK_SOURCE.databases, ...patch },
+	});
+
+	it("emits one mode with sorted values", () => {
+		expect(
+			sourceFromDraft(guests({ mode: "pick", vmids: [210, 101, 103] })),
+		).toEqual({ type: "proxmox-vm", vmids: [101, 103, 210] });
+		expect(sourceFromDraft(guests({ mode: "pool", pool: "prod" }))).toEqual({
+			type: "proxmox-vm",
+			pool: "prod",
+		});
+		expect(
+			sourceFromDraft(guests({ mode: "tags", tags: ["web", "db"] })),
+		).toEqual({ type: "proxmox-vm", tags: ["db", "web"] });
+		expect(sourceFromDraft(databases("postgres", {}))).toEqual({
+			type: "postgres",
+		});
+		expect(
+			sourceFromDraft(
+				databases("postgres", { mode: "pick", pick: ["billing", "app"] }),
+			),
+		).toEqual({ type: "postgres", databases: ["app", "billing"] });
+		expect(
+			sourceFromDraft(
+				databases("mysql", { mode: "except", except: ["scratch"] }),
+			),
+		).toEqual({ type: "mysql", excludeDatabases: ["scratch"] });
+		expect(sourceFromDraft(BLANK_SOURCE)).toBeUndefined();
+	});
+
+	it("never turns an empty pick into everything", () => {
+		expect(sourceFromDraft(guests({ mode: "pick" }))).toBeUndefined();
+		expect(sourceFromDraft(guests({ mode: "pool" }))).toBeUndefined();
+		expect(sourceFromDraft(guests({ mode: "tags" }))).toBeUndefined();
+		expect(
+			sourceFromDraft(databases("postgres", { mode: "pick" })),
+		).toBeUndefined();
+	});
+
+	it("reads a spec back into the form", () => {
+		expect(
+			sourceToDraft({ type: "proxmox-vm", vmids: [101] }).guests.mode,
+		).toBe("pick");
+		expect(
+			sourceToDraft({ type: "proxmox-ct", pool: "prod" }).guests,
+		).toMatchObject({ mode: "pool", pool: "prod" });
+		expect(sourceToDraft({ type: "proxmox-vm", tags: ["a"] }).guests.mode).toBe(
+			"tags",
+		);
+		expect(
+			sourceToDraft({ type: "postgres", databases: ["app"] }).databases,
+		).toMatchObject({ mode: "pick", pick: ["app"] });
+		expect(
+			sourceToDraft({ type: "mysql", excludeDatabases: ["x"] }).databases.mode,
+		).toBe("except");
+		expect(sourceToDraft({ type: "postgres" }).databases.mode).toBe("all");
+		expect(
+			sourceToDraft({ type: "postgres", excludeDatabases: [] }).databases.mode,
+		).toBe("all");
+		expect(sourceToDraft(undefined)).toEqual(BLANK_SOURCE);
+	});
+
+	it("keeps a combined selection as it is", () => {
+		const combined: Source = {
+			type: "proxmox-vm",
+			vmids: [101],
+			pool: "prod",
+		};
+		const draft = sourceToDraft(combined);
+		expect(draft.mixed).toEqual(combined);
+		expect(sourceFromDraft(draft)).toEqual(combined);
+		expect(sourceFromDraft({ ...draft, type: "proxmox-ct" })).toEqual({
+			type: "proxmox-ct",
+			vmids: [101],
+		});
+	});
+
+	it("round trips through the policy", () => {
+		const policy = makePolicy("p", {
+			source: { type: "postgres", databases: ["app"] },
+			paths: [],
+			exclude: [],
+		});
+		const back = policyFromDraft(draftFromPolicy(policy));
+		expect(back.apiVersion).toBe("lodestore.io/v1alpha2");
+		expect(back.spec.source).toEqual({ type: "postgres", databases: ["app"] });
+		expect(back.spec.paths).toEqual([]);
+	});
+});
+
+describe("What to back up cards", () => {
+	it("lists only the types the hosts report, in order", async () => {
+		mockValidate(() =>
+			validResponse({ availability: [availableOf("proxmox-vm", 3, 2)] }),
+		);
+		await openNew();
+
+		const group = await screen.findByRole("radiogroup", {
+			name: "What to back up",
+		});
+		expect(
+			within(group)
+				.getAllByRole("radio")
+				.map((card) => card.textContent),
+		).toEqual(["FilesPaths on every host", "Virtual machinesOn 2 of 3 hosts"]);
+	});
+
+	it("words availability and disables what is not on the hosts", async () => {
+		mockValidate(() =>
+			validResponse({
+				availability: [
+					availableOf("proxmox-vm", 3, 2),
+					availableOf("proxmox-ct", 3, 2, 2),
+					availableOf("postgres", 3, 0),
+					availableOf("mysql", 3, 3, 1),
+				],
+			}),
+		);
+		await openNew();
+
+		const ct = await screen.findByRole("radio", { name: /Containers/ });
+		expect(ct).toHaveTextContent("On 2 of 3 hosts · agent too old");
+		expect(screen.getByRole("radio", { name: /MySQL/ })).toHaveTextContent(
+			"On 3 of 3 hosts · 1 agent too old",
+		);
+		const missing = screen.getByRole("radio", { name: /PostgreSQL/ });
+		expect(missing).toHaveTextContent("Not found on the selected hosts");
+		expect(missing).toBeDisabled();
+		expect(ct).toBeEnabled();
+	});
+
+	it("says 2 agents too old and one host in the singular", async () => {
+		mockValidate(() =>
+			validResponse({
+				availability: [availableOf("proxmox-vm", 5, 4, 2)],
+			}),
+		);
+		await openNew();
+
+		expect(
+			await screen.findByRole("radio", { name: /Virtual machines/ }),
+		).toHaveTextContent("On 4 of 5 hosts · 2 agents too old");
+	});
+
+	it("keeps the saved type selectable when no host has it", async () => {
+		mockValidate(() =>
+			validResponse({ availability: [availableOf("postgres", 2, 0)] }),
+		);
+		mockPolicy(
+			makeDetail(
+				"db",
+				{},
+				{ source: { type: "postgres" }, paths: [], exclude: [] },
+			),
+		);
+		useSignedIn();
+		renderApp("/policies/db");
+
+		const card = await screen.findByRole("radio", { name: /PostgreSQL/ });
+		await waitFor(() => expect(card).toBeChecked());
+		expect(card).toBeEnabled();
+		expect(
+			screen.queryByText("Pick at least one database."),
+		).not.toBeInTheDocument();
+	});
+
+	it("shows a placeholder before the first answer", async () => {
+		server.use(
+			http.post("/api/v1/policies/validate", async () => {
+				await delay(400);
+				return HttpResponse.json(
+					validResponse({ availability: [availableOf("postgres", 1, 1)] }),
+				);
+			}),
+		);
+		await openNew();
+
+		expect(screen.getByText("What to back up")).toBeVisible();
+		expect(
+			screen.queryByRole("radiogroup", { name: "What to back up" }),
+		).not.toBeInTheDocument();
+		expect(
+			await screen.findByRole("radio", { name: /PostgreSQL/ }),
+		).toBeVisible();
+	});
+
+	it("falls back to the selected type when the check fails", async () => {
+		server.use(
+			http.post("/api/v1/policies/validate", () =>
+				HttpResponse.json(
+					{ code: "internal", message: "boom" },
+					{ status: 500 },
+				),
+			),
+		);
+		mockPolicy(
+			makeDetail(
+				"db",
+				{},
+				{ source: { type: "mysql" }, paths: [], exclude: [] },
+			),
+		);
+		useSignedIn();
+		renderApp("/policies/db");
+
+		const group = await screen.findByRole("radiogroup", {
+			name: "What to back up",
+		});
+		const cards = within(group).getAllByRole("radio");
+		expect(cards.map((card) => card.textContent)).toEqual([
+			"FilesPaths on every host",
+			"MySQLNot found on the selected hosts",
+		]);
+		expect(cards[1]).toBeChecked();
+	});
+
+	it("moves between cards with the arrow keys and skips disabled ones", async () => {
+		mockValidate(() =>
+			validResponse({
+				availability: [
+					availableOf("proxmox-vm", 1, 1),
+					availableOf("proxmox-ct", 1, 0),
+					availableOf("postgres", 1, 1),
+				],
+			}),
+		);
+		const user = await openNew();
+
+		const files = await screen.findByRole("radio", { name: /Files/ });
+		await user.click(files);
+		await user.keyboard("{ArrowRight>}");
+		await waitFor(() =>
+			expect(
+				screen.getByRole("radio", { name: /Virtual machines/ }),
+			).toBeChecked(),
+		);
+		await user.keyboard("{/ArrowRight}{ArrowRight>}");
+		await waitFor(() =>
+			expect(screen.getByRole("radio", { name: /PostgreSQL/ })).toBeChecked(),
+		);
+		await user.keyboard("{/ArrowRight}");
+	});
+
+	it("remembers paths and options while another type is selected", async () => {
+		const requests = mockValidate(() =>
+			validResponse({ availability: [availableOf("postgres", 1, 1)] }),
+		);
+		const user = await openNew();
+
+		const [first] = screen.getAllByRole("textbox", { name: "Paths" });
+		await user.clear(first);
+		await user.type(first, "/srv");
+		await user.click(await screen.findByRole("radio", { name: /PostgreSQL/ }));
+		await waitFor(() =>
+			expect(requests.at(-1)?.policy?.spec.source).toEqual({
+				type: "postgres",
+			}),
+		);
+		expect(requests.at(-1)?.policy?.spec.paths).toEqual([]);
+
+		await user.click(screen.getByRole("radio", { name: /Files/ }));
+		expect(
+			screen
+				.getAllByRole("textbox", { name: "Paths" })
+				.map((el) => (el as HTMLInputElement).value),
+		).toEqual(["/srv", "/home"]);
+		await waitFor(() =>
+			expect(requests.at(-1)?.policy?.spec.paths).toEqual(["/srv", "/home"]),
+		);
+		expect(requests.at(-1)?.policy?.spec.source).toBeUndefined();
+	});
+
+	it("blocks saving an empty guest pick and says why", async () => {
+		const requests = mockValidate(() =>
+			validResponse({
+				availability: [
+					availableOf("proxmox-vm", 1, 1),
+					availableOf("postgres", 1, 1),
+				],
+			}),
+		);
+		const user = await openNew();
+
+		const save = screen.getByRole("button", { name: "Save policy" });
+		await waitFor(() => expect(save).toBeEnabled());
+		await user.click(
+			await screen.findByRole("radio", { name: /Virtual machines/ }),
+		);
+
+		expect(screen.getByText("Pick at least one guest.")).toBeVisible();
+		await waitFor(() => expect(save).toBeDisabled());
+		await waitFor(() =>
+			expect(requests.at(-1)?.policy?.spec.source).toBeUndefined(),
+		);
+
+		await user.click(screen.getByRole("radio", { name: /PostgreSQL/ }));
+		expect(
+			screen.queryByText("Pick at least one guest."),
+		).not.toBeInTheDocument();
+		await waitFor(() => expect(save).toBeEnabled());
+
+		await user.click(screen.getByRole("radio", { name: /Files/ }));
+		await waitFor(() => expect(save).toBeEnabled());
+	});
+});
+
+describe("Matching hosts marks", () => {
+	function vmPolicy() {
+		return makePolicy("p", { source: { type: "proxmox-vm", vmids: [101] } });
+	}
+
+	it("counts instances and marks the hosts where jobs will fail", async () => {
+		mockValidate(() =>
+			validResponse({ policy: vmPolicy() }, [
+				matchHost("pve-01", { instances: 2 }),
+				matchHost("pve-02", { source_mark: "not_found" }),
+				matchHost("pve-03", { source_mark: "agent_too_old" }),
+			]),
+		);
+		const user = await openNew();
+
+		expect(
+			await screen.findByText("3 hosts match · 2 will fail"),
+		).toBeVisible();
+		expect(screen.getByText("2 guests")).toBeVisible();
+		expect(
+			screen.getByText("No Proxmox found on this host. Its jobs will fail."),
+		).toBeVisible();
+		expect(
+			screen.getByText(
+				"The agent on this host can't back up virtual machines yet. Its jobs will fail.",
+			),
+		).toBeVisible();
+
+		await user.click(screen.getByRole("button", { name: "Hide hosts" }));
+		expect(screen.getByText("2 will fail")).toBeVisible();
+		await user.click(screen.getByRole("button", { name: "Show hosts" }));
+		await user.click(screen.getByRole("button", { name: "Hide hosts" }));
+		expect(screen.getByText("2 will fail")).toBeVisible();
+	});
+
+	it("words the singular and the database selections", async () => {
+		mockValidate(() =>
+			validResponse(
+				{
+					policy: makePolicy("p", { source: { type: "mysql" } }),
+				},
+				[matchHost("db-1", { source_mark: "selects_nothing" })],
+			),
+		);
+		await openNew();
+
+		expect(
+			await screen.findByText("1 host matches · 1 will fail"),
+		).toBeVisible();
+		expect(
+			screen.getByText(
+				"None of the selected schemas are on this host. Its jobs will fail.",
+			),
+		).toBeVisible();
+	});
+
+	it("shows database counts and leaves files policies as they were", async () => {
+		mockValidate(() =>
+			validResponse(
+				{ policy: makePolicy("p", { source: { type: "postgres" } }) },
+				[
+					matchHost("db-1", { instances: 6 }),
+					matchHost("db-2", { instances: 1 }),
+				],
+			),
+		);
+		const user = await openNew();
+
+		expect(await screen.findByText("2 hosts will be backed up")).toBeVisible();
+		await user.click(screen.getByRole("button", { name: "Show hosts" }));
+		expect(screen.getByText("6 databases")).toBeVisible();
+		expect(screen.getByText("1 database")).toBeVisible();
+	});
+
+	it("ignores counts and marks for a files policy", async () => {
+		mockValidate(() =>
+			validResponse({}, [
+				matchHost("web-1", { instances: 3, source_mark: "not_found" }),
+				matchHost("web-2"),
+				matchHost("web-3"),
+			]),
+		);
+		const user = await openNew();
+
+		expect(await screen.findByText("3 hosts will be backed up")).toBeVisible();
+		await user.click(screen.getByRole("button", { name: "Show hosts" }));
+		expect(screen.queryByText(/will fail/)).not.toBeInTheDocument();
+		expect(screen.queryByText("3 guests")).not.toBeInTheDocument();
+	});
 });
