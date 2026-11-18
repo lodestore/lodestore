@@ -1060,11 +1060,7 @@ export function PolicyForm({
 						noun={pickNoun}
 						repository={draft.repository}
 						selector={selectorFromDraft(draft)}
-						hostsSelected={
-							draft.hostMode === "list"
-								? draft.hosts.length > 0
-								: draft.labels.some((l) => l.key !== "")
-						}
+						hostsSelected={draft.hostMode !== "list" || draft.hosts.length > 0}
 						error={
 							[...problems]
 								.filter(([path]) => path.startsWith("spec.source."))

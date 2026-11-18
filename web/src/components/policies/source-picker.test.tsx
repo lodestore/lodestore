@@ -246,6 +246,7 @@ describe("Source picker", () => {
 		mockValidate();
 		mockOptions(empty);
 		const user = await openForm(/Virtual machines/, false);
+		await user.click(screen.getByRole("radio", { name: "Pick hosts" }));
 
 		expect(
 			await screen.findByText(
@@ -254,6 +255,7 @@ describe("Source picker", () => {
 		).toBeVisible();
 		expect(screen.queryByRole("searchbox")).not.toBeInTheDocument();
 
+		await user.click(screen.getByRole("radio", { name: "By labels" }));
 		await typeLabel(user);
 		expect(
 			await screen.findByText("No guests found on the selected hosts."),

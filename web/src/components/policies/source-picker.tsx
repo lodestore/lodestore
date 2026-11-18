@@ -44,8 +44,8 @@ import { cn } from "@/lib/utils";
 const PAGE = 25;
 const MAX_TAGS = 20;
 const DEBOUNCE_MS = 400;
-const FROM_680 = "hidden @min-[680px]:table-cell";
-const PAD = "px-2 @min-[680px]:px-4";
+const WIDE = "hidden @min-[440px]:table-cell";
+const PAD = "px-2 @min-[440px]:px-4";
 const MODE =
 	"px-4 data-[state=on]:bg-primary-subtle data-[state=on]:text-primary-strong";
 
@@ -481,7 +481,7 @@ function PickTable({
 									/>
 								</TableHead>
 								<TableHead className={PAD}>{column}</TableHead>
-								<TableHead className={cn(PAD, FROM_680)}>
+								<TableHead className={cn(PAD, WIDE)}>
 									{text.guests.hostColumn}
 								</TableHead>
 							</TableRow>
@@ -501,7 +501,7 @@ function PickTable({
 											<Truncated text={row.label} />
 										</label>
 										{row.hosts === undefined && (
-											<span className="block text-sm font-normal text-muted-foreground @min-[680px]:hidden">
+											<span className="block text-sm font-normal text-muted-foreground @min-[440px]:hidden">
 												{text.notFoundRow}
 											</span>
 										)}
@@ -509,7 +509,7 @@ function PickTable({
 									<TableCell
 										className={cn(
 											PAD,
-											FROM_680,
+											WIDE,
 											"max-w-0 text-sm text-muted-foreground",
 										)}
 									>

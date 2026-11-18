@@ -77,9 +77,17 @@ function TypeIcon({ type }: { type: string }) {
 	return <Icon aria-hidden className="size-4 shrink-0 text-muted-foreground" />;
 }
 
-function SourceCell({ type, label }: { type: string; label: string }) {
+function SourceCell({
+	type,
+	label,
+	className = "max-w-36 @min-[680px]:max-w-72",
+}: {
+	type: string;
+	label: string;
+	className?: string;
+}) {
 	return (
-		<div className="flex max-w-48 items-center gap-2 @min-[680px]:max-w-72">
+		<div className={cn("flex items-center gap-2", className)}>
 			<TypeIcon type={type} />
 			<Truncated text={label} className="min-w-0" />
 		</div>
@@ -162,7 +170,7 @@ function ItemRow({ item }: { item: SourceItem }) {
 				{nested ? (
 					<Truncated
 						text={item.name ?? item.label}
-						className="max-w-48 @min-[680px]:max-w-72"
+						className="max-w-36 @min-[680px]:max-w-72"
 					/>
 				) : (
 					<SourceCell type={item.source_type} label={item.label} />
@@ -208,7 +216,11 @@ function GroupRow({ group }: { group: SourceGroup }) {
 	return (
 		<TableRow className="h-12 bg-muted/50">
 			<TableCell colSpan={4} className={cn(PAD, "text-sm font-semibold")}>
-				<SourceCell type={group.source_type} label={groupLabel(group)} />
+				<SourceCell
+					type={group.source_type}
+					label={groupLabel(group)}
+					className="min-w-0"
+				/>
 			</TableCell>
 		</TableRow>
 	);
@@ -217,7 +229,10 @@ function GroupRow({ group }: { group: SourceGroup }) {
 function UnreachableRow({ group }: { group: SourceGroup }) {
 	return (
 		<TableRow className="min-h-12">
-			<TableCell colSpan={4} className={cn(PAD, NESTED, "text-sm")}>
+			<TableCell
+				colSpan={4}
+				className={cn(PAD, NESTED, "text-sm whitespace-normal")}
+			>
 				<span className="flex items-start gap-1 text-destructive">
 					<CircleX aria-hidden className="mt-1 size-4 shrink-0" />
 					{group.source_type === "mysql"
@@ -545,7 +560,7 @@ export function HostSources({ host }: { host: HostDetail }) {
 				</Table>
 			</div>
 			{data !== undefined && shown.length > PAGE_SIZE && (
-				<div className="flex items-center justify-between gap-4">
+				<div className="flex flex-wrap items-center justify-between gap-4">
 					<p className="text-sm text-muted-foreground">
 						{text.showing(from + 1, from + slice.length, shown.length)}
 					</p>
