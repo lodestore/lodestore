@@ -53,8 +53,8 @@ Without `spec.source` a policy backs up the files in `spec.paths`, and every pol
 | `type` | Fields | Selects |
 | --- | --- | --- |
 | `files` | none | The files in `spec.paths`, as without a source. `paths`, `exclude`, `oneFileSystem` and `excludeCaches` belong to this type only; the other types refuse them. |
-| `proxmox-vm`, `proxmox-ct` | `vmids` (100 to 999999999, up to 1000), `pool`, `tags` (up to 20) | Guests of a Proxmox node by id, pool or tag. At least one of the three is required. |
-| `postgres`, `mysql` | `databases`, `excludeDatabases` (names of 1 to 64 bytes, up to 1000 each) | Databases of a server. `excludeDatabases` is used only when `databases` is empty. |
+| `proxmox-vm`, `proxmox-ct` | `vmids` (100 to 999999999, up to 1000), `pool`, `tags` (up to 20) | Virtual machines or containers of a Proxmox node by id, pool or tag. At least one of the three is required. A guest is selected when it matches any one of the three, and matches `tags` when it carries any one of the tags. |
+| `postgres`, `mysql` | `databases`, `excludeDatabases` (names of 1 to 64 bytes, up to 1000 each) | Databases of a server (MySQL: schemas). With no `databases`, every database is selected, including ones created later. `excludeDatabases` is used only when `databases` is empty. |
 
 ```yaml
 apiVersion: lodestore.io/v1alpha2
@@ -68,9 +68,55 @@ spec:
     tags: [prod]
 ```
 
-This version of the server runs only `files`. A policy with another type is checked like any other, and a create, update or `lode apply` that carries one is refused with 422 `spec.source.type`, after the permission checks and also on `--dry-run`, so no such policy is stored. The block is there so that policies and tools written for it already validate. A policy of `files` is exported in the old form: without `source` and with `apiVersion: lodestore.io/v1alpha1`, the same bytes as before. A policy with another source is exported as `v1alpha2`. A server of 0.2 does not read `v1alpha2`.
+The server stores a policy of every type, whether it comes from the form, the YAML tab, the API or `lode apply`. The agent decides what it can run: a job of a type the agent cannot back up yet fails before it starts, see [Jobs that do not start](#jobs-that-do-not-start). A policy of `files` is exported in the old form: without `source` and with `apiVersion: lodestore.io/v1alpha1`, the same bytes as before. A policy with another source is exported as `v1alpha2`. A server of 0.2 does not read `v1alpha2`.
+
+For guests, `vmids: [101]` with `tags: [prod]` selects VM 101 and every guest tagged `prod`; it does not require both. The selector of the policy chooses the hosts as for any policy; what the policy backs up on each host comes from what the agent of that host found there.
 
 `lode policy validate FILE...` checks policy files offline, with the same rules as the server, and prints the path, line and column of each problem. It exits 0 when every file is valid and 3 when one is not; it needs no server and no token.
+
+## What to back up in the policy form
+
+The field **What to back up** is at the top of the policy form. It offers **Files** and the types that an agent has found on a host of the repository: **Virtual machines** and **Containers** when an agent found at least one guest of that kind, **PostgreSQL** and **MySQL** when an agent found a server. A card shows on how many of the selected hosts the type was found, for example "On 2 of 3 hosts", and how many of those agents are too old to back it up. A type that none of the selected hosts has is disabled with "Not found on the selected hosts". Choosing a type other than Files hides the path fields, which belong to Files only.
+
+For guests the form shows **Guests**: pick them from a searchable list (25 rows at a time), take every guest of a pool, or take every guest with any of up to 20 tags. For PostgreSQL and MySQL it shows **Databases** or **Schemas** with three modes: all (including ones created later), pick, or all except the names you tick. The list is what the agents of the selected hosts reported in their last scan. A guest or database that is ticked in the policy but no longer reported stays in the list marked "Not found on the selected hosts", so it can be unticked. A pick with nothing ticked cannot be saved ("Pick at least one guest."), because an empty pick would otherwise mean everything. A selection that combines `vmids`, `pool` and `tags`, or `databases` and `excludeDatabases`, is kept as it is and shown with a note to edit it in the YAML tab. The YAML tab shows the same `spec.source` that `lode apply` takes.
+
+**Matching hosts** shows, for a policy of guests or databases, how many instances the policy selects on each host, and marks a host whose jobs will fail, with the reason: the agent is too old to back up the type, the host has no Proxmox, PostgreSQL or MySQL, or none of the selected guests or databases are on it. When the agent has no recent list, or its list was cut short or could not be read, the host has no count and no mark of the last two kinds: the server does not guess, and the agent decides when the job comes.
+
+## Sources found on a host
+
+The agent of each host scans for sources when it starts and every five minutes, and sends the last result with each heartbeat. A host page shows a **Sources** tab as soon as an agent has found a guest or a database. It lists:
+
+- **Guests**: VM or CT, the id, name, pool and tags.
+- **Databases**: grouped under their server with its port and version, one row per database. A server that the agent found but could not list shows a note instead of rows.
+- **Files**: a row for the paths that a files policy covers.
+
+Each row has a **Protection**: the policies that select it, **Not protected** when none does, or **Agent too old** when the agent finds the type but cannot back it up yet; an agent version that backs up the type clears it (see [Agent updates](/docs/guides/agent-updates/)). The filter **Not protected** shows what no policy covers. The table has 25 rows per page. A note names a list that the agent cut short, and a guest or database that another host also reports, such as a clone or a standby: both hosts report the same key, so `lode latest@<key>` needs `--host` (see [Which snapshot is `latest`](/docs/reference/cli/#which-snapshot-is-latest)).
+
+What the agent finds, and where it stops:
+
+| Source | Found from | Reported |
+| --- | --- | --- |
+| Proxmox | `/etc/pve`, read only and without starting a process: the guests of the node the agent runs on, and the cluster name from corosync, or the node name outside a cluster | VMID, VM or CT, name, tags, pool, UUID |
+| PostgreSQL | A running cluster: a socket `.s.PGSQL.<port>` in `/run/postgresql`, `/var/run/postgresql` or `/tmp`, owned by `postgres`. The agent runs `psql` as `postgres` over the socket | System identifier, port, version, databases (not templates) |
+| MySQL | A running `mysqld`: a socket in `/run/mysqld`, `/var/run/mysqld` or `/var/lib/mysql`, owned by `mysql`. The agent runs `mysql` as `root` over the socket (`auth_socket`) | Server UUID, port, version, schemas (not `information_schema`, `performance_schema`, `sys`) |
+
+- A VM is identified by the UUID in its configuration. A VM whose UUID is zero, invalid or the same as another VM's on the node (a restored copy), and a VM whose configuration cannot be read, is not listed. A container has no UUID in Proxmox, so the agent generates one and keeps it in `/var/lib/lodestore/source-ids.json`; it never writes to the Proxmox configuration. A reinstalled node, a container migrated to another node and a reused VMID are therefore new instances. A container recreated with the same VMID between two scans is not told apart.
+- The databases are read with constant queries over a local socket, with no password and no credentials in the agent configuration. If the agent cannot connect (no `psql` or `mysql` client in `/usr/bin`, a refused login, a timeout), the server is shown with its databases unknown, not empty. After a refused login the agent does not try again for a day, or until the database server restarts. A PostgreSQL refusal is recognised from its English message only. MariaDB is not listed as MySQL. A `mysqld` started with `skip_networking` has port 0.
+- Only a running server is found: a stopped cluster leaves no socket and disappears from the list. If a policy expected one of its databases, [Source no longer selected](/docs/guides/alerts/#source-no-longer-selected) is raised an hour later.
+- Limits: 1000 guests, 20 tags per guest, 16 database servers, 1000 databases per server, 64 bytes per name, 256 KiB per list. A tag or pool longer than 64 bytes is left out. When anything is dropped the list is marked as cut short, and the tab and the form say so.
+
+The agents of this version find guests and databases but back up files only: guest and database backups are not part of them yet.
+
+## Jobs that do not start
+
+A job of a guest or database policy fails at once, before any hook runs, in two cases. It shows in **Jobs** as a failed job with a message that says what to do, raises the usual **Backup failed** alert and carries its code in `error_code`:
+
+| Code | When | What to do |
+| --- | --- | --- |
+| `source_agent_outdated` | The agent has not declared the capability `source:<type>` for the type of the policy. Agents of this version declare only `source:files`. | Update the agent to a version that backs up the type. |
+| `source_not_found` | The host has no source of the type, or the policy selects none of the guests or databases found on it. | Check what the policy backs up and where it runs. |
+
+The server refuses a job for the second reason only on a recent, complete list: under 15 minutes old, not cut short, and with no database server that could not be read. If the agent is offline, or its list is old or incomplete, the job goes to the agent, which checks its own scan and refuses with the same code. What an agent reports never widens what it may do: it only narrows what the form offers and which jobs are handed out.
 
 ## Durations and rates
 
