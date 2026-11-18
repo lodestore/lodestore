@@ -129,8 +129,8 @@ pub(crate) fn read_bounded(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
 
 /// One discovery run. Proxmox files are read on a blocking thread: a hung
 /// `pmxcfs` blocks that thread and nothing else. Database servers are probed
-/// at the same time; they never fail the run, an unknown server is reported
-/// unreachable instead.
+/// at the same time (`scan_postgres` and `scan_mysql` under one deadline);
+/// they never fail the run, an unknown server is reported unreachable instead.
 pub(crate) async fn collect(
     config: &Config,
     paths: &Paths,
@@ -221,7 +221,7 @@ pub struct Discovery {
 
 impl Discovery {
     pub fn spawn(config: Config, paths: Paths, shutdown: CancellationToken) -> Discovery {
-        let memo = ProbeMemo::new();
+        let memo = ProbeMemo::new(database::AUTH_RETRY_AFTER);
         let run = move || -> Run {
             let (config, paths, memo) = (config.clone(), paths.clone(), memo.clone());
             Box::pin(async move { collect(&config, &paths, &memo).await })

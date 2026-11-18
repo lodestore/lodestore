@@ -15,8 +15,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use lodestore_format::source::SourceKey;
@@ -24,6 +24,9 @@ use lodestore_proto::agent::v1::{Database, DatabaseKind, DatabaseServer};
 use rustix::process::{Pid, Signal, kill_process_group};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
+use tokio::time::Instant;
 
 use super::{Config, MAX_DATABASES, MAX_NAME_BYTES, MAX_SERVERS, clip};
 use crate::hooks::terminate;
@@ -44,7 +47,10 @@ pub(crate) const MYSQL_SQL: &str = "SELECT 's', @@server_uuid, @@port, @@version
 pub(crate) const MAX_COMMAND_OUTPUT: usize = 1 << 20;
 pub(crate) const MAX_COMMAND_STDERR: usize = 64 << 10;
 pub(crate) const COMMAND_PATH: &str = "/usr/sbin:/usr/bin:/sbin:/bin";
+pub(crate) const MAX_PARALLEL_COMMANDS: usize = 4;
 pub(crate) const FS_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const AUTH_RETRY_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
+const MAX_EXCERPT_BYTES: usize = 256;
 const MAX_LOCK_BYTES: u64 = 4 << 10;
 const MAX_PG_VERSION_BYTES: u64 = 32;
 const PG_SOCKET: &str = ".s.PGSQL.";
@@ -58,15 +64,37 @@ const PG_ENV: [(&str, &str); 3] = [
 
 type Inode = (u64, u64);
 
-/// What the agent keeps between discovery runs.
-#[derive(Clone, Default)]
+/// What the agent keeps between discovery runs: the sockets that refused
+/// the login, so a server that does not let the agent in is not asked again
+/// every run (a failed root login is what account lockouts and intrusion
+/// alerts count), and whether a file system search is still stuck.
+#[derive(Clone)]
 pub(crate) struct ProbeMemo {
+    retry_after: Duration,
+    denied: Arc<Mutex<HashMap<Inode, Instant>>>,
     fs_busy: Arc<AtomicBool>,
 }
 
 impl ProbeMemo {
-    pub(crate) fn new() -> ProbeMemo {
-        ProbeMemo::default()
+    /// A socket that refused the login is asked again after `retry_after`,
+    /// or at once when it is created anew (the server restarted).
+    pub(crate) fn new(retry_after: Duration) -> ProbeMemo {
+        ProbeMemo {
+            retry_after,
+            denied: Arc::default(),
+            fs_busy: Arc::default(),
+        }
+    }
+
+    fn denied_recently(&self, inode: Inode) -> bool {
+        let mut denied = self.denied.lock().unwrap_or_else(PoisonError::into_inner);
+        denied.retain(|_, at| at.elapsed() < self.retry_after);
+        denied.contains_key(&inode)
+    }
+
+    fn deny(&self, inode: Inode) {
+        let mut denied = self.denied.lock().unwrap_or_else(PoisonError::into_inner);
+        denied.insert(inode, Instant::now());
     }
 }
 
@@ -74,14 +102,17 @@ struct Postgres {
     dir: PathBuf,
     port: u16,
     version: String,
-    #[allow(dead_code)]
     inode: Inode,
 }
 
 struct Mysql {
     socket: PathBuf,
-    #[allow(dead_code)]
     inode: Inode,
+}
+
+enum Probe {
+    Postgres(Postgres, (u32, u32)),
+    Mysql(Mysql),
 }
 
 struct Found {
@@ -103,21 +134,80 @@ pub(crate) async fn scan_databases(
         return (Vec::new(), true);
     };
     let mut truncated = found.truncated;
-    let mut servers = Vec::new();
+    let mut probes = Vec::new();
     if let Some(account) = found.pg_account {
-        for pg in &found.postgres {
-            let (server, cut) = scan_postgres(config, pg, account, config.command_timeout).await;
-            truncated |= cut;
-            servers.push(server);
+        probes.extend(
+            found
+                .postgres
+                .into_iter()
+                .map(|pg| Probe::Postgres(pg, account)),
+        );
+    }
+    probes.extend(found.mysql.into_iter().map(Probe::Mysql));
+
+    // A command never runs past `deadline`; a candidate whose turn comes
+    // after it is not asked and the list is marked incomplete.
+    let deadline = Instant::now() + config.db_deadline;
+    let slots = Arc::new(Semaphore::new(MAX_PARALLEL_COMMANDS));
+    let shared = Arc::new((config.clone(), memo.clone()));
+    let mut running = JoinSet::new();
+    let mut results: Vec<Option<(Option<DatabaseServer>, bool)>> =
+        std::iter::repeat_with(|| None).take(probes.len()).collect();
+    for (i, probe) in probes.into_iter().enumerate() {
+        let (slots, shared) = (Arc::clone(&slots), Arc::clone(&shared));
+        running.spawn(async move {
+            let _slot = slots.acquire_owned().await.ok()?;
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            let (config, memo) = &*shared;
+            let timeout = config.command_timeout.min(left);
+            Some((i, probe_one(config, memo, probe, timeout).await))
+        });
+    }
+    while let Some(done) = running.join_next().await {
+        match done {
+            Ok(Some((i, result))) => results[i] = Some(result),
+            Ok(None) => {}
+            Err(error) => tracing::warn!(%error, "a database probe failed"),
         }
     }
-    for my in &found.mysql {
-        let (server, cut) = scan_mysql(config, my, config.command_timeout).await;
-        truncated |= cut;
-        servers.extend(server);
+    let mut servers = Vec::new();
+    let mut late = 0;
+    for result in results {
+        match result {
+            Some((server, cut)) => {
+                truncated |= cut;
+                servers.extend(server);
+            }
+            None => late += 1,
+        }
+    }
+    if late > 0 {
+        truncated = true;
+        tracing::warn!(
+            late,
+            "some database servers were not asked in time and are not reported"
+        );
     }
     truncated |= dedup(&mut servers);
     (servers, truncated)
+}
+
+async fn probe_one(
+    config: &Config,
+    memo: &ProbeMemo,
+    probe: Probe,
+    timeout: Duration,
+) -> (Option<DatabaseServer>, bool) {
+    match probe {
+        Probe::Postgres(pg, account) => {
+            let (server, cut) = scan_postgres(config, memo, &pg, account, timeout).await;
+            (Some(server), cut)
+        }
+        Probe::Mysql(my) => scan_mysql(config, memo, &my, timeout).await,
+    }
 }
 
 /// A standby or a copied data directory reports the identifier of another
@@ -383,6 +473,7 @@ fn account(name: &str) -> Option<(u32, u32)> {
 
 async fn scan_postgres(
     config: &Config,
+    memo: &ProbeMemo,
     pg: &Postgres,
     account: (u32, u32),
     timeout: Duration,
@@ -411,10 +502,19 @@ async fn scan_postgres(
         unreachable: true,
         ..DatabaseServer::default()
     };
+    if memo.denied_recently(pg.inode) {
+        return (server, false);
+    }
     let ran = match run(&config.psql, &args, timeout, &PG_ENV, Some(account)).await {
         Ok(ran) if ran.code == Some(0) => ran,
         Ok(ran) => {
-            tracing::warn!(port = pg.port, code = ?ran.code, "psql failed; the cluster is reported unreachable");
+            let stderr = stderr_excerpt(&ran.stderr);
+            if pg_login_refused(&ran.stderr) {
+                memo.deny(pg.inode);
+                tracing::warn!(port = pg.port, %stderr, user = %config.pg_user, "the cluster does not let its account in over the socket; it is reported unreachable and asked again after a restart or in a day");
+            } else {
+                tracing::warn!(port = pg.port, code = ?ran.code, %stderr, "psql failed; the cluster is reported unreachable");
+            }
             return (server, false);
         }
         Err(error) => {
@@ -496,6 +596,7 @@ pub(crate) fn pg_system_id(text: &str) -> Option<u64> {
 
 async fn scan_mysql(
     config: &Config,
+    memo: &ProbeMemo,
     my: &Mysql,
     timeout: Duration,
 ) -> (Option<DatabaseServer>, bool) {
@@ -522,6 +623,9 @@ async fn scan_mysql(
         ..DatabaseServer::default()
     };
     let at = my.socket.display();
+    if memo.denied_recently(my.inode) {
+        return (Some(unreachable), false);
+    }
     let ran = match run(&config.mysql, &args, timeout, &[], None).await {
         Ok(ran) if ran.code == Some(0) => ran,
         Ok(ran) => {
@@ -530,10 +634,12 @@ async fn scan_mysql(
                 tracing::info!(socket = %at, "the server has no server_uuid, so it is MariaDB, which is not reported");
                 return (None, false);
             }
+            let stderr = stderr_excerpt(&ran.stderr);
             if error.is_some_and(|e| MYSQL_ACCESS_DENIED.contains(&e)) {
-                tracing::warn!(socket = %at, code = ?error, "root may not log in over the socket; the server is reported unreachable");
+                memo.deny(my.inode);
+                tracing::warn!(socket = %at, code = ?error, %stderr, "root may not log in over the socket; the server is reported unreachable and asked again after a restart or in a day");
             } else {
-                tracing::warn!(socket = %at, code = ?ran.code, error = ?error, "mysql failed; the server is reported unreachable");
+                tracing::warn!(socket = %at, code = ?ran.code, error = ?error, %stderr, "mysql failed; the server is reported unreachable");
             }
             return (Some(unreachable), false);
         }
@@ -559,6 +665,33 @@ async fn scan_mysql(
             .collect(),
     };
     (Some(server), reply.truncated)
+}
+
+/// A refused login. libpq prints no SQLSTATE for a failed connection, so
+/// this matches the English server messages; a server with translated
+/// messages is asked again every run.
+fn pg_login_refused(stderr: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(stderr);
+    [
+        "authentication failed",
+        "no pg_hba.conf entry",
+        "no password supplied",
+    ]
+    .iter()
+    .any(|m| text.contains(m))
+        || text
+            .split("role \"")
+            .skip(1)
+            .any(|rest| rest.contains("\" does not exist"))
+}
+
+/// A bounded and escaped piece of a client's stderr for the agent log: the
+/// text comes from the database server and may hold terminal escapes.
+fn stderr_excerpt(stderr: &[u8]) -> String {
+    format!(
+        "{:?}",
+        String::from_utf8_lossy(&stderr[..stderr.len().min(MAX_EXCERPT_BYTES)])
+    )
 }
 
 /// The code of a client error line such as `ERROR 1193 (HY000) at line 1:
@@ -798,7 +931,6 @@ for x in "$f/$name.$key.code" "$f/$name.code"; do [ -f "$x" ] && exit "$(cat "$x
 exit 0
 "#;
 
-    #[allow(dead_code)]
     pub(super) struct Call {
         pub argv: Vec<String>,
         pub uid: u32,
@@ -880,7 +1012,7 @@ exit 0
                 tmp,
                 fake,
                 config,
-                memo: ProbeMemo::new(),
+                memo: ProbeMemo::new(AUTH_RETRY_AFTER),
                 listeners: Vec::new(),
             }
         }
@@ -1497,5 +1629,497 @@ exit 0
         let late = parse_psql(&psql_out(&[d, s])).expect("the server row may come last");
         assert_eq!(late.databases, vec![db("app", 16384)]);
         assert_eq!(late.system_id.to_string(), SYSID);
+    }
+
+    fn alive(pid: i32) -> bool {
+        let Some(pid) = Pid::from_raw(pid) else {
+            return false;
+        };
+        if rustix::process::test_kill_process(pid).is_err() {
+            return false;
+        }
+        let stat = std::fs::read_to_string(format!("/proc/{}/stat", pid.as_raw_nonzero()));
+        !stat.is_ok_and(|s| s.rsplit(") ").next().is_some_and(|r| r.starts_with('Z')))
+    }
+
+    fn group_alive(pgid: i32) -> bool {
+        Pid::from_raw(pgid).is_some_and(|pgid| {
+            !matches!(
+                rustix::process::test_kill_process_group(pgid),
+                Err(rustix::io::Errno::SRCH)
+            )
+        })
+    }
+
+    async fn gone(what: &str, alive: impl Fn() -> bool) {
+        for _ in 0..40 {
+            if !alive() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("{what} is still running");
+    }
+
+    fn pids(path: &Path) -> Vec<i32> {
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        text.lines().map(|l| l.trim().parse().unwrap()).collect()
+    }
+
+    const HANG: &[u8] = b"echo $$ >> \"$f/pids\"\nsleep 30 &\necho $! >> \"$f/kids\"\nwait\n";
+
+    #[tokio::test]
+    async fn hung_client_kills_the_process_group() {
+        let (mut host, _dir) = one_cluster();
+        host.mysql_socket("mysqld.sock");
+        host.set("psql", "", "sh", HANG);
+        host.set("mysql", "", "sh", HANG);
+        host.config.command_timeout = Duration::from_millis(300);
+        let started = std::time::Instant::now();
+        let (servers, _) = host.scan().await;
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(servers.len(), 2);
+        assert!(
+            servers
+                .iter()
+                .all(|s| s.unreachable && s.databases.is_empty())
+        );
+        let kids = pids(&host.fake.join("kids"));
+        assert_eq!(kids.len(), 2, "both fakes started their child");
+        for pid in kids.into_iter().chain(pids(&host.fake.join("pids"))) {
+            gone("a client or its child", || alive(pid)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn dropped_run_kills_the_process_group() {
+        let (host, dir) = one_cluster();
+        host.set("psql", "", "sh", HANG);
+        let args = [
+            OsStr::new("-h"),
+            dir.as_os_str(),
+            OsStr::new("-p"),
+            OsStr::new("1"),
+        ];
+        let mut call = Box::pin(run(
+            &host.config.psql,
+            &args,
+            Duration::from_secs(30),
+            &[],
+            None,
+        ));
+        let kids = host.fake.join("kids");
+        let started = async {
+            while !kids.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        tokio::select! {
+            _ = &mut call => panic!("the hung client returned"),
+            _ = started => {}
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        drop(call);
+        for pid in pids(&kids).into_iter().chain(pids(&host.fake.join("pids"))) {
+            gone("a client or its child", || alive(pid)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn many_hung_sockets_stay_within_budget() {
+        let mut host = Host::new();
+        let dir = host.pg_dir("pg");
+        for port in 5500..5520 {
+            host.cluster(&dir, port, None);
+        }
+        host.set(
+            "psql",
+            "",
+            "sh",
+            b"trap 'rm -f \"$f/run.$$\"; exit 143' TERM\n\
+              touch \"$f/run.$$\"\n\
+              ls \"$f\" | grep -c '^run\\.' >> \"$f/counts\"\n\
+              echo $$ >> \"$f/pids\"\n\
+              sleep 30 &\n\
+              wait\n",
+        );
+        let pve = host.root().join("pve");
+        std::fs::create_dir(&pve).unwrap();
+        std::fs::write(pve.join(".members"), r#"{"nodename":"pve1","version":3}"#).unwrap();
+        std::fs::write(pve.join(".vmlist"), r#"{"version":7,"ids":{}}"#).unwrap();
+        host.config.pve_root = pve;
+        host.config.db_deadline = Duration::from_secs(1);
+        host.config.command_timeout = Duration::from_millis(900);
+        let started = std::time::Instant::now();
+        let facts = collect(&host.config, &host.paths(), &host.memo)
+            .await
+            .unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(1600),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(
+            host.calls("psql").len() < MAX_SERVERS,
+            "late candidates are not asked"
+        );
+        assert_eq!(facts.proxmox.unwrap().node, "pve1");
+        assert!(facts.truncated);
+        assert!(facts.databases.len() <= MAX_SERVERS);
+        assert!(facts.databases.iter().all(|s| s.unreachable));
+        let counts = pids(&host.fake.join("counts"));
+        assert!(!counts.is_empty());
+        assert!(
+            counts.iter().all(|&n| n as usize <= MAX_PARALLEL_COMMANDS),
+            "{counts:?}"
+        );
+        for pgid in pids(&host.fake.join("pids")) {
+            gone("a client group", || group_alive(pgid)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn auth_denial_is_not_retried_every_poll() {
+        let mut host = Host::new();
+        let socket = host.mysql_socket("mysqld.sock");
+        host.set("mysql", "", "code", b"1");
+        host.set(
+            "mysql",
+            "",
+            "err",
+            b"ERROR 1698 (28000): Access denied for user 'root'@'localhost'\n",
+        );
+        let dir = host.pg_dir("pg");
+        let data = host.root().join("data");
+        std::fs::create_dir(&data).unwrap();
+        std::fs::write(data.join("PG_VERSION"), "16\n").unwrap();
+        host.cluster(&dir, 5432, Some(&data));
+        host.set("psql", "", "code", b"2");
+        host.set(
+            "psql",
+            "",
+            "err",
+            b"WARNING: password file \"/dev/null\" is not a plain file\n\
+              psql: error: connection to server on socket \"/run/postgresql/.s.PGSQL.5432\" failed: \
+              FATAL:  Peer authentication failed for user \"postgres\"\n",
+        );
+        let pg = DatabaseServer {
+            kind: DatabaseKind::Postgres as i32,
+            port: 5432,
+            version: "16".into(),
+            unreachable: true,
+            ..DatabaseServer::default()
+        };
+        let expected = (vec![pg, unreachable_mysql()], false);
+        let calls = |host: &Host| (host.calls("psql").len(), host.calls("mysql").len());
+        assert_eq!(host.scan().await, expected);
+        assert_eq!(host.scan().await, expected);
+        assert_eq!(calls(&host), (1, 1));
+
+        let inode = |path: &Path| std::fs::symlink_metadata(path).unwrap().ino();
+        let before = inode(&socket);
+        std::fs::remove_file(&socket).unwrap();
+        host.bind(&socket);
+        assert_ne!(inode(&socket), before);
+        let pg_socket = dir.join(".s.PGSQL.5432");
+        let before = inode(&pg_socket);
+        std::fs::remove_file(&pg_socket).unwrap();
+        host.bind(&pg_socket);
+        assert_ne!(inode(&pg_socket), before);
+        assert_eq!(host.scan().await, expected);
+        assert_eq!(calls(&host), (2, 2));
+
+        host.memo = ProbeMemo::new(Duration::ZERO);
+        host.scan().await;
+        host.scan().await;
+        assert_eq!(calls(&host), (4, 4));
+
+        for refused in [
+            "FATAL:  role \"postgres\" does not exist",
+            "FATAL:  no pg_hba.conf entry for host \"[local]\", user \"postgres\"",
+            "fe_sendauth: no password supplied",
+            "FATAL:  password authentication failed for user \"postgres\"",
+        ] {
+            assert!(pg_login_refused(refused.as_bytes()), "{refused}");
+        }
+        assert!(!pg_login_refused(
+            b"FATAL:  the database system is starting up"
+        ));
+        assert!(!pg_login_refused(
+            b"FATAL:  database \"postgres\" does not exist"
+        ));
+    }
+
+    #[tokio::test]
+    async fn oversized_output_is_cut() {
+        let (mut host, _dir) = one_cluster();
+        host.set("psql", "", "sh", b"head -c 8388608 /dev/zero\nexit 0\n");
+        host.mysql_socket("mysqld.sock");
+        host.set(
+            "mysql",
+            "",
+            "sh",
+            b"head -c 1048576 /dev/zero | tr '\\000' x >&2\nsleep 30\n",
+        );
+        let started = std::time::Instant::now();
+        let (servers, _) = host.scan().await;
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(servers.len(), 2, "a MySQL error is not MariaDB");
+        assert!(
+            servers
+                .iter()
+                .all(|s| s.unreachable && s.databases.is_empty())
+        );
+    }
+
+    #[test]
+    fn stderr_excerpt_is_short_and_escaped() {
+        let mut stderr = b"\x1b[31mERROR\x1b[0m\nline two\r\n".repeat(4096);
+        stderr.truncate(64 << 10);
+        let excerpt = stderr_excerpt(&stderr);
+        assert!(!excerpt.contains('\x1b') && !excerpt.contains('\n') && !excerpt.contains('\r'));
+        let expected = format!(
+            "{:?}",
+            String::from_utf8_lossy(&stderr[..MAX_EXCERPT_BYTES])
+        );
+        assert_eq!(excerpt, expected);
+        assert!(excerpt.contains("\\u{1b}[31m"));
+        assert_eq!(stderr_excerpt(b"short"), "\"short\"");
+    }
+
+    #[tokio::test]
+    async fn hostile_names_never_reach_a_command() {
+        let (mut host, dir) = one_cluster();
+        let hostile: [&[u8]; 5] = [b"$(touch CANARY)", b"a;b", b"`id`", b"x\ny", b"--help"];
+        let mut rows = vec![[b"s".as_slice(), SYSID.as_bytes(), b"16"]];
+        let oids: Vec<String> = (0..hostile.len())
+            .map(|i| (16384 + i).to_string())
+            .collect();
+        rows.extend(
+            hostile
+                .iter()
+                .zip(&oids)
+                .map(|(name, oid)| [b"d".as_slice(), oid.as_bytes(), name]),
+        );
+        host.set("psql", "", "out", &psql_out(&rows));
+        let socket = host.mysql_socket("mysqld.sock");
+        let reply = format!("s\t{UUID}\t3306\t8.4.2\nd\t$(touch CANARY2)\nd\tline\\nbreak\n");
+        host.set("mysql", "", "out", reply.as_bytes());
+        for _ in 0..2 {
+            let facts = collect(&host.config, &host.paths(), &host.memo)
+                .await
+                .unwrap();
+            let pg: Vec<&[u8]> = facts.databases[0]
+                .databases
+                .iter()
+                .map(|d| d.name.as_bytes())
+                .collect();
+            assert_eq!(pg, hostile);
+            assert_eq!(
+                names(&facts.databases[1]),
+                ["$(touch CANARY2)", "line\nbreak"]
+            );
+        }
+        for canary in ["CANARY", "CANARY2"] {
+            for base in [Path::new("/"), host.root(), &host.fake] {
+                assert!(
+                    !base.join(canary).exists(),
+                    "{canary} in {}",
+                    base.display()
+                );
+            }
+        }
+        let (psql, mysql) = (host.calls("psql"), host.calls("mysql"));
+        assert_eq!((psql.len(), mysql.len()), (2, 2));
+        assert!(psql.iter().all(|c| c.argv == pg_argv(&dir, 5432)));
+        assert!(mysql.iter().all(|c| c.argv == mysql_argv(&socket)));
+    }
+
+    #[tokio::test]
+    async fn commands_run_with_a_clean_environment() {
+        // SAFETY: nextest runs each test in its own process, and nothing else
+        // in this one reads the environment while it is changed.
+        unsafe {
+            std::env::set_var("PGPASSWORD", "leak");
+            std::env::set_var("MYSQL_PWD", "leak");
+            std::env::set_var("HOME", "/tmp/x");
+        }
+        let (mut host, _dir) = one_cluster();
+        host.mysql_socket("mysqld.sock");
+        let reply = format!("s\t{UUID}\t3306\t8.4.2\n");
+        host.set("mysql", "", "out", reply.as_bytes());
+        let (servers, _) = host.scan().await;
+        assert_eq!(servers.len(), 2);
+        let shell = ["PWD", "SHLVL", "_", "OLDPWD"];
+        let env = |call: &Call| {
+            let mut env: Vec<String> = call
+                .env
+                .iter()
+                .filter(|v| !shell.iter().any(|s| v.starts_with(&format!("{s}="))))
+                .cloned()
+                .collect();
+            env.sort();
+            env
+        };
+        let path = format!("PATH={COMMAND_PATH}");
+        let psql = &host.calls("psql")[0];
+        assert_eq!(
+            env(psql),
+            [
+                "LC_ALL=C",
+                &path,
+                "PGCLIENTENCODING=UTF8",
+                "PGOPTIONS=-c search_path=pg_catalog",
+                "PGPASSFILE=/dev/null",
+            ]
+        );
+        let mysql = &host.calls("mysql")[0];
+        assert_eq!(env(mysql), ["LC_ALL=C", &path]);
+        for call in [psql, mysql] {
+            assert!(
+                !call
+                    .env
+                    .iter()
+                    .any(|v| v.contains("leak") || v.starts_with("HOME="))
+            );
+            assert!(
+                !call
+                    .env
+                    .iter()
+                    .any(|v| v.starts_with("USER=") || v.starts_with("SHELL="))
+            );
+            assert_eq!(call.pwd, "/");
+            assert!(call.stdin.is_empty());
+        }
+    }
+
+    /// Runs `sql` with the real `psql` as the `postgres` account.
+    fn psql_as_postgres(sql: &str) -> String {
+        use std::os::unix::process::CommandExt;
+        let (uid, gid) = account("postgres").expect("a postgres account");
+        let out = std::process::Command::new("/usr/bin/psql")
+            .args([
+                "-X",
+                "-A",
+                "-t",
+                "-h",
+                "/run/postgresql",
+                "-d",
+                "postgres",
+                "-c",
+                sql,
+            ])
+            .env_clear()
+            .env("PATH", COMMAND_PATH)
+            .current_dir("/")
+            .uid(uid)
+            .gid(gid)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{sql}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    }
+
+    struct DropDatabase(&'static str);
+
+    impl Drop for DropDatabase {
+        fn drop(&mut self) {
+            psql_as_postgres(&format!("DROP DATABASE IF EXISTS \"{}\"", self.0));
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "needs root and real database servers: run with scripts/test-linux.sh --root on the test machine"]
+    async fn real_db_servers_on_the_test_machine() {
+        assert!(is_root(), "the clients run as the database accounts");
+        let mysql_version = std::process::Command::new("/usr/bin/mysql")
+            .arg("--version")
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
+        assert!(
+            Path::new("/usr/bin/psql").exists() && mysql_version.is_some(),
+            "install the servers first: apt-get install postgresql mysql-server (or mariadb-server for the MariaDB run)"
+        );
+        let mariadb = mysql_version.unwrap().contains("MariaDB");
+
+        let name = "база_тест";
+        psql_as_postgres(&format!("DROP DATABASE IF EXISTS \"{name}\""));
+        psql_as_postgres(&format!("CREATE DATABASE \"{name}\""));
+        let _drop = DropDatabase(name);
+        let data_dir = psql_as_postgres("SHOW data_directory");
+        let controldata = std::fs::read_dir("/usr/lib/postgresql")
+            .unwrap()
+            .map(|e| e.unwrap().path().join("bin/pg_controldata"))
+            .find(|p| p.exists())
+            .expect("pg_controldata");
+        let out = std::process::Command::new(controldata)
+            .arg(&data_dir)
+            .output()
+            .unwrap();
+        let system_id = String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .find_map(|l| {
+                l.strip_prefix("Database system identifier:")
+                    .map(|v| v.trim().to_owned())
+            })
+            .expect("the system identifier");
+
+        let config = Config::system();
+        let (servers, truncated) = scan_databases(&config, &ProbeMemo::new(AUTH_RETRY_AFTER)).await;
+        eprintln!("servers: {servers:#?}\ntruncated: {truncated}");
+        let pg: Vec<_> = servers
+            .iter()
+            .filter(|s| s.kind == DatabaseKind::Postgres as i32)
+            .collect();
+        assert_eq!(pg.len(), 1);
+        assert!(!pg[0].unreachable, "peer auth as postgres");
+        assert_eq!(pg[0].server_id, system_id);
+        assert!(pg[0].databases.iter().any(|d| d.name == name && d.oid > 0));
+        let mysql: Vec<_> = servers
+            .iter()
+            .filter(|s| s.kind == DatabaseKind::Mysql as i32)
+            .collect();
+        if mariadb {
+            assert!(mysql.is_empty(), "MariaDB is not reported");
+        } else {
+            assert_eq!(mysql.len(), 1);
+            assert!(!mysql[0].unreachable);
+            assert_eq!(
+                mysql_server_id(&mysql[0].server_id).as_deref(),
+                Some(mysql[0].server_id.as_str())
+            );
+            assert!(mysql[0].databases.iter().any(|d| d.name == "mysql"));
+        }
+
+        // A real refusal: the cluster's socket asked by an account without a role.
+        let real = find(&config)
+            .postgres
+            .into_iter()
+            .next()
+            .expect("the cluster");
+        let memo = ProbeMemo::new(AUTH_RETRY_AFTER);
+        let nobody = account("nobody").expect("a nobody account");
+        let (server, _) =
+            scan_postgres(&config, &memo, &real, nobody, Duration::from_secs(10)).await;
+        eprintln!("as nobody: {server:#?}");
+        assert!(server.unreachable && server.databases.is_empty());
+        assert!(
+            memo.denied_recently(real.inode),
+            "the refusal is recognised"
+        );
     }
 }
