@@ -30,13 +30,11 @@ export function SourceTypeCards({
 	onChange,
 	availability,
 	state,
-	notice,
 }: {
 	value: SourceType;
 	onChange: (type: SourceType) => void;
 	availability?: SourceAvailability[];
 	state: SourceTypeState;
-	notice?: string;
 }) {
 	const text = copy.policies.form.source;
 	const found = new Map((availability ?? []).map((a) => [a.source_type, a]));
@@ -89,7 +87,6 @@ export function SourceTypeCards({
 					})}
 				</RadioGroup.Root>
 			)}
-			{notice && <p className="text-sm text-muted-foreground">{notice}</p>}
 		</FieldSet>
 	);
 }

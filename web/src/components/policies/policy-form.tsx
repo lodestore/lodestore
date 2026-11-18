@@ -7,6 +7,7 @@ import type {
 	RepositorySummary,
 	Retention,
 	ScheduleInfo,
+	Selector,
 	Source,
 	SourceAvailability,
 } from "@/api/gen/model";
@@ -19,6 +20,7 @@ import {
 import { LimitsPanel } from "@/components/policies/limits-panel";
 import { RetentionPanel } from "@/components/policies/retention-panel";
 import { SchedulePanel } from "@/components/policies/schedule-panel";
+import { SourcePicker } from "@/components/policies/source-picker";
 import {
 	SourceTypeCards,
 	type SourceTypeState,
@@ -365,6 +367,16 @@ function limitsFromDraft(draft: LimitsDraft): BackupPolicy["spec"]["limits"] {
 	return Object.keys(limits).length > 0 ? limits : undefined;
 }
 
+export function selectorFromDraft(draft: PolicyDraft): Selector {
+	return draft.hostMode === "list"
+		? { matchLabels: {}, hosts: draft.hosts }
+		: {
+				matchLabels: Object.fromEntries(
+					draft.labels.filter((l) => l.key !== "").map((l) => [l.key, l.value]),
+				),
+			};
+}
+
 export function policyFromDraft(draft: PolicyDraft): BackupPolicy {
 	const source = sourceFromDraft(draft.source);
 	const files = source === undefined;
@@ -374,16 +386,7 @@ export function policyFromDraft(draft: PolicyDraft): BackupPolicy {
 		metadata: { name: draft.name.trim() },
 		spec: {
 			repository: draft.repository,
-			selector:
-				draft.hostMode === "list"
-					? { matchLabels: {}, hosts: draft.hosts }
-					: {
-							matchLabels: Object.fromEntries(
-								draft.labels
-									.filter((l) => l.key !== "")
-									.map((l) => [l.key, l.value]),
-							),
-						},
+			selector: selectorFromDraft(draft),
 			...(source && { source }),
 			paths: files ? draft.paths : [],
 			exclude: files ? lines(draft.exclude) : [],
@@ -1048,12 +1051,31 @@ export function PolicyForm({
 					onChange={(type) => set({ source: { ...draft.source, type } })}
 					availability={availability}
 					state={sourceState}
-					notice={
-						nothingPicked && pickNoun
-							? form.source.pickAtLeastOne(pickNoun)
-							: undefined
-					}
 				/>
+
+				{pickNoun && (
+					<SourcePicker
+						value={draft.source}
+						onChange={(source) => set({ source })}
+						noun={pickNoun}
+						repository={draft.repository}
+						selector={selectorFromDraft(draft)}
+						hostsSelected={
+							draft.hostMode === "list"
+								? draft.hosts.length > 0
+								: draft.labels.some((l) => l.key !== "")
+						}
+						error={
+							[...problems]
+								.filter(([path]) => path.startsWith("spec.source."))
+								.map(([, message]) => message)
+								.join(" ") || undefined
+						}
+						notice={
+							nothingPicked ? form.source.pickAtLeastOne(pickNoun) : undefined
+						}
+					/>
+				)}
 
 				{isFiles && (
 					<>
