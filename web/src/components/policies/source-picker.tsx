@@ -407,11 +407,14 @@ function PickTable({
 		.filter((key) => !known.has(key))
 		.map((key) => ({ key, label: missingLabel(key) }));
 	const needle = search.trim().toLowerCase();
-	const all = [...missing, ...rows];
-	const filtered = all.filter(
-		(r) => needle === "" || r.label.toLowerCase().includes(needle),
-	);
-	const shown = filtered.slice(0, PAGE * pages);
+	const matches = (r: Row) =>
+		needle === "" || r.label.toLowerCase().includes(needle);
+	const lost = missing.filter(matches);
+	const found = rows.filter(matches);
+	const filtered = [...lost, ...found];
+	// Picked rows that are not found stay on top and outside the found counts.
+	const shownFound = found.slice(0, PAGE * pages);
+	const shown = [...lost, ...shownFound];
 	const picked = new Set(selected);
 	const onCount = filtered.filter((r) => picked.has(r.key)).length;
 	const header =
@@ -523,7 +526,7 @@ function PickTable({
 					</Table>
 				</div>
 			)}
-			{shown.length < filtered.length && (
+			{shownFound.length < found.length && (
 				<div className="flex flex-wrap items-center gap-2">
 					<Button
 						type="button"
@@ -531,14 +534,14 @@ function PickTable({
 						size="sm"
 						className="self-start"
 						onClick={() => {
-							setFocusKey(filtered[shown.length].key);
+							setFocusKey(found[shownFound.length].key);
 							setPages(pages + 1);
 						}}
 					>
 						{text.showMore(PAGE)}
 					</Button>
 					<span className="text-sm text-muted-foreground">
-						{text.showing(shown.length, filtered.length, plural)}
+						{text.showing(shownFound.length, found.length, plural)}
 					</span>
 				</div>
 			)}

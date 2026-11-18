@@ -381,6 +381,20 @@ describe("Source picker", () => {
 		).not.toBeInTheDocument();
 	});
 
+	it("counts only found guests while a missing pick stays on top", async () => {
+		mockValidate({ type: "proxmox-vm", vmids: [150] });
+		mockOptions({ ...empty, guests: manyGuests(38) });
+		const user = await openForm(/Virtual machines/);
+		await loadYaml(user);
+
+		await screen.findByRole("checkbox", { name: "VM 150" });
+		expect(
+			screen.getByRole("searchbox", { name: "Search 38 virtual machines" }),
+		).toBeVisible();
+		expect(screen.getAllByRole("row")).toHaveLength(27);
+		expect(screen.getByText("Showing 25 of 38 guests")).toBeVisible();
+	});
+
 	it("leaves a selection that combines modes to the YAML tab", async () => {
 		mockValidate({ type: "proxmox-vm", vmids: [101], pool: "prod" });
 		mockOptions({ ...empty, guests: [guest(101, "web-01")] });
