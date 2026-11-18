@@ -243,7 +243,8 @@ export function SnapshotsTable({ host }: { host: HostDetail }) {
 
 	const counts = data?.source_counts ?? [];
 	const several = counts.length > 1;
-	const showFiles = several ? FROM_1040 : FROM_920;
+	const labelled = counts.some((c) => c.source_type !== "files");
+	const showFiles = labelled ? FROM_1040 : FROM_920;
 
 	function selectType(next: SourceType | undefined) {
 		setPage(1);
@@ -366,7 +367,9 @@ export function SnapshotsTable({ host }: { host: HostDetail }) {
 								<TableHead className={cn(PAD, FROM_680)}>
 									{copy.snapshots.columns.snapshot}
 								</TableHead>
-								<TableHead className={cn(PAD, SOURCE_FLEX)}>
+								<TableHead
+									className={cn(PAD, labelled ? FROM_680 : SOURCE_FLEX)}
+								>
 									{copy.snapshots.columns.source}
 								</TableHead>
 								<TableHead className={cn("px-4", FROM_920)}>
@@ -398,6 +401,18 @@ export function SnapshotsTable({ host }: { host: HostDetail }) {
 									<TableRow key={snapshot.id} className="h-12">
 										<TableCell className={cn("text-sm", PAD)}>
 											<RelativeTime value={new Date(snapshot.time)} />
+											{labelled && (
+												<span className="mt-1 flex max-w-44 items-center gap-2 font-semibold @min-[680px]:hidden">
+													<TypeIcon type={snapshot.source_type} />
+													<Truncated
+														text={
+															snapshot.source_label ??
+															sourceTypeLabel(snapshot.source_type)
+														}
+														className="min-w-0"
+													/>
+												</span>
+											)}
 										</TableCell>
 										<TableCell
 											className={cn("font-mono text-sm", PAD, FROM_680)}
@@ -406,15 +421,19 @@ export function SnapshotsTable({ host }: { host: HostDetail }) {
 											{snapshot.id.slice(0, SHORT_ID)}
 										</TableCell>
 										<TableCell
-											className={cn("text-sm font-semibold", PAD, SOURCE_FLEX)}
+											className={cn(
+												"text-sm font-semibold",
+												PAD,
+												labelled ? FROM_680 : SOURCE_FLEX,
+											)}
 										>
 											<div
 												className={cn(
 													"flex flex-col items-start py-1",
-													several ? cn("gap-0", SOURCE_CAP_MIXED) : "gap-1",
+													labelled ? cn("gap-0", SOURCE_CAP_MIXED) : "gap-1",
 												)}
 											>
-												{several && (
+												{labelled && (
 													<span className="flex max-w-full items-center gap-2">
 														<TypeIcon type={snapshot.source_type} />
 														<Truncated
@@ -429,7 +448,7 @@ export function SnapshotsTable({ host }: { host: HostDetail }) {
 												<Truncated
 													text={source(snapshot)}
 													className={
-														several
+														labelled
 															? "max-w-full font-normal text-muted-foreground"
 															: SOURCE_CAP
 													}
