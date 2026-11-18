@@ -7,7 +7,10 @@ import {
 	ShieldAlert,
 } from "lucide-react";
 import type { JobKind, JobSummary } from "@/api/gen/model";
-import { restoreFailureText } from "@/components/jobs/job-cards";
+import {
+	backupFailureCopy,
+	restoreFailureText,
+} from "@/components/jobs/job-cards";
 import { TextWithPaths } from "@/components/path-text";
 import { formatRelative } from "@/components/relative-time";
 import { StatusBadge } from "@/components/status-badge";
@@ -507,7 +510,9 @@ export function JobResult({ job }: { job: JobRow }) {
 			);
 		case "failed": {
 			const reason =
-				job.error_message?.split("\n")[0].trim() || copy.jobs.statusHint.failed;
+				backupFailureCopy(job) ??
+				(job.error_message?.split("\n")[0].trim() ||
+					copy.jobs.statusHint.failed);
 			return <Truncated text={reason} className="max-w-64 text-sm" />;
 		}
 		default:

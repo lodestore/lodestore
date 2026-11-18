@@ -604,7 +604,7 @@ describe("Job page result", () => {
 		);
 	});
 
-	it("falls back to the server message when the source type is missing", async () => {
+	it("names no source type when the job does not say which", async () => {
 		mockJob(
 			makeDetail({
 				state: "failed",
@@ -617,7 +617,7 @@ describe("Job page result", () => {
 		await openJob();
 
 		expect(await screen.findByRole("alert")).toHaveTextContent(
-			"The backup failed. nothing selected. Check the log, then run again.",
+			"The backup did not start. Nothing the policy selects was found on web-1. Check what the policy backs up, then run again.",
 		);
 	});
 

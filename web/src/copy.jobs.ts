@@ -368,6 +368,10 @@ export const jobs = {
 			`The backup did not start. The agent on ${host} is too old to back up ${noun}. Update the agent on ${host}, then run again.`,
 		source_not_found: (host: string, noun: string) =>
 			`The backup did not start. No ${noun} were found on ${host}, or the policy selects none of them. Check what the policy backs up, then run again.`,
+		source_agent_outdated_any: (host: string) =>
+			`The backup did not start. The agent on ${host} is too old to back up this source. Update the agent on ${host}, then run again.`,
+		source_not_found_any: (host: string) =>
+			`The backup did not start. Nothing the policy selects was found on ${host}. Check what the policy backs up, then run again.`,
 		interrupted:
 			"The agent stopped while this job ran. Run it again; data already uploaded is not sent twice.",
 		restoreFailed: (message: string) =>

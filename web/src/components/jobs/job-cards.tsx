@@ -425,8 +425,13 @@ export function restoreFailureText(
 		.replace(/\s{2,}/g, " ");
 }
 
-export function failureText(job: JobDetail) {
-	if (job.kind === "restore") return restoreFailureText(job);
+/** Friendly text for a backup error code, or null when the code is unknown
+ * or its details are missing. The jobs list has no `error_detail`. */
+export function backupFailureCopy(
+	job: Pick<JobDetail, "hostname" | "error_code"> & {
+		error_detail?: JobDetail["error_detail"];
+	},
+): string | null {
 	const host = job.hostname;
 	const detail = job.error_detail ?? {};
 	const e = copy.jobs.errors;
@@ -452,13 +457,15 @@ export function failureText(job: JobDetail) {
 			return e.gc_agent_outdated(host);
 		case "source_agent_outdated": {
 			const noun = sourceTypeNoun(detail.source_type ?? "");
-			if (noun) return e.source_agent_outdated(host, noun);
-			break;
+			return noun
+				? e.source_agent_outdated(host, noun)
+				: e.source_agent_outdated_any(host);
 		}
 		case "source_not_found": {
 			const noun = sourceTypeNoun(detail.source_type ?? "");
-			if (noun) return e.source_not_found(host, noun);
-			break;
+			return noun
+				? e.source_not_found(host, noun)
+				: e.source_not_found_any(host);
 		}
 		case "hook_timeout":
 			if (has("script", "timeout")) {
@@ -466,7 +473,17 @@ export function failureText(job: JobDetail) {
 			}
 			break;
 	}
-	return e.failed(job.error_message?.trim() ?? "").replace(/\s{2,}/g, " ");
+	return null;
+}
+
+export function failureText(job: JobDetail) {
+	if (job.kind === "restore") return restoreFailureText(job);
+	return (
+		backupFailureCopy(job) ??
+		copy.jobs.errors
+			.failed(job.error_message?.trim() ?? "")
+			.replace(/\s{2,}/g, " ")
+	);
 }
 
 function outcomeText(job: JobDetail) {
