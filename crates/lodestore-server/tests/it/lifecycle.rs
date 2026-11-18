@@ -274,6 +274,90 @@ impl std::io::Write for LogBuffer {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lifecycle_agent_reports_sources() {
+    for backend in backends() {
+        reports_sources_case(&backend).await;
+    }
+}
+
+async fn reports_sources_case(backend: &Backend) {
+    let ts = TestServer::start(backend).await;
+    let api = ts.api().await;
+    let repo = ts.create_local_repository("main").await;
+    let (id, paths) = enroll_only(&ts, &api, &repo, "pve", json!([])).await;
+    let pve = paths.state_dir.parent().unwrap().join("pve");
+    let uuid = "0B6F1A2C-3D4E-4F50-8172-93A4B5C6D7E8";
+    std::fs::create_dir_all(pve.join("nodes/pve1/qemu-server")).unwrap();
+    std::fs::write(pve.join(".members"), r#"{"nodename":"pve1","version":2}"#).unwrap();
+    std::fs::write(
+        pve.join(".vmlist"),
+        r#"{"version":1,"ids":{"101":{"node":"pve1","type":"qemu","version":1}}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        pve.join("nodes/pve1/qemu-server/101.conf"),
+        format!("name: web-01\nsmbios1: uuid={uuid}\n"),
+    )
+    .unwrap();
+
+    let shutdown = CancellationToken::new();
+    let task = tokio::spawn(lodestore_agent::run_with(
+        RunArgs {
+            paths: paths.clone(),
+            net: NetOptions::default(),
+            heartbeat: Duration::from_secs(1),
+            shutdown: shutdown.clone(),
+        },
+        lodestore_agent::update::UpdateRuntime::detect(),
+        lodestore_agent::discovery::Config::proxmox_only(pve),
+    ));
+    let pool = &ts.state().db.pool;
+    let collected = wait_until(Duration::from_secs(30), || async {
+        sqlx::query("SELECT sources_collected_at FROM agents WHERE id = $1")
+            .bind(&id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+            .try_get::<Option<i64>, _>("sources_collected_at")
+            .unwrap()
+            .is_some()
+    })
+    .await;
+    assert!(
+        collected,
+        "[{}] the server never recorded the sources",
+        backend.name()
+    );
+    let refs: Vec<String> = sqlx::query(
+        "SELECT source_ref FROM discovered_sources WHERE host_id = $1 ORDER BY source_ref",
+    )
+    .bind(&id)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+    .iter()
+    .map(|row| row.try_get("source_ref").unwrap())
+    .collect();
+    assert_eq!(
+        refs,
+        [format!("proxmox-vm/pve1/{}", uuid.to_ascii_lowercase())],
+        "[{}]",
+        backend.name()
+    );
+    let capabilities: String = sqlx::query("SELECT capabilities_json FROM agents WHERE id = $1")
+        .bind(&id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+        .try_get("capabilities_json")
+        .unwrap();
+    assert!(capabilities.contains("\"source:files\""), "{capabilities}");
+
+    shutdown.cancel();
+    let _ = task.await;
+}
+
 async fn cert_serial(ts: &TestServer, id: &str) -> String {
     sqlx::query("SELECT cert_serial FROM agents WHERE id = $1")
         .bind(id)

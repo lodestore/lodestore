@@ -76,6 +76,9 @@ impl Paths {
     pub fn update_dir(&self) -> PathBuf {
         self.state_dir.join("update")
     }
+    pub fn source_ids(&self) -> PathBuf {
+        self.state_dir.join("source-ids.json")
+    }
 }
 
 pub fn ensure_dir(dir: &Path) -> std::io::Result<()> {

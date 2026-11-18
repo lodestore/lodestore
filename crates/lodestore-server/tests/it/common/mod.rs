@@ -519,6 +519,7 @@ impl AgentEnv {
                 shutdown: shutdown.clone(),
             },
             runtime,
+            lodestore_agent::discovery::Config::system(),
         ));
         self.agent = Some((shutdown, handle));
         let (api, host) = (&self.api, &self.host);
