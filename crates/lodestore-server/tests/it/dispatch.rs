@@ -2572,3 +2572,88 @@ async fn dispatch_refuses_a_source_the_agent_does_not_back_up() {
         ts.stop().await;
     }
 }
+
+const VM_CAPABILITY: &str = "source:proxmox-vm";
+const STALE_MS: u64 = 16 * 60 * 1000;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dispatch_refuses_a_source_missing_on_the_host() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let cases = [
+            (
+                "no-proxmox",
+                SourceFacts {
+                    age_ms: 1000,
+                    ..Default::default()
+                },
+            ),
+            ("no-guest", vm_facts(1000, false, &[102])),
+        ];
+        for (name, facts) in cases {
+            let host = enroll(&ts, &api, &repo, name).await;
+            seed_source_policy(&ts, &repo, name, &host, VM_SOURCE).await;
+            seed_facts(&ts, &host, &facts).await;
+            let job = run_now(&api, name).await;
+            let mut agent = Fake::connect_with(&ts, &host, &[VM_CAPABILITY]).await;
+            assert_refused(
+                &ts,
+                &api,
+                &mut agent,
+                &job,
+                "source_not_found",
+                backend.name(),
+            )
+            .await;
+        }
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dispatch_sends_on_stale_or_incomplete_discovery() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let cases = [
+            ("stale", Some(vm_facts(STALE_MS, false, &[102]))),
+            ("truncated", Some(vm_facts(1000, true, &[102]))),
+            ("unknown", None),
+        ];
+        for (name, facts) in cases {
+            let host = enroll(&ts, &api, &repo, name).await;
+            seed_source_policy(&ts, &repo, name, &host, VM_SOURCE).await;
+            if let Some(facts) = &facts {
+                seed_facts(&ts, &host, facts).await;
+            }
+            run_now(&api, name).await;
+            let mut agent = Fake::connect_with(&ts, &host, &[VM_CAPABILITY]).await;
+            let spec = agent.recv(assigned_spec).await;
+            let source = spec.source.unwrap_or_else(|| panic!("[{name}] no source"));
+            assert_eq!(source.r#type, "proxmox-vm", "[{name}]");
+            assert_eq!(source.vmids, [101], "[{name}]");
+            assert!(spec.paths.is_empty(), "[{name}]");
+        }
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dispatch_files_jobs_are_unchanged() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let host = enroll(&ts, &api, &repo, "plain").await;
+        seed_source_policy(&ts, &repo, "etc", &host, "  paths: [/etc]\n").await;
+        run_now(&api, "etc").await;
+        let mut agent = Fake::connect(&ts, &host, vec![]).await;
+        let spec = agent.recv(assigned_spec).await;
+        assert!(spec.source.is_none(), "[{}]", backend.name());
+        assert_eq!(spec.paths, ["/etc"]);
+        ts.stop().await;
+    }
+}

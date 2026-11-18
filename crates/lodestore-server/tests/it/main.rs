@@ -20,6 +20,7 @@ mod adv_restore_scopes;
 mod adv_retention;
 mod adv_retention_flood;
 mod adv_retention_paths;
+mod adv_source_facts;
 mod adv_stdin_flood;
 mod adv_stdin_pool;
 mod agent_update;
