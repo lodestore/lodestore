@@ -139,17 +139,55 @@ async fn execute(command: Command) -> Result<(), AgentError> {
     }
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+
+fn runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+}
+
+/// A blocking thread stuck in a hung FUSE read cannot be stopped; waiting for
+/// it would keep a stopping agent alive until systemd kills it.
+fn finish(runtime: tokio::runtime::Runtime, grace: Duration) {
+    runtime.shutdown_timeout(grace);
+}
+
+fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
     let cli = Cli::parse();
-    match execute(cli.command).await {
+    let runtime = match runtime() {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let result = runtime.block_on(execute(cli.command));
+    finish(runtime, SHUTDOWN_GRACE);
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("{e}");
             ExitCode::from(e.exit_code())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::{finish, runtime};
+
+    #[test]
+    fn runtime_shutdown_does_not_wait_for_a_hung_blocking_task() {
+        let runtime = runtime().unwrap();
+        runtime.spawn_blocking(|| std::thread::sleep(Duration::from_secs(30)));
+        let started = Instant::now();
+        finish(runtime, Duration::from_millis(200));
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 }

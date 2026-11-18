@@ -17,6 +17,7 @@ use tonic::transport::Channel;
 
 use crate::config::AgentSettings;
 use crate::connect::channel;
+use crate::discovery::{self, Discovery};
 use crate::identity::{AgentConfig, Identity, Paths, load_pair, replace_pair, write_json_file};
 use crate::jobs::JobHub;
 use crate::shared_channel::SharedChannel;
@@ -33,12 +34,13 @@ const STABLE_STREAM: Duration = Duration::from_secs(60);
 const RENEW_RETRY: Duration = Duration::from_secs(60);
 const MAX_SKEW_SECS: i64 = 300;
 const JOBS_DRAIN: Duration = Duration::from_secs(30);
-pub const CAPABILITIES: [&str; 5] = [
+pub const CAPABILITIES: [&str; 6] = [
     "restore_v1",
     "limits_v1",
     "gc_v1",
     "restore_roots_v1",
     "shard_limit_v1",
+    "source:files",
 ];
 const CAP_UPDATE: &str = "update_v1";
 
@@ -114,10 +116,14 @@ fn now_ms() -> u64 {
 }
 
 pub async fn run(args: RunArgs) -> Result<(), AgentError> {
-    run_with(args, UpdateRuntime::detect()).await
+    run_with(args, UpdateRuntime::detect(), discovery::Config::system()).await
 }
 
-pub async fn run_with(args: RunArgs, runtime: UpdateRuntime) -> Result<(), AgentError> {
+pub async fn run_with(
+    args: RunArgs,
+    runtime: UpdateRuntime,
+    discovery: discovery::Config,
+) -> Result<(), AgentError> {
     let first = load_identity(&args.paths)?;
     let (paths, started) = (args.paths.clone(), runtime.clone());
     let start = tokio::task::spawn_blocking(move || guard::on_start(&paths, &started, now_ms()))
@@ -137,7 +143,8 @@ pub async fn run_with(args: RunArgs, runtime: UpdateRuntime) -> Result<(), Agent
         AgentSettings::load(&args.paths).socket_path(),
         socket_stop.clone(),
     ));
-    let result = run_sessions(&args, &hub, &runtime).await;
+    let discovery = Discovery::spawn(discovery, args.paths.clone(), args.shutdown.clone());
+    let result = run_sessions(&args, &hub, &runtime, &discovery).await;
     socket_stop.cancel();
     hub.shutdown();
     hub.wait_idle(JOBS_DRAIN).await;
@@ -148,6 +155,7 @@ async fn run_sessions(
     args: &RunArgs,
     hub: &Arc<JobHub>,
     runtime: &UpdateRuntime,
+    discovery: &Discovery,
 ) -> Result<(), AgentError> {
     let config = AgentConfig::load(&args.paths)?.ok_or_else(|| {
         AgentError::NotEnrolled(format!("{} is missing", args.paths.agent_json().display()))
@@ -169,6 +177,7 @@ async fn run_sessions(
             &identity,
             hub,
             runtime,
+            discovery,
             &done_tx,
             &mut done_rx,
         );
@@ -314,12 +323,14 @@ fn spawn_update(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn session_once(
     args: &RunArgs,
     config: &AgentConfig,
     identity: &Identity,
     hub: &Arc<JobHub>,
     runtime: &UpdateRuntime,
+    discovery: &Discovery,
     done_tx: &mpsc::Sender<UpdateDone>,
     done_rx: &mut mpsc::Receiver<UpdateDone>,
 ) -> Result<Outcome, AgentError> {
@@ -412,6 +423,7 @@ async fn session_once(
                 let mut heartbeat = facts.next().await;
                 heartbeat.hook_facts = Some(facts::hook_facts(paths));
                 heartbeat.restore_facts = Some(facts::restore_facts(paths));
+                heartbeat.source_facts = discovery.current();
                 let message = AgentMessage { body: Some(AgentBody::Heartbeat(heartbeat)) };
                 if tx.send(message).await.is_err() {
                     return Ok(Outcome::Closed { lived: started.elapsed() });
