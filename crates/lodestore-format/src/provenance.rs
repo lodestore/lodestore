@@ -280,12 +280,11 @@ fn hosts_of(provenance: &ProvenanceSet, entries: &[&SnapshotEntry]) -> Hosts {
             continue;
         };
         let order = provenance.stored_order(e);
-        let seen = hosts
+        let newest = (order, record.hostname.clone());
+        hosts
             .entry(record.host_id.clone())
-            .or_insert_with(|| (order, record.hostname.clone()));
-        if seen.0 < order {
-            *seen = (order, record.hostname.clone());
-        }
+            .and_modify(|seen| *seen = seen.clone().max(newest.clone()))
+            .or_insert(newest);
     }
     hosts
 }
@@ -527,4 +526,21 @@ pub fn pick_latest_in(
         mode,
         warnings,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::age;
+
+    #[test]
+    fn age_names_each_range() {
+        let now = 1_000_000_000;
+        assert_eq!(age(now, now + 1000), "stored in the future");
+        assert_eq!(age(now, now), "0s ago");
+        assert_eq!(age(now, now - 119_000), "119s ago");
+        assert_eq!(age(now, now - 120_000), "2m ago");
+        assert_eq!(age(now, now - 3_599_000), "59m ago");
+        assert_eq!(age(now, now - 3_600_000), "1h ago");
+        assert_eq!(age(now, now - 172_800_000), "2d ago");
+    }
 }
