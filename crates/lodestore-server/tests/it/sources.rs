@@ -532,6 +532,17 @@ async fn sources_tab_groups_databases_and_clones() {
         assert_eq!(body["groups"][0]["shared_with"], serde_json::json!([]));
         assert_eq!(body["items"][0]["shared_with"], serde_json::json!([]));
 
+        sqlx::query("UPDATE snapshots SET received_at = $1")
+            .bind(now_ms() + 86_400_000)
+            .execute(pool)
+            .await
+            .unwrap();
+        let body = sources_of(&api, &db02.id).await;
+        assert!(
+            body["items"][0]["last_snapshot_at"].is_null(),
+            "a snapshot stored in the future is not shown as the last one"
+        );
+
         ts.stop().await;
     }
 }
