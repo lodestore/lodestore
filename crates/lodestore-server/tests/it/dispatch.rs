@@ -18,6 +18,7 @@ use lodestore_proto::agent::v1::{
     JobEvent, JobEventLevel, JobEvents, JobOutcome, JobPhase, JobPhaseKind, JobProgress,
     JobRejected, JobReportState, JobSpec, ProxmoxFacts, ProxmoxGuest, SourceFacts,
 };
+use lodestore_proto::agent::v1::{Database, DatabaseKind, DatabaseServer, GuestKind};
 use lodestore_server::catalog::ingest_snapshot;
 use lodestore_server::db::now_ms;
 use lodestore_server::grpc::dispatch::janitor_once;
@@ -2655,5 +2656,267 @@ async fn dispatch_files_jobs_are_unchanged() {
         assert!(spec.source.is_none(), "[{}]", backend.name());
         assert_eq!(spec.paths, ["/etc"]);
         ts.stop().await;
+    }
+}
+
+fn tagged_guest(kind: GuestKind, vmid: u32, pool: &str, tags: &[&str]) -> ProxmoxGuest {
+    ProxmoxGuest {
+        kind: kind as i32,
+        vmid,
+        name: format!("guest-{vmid}"),
+        uuid: format!("{vmid:08}-1111-4111-8111-111111111111"),
+        pool: pool.to_string(),
+        tags: tags.iter().map(|t| t.to_string()).collect(),
+    }
+}
+
+fn node_facts(age_ms: u64, truncated: bool, guests: Vec<ProxmoxGuest>) -> SourceFacts {
+    SourceFacts {
+        age_ms,
+        truncated,
+        proxmox: Some(ProxmoxFacts {
+            cluster: "pve-prod".to_string(),
+            node: "pve1".to_string(),
+            guests,
+        }),
+        ..Default::default()
+    }
+}
+
+fn db_server(kind: DatabaseKind, unreachable: bool, names: &[&str]) -> DatabaseServer {
+    let (port, server_id) = match kind {
+        DatabaseKind::Mysql => (3306, "33333333-3333-4333-8333-333333333333"),
+        _ => (5432, "7"),
+    };
+    DatabaseServer {
+        kind: kind as i32,
+        port,
+        version: "16.4".to_string(),
+        unreachable,
+        server_id: server_id.to_string(),
+        databases: if unreachable {
+            Vec::new()
+        } else {
+            names
+                .iter()
+                .zip(16384u32..)
+                .map(|(name, oid)| Database {
+                    name: (*name).to_string(),
+                    oid,
+                })
+                .collect()
+        },
+    }
+}
+
+fn db_facts(servers: Vec<DatabaseServer>) -> SourceFacts {
+    SourceFacts {
+        age_ms: 1000,
+        databases: servers,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn dispatch_agent_and_server_agree_on_missing_sources() {
+    use lodestore_policy::source::{DatabaseSource, ProxmoxGuests, Source};
+    use lodestore_server::jobs::selector_of;
+    use lodestore_server::sources::select::{Selection, select};
+    use lodestore_server::sources::{Discovery, Stored};
+
+    let guests = |vmids: &[u32], pool: Option<&str>, tags: &[&str]| ProxmoxGuests {
+        vmids: vmids.to_vec(),
+        pool: pool.map(str::to_string),
+        tags: tags.iter().map(|t| t.to_string()).collect(),
+    };
+    let dbs = |databases: &[&str], exclude: &[&str]| DatabaseSource {
+        databases: databases.iter().map(|d| d.to_string()).collect(),
+        exclude_databases: exclude.iter().map(|d| d.to_string()).collect(),
+    };
+    let vm = |g| Source::ProxmoxVm(g);
+    let ct = |g| Source::ProxmoxCt(g);
+    let host = || {
+        vec![
+            tagged_guest(GuestKind::Vm, 101, "prod", &["web", "db"]),
+            tagged_guest(GuestKind::Ct, 200, "dev", &["dns"]),
+        ]
+    };
+    let fresh = node_facts(1000, false, host());
+    let stale = node_facts(STALE_MS, false, host());
+    let partial = node_facts(1000, true, host());
+    let pg = |unreachable| db_server(DatabaseKind::Postgres, unreachable, &["app", "billing"]);
+    let my = db_server(DatabaseKind::Mysql, false, &["shop"]);
+    let cases: Vec<(&str, Source, SourceFacts, bool)> = vec![
+        (
+            "vmid hit",
+            vm(guests(&[101], None, &[])),
+            fresh.clone(),
+            false,
+        ),
+        (
+            "vmid miss",
+            vm(guests(&[102], None, &[])),
+            fresh.clone(),
+            true,
+        ),
+        (
+            "pool hit",
+            vm(guests(&[], Some("prod"), &[])),
+            fresh.clone(),
+            false,
+        ),
+        (
+            "pool miss",
+            vm(guests(&[], Some("dev"), &[])),
+            fresh.clone(),
+            true,
+        ),
+        (
+            "any tag",
+            vm(guests(&[], None, &["x", "db"])),
+            fresh.clone(),
+            false,
+        ),
+        ("no tag", vm(guests(&[], None, &["x"])), fresh.clone(), true),
+        (
+            "vmid or tag",
+            vm(guests(&[999], None, &["web"])),
+            fresh.clone(),
+            false,
+        ),
+        (
+            "vm selector, ct guest",
+            vm(guests(&[200], None, &[])),
+            fresh.clone(),
+            true,
+        ),
+        (
+            "ct selector, ct guest",
+            ct(guests(&[200], None, &[])),
+            fresh.clone(),
+            false,
+        ),
+        (
+            "ct selector, vm guest",
+            ct(guests(&[101], None, &[])),
+            fresh.clone(),
+            true,
+        ),
+        (
+            "no proxmox",
+            vm(guests(&[101], None, &[])),
+            SourceFacts {
+                age_ms: 1000,
+                ..Default::default()
+            },
+            true,
+        ),
+        ("stale", vm(guests(&[102], None, &[])), stale, false),
+        (
+            "partial, miss",
+            vm(guests(&[102], None, &[])),
+            partial.clone(),
+            false,
+        ),
+        (
+            "partial, hit",
+            vm(guests(&[101], None, &[])),
+            partial,
+            false,
+        ),
+        (
+            "pg all",
+            Source::Postgres(dbs(&[], &[])),
+            db_facts(vec![pg(false)]),
+            false,
+        ),
+        (
+            "pg pick hit",
+            Source::Postgres(dbs(&["app"], &[])),
+            db_facts(vec![pg(false)]),
+            false,
+        ),
+        (
+            "pg pick miss",
+            Source::Postgres(dbs(&["nope"], &[])),
+            db_facts(vec![pg(false)]),
+            true,
+        ),
+        (
+            "pg except one",
+            Source::Postgres(dbs(&[], &["app"])),
+            db_facts(vec![pg(false)]),
+            false,
+        ),
+        (
+            "pg except all",
+            Source::Postgres(dbs(&[], &["app", "billing"])),
+            db_facts(vec![pg(false)]),
+            true,
+        ),
+        (
+            "pg empty server",
+            Source::Postgres(dbs(&[], &[])),
+            db_facts(vec![db_server(DatabaseKind::Postgres, false, &[])]),
+            true,
+        ),
+        (
+            "pg unreachable",
+            Source::Postgres(dbs(&["app"], &[])),
+            db_facts(vec![pg(true)]),
+            false,
+        ),
+        (
+            "pg unreachable and hit",
+            Source::Postgres(dbs(&["app"], &[])),
+            db_facts(vec![pg(true), db_server_two()]),
+            false,
+        ),
+        (
+            "pg on a mysql host",
+            Source::Postgres(dbs(&[], &[])),
+            db_facts(vec![my.clone()]),
+            true,
+        ),
+        (
+            "mysql hit",
+            Source::Mysql(dbs(&["shop"], &[])),
+            db_facts(vec![my.clone()]),
+            false,
+        ),
+        (
+            "mysql miss",
+            Source::Mysql(dbs(&["blog"], &[])),
+            db_facts(vec![my]),
+            true,
+        ),
+        (
+            "no databases at all",
+            Source::Mysql(dbs(&[], &[])),
+            db_facts(Vec::new()),
+            true,
+        ),
+    ];
+    for (name, source, facts, missing) in cases {
+        let agent =
+            lodestore_agent::jobs::runner::source_missing(&selector_of(&source), Some(&facts));
+        let stored = Stored {
+            discovery: Discovery::from_proto(&facts),
+            collected_at: Some(now_ms() - i64::try_from(facts.age_ms).unwrap()),
+        };
+        let server = matches!(
+            select(&source, Some(&stored), now_ms()),
+            Selection::NoSource | Selection::Nothing
+        );
+        assert_eq!(server, missing, "server: {name}");
+        assert_eq!(agent, missing, "agent: {name}");
+    }
+}
+
+fn db_server_two() -> DatabaseServer {
+    DatabaseServer {
+        port: 5433,
+        server_id: "8".to_string(),
+        ..db_server(DatabaseKind::Postgres, false, &["app"])
     }
 }

@@ -20,7 +20,8 @@ use lodestore_format::store::{RepoLocation, Store};
 use lodestore_format::tree_cache::{CacheWriter, open_parent};
 use lodestore_format::writer::{BackupOptions, BackupProgress, Deadline, IssueEvent, Writer};
 use lodestore_proto::agent::v1::{
-    Hook, JobEventLevel, JobFinished, JobOutcome, JobPhaseKind, JobSpec, JobStats,
+    DatabaseKind, GuestKind, Hook, JobEventLevel, JobFinished, JobOutcome, JobPhaseKind, JobSpec,
+    JobStats, SourceFacts, SourceSelector,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -141,6 +142,101 @@ pub(super) fn gc_locks_gate(denied: bool, required: bool) -> Option<JobFinished>
             "The agent key cannot read locks/ in the repository, so this backup could reuse data a cleanup cycle is about to delete. Replace the agent key policy.",
         )
     })
+}
+
+/// Discovery older than this says nothing: three poll intervals, as on the server.
+const DISCOVERY_FRESH_MS: u64 = 15 * 60 * 1000;
+
+fn source_noun(source_type: &str) -> &'static str {
+    match source_type {
+        "proxmox-vm" => "virtual machines",
+        "proxmox-ct" => "containers",
+        "postgres" => "PostgreSQL databases",
+        "mysql" => "MySQL schemas",
+        _ => "sources",
+    }
+}
+
+/// Whether the agent's own fresh, complete discovery shows nothing the selector
+/// picks. No data, stale data or a partial list is "unknown", never "missing".
+/// The selection rules are those of the server (any of vmids, pool, tags; any
+/// tag; databases all or listed minus excluded), on the protocol types.
+pub fn source_missing(selector: &SourceSelector, facts: Option<&SourceFacts>) -> bool {
+    let Some(facts) = facts.filter(|f| f.age_ms < DISCOVERY_FRESH_MS && !f.truncated) else {
+        return false;
+    };
+    match selector.r#type.as_str() {
+        kind @ ("proxmox-vm" | "proxmox-ct") => {
+            let wanted = if kind == "proxmox-vm" {
+                GuestKind::Vm
+            } else {
+                GuestKind::Ct
+            };
+            !facts.proxmox.iter().flat_map(|p| &p.guests).any(|g| {
+                g.kind == wanted as i32
+                    && (selector.vmids.contains(&g.vmid)
+                        || (!selector.pool.is_empty() && g.pool == selector.pool)
+                        || selector.tags.iter().any(|t| g.tags.contains(t)))
+            })
+        }
+        kind @ ("postgres" | "mysql") => {
+            let wanted = if kind == "postgres" {
+                DatabaseKind::Postgres
+            } else {
+                DatabaseKind::Mysql
+            };
+            let servers = facts.databases.iter().filter(|s| s.kind == wanted as i32);
+            let mut complete = true;
+            for server in servers {
+                if server.unreachable {
+                    complete = false;
+                }
+                let picked = server.databases.iter().any(|d| {
+                    (selector.databases.is_empty() || selector.databases.contains(&d.name))
+                        && !selector.exclude_databases.contains(&d.name)
+                });
+                if picked {
+                    return false;
+                }
+            }
+            complete
+        }
+        _ => false,
+    }
+}
+
+/// Refuses a job for a source the agent cannot back up, or one its own fresh
+/// discovery does not find. Files jobs never reach this.
+pub(super) fn source_gate(
+    spec: &JobSpec,
+    capabilities: &[&str],
+    facts: Option<&SourceFacts>,
+) -> Option<JobFinished> {
+    let selector = spec.source.as_ref().filter(|s| s.r#type != "files")?;
+    let source_type = &selector.r#type;
+    let (code, text) = if !capabilities.contains(&format!("source:{source_type}").as_str()) {
+        (
+            "source_agent_outdated",
+            format!(
+                "This agent version does not back up {source_type} sources yet. Update the agent."
+            ),
+        )
+    } else if source_missing(selector, facts) {
+        (
+            "source_not_found",
+            format!(
+                "No {} were found on this host, or the policy selects none of them.",
+                source_noun(source_type)
+            ),
+        )
+    } else {
+        return None;
+    };
+    let mut refused = failed(code, &text);
+    refused
+        .error_detail
+        .insert("source_type".into(), source_type.clone());
+    Some(refused)
 }
 
 fn issue_kind(kind: IssueKind) -> &'static str {
@@ -356,6 +452,10 @@ fn missing_path(paths: &[String]) -> Option<JobFinished> {
 }
 
 async fn execute(ctx: &JobCtx, spec: &JobSpec) -> JobFinished {
+    if let Some(refused) = source_gate(spec, &crate::session::CAPABILITIES, ctx.sources().as_ref())
+    {
+        return refused;
+    }
     let deadline = job_deadline(spec);
     let settings = AgentSettings::load(ctx.paths());
     let hooks = Hooks {
@@ -593,5 +693,149 @@ mod tests {
         assert!(gc_locks_gate(true, false).is_none());
         assert!(gc_locks_gate(false, true).is_none());
         assert!(gc_locks_gate(false, false).is_none());
+    }
+
+    use lodestore_proto::agent::v1::{Database, DatabaseServer, ProxmoxFacts, ProxmoxGuest};
+
+    const FRESH: u64 = 1000;
+    const STALE: u64 = 16 * 60 * 1000;
+
+    fn selector(source_type: &str) -> SourceSelector {
+        SourceSelector {
+            r#type: source_type.into(),
+            ..Default::default()
+        }
+    }
+
+    fn job(source: Option<SourceSelector>) -> JobSpec {
+        JobSpec {
+            source,
+            ..Default::default()
+        }
+    }
+
+    fn guests(age_ms: u64, truncated: bool, kind: GuestKind, vmids: &[u32]) -> SourceFacts {
+        SourceFacts {
+            age_ms,
+            truncated,
+            proxmox: Some(ProxmoxFacts {
+                guests: vmids
+                    .iter()
+                    .map(|vmid| ProxmoxGuest {
+                        kind: kind as i32,
+                        vmid: *vmid,
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn postgres(unreachable: bool, names: &[&str]) -> SourceFacts {
+        SourceFacts {
+            age_ms: FRESH,
+            databases: vec![DatabaseServer {
+                kind: DatabaseKind::Postgres as i32,
+                unreachable,
+                databases: names
+                    .iter()
+                    .map(|n| Database {
+                        name: (*n).into(),
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn code(done: Option<JobFinished>) -> Option<String> {
+        done.map(|f| f.error_code)
+    }
+
+    #[test]
+    fn source_gate_checks_the_capability_then_the_discovery() {
+        let vm = SourceSelector {
+            vmids: vec![101],
+            ..selector("proxmox-vm")
+        };
+        let spec = job(Some(vm));
+        let with = ["source:files", "source:proxmox-vm"];
+        let without = ["source:files"];
+
+        let outdated = source_gate(
+            &spec,
+            &without,
+            Some(&guests(FRESH, false, GuestKind::Vm, &[101])),
+        )
+        .expect("refused");
+        assert_eq!(outdated.error_code, "source_agent_outdated");
+        assert_eq!(outdated.error_detail["source_type"], "proxmox-vm");
+        assert_eq!(
+            outdated.error_message,
+            "This agent version does not back up proxmox-vm sources yet. Update the agent."
+        );
+
+        let found = |facts: Option<&SourceFacts>| code(source_gate(&spec, &with, facts));
+        assert_eq!(
+            found(Some(&SourceFacts {
+                age_ms: FRESH,
+                ..Default::default()
+            }))
+            .as_deref(),
+            Some("source_not_found")
+        );
+        assert_eq!(
+            found(Some(&guests(FRESH, false, GuestKind::Ct, &[101]))).as_deref(),
+            Some("source_not_found")
+        );
+        assert_eq!(
+            found(Some(&guests(FRESH, false, GuestKind::Vm, &[102]))).as_deref(),
+            Some("source_not_found")
+        );
+        let refused = source_gate(
+            &spec,
+            &with,
+            Some(&guests(FRESH, false, GuestKind::Vm, &[102])),
+        )
+        .unwrap();
+        assert_eq!(refused.error_detail["source_type"], "proxmox-vm");
+        assert_eq!(
+            refused.error_message,
+            "No virtual machines were found on this host, or the policy selects none of them."
+        );
+        assert_eq!(
+            found(Some(&guests(FRESH, false, GuestKind::Vm, &[101]))),
+            None
+        );
+        assert_eq!(
+            found(Some(&guests(STALE, false, GuestKind::Vm, &[102]))),
+            None
+        );
+        assert_eq!(
+            found(Some(&guests(FRESH, true, GuestKind::Vm, &[102]))),
+            None
+        );
+        assert_eq!(found(None), None);
+
+        let db = job(Some(SourceSelector {
+            databases: vec!["app".into()],
+            ..selector("postgres")
+        }));
+        let with_pg = ["source:postgres"];
+        let pg = |facts: &SourceFacts| code(source_gate(&db, &with_pg, Some(facts)));
+        assert_eq!(pg(&postgres(true, &[])), None);
+        assert_eq!(
+            pg(&postgres(false, &["other"])).as_deref(),
+            Some("source_not_found")
+        );
+        assert_eq!(pg(&postgres(false, &["app"])), None);
+
+        assert!(source_gate(&job(None), &without, None).is_none());
+        let files = job(Some(selector("files")));
+        assert!(source_gate(&files, &[], Some(&SourceFacts::default())).is_none());
     }
 }
