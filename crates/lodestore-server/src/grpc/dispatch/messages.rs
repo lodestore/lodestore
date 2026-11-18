@@ -511,7 +511,11 @@ async fn ingest_before_finish(
     .unwrap_or_else(|_| Err(anyhow::anyhow!("reading the snapshot timed out")));
     match ingested {
         Err(error) => match error.downcast_ref::<catalog::LinkRefused>() {
-            Some(catalog::LinkRefused::Policy { .. } | catalog::LinkRefused::Stream { .. }) => {
+            Some(
+                catalog::LinkRefused::Policy { .. }
+                | catalog::LinkRefused::Stream { .. }
+                | catalog::LinkRefused::Source,
+            ) => {
                 tracing::warn!(
                     job_id,
                     snapshot_id,

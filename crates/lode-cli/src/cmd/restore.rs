@@ -64,6 +64,7 @@ pub async fn run(
     args: &SecretArgs,
     out: Output,
     snapshot: &str,
+    host: Option<&str>,
     target: &Path,
     flags: RestoreFlags,
 ) -> Result<u8> {
@@ -94,7 +95,7 @@ pub async fn run(
         reader.allow_large_directories();
     }
     let (snapshot, path) = parse_snapshot_path(snapshot);
-    let entry = super::resolve_spec(&reader, snapshot).await?;
+    let entry = super::resolve_spec(&reader, snapshot, host).await?;
     let throttle = Throttle::new();
     let bar = if out.json { None } else { spinner() };
     let progress = |p: &RestoreProgress| {

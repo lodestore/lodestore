@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use lodestore_format::index::{hex32, parse_hex32};
+use lodestore_format::provenance::FUTURE_TOLERANCE_MS;
 use lodestore_format::source::{SourceKey, SourceType};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
@@ -13,6 +14,7 @@ use utoipa_axum::routes;
 use crate::auth::tokens::{Scoped, SnapshotsDelete, SnapshotsRead};
 use crate::catalog::retention::{ForgetOutcome, forget_snapshot};
 use crate::catalog::{SNAPSHOT_COLUMNS, SnapshotItem, item_from_row, parse_source_type};
+use crate::db::now_ms;
 use crate::error::{ApiError, ErrorBody};
 use crate::hosts::HostStatus;
 use crate::hosts::labels::Label;
@@ -417,12 +419,13 @@ async fn list_restore_snapshots(
     } else {
         sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT id FROM snapshots WHERE {} AND {} = $2 AND verified_at IS NOT NULL \
-             ORDER BY received_at DESC, id DESC LIMIT 1",
+             AND received_at <= $3 ORDER BY received_at DESC, id DESC LIMIT 1",
             filter.condition(),
             source.column()
         )))
         .bind(filter.value())
         .bind(source.value())
+        .bind(now_ms().saturating_add(FUTURE_TOLERANCE_MS))
         .fetch_optional(&state.db.pool)
         .await?
         .map(|row| row.try_get("id"))

@@ -6,10 +6,16 @@ use lodestore_format::reader::parse_snapshot_path;
 use crate::cli::SecretArgs;
 use crate::open::open_for_read;
 
-pub async fn run(url: &str, args: &SecretArgs, snapshot: &str, path: &str) -> Result<()> {
+pub async fn run(
+    url: &str,
+    args: &SecretArgs,
+    snapshot: &str,
+    host: Option<&str>,
+    path: &str,
+) -> Result<()> {
     let mut reader = open_for_read(url, args).await?;
     let (snapshot, _) = parse_snapshot_path(snapshot);
-    let entry = super::resolve_spec(&reader, snapshot).await?;
+    let entry = super::resolve_spec(&reader, snapshot, host).await?;
     let mut out = std::io::stdout().lock();
     reader
         .dump_file(&entry.id, path.as_bytes(), &mut out)

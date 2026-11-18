@@ -1,7 +1,8 @@
 use crate::adv_support;
 use crate::common;
 
-use std::collections::HashSet;
+use std::cell::RefCell;
+use std::collections::{BTreeSet, HashSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -14,12 +15,15 @@ use lodestore_format::crypto::{BLOB_TYPE_DATA, BlobId, Entropy};
 use lodestore_format::index::{hex32, index_object_key, open_shard, parse_hex32};
 use lodestore_format::pack::pack_object_key;
 use lodestore_format::pb;
-use lodestore_format::provenance::{LatestScope, ProvenanceSet};
+use lodestore_format::provenance::{
+    ALL_SIGNED_STORED_IN_FUTURE, FUTURE_TOLERANCE_MS, LatestScope, LatestWarning,
+    NO_VERIFIED_SNAPSHOT, ProvenanceSet,
+};
 use lodestore_format::reader::Reader;
 use lodestore_format::repo::Repository;
 use lodestore_format::snapshot::snapshot_object_key;
 use lodestore_format::source::{self, Meta, SourceKey};
-use lodestore_format::store::{BlobStore, LocalFsStore, put_named};
+use lodestore_format::store::{BlobError, BlobStore, ListEntry, LocalFsStore, put_named};
 use lodestore_format::verify_snapshot::snapshot_index_refs;
 use lodestore_format::writer::{BackupOptions, Writer};
 use lodestore_server::alerts::inputs::gather;
@@ -33,6 +37,8 @@ use lodestore_server::maintenance::attest::{
 use lodestore_server::maintenance::gc::cycle::{StepOutcome, step};
 use lodestore_server::maintenance::gc::{GcOrigin, GcSettings, GcState, db as gc_db, start_cycle};
 use lodestore_server::state::AppState;
+use proptest::prelude::{Just, ProptestConfig, Strategy, prop_assert, prop_assert_eq, prop_oneof};
+use proptest::test_runner::{TestCaseError, TestRunner};
 use serde_json::Value;
 use sqlx::Row;
 
@@ -168,13 +174,17 @@ impl Env {
     }
 
     async fn job(&self, id: &str, snapshot_id: &str, verify_state: &str) {
+        self.job_row(HOST, id, snapshot_id, verify_state).await;
+    }
+
+    async fn job_row(&self, host: &str, id: &str, snapshot_id: &str, verify_state: &str) {
         sqlx::query(
             "INSERT INTO jobs (id, host_id, policy_name, source, state, spec, queued_at, \
              finished_at, snapshot_id, verify_state) \
              VALUES ($1, $2, $3, 'schedule', 'succeeded', $4, $5, $5, $6, $7)",
         )
         .bind(id)
-        .bind(HOST)
+        .bind(host)
         .bind(POLICY)
         .bind(Vec::<u8>::new())
         .bind(now_ms())
@@ -943,6 +953,16 @@ fn claim(key: &str) -> Option<pb::Source> {
 
 impl Env {
     async fn snapshot_claiming(&self, label: &str, source: Option<pb::Source>) -> String {
+        self.snapshot_on(HOST, label, source, None).await
+    }
+
+    async fn snapshot_on(
+        &self,
+        host: &str,
+        label: &str,
+        source: Option<pb::Source>,
+        time: Option<pb::Timestamp>,
+    ) -> String {
         let (dir, _) = self.source(label);
         let (_, keys) = self.writer_keys().await;
         let mut writer = Writer::connect(&self.store, keys).await.unwrap();
@@ -950,8 +970,9 @@ impl Env {
             .backup(
                 &[dir],
                 BackupOptions {
-                    agent_id: Some(HOST.as_bytes().to_vec()),
+                    agent_id: Some(host.as_bytes().to_vec()),
                     source,
+                    time,
                     ..BackupOptions::default()
                 },
                 &|_| {},
@@ -962,7 +983,11 @@ impl Env {
     }
 
     async fn job_of_source(&self, id: &str, snapshot_id: &str, key: &str, meta: Option<&str>) {
-        self.job(id, snapshot_id, "pending").await;
+        self.job_on(HOST, id, snapshot_id, key, meta).await;
+    }
+
+    async fn job_on(&self, host: &str, id: &str, snapshot_id: &str, key: &str, meta: Option<&str>) {
+        self.job_row(host, id, snapshot_id, "pending").await;
         sqlx::query("UPDATE jobs SET source_ref = $1, source_meta_json = $2 WHERE id = $3")
             .bind(key)
             .bind(meta)
@@ -1161,86 +1186,710 @@ async fn attest_verify_refuses_a_claim_found_by_a_catalog_sync_first() {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn attest_verify_latest_of_an_instance_agrees_with_lode() {
-    for backend in backends() {
-        let env = Env::new(&backend).await;
-        // The default policy keeps one snapshot and would forget the older ones being compared.
-        sqlx::query("DELETE FROM policies")
-            .execute(env.pool())
+// Differential test of `latest`: the server's `latest_verified_id` and what
+// `lode` picks from the bucket alone, on repositories with several hosts,
+// shared and borrowed host names, renames and skewed clocks. Its limits: no
+// retention or forget runs (policies are deleted), and the store reports
+// object times (LocalFs, S3).
+
+const PG_WAL: &str = "postgres-wal/7300000000000000001";
+const KEYS: [&str; 5] = [GUEST_A, GUEST_B, PG_A, "", PG_WAL];
+const FILES: usize = 3;
+const WAL: usize = 4;
+const HOST_IDS: [&str; 3] = [HOST, "h2", "h3"];
+const NAMES: [&str; 5] = ["web", "db", "h1", "h2", "h3"];
+const YEAR_MS: i64 = 365 * 86_400_000;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Fate {
+    Verified,
+    /// The manifest claims another source than its job.
+    Refused,
+    NotRun,
+}
+
+/// When the store says it wrote the snapshot. Nothing lands within a minute
+/// of the future cutoff: the server and `lode` read their clocks apart.
+#[derive(Debug, Clone, Copy)]
+enum Stored {
+    AsWritten,
+    Past(i64),
+    SameAsPrevious,
+    NearFuture(i64),
+    FarFuture(i64),
+}
+
+#[derive(Debug, Clone)]
+struct Step {
+    host: usize,
+    key: usize,
+    fate: Fate,
+    stored: Stored,
+    manifest_offset_ms: Option<i64>,
+    rename: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct Case {
+    /// The first name of each host; its length is the number of hosts.
+    names: Vec<usize>,
+    steps: Vec<Step>,
+}
+
+fn plain(host: usize, key: usize, fate: Fate) -> Step {
+    Step {
+        host,
+        key,
+        fate,
+        stored: Stored::AsWritten,
+        manifest_offset_ms: None,
+        rename: None,
+    }
+}
+
+fn case_strategy() -> impl Strategy<Value = Case> {
+    let step = (
+        0usize..3,
+        0..KEYS.len(),
+        prop_oneof![
+            3 => Just(Fate::Verified),
+            1 => Just(Fate::Refused),
+            1 => Just(Fate::NotRun),
+        ],
+        prop_oneof![
+            Just(Stored::AsWritten),
+            (60_000..10 * YEAR_MS).prop_map(Stored::Past),
+            Just(Stored::SameAsPrevious),
+            (60_000..300_000i64).prop_map(Stored::NearFuture),
+            (3_600_000..10 * YEAR_MS).prop_map(Stored::FarFuture),
+        ],
+        proptest::option::of(-10 * YEAR_MS..10 * YEAR_MS),
+        proptest::option::weighted(0.2, 0..NAMES.len()),
+    )
+        .prop_map(
+            |(host, key, fate, stored, manifest_offset_ms, rename)| Step {
+                host,
+                key,
+                fate,
+                stored,
+                manifest_offset_ms,
+                rename,
+            },
+        );
+    (
+        proptest::collection::vec(0..NAMES.len(), 1..=3),
+        proptest::collection::vec(step, 1..=8),
+    )
+        .prop_map(|(names, mut steps)| {
+            for s in &mut steps {
+                s.host %= names.len();
+            }
+            Case { names, steps }
+        })
+}
+
+fn fixed_cases() -> Vec<Case> {
+    use Fate::*;
+    let (web, db, h1, h2, h3) = (0, 1, 2, 3, 4);
+    let renamed = Step {
+        rename: Some(db),
+        ..plain(1, 2, Verified)
+    };
+    let tied = Step {
+        stored: Stored::SameAsPrevious,
+        ..plain(0, 0, Verified)
+    };
+    let ahead = |host| Step {
+        stored: Stored::FarFuture(YEAR_MS),
+        ..plain(host, 0, Verified)
+    };
+    vec![
+        Case {
+            names: vec![h1, h2],
+            steps: vec![
+                plain(0, 0, Verified),
+                plain(1, 0, Verified),
+                plain(0, FILES, Verified),
+                plain(1, WAL, Verified),
+            ],
+        },
+        Case {
+            names: vec![h1, web, web],
+            steps: vec![plain(1, 0, Verified), plain(2, 0, Verified)],
+        },
+        Case {
+            names: vec![h1, h1],
+            steps: vec![
+                plain(0, 0, Verified),
+                plain(0, FILES, Verified),
+                plain(1, 0, Verified),
+                plain(1, 1, Verified),
+            ],
+        },
+        Case {
+            names: vec![h1, web],
+            steps: vec![plain(1, 2, Verified), renamed],
+        },
+        Case {
+            names: vec![h1],
+            steps: vec![
+                plain(0, 0, Verified),
+                plain(0, 0, Refused),
+                plain(0, 0, NotRun),
+            ],
+        },
+        Case {
+            names: vec![h1],
+            steps: vec![plain(0, 0, Verified), tied],
+        },
+        Case {
+            names: vec![h1, h3],
+            steps: vec![plain(0, 0, Verified), ahead(0), ahead(1)],
+        },
+    ]
+}
+
+#[derive(Debug, Default)]
+struct Coverage {
+    two_hosts: usize,
+    shared_name: usize,
+    name_is_other_id: usize,
+    renamed: usize,
+    newer_skipped: usize,
+    tie: usize,
+    future_stored: usize,
+}
+
+/// Records each read with the size of the answer.
+struct Counting<S> {
+    inner: S,
+    reads: std::sync::Mutex<Vec<(String, usize)>>,
+}
+
+impl<S: BlobStore> Counting<S> {
+    fn new(inner: S) -> Self {
+        Counting {
+            inner,
+            reads: std::sync::Mutex::default(),
+        }
+    }
+
+    fn note(&self, key: &str, got: &Result<bytes::Bytes, BlobError>) {
+        let len = got.as_ref().map_or(0, bytes::Bytes::len);
+        self.reads.lock().unwrap().push((key.to_string(), len));
+    }
+
+    fn take(&self) -> Vec<(String, usize)> {
+        std::mem::take(&mut *self.reads.lock().unwrap())
+    }
+}
+
+impl<S: BlobStore> BlobStore for Counting<S> {
+    async fn put_if_absent(&self, key: &str, data: bytes::Bytes) -> Result<(), BlobError> {
+        self.inner.put_if_absent(key, data).await
+    }
+
+    async fn get(&self, key: &str) -> Result<bytes::Bytes, BlobError> {
+        let got = self.inner.get(key).await;
+        self.note(key, &got);
+        got
+    }
+
+    async fn get_range(
+        &self,
+        key: &str,
+        range: std::ops::Range<u64>,
+    ) -> Result<bytes::Bytes, BlobError> {
+        let got = self.inner.get_range(key, range).await;
+        self.note(key, &got);
+        got
+    }
+
+    async fn list(&self, prefix: &str) -> Result<Vec<ListEntry>, BlobError> {
+        self.inner.list(prefix).await
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum Got {
+    Snapshot(String, Option<String>),
+    Nothing,
+    TwoHosts,
+    TwoNamed,
+}
+
+impl Got {
+    fn from_server(id: Option<String>, by_name: Option<&str>) -> Got {
+        id.map_or(Got::Nothing, |id| {
+            Got::Snapshot(id, by_name.map(str::to_string))
+        })
+    }
+}
+
+/// `resolve_latest_in` over a fresh reader, checking that it read only the
+/// snapshot manifests and attestations, each once.
+async fn lode_latest(
+    source: &lodestore_server::catalog::OpenRepository,
+    scope: &LatestScope,
+) -> Result<Got, TestCaseError> {
+    let counting = Counting::new(&source.store);
+    let reader = Reader::open(&counting, source.keys.duplicate(), &source.config).unwrap();
+    counting.take();
+    let pick = reader.resolve_latest_in(false, scope).await;
+    let reads = counting.take();
+
+    let mut listed = source.store.list("snapshots/").await.unwrap();
+    listed.extend(
+        source
+            .store
+            .list("locks/")
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.key.starts_with(ATTEST_PREFIX)),
+    );
+    let keys: HashSet<&str> = reads.iter().map(|(k, _)| k.as_str()).collect();
+    prop_assert!(
+        reads
+            .iter()
+            .all(|(k, _)| k.starts_with("snapshots/") || k.starts_with(ATTEST_PREFIX)),
+        "{scope:?} read {reads:?}"
+    );
+    prop_assert_eq!(keys.len(), reads.len(), "{:?} read a key twice", scope);
+    prop_assert_eq!(reads.len(), listed.len(), "{:?}", scope);
+    let read: usize = reads.iter().map(|(_, n)| n).sum();
+    let size: u64 = listed.iter().map(|e| e.size).sum();
+    prop_assert!(read as u64 <= size, "{scope:?} read {read} of {size} bytes");
+
+    Ok(match pick {
+        Ok(p) => Got::Snapshot(
+            hex32(&p.entry.id),
+            p.warnings.iter().find_map(|w| match w {
+                LatestWarning::HostByName { host_id, .. } => Some(host_id.clone()),
+                _ => None,
+            }),
+        ),
+        Err(lodestore_format::Error::InvalidInput(m))
+            if m == NO_VERIFIED_SNAPSHOT || m == ALL_SIGNED_STORED_IN_FUTURE =>
+        {
+            Got::Nothing
+        }
+        Err(lodestore_format::Error::InvalidInput(m)) if m.contains("names more than one host") => {
+            Got::TwoNamed
+        }
+        Err(lodestore_format::Error::InvalidInput(m))
+            if m.contains("come from more than one host") =>
+        {
+            Got::TwoHosts
+        }
+        Err(e) => return Err(TestCaseError::fail(format!("{scope:?}: {e}"))),
+    })
+}
+
+struct Done {
+    host: usize,
+    key: usize,
+    fate: Fate,
+    id: String,
+    stored_ms: i64,
+    /// The host's name when the server signed it.
+    name: String,
+}
+
+fn mtime_ms(path: &Path) -> i64 {
+    let at = std::fs::metadata(path).unwrap().modified().unwrap();
+    i64::try_from(
+        at.duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap()
+}
+
+impl Env {
+    async fn rename(&self, host: &str, name: &str) {
+        sqlx::query("UPDATE agents SET hostname = $1 WHERE id = $2")
+            .bind(name)
+            .bind(host)
+            .execute(self.pool())
             .await
             .unwrap();
-        env.upgrade().await;
-        let order = [
-            Some(GUEST_A),
-            None,
-            Some(GUEST_B),
-            Some(GUEST_A),
-            Some(GUEST_B),
-            None,
-            Some(GUEST_B),
-            Some(GUEST_A),
-        ];
-        for (n, key) in order.into_iter().enumerate() {
-            let label = format!("agree-{n}");
-            let snapshot_id = env.snapshot_claiming(&label, key.and_then(claim)).await;
-            let job = format!("j{n}");
-            match key {
-                Some(key) => env.job_of_source(&job, &snapshot_id, key, None).await,
-                None => env.job(&job, &snapshot_id, "pending").await,
+    }
+
+    async fn play(&self, case: &Case) -> Result<Vec<Done>, TestCaseError> {
+        for (i, &name) in case.names.iter().enumerate() {
+            if i > 0 {
+                common::seed_agent(&self.ts, &self.repo, HOST_IDS[i], "[]").await;
             }
-            env.verify(&job).await;
-            assert_eq!(
-                env.column(&job, "verify_state").await.as_deref(),
-                Some("verified"),
-                "{label} [{}]",
-                backend.name()
-            );
-            tokio::time::sleep(Duration::from_millis(15)).await;
+            self.rename(HOST_IDS[i], NAMES[name]).await;
+        }
+        let mut names: Vec<&str> = case.names.iter().map(|&n| NAMES[n]).collect();
+        let root = self.ts.local_repo_root("main");
+        let mut journal: Vec<Done> = Vec::new();
+        for (n, step) in case.steps.iter().enumerate() {
+            let key = KEYS[step.key];
+            let claimed = match step.fate {
+                Fate::Refused if key == GUEST_A => GUEST_B,
+                Fate::Refused => GUEST_A,
+                _ => key,
+            };
+            let time = step
+                .manifest_offset_ms
+                .map(|d| manifest_time(now_ms().saturating_add(d)));
+            let host = HOST_IDS[step.host];
+            let id = self
+                .snapshot_on(
+                    host,
+                    &format!("step-{n}"),
+                    Some(claimed).filter(|k| !k.is_empty()).and_then(claim),
+                    time,
+                )
+                .await;
+            let path = root.join(snapshot_object_key(&parse_hex32(&id).unwrap()));
+            let now = now_ms();
+            let at = match step.stored {
+                Stored::AsWritten => None,
+                Stored::Past(d) => Some(now - d),
+                Stored::SameAsPrevious => journal.last().map(|d| d.stored_ms),
+                Stored::NearFuture(d) | Stored::FarFuture(d) => Some(now + d),
+            };
+            if let Some(at) = at {
+                File::options()
+                    .write(true)
+                    .open(&path)
+                    .unwrap()
+                    .set_modified(
+                        SystemTime::UNIX_EPOCH + Duration::from_millis(u64::try_from(at).unwrap()),
+                    )
+                    .unwrap();
+            }
+            if let Some(r) = step.rename {
+                names[step.host] = NAMES[r];
+                self.rename(host, NAMES[r]).await;
+            }
+            let job = format!("j{n}");
+            self.job_on(host, &job, &id, key, None).await;
+            if step.fate != Fate::NotRun {
+                self.verify(&job).await;
+            }
+            let want = match step.fate {
+                Fate::Verified => "verified",
+                Fate::Refused => "failed",
+                Fate::NotRun => "pending",
+            };
+            let state = self.column(&job, "verify_state").await;
+            prop_assert_eq!(state.as_deref(), Some(want), "step {}", n);
+            journal.push(Done {
+                host: step.host,
+                key: step.key,
+                fate: step.fate,
+                id,
+                stored_ms: mtime_ms(&path),
+                name: names[step.host].to_string(),
+            });
+        }
+        Ok(journal)
+    }
+
+    async fn server_latest(&self, host: usize, key: usize) -> Option<String> {
+        let source = if key == FILES {
+            String::new()
+        } else {
+            format!("&source={}", KEYS[key].replace('/', "%2F"))
+        };
+        let page: Value = self
+            .ts
+            .api()
+            .await
+            .get(&format!(
+                "/api/v1/restore/snapshots?host={}{source}",
+                HOST_IDS[host]
+            ))
+            .await
+            .json()
+            .await
+            .unwrap();
+        page["latest_verified_id"].as_str().map(str::to_string)
+    }
+
+    async fn received_at(&self, id: &str) -> i64 {
+        sqlx::query("SELECT received_at FROM snapshots WHERE id = $1")
+            .bind(id)
+            .fetch_one(self.pool())
+            .await
+            .unwrap()
+            .try_get("received_at")
+            .unwrap()
+    }
+
+    async fn compare(
+        &self,
+        case: &Case,
+        journal: &[Done],
+        coverage: &RefCell<Coverage>,
+    ) -> Result<(), TestCaseError> {
+        let hosts = case.names.len();
+        let source = open_repository(self.ts.state(), &self.repo).await.unwrap();
+        let verified = || journal.iter().filter(|d| d.fate == Fate::Verified);
+        let signed_hosts: BTreeSet<usize> = verified().map(|d| d.host).collect();
+        let id_of = |name: &str| {
+            HOST_IDS
+                .iter()
+                .position(|h| *h == name)
+                .filter(|h| signed_hosts.contains(h))
+        };
+
+        for key in [0, 1, 2, WAL] {
+            let source_key = SourceKey::parse(KEYS[key]).unwrap();
+            let of_key = || verified().filter(|d| d.key == key && key != WAL);
+            for (host, host_id) in HOST_IDS.iter().enumerate().take(hosts) {
+                let server = self.server_latest(host, key).await;
+                // An id no signed record carries is looked up as a name; the name checks cover it.
+                if signed_hosts.contains(&host) {
+                    let scope = LatestScope::InstanceOnHost(source_key.clone(), (*host_id).into());
+                    let lode = lode_latest(&source, &scope).await?;
+                    prop_assert_eq!(
+                        &lode,
+                        &Got::from_server(server.clone(), None),
+                        "{:?}",
+                        scope
+                    );
+                }
+                if let Some(chosen) = &server {
+                    let bar = journal.iter().find(|d| &d.id == chosen).unwrap().stored_ms;
+                    if journal.iter().any(|d| {
+                        d.host == host
+                            && d.key == key
+                            && d.fate != Fate::Verified
+                            && d.stored_ms > bar
+                    }) {
+                        coverage.borrow_mut().newer_skipped += 1;
+                    }
+                }
+                let pair: Vec<&Done> = of_key().filter(|d| d.host == host).collect();
+                if pair.iter().map(|d| &d.name).collect::<BTreeSet<_>>().len() > 1 {
+                    coverage.borrow_mut().renamed += 1;
+                }
+                let times: BTreeSet<i64> = pair.iter().map(|d| d.stored_ms).collect();
+                if times.len() < pair.len() {
+                    coverage.borrow_mut().tie += 1;
+                }
+            }
+
+            let on: BTreeSet<usize> = of_key().map(|d| d.host).collect();
+            let scope = LatestScope::Instance(source_key.clone());
+            let lode = lode_latest(&source, &scope).await?;
+            if on.len() > 1 {
+                prop_assert_eq!(&lode, &Got::TwoHosts, "{:?}", scope);
+                coverage.borrow_mut().two_hosts += 1;
+            } else {
+                let want = match on.first() {
+                    Some(&host) => self.server_latest(host, key).await,
+                    None => None,
+                };
+                prop_assert_eq!(&lode, &Got::from_server(want, None), "{:?}", scope);
+            }
+
+            for name in NAMES {
+                let scope = LatestScope::InstanceOnHost(source_key.clone(), name.into());
+                let lode = lode_latest(&source, &scope).await?;
+                let want = if let Some(host) = id_of(name) {
+                    Got::from_server(self.server_latest(host, key).await, None)
+                } else {
+                    let named: BTreeSet<usize> = of_key()
+                        .filter(|d| d.name == name)
+                        .map(|d| d.host)
+                        .collect();
+                    match named.len() {
+                        0 => Got::Nothing,
+                        1 => {
+                            let host = *named.first().unwrap();
+                            Got::from_server(
+                                self.server_latest(host, key).await,
+                                Some(HOST_IDS[host]),
+                            )
+                        }
+                        _ => {
+                            coverage.borrow_mut().shared_name += 1;
+                            Got::TwoNamed
+                        }
+                    }
+                };
+                prop_assert_eq!(&lode, &want, "{:?}", scope);
+            }
         }
 
-        let source = open_repository(env.ts.state(), &env.repo).await.unwrap();
-        let reader = Reader::open(source.store, source.keys, &source.config).unwrap();
-        let api = env.ts.api().await;
-        let server_latest = |query: String| {
-            let api = &api;
-            async move {
-                let page: Value = api
-                    .get(&format!("/api/v1/restore/snapshots?host={HOST}{query}"))
-                    .await
-                    .json()
-                    .await
-                    .unwrap();
-                page["latest_verified_id"].as_str().unwrap().to_string()
+        // `lode` keeps one files `latest` for the whole repository; the server keeps one per host.
+        let mut newest: Option<(i64, String)> = None;
+        for host in 0..hosts {
+            if let Some(id) = self.server_latest(host, FILES).await {
+                newest = newest.max(Some((self.received_at(&id).await, id)));
             }
-        };
-        for key in [GUEST_A, GUEST_B] {
-            let scope = LatestScope::Instance(SourceKey::parse(key).unwrap());
-            let lode = hex32(
-                &reader
-                    .resolve_latest_in(false, &scope)
-                    .await
-                    .unwrap()
-                    .entry
-                    .id,
-            );
-            let server = server_latest(format!("&source={}", key.replace('/', "%2F"))).await;
-            assert_eq!(server, lode, "instance {key} [{}]", backend.name());
         }
-        let lode = hex32(
-            &reader
-                .resolve_latest_in(false, &LatestScope::Files)
-                .await
-                .unwrap()
-                .entry
-                .id,
-        );
-        assert_eq!(
-            server_latest(String::new()).await,
+        let lode = lode_latest(&source, &LatestScope::Files).await?;
+        prop_assert_eq!(
             lode,
-            "files [{}]",
-            backend.name()
+            Got::from_server(newest.map(|(_, id)| id), None),
+            "files"
         );
+
+        let mut seen = coverage.borrow_mut();
+        if verified().any(|d| id_of(&d.name).is_some_and(|h| h != d.host)) {
+            seen.name_is_other_id += 1;
+        }
+        let cutoff = now_ms() + FUTURE_TOLERANCE_MS;
+        if verified().any(|d| d.stored_ms > cutoff) {
+            seen.future_stored += 1;
+        }
+        Ok(())
+    }
+}
+
+fn manifest_time(at_ms: i64) -> pb::Timestamp {
+    pb::Timestamp {
+        seconds: at_ms.div_euclid(1000),
+        nanos: 0,
+    }
+}
+
+async fn check_case(
+    backend: &common::Backend,
+    case: &Case,
+    coverage: &RefCell<Coverage>,
+) -> Result<(), TestCaseError> {
+    let env = Env::new(backend).await;
+    sqlx::query("DELETE FROM policies")
+        .execute(env.pool())
+        .await
+        .unwrap();
+    env.upgrade().await;
+    let result = match env.play(case).await {
+        Ok(journal) => env.compare(case, &journal, coverage).await,
+        Err(e) => Err(e),
+    };
+    env.ts.stop().await;
+    result.map_err(|e| TestCaseError::fail(format!("[{}] {e}", backend.name())))
+}
+
+fn multi_thread() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .unwrap()
+}
+
+#[test]
+fn attest_verify_latest_agrees_with_lode_on_hostile_repositories() {
+    let rt = multi_thread();
+    for backend in backends() {
+        let started = std::time::Instant::now();
+        let coverage = RefCell::new(Coverage::default());
+        for (n, case) in fixed_cases().iter().enumerate() {
+            if let Err(e) = rt.block_on(check_case(&backend, case, &coverage)) {
+                panic!("fixed case {}: {e}\n{case:#?}", n + 1);
+            }
+        }
+        let mut runner = TestRunner::new(ProptestConfig {
+            cases: 12,
+            failure_persistence: None,
+            max_shrink_iters: 64,
+            ..ProptestConfig::default()
+        });
+        if let Err(e) = runner.run(&case_strategy(), |case| {
+            rt.block_on(check_case(&backend, &case, &coverage))
+        }) {
+            panic!("{e}");
+        }
+        let seen = coverage.into_inner();
+        eprintln!(
+            "[{}] 7 fixed + 12 generated cases in {:?}: {seen:?}",
+            backend.name(),
+            started.elapsed()
+        );
+        for (class, count) in [
+            ("two_hosts", seen.two_hosts),
+            ("shared_name", seen.shared_name),
+            ("name_is_other_id", seen.name_is_other_id),
+            ("renamed", seen.renamed),
+            ("newer_skipped", seen.newer_skipped),
+            ("tie", seen.tie),
+            ("future_stored", seen.future_stored),
+        ] {
+            assert!(count >= 1, "[{}] no case covered {class}", backend.name());
+        }
+    }
+}
+
+#[test]
+fn attest_verify_latest_of_a_cloned_key_needs_a_host() {
+    let rt = multi_thread();
+    for backend in backends() {
+        let coverage = RefCell::new(Coverage::default());
+        let clone = Case {
+            names: vec![2, 3],
+            steps: vec![plain(0, 0, Fate::Verified), plain(1, 0, Fate::Verified)],
+        };
+        if let Err(e) = rt.block_on(check_case(&backend, &clone, &coverage)) {
+            panic!("{e}");
+        }
+        assert_eq!(coverage.into_inner().two_hosts, 1, "[{}]", backend.name());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn attest_verify_refuses_a_job_with_malformed_meta() {
+    let crowded = format!(
+        "{{{}}}",
+        (0..33)
+            .map(|n| format!("\"k{n:02}\":\"v\""))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    for backend in backends() {
+        let env = Env::new(&backend).await;
+        env.upgrade().await;
+        for (job, meta) in [
+            ("j-bad-key", r#"{"BAD":"x"}"#),
+            ("j-crowded", crowded.as_str()),
+        ] {
+            let snapshot_id = env.snapshot_claiming(job, claim(GUEST_A)).await;
+            env.job_of_source(job, &snapshot_id, GUEST_A, Some(meta))
+                .await;
+            for _ in 0..2 {
+                env.verify(job).await;
+                let at = format!("{job} [{}]", backend.name());
+                let column = |name| env.column(job, name);
+                assert_eq!(column("state").await.as_deref(), Some("failed"), "{at}");
+                assert_eq!(
+                    column("verify_state").await.as_deref(),
+                    Some("failed"),
+                    "{at}"
+                );
+                assert_eq!(
+                    column("error_code").await.as_deref(),
+                    Some("verification_failed"),
+                    "{at}"
+                );
+                let message = column("error_message").await.unwrap();
+                assert!(message.contains("malformed source"), "{at}: {message}");
+                assert_eq!(
+                    env.events(job, "verification_failed").await.len(),
+                    1,
+                    "{at}"
+                );
+                let linked: i64 =
+                    sqlx::query("SELECT COUNT(*) AS n FROM snapshots WHERE job_id = $1")
+                        .bind(job)
+                        .fetch_one(env.pool())
+                        .await
+                        .unwrap()
+                        .try_get("n")
+                        .unwrap();
+                assert_eq!(linked, 0, "{at}");
+                assert!(env.signed_source(&snapshot_id).await.is_none(), "{at}");
+            }
+        }
         env.ts.stop().await;
     }
 }

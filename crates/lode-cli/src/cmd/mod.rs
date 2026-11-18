@@ -100,18 +100,38 @@ pub fn run(cli: Cli) -> Result<u8> {
                     .await
                     .map(|()| 0)
             }
-            Command::Ls { snapshot, long } => ls::run(&url, &secret, out, &snapshot, long)
+            Command::Ls {
+                snapshot,
+                host,
+                long,
+            } => ls::run(&url, &secret, out, &snapshot, host.as_deref(), long)
                 .await
                 .map(|()| 0),
             Command::Check(args) => check::run(&url, &secret, out, args).await,
-            Command::Dump { snapshot, path } => {
-                dump::run(&url, &secret, &snapshot, &path).await.map(|()| 0)
-            }
+            Command::Dump {
+                snapshot,
+                host,
+                path,
+            } => dump::run(&url, &secret, &snapshot, host.as_deref(), &path)
+                .await
+                .map(|()| 0),
             Command::Restore {
                 snapshot,
+                host,
                 target,
                 flags,
-            } => restore::run(&url, &secret, out, &snapshot, &target, flags).await,
+            } => {
+                restore::run(
+                    &url,
+                    &secret,
+                    out,
+                    &snapshot,
+                    host.as_deref(),
+                    &target,
+                    flags,
+                )
+                .await
+            }
             Command::Server { .. }
             | Command::Apply(_)
             | Command::Policy { .. }
@@ -124,18 +144,35 @@ pub fn run(cli: Cli) -> Result<u8> {
 
 /// A snapshot by `latest`, `latest@<source key>`, id or unique id prefix.
 /// `latest` is the newest signed files snapshot; `latest@<key>` is the newest
-/// signed snapshot of that source instance from every host, as `latest` is
-/// for files, so a guest that moved to another node keeps its newest backup.
-/// To pin one host, name a snapshot id from `lode snapshots --source-type`.
-/// Both follow the signature rules of the format library and explain their
-/// choice on stderr.
-pub(crate) async fn resolve_spec(reader: &Reader<Store>, spec: &str) -> Result<SnapshotEntry> {
-    let scope = if spec == "latest" {
+/// signed snapshot of that source instance, refused when its signed records
+/// come from more than one host (clones share a key). `host` chooses one: a
+/// host id, or a name that only one host carries. Both follow the signature
+/// rules of the format library and explain their choice on stderr.
+pub(crate) async fn resolve_spec(
+    reader: &Reader<Store>,
+    spec: &str,
+    host: Option<&str>,
+) -> Result<SnapshotEntry> {
+    if host == Some("") {
+        return Err(UsageError("--host needs a host id or name".into()).into());
+    }
+    let scope = if spec == "latest" && host.is_none() {
         LatestScope::Files
     } else if let Some(key) = spec.strip_prefix("latest@") {
+        if key.is_empty() {
+            return Err(UsageError(
+                "latest@ needs a source key; plain latest is the files snapshot".into(),
+            )
+            .into());
+        }
         let key = SourceKey::parse(key)
             .map_err(|e| UsageError(format!("latest@KEY needs a canonical source key: {e}")))?;
-        LatestScope::Instance(key)
+        match host {
+            Some(host) => LatestScope::InstanceOnHost(key, host.to_owned()),
+            None => LatestScope::Instance(key),
+        }
+    } else if host.is_some() {
+        return Err(UsageError("--host only applies to latest@<source key>".into()).into());
     } else {
         return Ok(reader.resolve_snapshot(spec).await?);
     };

@@ -206,7 +206,7 @@ async fn explicit_parent(
     strict: Option<&Strict>,
     spec: &str,
 ) -> Result<BlobId> {
-    let id = resolve_spec(reader, spec).await?.id;
+    let id = resolve_spec(reader, spec, None).await?.id;
     if strict.is_some_and(|s| !s.provenance.contains(&id)) {
         eprintln!(
             "warning: parent snapshot {} is not signed by the server or by the password holder",

@@ -222,18 +222,26 @@ struct JobBinding {
 }
 
 /// The source a job row names, as the catalog and the signed record carry it.
+/// A key, JSON or meta that the format would not sign is [`LinkRefused::Source`].
 pub(crate) fn job_source(
     job_id: &str,
     source_ref: &str,
     meta_json: Option<&str>,
 ) -> anyhow::Result<(SourceKey, Meta)> {
-    let malformed = || format!("job {job_id} has a malformed source");
-    let key = SourceKey::parse(source_ref).with_context(malformed)?;
-    let meta = match meta_json {
-        Some(json) => serde_json::from_str::<Meta>(json).with_context(malformed)?,
-        None => Meta::new(),
-    };
-    Ok((key, meta))
+    let parsed = SourceKey::parse(source_ref)
+        .map_err(anyhow::Error::from)
+        .and_then(|key| {
+            let meta = match meta_json {
+                Some(json) => serde_json::from_str::<Meta>(json)?,
+                None => Meta::new(),
+            };
+            source::encode(&key, &meta)?;
+            Ok((key, meta))
+        });
+    parsed.map_err(|error| {
+        tracing::warn!(job_id, error = %format!("{error:#}"), "the job names a malformed source");
+        LinkRefused::Source.into()
+    })
 }
 
 async fn job_binding(state: &AppState, job_id: &str) -> anyhow::Result<JobBinding> {
@@ -452,6 +460,8 @@ pub enum LinkRefused {
     Policy { tagged: String, job: Option<String> },
     #[error("the snapshot is not a stream named \"{job}\", as its job is")]
     Stream { job: String },
+    #[error("the job names a malformed source")]
+    Source,
 }
 
 fn policy_of(job: &Option<String>) -> String {

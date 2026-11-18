@@ -49,11 +49,12 @@ pub async fn run(
     args: &SecretArgs,
     out: Output,
     snapshot: &str,
+    host: Option<&str>,
     long: bool,
 ) -> Result<()> {
     let mut reader = open_for_read(url, args).await?;
     let (snapshot, path) = parse_snapshot_path(snapshot);
-    let entry = super::resolve_spec(&reader, snapshot).await?;
+    let entry = super::resolve_spec(&reader, snapshot, host).await?;
     let mut stdout = std::io::BufWriter::new(std::io::stdout().lock());
     let mut visit = |path: &[u8], node: &pb::Node| -> Result<(), Error> {
         if out.json {
