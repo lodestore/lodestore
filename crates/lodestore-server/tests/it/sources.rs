@@ -414,3 +414,124 @@ async fn sources_tab_lists_guests_with_protection() {
         ts.stop().await;
     }
 }
+
+fn postgres_server(port: u32, server_id: &str, names: &[(&str, u32)]) -> DatabaseServer {
+    DatabaseServer {
+        kind: DatabaseKind::Postgres as i32,
+        port,
+        version: "16.4".to_string(),
+        server_id: server_id.to_string(),
+        databases: names
+            .iter()
+            .map(|(name, oid)| Database {
+                name: name.to_string(),
+                oid: *oid,
+            })
+            .collect(),
+        ..Default::default()
+    }
+}
+
+async fn seed_snapshot(pool: &AnyPool, repo: &str, host: &str, source_ref: &str, received: i64) {
+    sqlx::query(
+        "INSERT INTO snapshots (id, repository_id, host_id, hostname, time_ms, paths_json, \
+         tags_json, incomplete, errors_total, warnings_total, stats_json, discovered_at, \
+         received_at, verified_at, source_ref) \
+         VALUES ($1, $2, $3, 'inserted', $4, '[]', '[]', 0, 0, 0, '{}', $4, $4, $4, $5)",
+    )
+    .bind("a".repeat(64))
+    .bind(repo)
+    .bind(host)
+    .bind(received)
+    .bind(source_ref)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sources_tab_groups_databases_and_clones() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let pool = &ts.state().db.pool;
+        let db02 = enroll(&ts, &api, &repo, "db-02").await;
+        let db03 = enroll(&ts, &api, &repo, "db-03").await;
+
+        let unreachable = DatabaseServer {
+            kind: DatabaseKind::Postgres as i32,
+            port: 5433,
+            version: "14.2".to_string(),
+            unreachable: true,
+            ..Default::default()
+        };
+        let facts = SourceFacts {
+            databases: vec![
+                unreachable,
+                postgres_server(5432, "7", &[("billing", 16385), ("app", 16384)]),
+            ],
+            ..Default::default()
+        };
+        let clone = SourceFacts {
+            databases: vec![postgres_server(5432, "7", &[("app", 16384)])],
+            ..Default::default()
+        };
+        let mut last = None;
+        sources::record(ts.state(), &db02.id, &facts, &mut last, now_ms())
+            .await
+            .unwrap();
+        sources::record(ts.state(), &db03.id, &clone, &mut None, now_ms())
+            .await
+            .unwrap();
+        set_capabilities(pool, &db02.id, &["source:postgres"]).await;
+        seed_policy(
+            pool,
+            &repo,
+            "pg",
+            &db02.id,
+            "  source:\n    type: postgres\n    databases: [app]\n",
+        )
+        .await;
+        let received = now_ms() - 5000;
+        seed_snapshot(pool, &repo, &db02.id, "postgres/7/16384", received).await;
+
+        let body = sources_of(&api, &db02.id).await;
+        assert!(body["scope"].is_null());
+        let groups = body["groups"].as_array().unwrap();
+        let ids: Vec<_> = groups.iter().map(|g| g["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["postgres:5432", "postgres:5433"]);
+        assert_eq!(groups[0]["unreachable"], false);
+        assert_eq!(groups[0]["version"], "16.4");
+        assert_eq!(groups[0]["port"], 5432);
+        assert_eq!(groups[0]["shared_with"], serde_json::json!(["db-03"]));
+        assert_eq!(groups[1]["unreachable"], true);
+        assert_eq!(groups[1]["shared_with"], serde_json::json!([]));
+
+        let items = body["items"].as_array().unwrap();
+        let names: Vec<_> = items.iter().map(|i| i["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["app", "billing"]);
+        assert_eq!(items[0]["label"], "app · PostgreSQL 16");
+        assert_eq!(items[0]["group_id"], "postgres:5432");
+        assert_eq!(items[0]["oid"], 16384);
+        assert_eq!(items[0]["source_type"], "postgres");
+        assert_eq!(items[0]["shared_with"], serde_json::json!(["db-03"]));
+        assert_eq!(items[1]["shared_with"], serde_json::json!([]));
+        assert_eq!(items[0]["last_snapshot_at"], received);
+        assert!(items[1]["last_snapshot_at"].is_null());
+        assert_eq!(protection(&items[0]), ("protected", vec!["pg"]));
+        assert_eq!(protection(&items[1]), ("unprotected", vec![]));
+        assert!(!body.to_string().contains("postgres/7/"));
+
+        sqlx::query("UPDATE agents SET status = 'revoked' WHERE id = $1")
+            .bind(&db03.id)
+            .execute(pool)
+            .await
+            .unwrap();
+        let body = sources_of(&api, &db02.id).await;
+        assert_eq!(body["groups"][0]["shared_with"], serde_json::json!([]));
+        assert_eq!(body["items"][0]["shared_with"], serde_json::json!([]));
+
+        ts.stop().await;
+    }
+}
