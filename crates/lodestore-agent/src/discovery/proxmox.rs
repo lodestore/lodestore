@@ -1,7 +1,7 @@
 //! Proxmox VE node and guests from the files `pmxcfs` serves under
 //! `/etc/pve`. Nothing is written there and no process is started.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{self, BufRead, BufReader};
 use std::path::Path;
 
@@ -334,6 +334,8 @@ fn scan_with(root: &Path, ids_path: &Path, budget: u64) -> Result<Option<Found>,
         }
         Err(e) => return Err(failed(".vmlist")(e)),
     };
+    // Guests past the cap are not reported but keep their saved ids.
+    let present: HashSet<String> = listed.iter().map(|&(k, v)| map_key(k, v)).collect();
     if listed.len() > MAX_GUESTS {
         listed.truncate(MAX_GUESTS);
         truncated = true;
@@ -377,7 +379,7 @@ fn scan_with(root: &Path, ids_path: &Path, budget: u64) -> Result<Option<Found>,
 
     let mut ids: Ids = old_ids
         .iter()
-        .filter(|(key, _)| listed.iter().any(|&(k, v)| map_key(k, v) == **key))
+        .filter(|(key, _)| present.contains(*key))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     let mut fresh = Vec::new();
@@ -445,7 +447,12 @@ fn scan_with(root: &Path, ids_path: &Path, budget: u64) -> Result<Option<Found>,
     if ids != old_ids {
         let written = serde_json::to_vec(&ids)
             .map_err(io::Error::other)
-            .and_then(|json| write_private_file(ids_path, &json));
+            .and_then(|json| {
+                if json.len() as u64 > MAX_STATE_BYTES {
+                    return Err(io::Error::from(io::ErrorKind::FileTooLarge));
+                }
+                write_private_file(ids_path, &json)
+            });
         if let Err(error) = written {
             tracing::warn!(
                 %error,
@@ -919,6 +926,35 @@ mod tests {
         let kept: Vec<u32> = listed(&first).iter().map(|(v, _)| *v).collect();
         assert_eq!(kept, (100..1100).collect::<Vec<_>>());
         assert_eq!(pve.ids().len(), MAX_GUESTS);
+    }
+
+    #[test]
+    fn guests_past_the_cap_keep_their_ids() {
+        let pve = Pve::new();
+        pve.members("pve1", None);
+        let list = |vmids: std::ops::Range<u32>| {
+            let entries: Vec<String> = vmids
+                .map(|v| format!(r#""{v}":{{"node":"pve1","type":"lxc","version":1}}"#))
+                .collect();
+            pve.write(
+                ".vmlist",
+                &format!(r#"{{"ids":{{{}}}}}"#, entries.join(",")),
+            );
+        };
+        let last = 200 + u32::try_from(MAX_GUESTS).unwrap() - 1;
+        let uuid_of = |f: &Found| {
+            f.proxmox
+                .guests
+                .iter()
+                .find(|g| g.vmid == last)
+                .map(|g| g.uuid.clone())
+        };
+        list(200..last + 1);
+        let before = uuid_of(&pve.found()).unwrap();
+        list(150..last + 1);
+        assert_eq!(uuid_of(&pve.found()), None);
+        list(200..last + 1);
+        assert_eq!(uuid_of(&pve.found()), Some(before));
 
         let pve = Pve::new();
         pve.members("pve1", None);
