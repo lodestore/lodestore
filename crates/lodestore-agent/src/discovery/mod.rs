@@ -1,7 +1,9 @@
 //! Finds the backup sources of this host and reports them to the server with
-//! every heartbeat. Discovery only reads files: everything under the Proxmox
-//! root is opened with `O_NOFOLLOW` and read up to a fixed size.
+//! every heartbeat. Proxmox is read from files: everything under the Proxmox
+//! root is opened with `O_NOFOLLOW` and read up to a fixed size. Database
+//! servers are asked over their local sockets (see `database`).
 
+mod database;
 mod proxmox;
 
 use std::fs::File;
@@ -20,6 +22,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::Paths;
+pub(crate) use database::ProbeMemo;
 
 pub const DISCOVERY_EVERY: Duration = Duration::from_secs(5 * 60);
 pub const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(60);
@@ -38,18 +41,47 @@ pub const MAX_STATE_BYTES: u64 = 1 << 20;
 #[derive(Debug, Clone)]
 pub struct Config {
     pub pve_root: PathBuf,
+    /// Searched in this order; a port found in an earlier directory wins.
+    pub pg_socket_dirs: Vec<PathBuf>,
+    pub mysql_sockets: Vec<PathBuf>,
+    pub pg_user: String,
+    pub mysql_user: String,
+    pub psql: PathBuf,
+    pub mysql: PathBuf,
+    pub command_timeout: Duration,
+    pub db_deadline: Duration,
 }
 
 impl Config {
     pub fn system() -> Config {
         Config {
-            pve_root: PathBuf::from("/etc/pve"),
+            pg_socket_dirs: ["/run/postgresql", "/var/run/postgresql", "/tmp"]
+                .map(PathBuf::from)
+                .into(),
+            mysql_sockets: [
+                "/run/mysqld/mysqld.sock",
+                "/var/run/mysqld/mysqld.sock",
+                "/var/lib/mysql/mysql.sock",
+            ]
+            .map(PathBuf::from)
+            .into(),
+            ..Config::proxmox_only(PathBuf::from("/etc/pve"))
         }
     }
 
     /// Reads Proxmox from `pve_root` and probes no database servers.
     pub fn proxmox_only(pve_root: PathBuf) -> Config {
-        Config { pve_root }
+        Config {
+            pve_root,
+            pg_socket_dirs: Vec::new(),
+            mysql_sockets: Vec::new(),
+            pg_user: "postgres".into(),
+            mysql_user: "mysql".into(),
+            psql: PathBuf::from("/usr/bin/psql"),
+            mysql: PathBuf::from("/usr/bin/mysql"),
+            command_timeout: Duration::from_secs(10),
+            db_deadline: Duration::from_secs(30),
+        }
     }
 }
 
@@ -72,6 +104,15 @@ pub(crate) fn open_nofollow(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
+pub(crate) fn clip(mut name: String) -> String {
+    let mut end = name.len().min(MAX_NAME_BYTES);
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    name.truncate(end);
+    name
+}
+
 pub(crate) fn read_bounded(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     open_nofollow(path)?
@@ -87,17 +128,28 @@ pub(crate) fn read_bounded(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
 }
 
 /// One discovery run. Proxmox files are read on a blocking thread: a hung
-/// `pmxcfs` blocks that thread and nothing else.
-pub async fn collect(config: &Config, paths: &Paths) -> Result<SourceFacts, ScanFailed> {
+/// `pmxcfs` blocks that thread and nothing else. Database servers are probed
+/// at the same time; they never fail the run, an unknown server is reported
+/// unreachable instead.
+pub(crate) async fn collect(
+    config: &Config,
+    paths: &Paths,
+    memo: &ProbeMemo,
+) -> Result<SourceFacts, ScanFailed> {
     let (root, ids) = (config.pve_root.clone(), paths.source_ids());
-    let found = tokio::task::spawn_blocking(move || proxmox::scan(&root, &ids))
-        .await
-        .map_err(|e| ScanFailed(format!("the discovery thread failed: {e}")))??;
+    let proxmox = async {
+        tokio::task::spawn_blocking(move || proxmox::scan(&root, &ids))
+            .await
+            .map_err(|e| ScanFailed(format!("the discovery thread failed: {e}")))?
+    };
+    let (found, (databases, db_truncated)) =
+        tokio::join!(proxmox, database::scan_databases(config, memo));
+    let found = found?;
     Ok(bound(SourceFacts {
         age_ms: 0,
-        truncated: found.as_ref().is_some_and(|f| f.truncated),
+        truncated: db_truncated || found.as_ref().is_some_and(|f| f.truncated),
         proxmox: found.map(|f| f.proxmox),
-        databases: Vec::new(),
+        databases,
     }))
 }
 
@@ -169,9 +221,10 @@ pub struct Discovery {
 
 impl Discovery {
     pub fn spawn(config: Config, paths: Paths, shutdown: CancellationToken) -> Discovery {
+        let memo = ProbeMemo::new();
         let run = move || -> Run {
-            let (config, paths) = (config.clone(), paths.clone());
-            Box::pin(async move { collect(&config, &paths).await })
+            let (config, paths, memo) = (config.clone(), paths.clone(), memo.clone());
+            Box::pin(async move { collect(&config, &paths, &memo).await })
         };
         Discovery::start(run, DISCOVERY_EVERY, DISCOVERY_TIMEOUT, shutdown).0
     }

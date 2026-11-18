@@ -12,7 +12,7 @@ use super::{
     MAX_GUEST_CONF_BYTES, MAX_GUEST_TAGS, MAX_GUESTS, MAX_NAME_BYTES, MAX_PVE_FILE_BYTES,
     MAX_SCAN_BYTES, MAX_STATE_BYTES, ScanFailed,
 };
-use super::{open_nofollow, read_bounded};
+use super::{clip, open_nofollow, read_bounded};
 use crate::identity::write_private_file;
 
 const VMIDS: std::ops::RangeInclusive<u32> = 100..=999_999_999;
@@ -270,15 +270,6 @@ fn cluster_name(root: &Path, members: Option<String>) -> Result<String, ScanFail
         )));
     }
     Ok(conf.unwrap_or_default())
-}
-
-fn clip(mut name: String) -> String {
-    let mut end = name.len().min(MAX_NAME_BYTES);
-    while !name.is_char_boundary(end) {
-        end -= 1;
-    }
-    name.truncate(end);
-    name
 }
 
 /// A cut tag would select guests it was never put on, so a long tag is left
