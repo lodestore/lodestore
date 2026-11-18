@@ -26,8 +26,8 @@ All notable changes to Lodestore are recorded here. The format follows [Keep a C
 - `latest` in `lode` and the server chooses among `files` snapshots; a snapshot of another source is chosen only by `latest@<source key>`, and a WAL batch never. A repository without signatures skips snapshots whose manifest claims a source other than `files`.
 - The anomaly baseline of a snapshot is the history of its own source instance.
 - A files restore of a snapshot of a guest or a database is refused with 422.
-- `lode ls`, `lode dump` and `lode restore` with `latest@<source key>` exit with code 1 when the signed snapshots of the key come from more than one host, as with a cloned guest or a database and its standby, and name the hosts; `--host` chooses one. A key held by one host behaves as before.
-- A job for a source other than `files` is refused when the agent has no `source:<type>` capability, and when the agent has reported a complete, recent list of sources that holds none the policy selects. An agent that is offline or has no recent list is sent the job and decides itself.
+- `lode ls`, `lode dump` and `lode restore` with `latest@<source key>` exit with code 1 when the signed snapshots of the key come from more than one host, as with a cloned guest or a database and its standby, and name the hosts with the id and age of the newest snapshot of each; `--host` chooses one. A value of `--host` in the form of a UUID is a host id and is never looked up as a name. A key held by one host behaves as before.
+- A job for a source other than `files` is refused when the agent has no `source:<type>` capability, and when the agent has reported a complete, recent list of sources, collected after the job was queued, that holds none the policy selects. An agent that is offline or has no recent list is sent the job and decides itself.
 - The missing-backup alert of a policy for guests or databases waits for the instances the agents found, plus any instance whose latest job failed. When nothing is known about a host it waits for one placeholder instance, so a failing job still raises an alert.
 - `source_instance_gone` opens an hour after an instance stops being expected and not before, and does not open again within 24 hours of the last event, so a guest that disappears from one scan does not raise an alert.
 
@@ -40,7 +40,11 @@ All notable changes to Lodestore are recorded here. The format follows [Keep a C
 - A snapshot that the storage stored ahead of the server clock is skipped when the server picks the latest snapshot of a source, as `lode` already did; the two no longer disagree.
 - A job whose snapshot claims a malformed source fails at once, with `verification_failed` or `snapshot_policy_mismatch`, instead of being retried by the verification forever.
 - An instance that is no longer expected does not make a host healthy, and its old success no longer sets the last success of the fleet overview.
-- A scan that fails is not read as "nothing found": an unknown list never silences the missing-backup alert and never raises `source_instance_gone`.
+- A scan that fails is not read as "nothing found": an unknown list never silences the missing-backup alert and never raises `source_instance_gone`. A guest that drops out of a list that was cut short keeps raising "No recent backup".
+- The sources tab ignores a snapshot stored ahead of the server clock when it shows the last snapshot of a source.
+- A job for a guest created while it waited in the queue is no longer refused with `source_not_found`: only a list collected after the job was queued can refuse it.
+- A list of sources that is over the size limit is not stored and counts as unknown; tags past the limit and over-long cluster or node names mark the list as cut short.
+- The agent runs `mysql` with `--local-infile=0` and treats a locked account like a refused login, so it does not retry at every scan. A PostgreSQL database whose name is longer than 64 bytes or is not valid UTF-8 is no longer reported under a cut name, and the saved ids of containers past the report limit are kept.
 
 ### Security
 
