@@ -625,6 +625,142 @@ async fn latest_ignores_the_claim_of_the_manifest() {
     );
 }
 
+fn named(mut r: pb::ProvenanceRecord, hostname: &str) -> pb::ProvenanceRecord {
+    r.hostname = hostname.into();
+    r
+}
+
+fn guest_record(n: u8, host: &str, hostname: &str) -> pb::ProvenanceRecord {
+    named(
+        from_source(record(id(n), host, "j", 10), &guest()),
+        hostname,
+    )
+}
+
+/// A record whose source no build reads: an unknown type, or meta outside
+/// the rules, written past `source::encode`.
+fn unreadable(mut r: pb::ProvenanceRecord, unknown_type: bool) -> pb::ProvenanceRecord {
+    r.source = Some(if unknown_type {
+        pb::Source {
+            key: "zfs/pool/x".into(),
+            meta: Vec::new(),
+        }
+    } else {
+        pb::Source {
+            key: GUEST.into(),
+            meta: vec![pb::SourceMeta {
+                key: "BAD".into(),
+                value: "x".into(),
+            }],
+        }
+    });
+    r
+}
+
+fn hours_ago(n: u8, hours: i64) -> SnapshotEntry {
+    entry(n, Some(NOW_MS - hours * HOUR_MS), 0)
+}
+
+#[test]
+fn latest_of_an_instance_refuses_two_hosts() {
+    let scope = LatestScope::Instance(guest());
+    let pick = |records: &[pb::ProvenanceRecord], entries: Vec<SnapshotEntry>| {
+        pick_latest_in(entries, &signed(records), NOW_MS, false, &scope)
+    };
+
+    let records = [
+        guest_record(1, "h1", "web"),
+        guest_record(2, "h2", "old"),
+        guest_record(3, "h2", "db"),
+    ];
+    let entries = vec![hours_ago(1, 3), hours_ago(2, 2), hours_ago(3, 1)];
+    let msg = text(pick(&records, entries.clone()).unwrap_err());
+    assert!(msg.contains("more than one host"), "{msg}");
+    assert!(msg.contains(r#""web" ("h1")"#), "{msg}");
+    assert!(msg.contains(r#""db" ("h2")"#), "{msg}");
+    assert!(!msg.contains(r#""old""#), "one item per host: {msg}");
+    assert!(msg.contains("--host"), "{msg}");
+
+    let hostile = "a\u{1b}[2Jb";
+    let long = "n".repeat(70);
+    let records = [
+        guest_record(1, "h1", hostile),
+        guest_record(2, "h2", &long),
+        guest_record(3, "h3", r#"x", "y"#),
+    ];
+    let entries = vec![hours_ago(1, 3), hours_ago(2, 2), hours_ago(3, 1)];
+    let msg = text(pick(&records, entries).unwrap_err());
+    assert!(!msg.contains('\u{1b}'), "{msg}");
+    assert!(msg.contains(r#""a\u{1b}[2Jb" ("h1")"#), "{msg}");
+    assert!(
+        msg.contains(&format!("\"{}\" (\"h2\")", "n".repeat(64))),
+        "{msg}"
+    );
+    assert!(!msg.contains(&"n".repeat(65)), "{msg}");
+    assert!(msg.contains(r#""x\", \"y" ("h3")"#), "{msg}");
+
+    let records: Vec<_> = (1..=7)
+        .map(|n| guest_record(n, &format!("h{n}"), &format!("host{n}")))
+        .collect();
+    let entries = (1..=7).map(|n| hours_ago(n, i64::from(n))).collect();
+    let msg = text(pick(&records, entries).unwrap_err());
+    assert!(msg.contains(r#""host5" ("h5")"#), "{msg}");
+    assert!(!msg.contains(r#"("h6")"#), "{msg}");
+    assert!(msg.contains("and 2 more"), "{msg}");
+
+    let other = SourceKey::proxmox_vm("pve1", "11111111-1111-4111-8111-111111111111").unwrap();
+    let records = [
+        guest_record(1, "h1", "web"),
+        guest_record(2, "h1", "web"),
+        from_source(record(id(3), "h2", "j", 10), &other),
+        record(id(4), "h2", "j", 10),
+    ];
+    let entries = vec![
+        hours_ago(1, 4),
+        hours_ago(2, 3),
+        hours_ago(3, 2),
+        hours_ago(4, 1),
+    ];
+    assert_eq!(pick(&records, entries).unwrap().entry.id, id(2));
+}
+
+#[test]
+fn latest_skips_a_source_this_build_cannot_read() {
+    let k = guest();
+    let records = [
+        record(id(1), "h1", "j", 10),
+        from_source(record(id(2), "h1", "j", 10), &k),
+        unreadable(record(id(3), "h2", "j", 10), true),
+        unreadable(record(id(4), "h2", "j", 10), false),
+    ];
+    let set = signed(&records);
+    let entries = vec![
+        hours_ago(1, 4),
+        hours_ago(2, 3),
+        hours_ago(3, 2),
+        hours_ago(4, 1),
+    ];
+    let unsigned_newer = LatestWarning::NewerUnverified {
+        count: 2,
+        newest: id(4),
+    };
+    let unopened = LatestWarning::UnreadableProvenance { count: 2 };
+    for (scope, want) in [
+        (LatestScope::Files, id(1)),
+        (LatestScope::Instance(k.clone()), id(2)),
+    ] {
+        let pick = pick_latest_in(entries.clone(), &set, NOW_MS, false, &scope).unwrap();
+        assert_eq!(pick.entry.id, want, "{scope:?}");
+        assert!(pick.warnings.contains(&unsigned_newer), "{:?}", pick.warnings);
+        assert!(pick.warnings.contains(&unopened), "{:?}", pick.warnings);
+    }
+    assert!(!set.contains(&id(3)) && !set.contains(&id(4)));
+
+    let only = signed(&records[2..]);
+    let err = pick_latest_in(entries, &only, NOW_MS, false, &LatestScope::Files).unwrap_err();
+    assert!(text(err).starts_with("No snapshot in this repository is signed"));
+}
+
 mod before_phase_20 {
     // Frozen copy of pick_latest from commit 83884fdf (main after 19.1, before phase 20); never fix it together with the code.
     use super::*;

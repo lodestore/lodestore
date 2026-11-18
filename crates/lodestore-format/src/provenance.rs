@@ -4,7 +4,7 @@
 //! written by the host being backed up, so its time and names never decide
 //! the order of a verified repository.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::attest::{AttestedSet, open_provenance};
 use crate::crypto::BlobId;
@@ -107,7 +107,8 @@ impl ProvenanceSet {
 
     /// The source of a snapshot, from its signed record only; the manifest's
     /// own claim never counts. No record, or a record without the field, is
-    /// `files`.
+    /// `files`. A record whose source this build cannot read does not open
+    /// (`open_provenance`), so its snapshot counts as unsigned.
     pub fn source_of(&self, id: &BlobId) -> SourceKey {
         self.records
             .get(id)
@@ -223,7 +224,9 @@ fn newest_of<'a>(
 pub enum LatestScope {
     /// Snapshots of files only.
     Files,
-    /// The snapshots of one source instance, whichever host wrote them.
+    /// The snapshots of one source instance. Refused when their signed
+    /// records name more than one host: clones and copies share a key, so the
+    /// caller names the host.
     Instance(SourceKey),
 }
 
@@ -235,6 +238,49 @@ impl LatestScope {
             LatestScope::Instance(key) => source == key && !key.kind().is_wal_batch(),
         }
     }
+}
+
+/// Host names and ids come from agents; they are shown cut short and escaped.
+fn clip(text: &str) -> String {
+    text.chars().take(64).collect()
+}
+
+type Hosts = BTreeMap<String, ((i64, BlobId), String)>;
+
+/// Each `host_id` of `entries` with the hostname of its newest record.
+fn hosts_of(provenance: &ProvenanceSet, entries: &[&SnapshotEntry]) -> Hosts {
+    let mut hosts = Hosts::new();
+    for e in entries {
+        let Some(record) = provenance.get(&e.id) else {
+            continue;
+        };
+        let order = provenance.stored_order(e);
+        let seen = hosts
+            .entry(record.host_id.clone())
+            .or_insert_with(|| (order, record.hostname.clone()));
+        if seen.0 < order {
+            *seen = (order, record.hostname.clone());
+        }
+    }
+    hosts
+}
+
+/// `"hostname" ("host_id")` per host, sorted by name, at most five shown.
+fn host_list<'a>(hosts: impl Iterator<Item = (&'a String, &'a ((i64, BlobId), String))>) -> String {
+    const SHOWN: usize = 5;
+    let mut items: Vec<(String, String)> = hosts
+        .map(|(id, (_, name))| (clip(name), clip(id)))
+        .collect();
+    items.sort();
+    let mut out: Vec<String> = items
+        .iter()
+        .take(SHOWN)
+        .map(|(name, id)| format!("{name:?} ({id:?})"))
+        .collect();
+    if items.len() > SHOWN {
+        out.push(format!("and {} more", items.len() - SHOWN));
+    }
+    out.join(", ")
 }
 
 /// Picks `latest`. Only files snapshots count; another source needs
@@ -299,10 +345,22 @@ pub fn pick_latest_in(
 
     let (mode, chosen) = if provenance.attested_any() {
         let key = |e: &SnapshotEntry| provenance.stored_order(e);
-        let (kept, future): (Vec<&SnapshotEntry>, Vec<&SnapshotEntry>) = entries
+        let admitted: Vec<&SnapshotEntry> = entries
             .iter()
             .filter(|e| provenance.contains(&e.id) && scope.admits(&provenance.source_of(&e.id)))
-            .partition(|e| key(e).0 <= limit);
+            .collect();
+        if let LatestScope::Instance(source) = scope {
+            let hosts = hosts_of(provenance, &admitted);
+            if hosts.len() > 1 {
+                return Err(Error::InvalidInput(format!(
+                    "the snapshots of {} come from more than one host: {}; add --host with a host id to choose one",
+                    source.as_str(),
+                    host_list(hosts.iter())
+                )));
+            }
+        }
+        let (kept, future): (Vec<&SnapshotEntry>, Vec<&SnapshotEntry>) =
+            admitted.into_iter().partition(|e| key(e).0 <= limit);
         if kept.is_empty() && !future.is_empty() {
             return Err(Error::InvalidInput(ALL_SIGNED_STORED_IN_FUTURE.into()));
         }

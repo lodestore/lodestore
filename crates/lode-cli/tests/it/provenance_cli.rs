@@ -423,13 +423,18 @@ async fn cli_latest_of_a_source_instance() {
     .await;
 
     let spec = format!("latest@{GUEST}");
-    let listed = stdout_of(lode(&fx.repo).args(["ls", &spec]));
-    assert!(listed.contains("marker4"), "{listed}");
-    assert!(!listed.contains("marker3"), "{listed}");
-
-    let path = dirs[3].to_str().unwrap();
-    let narrowed = stdout_of(lode(&fx.repo).args(["ls", &format!("{spec}:{path}")]));
-    assert!(narrowed.contains("marker4"), "{narrowed}");
+    let refused = lode(&fx.repo)
+        .args(["ls", &spec])
+        .assert()
+        .failure()
+        .code(1);
+    let stderr = String::from_utf8_lossy(&refused.get_output().stderr).into_owned();
+    assert!(stderr.contains("more than one host"), "{stderr}");
+    assert!(
+        stderr.contains(r#"("h1")"#) && stderr.contains(r#"("h2")"#),
+        "{stderr}"
+    );
+    assert!(stderr.contains("--host"), "{stderr}");
 
     let files = stdout_of(lode(&fx.repo).args(["ls", "latest"]));
     assert!(
@@ -474,9 +479,19 @@ async fn cli_snapshots_filter_by_signed_source_type() {
     let first = backup(&fx.repo, &fx.src);
     let vm = backup(&fx.repo, &second);
     let claimed = claiming_backup(&fx.repo, &fx.forged_src, GUEST).await;
+    let third = fx.src.with_file_name("third");
+    std::fs::create_dir(&third).unwrap();
+    std::fs::write(third.join("f"), b"third").unwrap();
+    let unknown = backup(&fx.repo, &third);
+    let mut unreadable = record(unknown, "host", "job");
+    unreadable.source = Some(pb::Source {
+        key: "zfs/pool/x".into(),
+        meta: Vec::new(),
+    });
     sign(
         &fx.repo,
         &[
+            unreadable,
             record(first, "host", "job"),
             from_source(
                 record(vm, "host", "job"),
@@ -505,13 +520,18 @@ async fn cli_snapshots_filter_by_signed_source_type() {
         .map(|s| s["id"].as_str().unwrap().to_owned())
         .collect();
     files.sort();
-    let mut want = vec![hex(&first), hex(&claimed)];
+    let mut want = vec![hex(&first), hex(&claimed), hex(&unknown)];
     want.sort();
     assert_eq!(files, want, "an unsigned claim counted as a guest");
 
     let all = list(&[]);
-    assert_eq!(all.len(), 3);
+    assert_eq!(all.len(), 4);
     assert!(all.iter().all(|s| s["source_type"].is_string()));
+    let unread = all
+        .iter()
+        .find(|s| s["id"] == hex(&unknown).as_str())
+        .unwrap();
+    assert!(unread["verified_by"].is_null(), "{unread}");
 
     lode(&fx.repo)
         .args(["snapshots", "--source-type", "oracle"])
