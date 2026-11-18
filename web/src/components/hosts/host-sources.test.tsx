@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { delay, HttpResponse, http } from "msw";
+import { HttpResponse, http } from "msw";
 import { describe, expect, it } from "vitest";
 import type {
 	HostDetail,
@@ -451,11 +451,15 @@ describe("Host sources notes", () => {
 describe("Host sources states", () => {
 	it("shows five skeleton rows and no toolbar until the first answer", async () => {
 		const host = makeHost();
+		let answer = () => {};
+		const held = new Promise<void>((resolve) => {
+			answer = resolve;
+		});
 		useSignedIn();
 		server.use(
 			http.get(`/api/v1/hosts/${host.id}`, () => HttpResponse.json(host)),
 			http.get(`/api/v1/hosts/${host.id}/sources`, async () => {
-				await delay("infinite");
+				await held;
 				return HttpResponse.json(makeSources());
 			}),
 		);
@@ -468,6 +472,10 @@ describe("Host sources states", () => {
 		);
 		expect(screen.queryByRole("radiogroup")).toBeNull();
 		expect(screen.queryByText(/found by the agent/i)).toBeNull();
+
+		// A request left hanging at teardown makes the next test's first request miss its handler.
+		answer();
+		await screen.findByText("The agent found no sources on this host.");
 	});
 
 	it("explains a failed load and retries on request", async () => {
@@ -496,7 +504,7 @@ describe("Host sources states", () => {
 		await user.click(
 			within(alert).getByRole("button", { name: "Retry loading sources" }),
 		);
-		await screen.findByText("VM 102 · app", undefined, { timeout: 12_000 });
+		await screen.findByText("VM 102 · app");
 	});
 
 	it("says so when the agent found nothing", async () => {
