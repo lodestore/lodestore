@@ -8,7 +8,10 @@ use std::path::Path;
 use lodestore_proto::agent::v1::{GuestKind, ProxmoxFacts, ProxmoxGuest};
 use serde::Deserialize;
 
-use super::{MAX_GUEST_CONF_BYTES, MAX_PVE_FILE_BYTES, MAX_STATE_BYTES, ScanFailed};
+use super::{
+    MAX_GUEST_CONF_BYTES, MAX_GUEST_TAGS, MAX_GUESTS, MAX_NAME_BYTES, MAX_PVE_FILE_BYTES,
+    MAX_SCAN_BYTES, MAX_STATE_BYTES, ScanFailed,
+};
 use super::{open_nofollow, read_bounded};
 use crate::identity::write_private_file;
 
@@ -230,8 +233,7 @@ fn load_ids(path: &Path) -> Result<Ids, ScanFailed> {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Ids::new()),
         Err(e)
-            if e.kind() == io::ErrorKind::FileTooLarge
-                || e.raw_os_error() == Some(libc::ELOOP) =>
+            if e.kind() == io::ErrorKind::FileTooLarge || e.raw_os_error() == Some(libc::ELOOP) =>
         {
             return quarantine(path, &e);
         }
@@ -270,6 +272,28 @@ fn cluster_name(root: &Path, members: Option<String>) -> Result<String, ScanFail
     Ok(conf.unwrap_or_default())
 }
 
+fn clip(mut name: String) -> String {
+    let mut end = name.len().min(MAX_NAME_BYTES);
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    name.truncate(end);
+    name
+}
+
+/// A cut tag would select guests it was never put on, so a long tag is left
+/// out rather than shortened.
+fn guest_tags(tags: Vec<String>, truncated: &mut bool) -> Vec<String> {
+    let before = tags.len();
+    let mut tags: Vec<String> = tags
+        .into_iter()
+        .filter(|t| t.len() <= MAX_NAME_BYTES)
+        .collect();
+    tags.truncate(MAX_GUEST_TAGS);
+    *truncated |= tags.len() < before;
+    tags
+}
+
 fn smbios_uuid(conf: &GuestConf) -> Option<uuid::Uuid> {
     conf.smbios_uuid
         .as_deref()
@@ -280,6 +304,12 @@ fn smbios_uuid(conf: &GuestConf) -> Option<uuid::Uuid> {
 /// that exists without the cluster files is a stopped `pmxcfs`, not "no
 /// Proxmox", and fails the run.
 pub(crate) fn scan(root: &Path, ids_path: &Path) -> Result<Option<Found>, ScanFailed> {
+    scan_with(root, ids_path, MAX_SCAN_BYTES)
+}
+
+/// `budget` caps the bytes read under `root` in one run; guests whose config
+/// is past it are not reported and keep their saved ids.
+fn scan_with(root: &Path, ids_path: &Path, budget: u64) -> Result<Option<Found>, ScanFailed> {
     match std::fs::metadata(root) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(failed("the Proxmox directory")(e)),
@@ -290,15 +320,40 @@ pub(crate) fn scan(root: &Path, ids_path: &Path) -> Result<Option<Found>, ScanFa
     }
     let members =
         read_bounded(&root.join(".members"), MAX_PVE_FILE_BYTES).map_err(failed(".members"))?;
+    let mut spent = members.len() as u64;
     let (node, member_cluster) = parse_members(&members)?;
     let cluster = cluster_name(root, member_cluster)?;
-    let vmlist =
-        read_bounded(&root.join(".vmlist"), MAX_PVE_FILE_BYTES).map_err(failed(".vmlist"))?;
-    let (listed, mut truncated) = parse_vmlist(&vmlist, &node)?;
+    let (mut listed, mut truncated) = match read_bounded(&root.join(".vmlist"), MAX_PVE_FILE_BYTES)
+    {
+        Ok(bytes) => {
+            spent += bytes.len() as u64;
+            parse_vmlist(&bytes, &node)?
+        }
+        Err(e) if e.kind() == io::ErrorKind::FileTooLarge => {
+            tracing::warn!("/etc/pve/.vmlist is too large; reporting the node without guests");
+            let proxmox = ProxmoxFacts {
+                cluster,
+                node,
+                guests: Vec::new(),
+            };
+            return Ok(Some(Found {
+                proxmox,
+                truncated: true,
+            }));
+        }
+        Err(e) => return Err(failed(".vmlist")(e)),
+    };
+    if listed.len() > MAX_GUESTS {
+        listed.truncate(MAX_GUESTS);
+        truncated = true;
+    }
     let old_ids = load_ids(ids_path)?;
 
     let pools = match read_bounded(&root.join("user.cfg"), MAX_PVE_FILE_BYTES) {
-        Ok(bytes) => parse_pools(&String::from_utf8_lossy(&bytes)),
+        Ok(bytes) => {
+            spent += bytes.len() as u64;
+            parse_pools(&String::from_utf8_lossy(&bytes))
+        }
         Err(e) if e.kind() == io::ErrorKind::NotFound => HashMap::new(),
         Err(_) => {
             truncated = true;
@@ -307,18 +362,21 @@ pub(crate) fn scan(root: &Path, ids_path: &Path) -> Result<Option<Found>, ScanFa
     };
 
     let node_dir = root.join("nodes").join(&node);
-    let confs: Vec<(GuestKind, u32, Option<GuestConf>)> = listed
-        .iter()
-        .map(|&(kind, vmid)| {
-            let dir = if kind == GuestKind::Vm {
-                "qemu-server"
-            } else {
-                "lxc"
-            };
-            let conf = read_conf(&node_dir.join(dir).join(format!("{vmid}.conf")));
-            (kind, vmid, conf.ok().map(|text| parse_guest_conf(&text)))
-        })
-        .collect();
+    let mut confs: Vec<(GuestKind, u32, Option<GuestConf>)> = Vec::new();
+    for &(kind, vmid) in &listed {
+        if spent >= budget {
+            truncated = true;
+            break;
+        }
+        let dir = if kind == GuestKind::Vm {
+            "qemu-server"
+        } else {
+            "lxc"
+        };
+        let conf = read_conf(&node_dir.join(dir).join(format!("{vmid}.conf")));
+        spent += conf.as_ref().map_or(0, |text| text.len() as u64);
+        confs.push((kind, vmid, conf.ok().map(|text| parse_guest_conf(&text))));
+    }
     let mut smbios_seen: HashMap<uuid::Uuid, usize> = HashMap::new();
     for (_, _, conf) in confs.iter().filter(|(kind, ..)| *kind == GuestKind::Vm) {
         if let Some(uuid) = conf.as_ref().and_then(smbios_uuid) {
@@ -377,13 +435,20 @@ pub(crate) fn scan(root: &Path, ids_path: &Path) -> Result<Option<Found>, ScanFa
         } else {
             conf.hostname
         };
+        let pool = match pools.get(&vmid) {
+            Some(pool) if pool.len() > MAX_NAME_BYTES => {
+                truncated = true;
+                String::new()
+            }
+            pool => pool.cloned().unwrap_or_default(),
+        };
         guests.push(ProxmoxGuest {
             kind: kind as i32,
             vmid,
-            name: name.unwrap_or_default(),
+            name: clip(name.unwrap_or_default()),
             uuid,
-            pool: pools.get(&vmid).cloned().unwrap_or_default(),
-            tags: conf.tags,
+            pool,
+            tags: guest_tags(conf.tags, &mut truncated),
         });
     }
     if ids != old_ids {
@@ -835,5 +900,178 @@ mod tests {
         pve.vmlist(&[]);
         let facts = pve.found().proxmox;
         assert_eq!((facts.cluster.as_str(), facts.node.as_str()), ("", "pve1"));
+    }
+
+    #[test]
+    fn guest_order_is_stable_across_runs() {
+        let pve = Pve::new();
+        pve.members("pve1", None);
+        let mut vmids: Vec<u32> = (100..1600).collect();
+        vmids.reverse();
+        vmids.swap(3, 1200);
+        let entries: Vec<String> = vmids
+            .iter()
+            .map(|v| format!(r#""{v}":{{"node":"pve1","type":"lxc","version":1}}"#))
+            .collect();
+        pve.write(
+            ".vmlist",
+            &format!(r#"{{"ids":{{{}}}}}"#, entries.join(",")),
+        );
+        let first = pve.found();
+        let second = pve.found();
+        assert!(first.truncated && second.truncated);
+        let listed = |f: &Found| -> Vec<(u32, String)> {
+            let guests = f.proxmox.guests.iter();
+            guests.map(|g| (g.vmid, g.uuid.clone())).collect()
+        };
+        assert_eq!(listed(&first), listed(&second));
+        let kept: Vec<u32> = listed(&first).iter().map(|(v, _)| *v).collect();
+        assert_eq!(kept, (100..1100).collect::<Vec<_>>());
+        assert_eq!(pve.ids().len(), MAX_GUESTS);
+
+        let pve = Pve::new();
+        pve.members("pve1", None);
+        pve.vmlist(&[
+            (100, "lxc", "pve1"),
+            (101, "lxc", "pve1"),
+            (102, "lxc", "pve1"),
+        ]);
+        let many: Vec<String> = (0..25).map(|i| format!("t{i}")).collect();
+        pve.write(
+            "nodes/pve1/lxc/100.conf",
+            &format!("hostname: a\ntags: {}\n", many.join(";")),
+        );
+        let long = "x".repeat(MAX_NAME_BYTES + 1);
+        pve.write(
+            "nodes/pve1/lxc/101.conf",
+            &format!("hostname: b\ntags: ok;{long}\n"),
+        );
+        pve.write("nodes/pve1/lxc/102.conf", "hostname: c\n");
+        pve.write("user.cfg", &format!("pool:{long}::102::\npool:p::101::\n"));
+        let found = pve.found();
+        assert!(found.truncated);
+        assert_eq!(guest(&found, 100).unwrap().tags, many[..MAX_GUEST_TAGS]);
+        assert_eq!(guest(&found, 101).unwrap().tags, ["ok"]);
+        assert_eq!(guest(&found, 101).unwrap().pool, "p");
+        assert_eq!(guest(&found, 102).unwrap().pool, "");
+    }
+
+    #[test]
+    fn oversized_pve_files_mark_the_list_truncated() {
+        let pve = Pve::new();
+        pve.members("pve1", Some("prod"));
+        pve.write("corosync.conf", "totem {\n  cluster_name: prod\n}\n");
+        std::fs::File::create(pve.root.join(".vmlist"))
+            .unwrap()
+            .set_len(MAX_PVE_FILE_BYTES + 1)
+            .unwrap();
+        let found = pve.found();
+        assert!(found.truncated);
+        assert_eq!(
+            (found.proxmox.node.as_str(), found.proxmox.cluster.as_str()),
+            ("pve1", "prod")
+        );
+        assert!(found.proxmox.guests.is_empty());
+
+        pve.vmlist(&[(100, "lxc", "pve1"), (101, "qemu", "pve1")]);
+        let snapshots: String = (0..3000)
+            .map(|i| format!("[snap{i}]\nname: old{i}\n{}\n", "#".repeat(1000)))
+            .collect();
+        pve.write(
+            "nodes/pve1/qemu-server/101.conf",
+            &format!("name: web\ntags: a\n{snapshots}"),
+        );
+        pve.write("nodes/pve1/lxc/100.conf", "hostname: dns\n");
+        std::fs::File::create(pve.root.join("user.cfg"))
+            .unwrap()
+            .set_len(MAX_PVE_FILE_BYTES + 1)
+            .unwrap();
+        let found = pve.found();
+        assert!(found.truncated);
+        assert!(found.proxmox.guests.iter().all(|g| g.pool.is_empty()));
+        let vm = guest(&found, 101).unwrap();
+        assert_eq!(
+            (vm.name.as_str(), vm.tags.as_slice()),
+            ("web", &["a".to_string()][..])
+        );
+
+        let pve = Pve::new();
+        pve.members("pve1", None);
+        let guests: Vec<(u32, &str, &str)> = (100..110).map(|v| (v, "lxc", "pve1")).collect();
+        pve.vmlist(&guests);
+        for vmid in 100..110 {
+            let pad = "#".repeat(10_000);
+            pve.write(
+                &format!("nodes/pve1/lxc/{vmid}.conf"),
+                &format!("hostname: h{vmid}\n{pad}\n"),
+            );
+        }
+        let all = pve.found();
+        assert!(!all.truncated);
+        let saved = pve.ids();
+        assert_eq!(saved.len(), 10);
+        let found = scan_with(&pve.root, &pve.ids, 35_000).unwrap().unwrap();
+        assert!(found.truncated);
+        let reported = found.proxmox.guests.len();
+        assert!(reported > 0 && reported < 10, "{reported}");
+        assert_eq!(pve.ids(), saved);
+    }
+
+    struct Counting<R> {
+        inner: R,
+        read: std::rc::Rc<std::cell::Cell<usize>>,
+    }
+
+    impl<R: io::Read> io::Read for Counting<R> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let n = self.inner.read(buf)?;
+            self.read.set(self.read.get() + n);
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn main_section_stops_at_the_first_bracket() {
+        let main = "name: web\n".repeat(20);
+        let mut data = main.clone().into_bytes();
+        data.extend_from_slice(b"[snap1]\nname: old\n");
+        data.resize(3 << 20, b'x');
+        let read = std::rc::Rc::default();
+        let reader = BufReader::new(Counting {
+            inner: io::Cursor::new(data),
+            read: std::rc::Rc::clone(&read),
+        });
+        let capacity = reader.capacity();
+        assert_eq!(
+            read_main_section(reader, MAX_GUEST_CONF_BYTES).unwrap(),
+            main
+        );
+        assert!(read.get() <= main.len() + capacity, "read {}", read.get());
+
+        let long = "a: b\n".repeat(MAX_GUEST_CONF_BYTES as usize);
+        let error = read_main_section(io::Cursor::new(long), MAX_GUEST_CONF_BYTES).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::FileTooLarge);
+    }
+
+    #[test]
+    fn path_segments_come_only_from_numbers_and_a_checked_node_name() {
+        let pve = Pve::new();
+        pve.members("../../root", None);
+        pve.vmlist(&[(100, "lxc", "../../root")]);
+        assert!(pve.scan().is_err());
+
+        pve.members("pve1", None);
+        let entry = r#"{"node":"pve1","type":"qemu","version":1}"#;
+        let keys = ["101/../../x", "abc", "99", "1000000000", "0101", "101"];
+        let ids: Vec<String> = keys.iter().map(|k| format!(r#""{k}":{entry}"#)).collect();
+        pve.write(".vmlist", &format!(r#"{{"ids":{{{}}}}}"#, ids.join(",")));
+        pve.write("nodes/pve1/qemu-server/101.conf", "name: web\n");
+        pve.write("x.conf", "name: leak\n");
+        pve.write("nodes/pve1/qemu-server/99.conf", "name: leak\n");
+        let found = pve.found();
+        assert!(found.truncated);
+        let vmids: Vec<u32> = found.proxmox.guests.iter().map(|g| g.vmid).collect();
+        assert_eq!(vmids, [101]);
+        assert!(!format!("{:?}", found.proxmox).contains("leak"));
     }
 }

@@ -323,6 +323,7 @@ fn spawn_update(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn session_once(
     args: &RunArgs,
     config: &AgentConfig,

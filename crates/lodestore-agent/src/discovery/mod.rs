@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use lodestore_proto::agent::v1::SourceFacts;
+use prost::Message;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -24,9 +25,14 @@ pub const DISCOVERY_EVERY: Duration = Duration::from_secs(5 * 60);
 pub const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(60);
 pub const MAX_GUESTS: usize = 1000;
 pub const MAX_GUEST_TAGS: usize = 20;
+pub const MAX_SERVERS: usize = 16;
+pub const MAX_DATABASES: usize = 1000;
 pub const MAX_NAME_BYTES: usize = 64;
+pub const MAX_VERSION_BYTES: usize = 32;
+pub const MAX_FACTS_BYTES: usize = 256 << 10;
 pub const MAX_PVE_FILE_BYTES: u64 = 4 << 20;
 pub const MAX_GUEST_CONF_BYTES: u64 = 64 << 10;
+pub const MAX_SCAN_BYTES: u64 = 32 << 20;
 pub const MAX_STATE_BYTES: u64 = 1 << 20;
 
 #[derive(Debug, Clone)]
@@ -87,12 +93,67 @@ pub async fn collect(config: &Config, paths: &Paths) -> Result<SourceFacts, Scan
     let found = tokio::task::spawn_blocking(move || proxmox::scan(&root, &ids))
         .await
         .map_err(|e| ScanFailed(format!("the discovery thread failed: {e}")))??;
-    Ok(SourceFacts {
+    Ok(bound(SourceFacts {
         age_ms: 0,
         truncated: found.as_ref().is_some_and(|f| f.truncated),
         proxmox: found.map(|f| f.proxmox),
         databases: Vec::new(),
-    })
+    }))
+}
+
+/// Cuts the list to the limits the server applies and to `MAX_FACTS_BYTES`
+/// encoded, always from the tail of the already ordered lists.
+fn bound(mut facts: SourceFacts) -> SourceFacts {
+    let mut truncated = facts.truncated;
+    if let Some(proxmox) = &mut facts.proxmox
+        && proxmox.guests.len() > MAX_GUESTS
+    {
+        proxmox.guests.truncate(MAX_GUESTS);
+        truncated = true;
+    }
+    if facts.databases.len() > MAX_SERVERS {
+        facts.databases.truncate(MAX_SERVERS);
+        truncated = true;
+    }
+    let mut left = MAX_DATABASES;
+    for server in &mut facts.databases {
+        if server.databases.len() > left {
+            server.databases.truncate(left);
+            truncated = true;
+        }
+        left -= server.databases.len();
+        if server.version.len() > MAX_VERSION_BYTES {
+            let mut end = MAX_VERSION_BYTES;
+            while !server.version.is_char_boundary(end) {
+                end -= 1;
+            }
+            server.version.truncate(end);
+        }
+    }
+    let mut len = facts.encoded_len();
+    while len > MAX_FACTS_BYTES {
+        let cut = if let Some(server) = facts.databases.last_mut() {
+            match server.databases.pop() {
+                Some(db) => prost::encoding::message::encoded_len(6, &db),
+                None => facts
+                    .databases
+                    .pop()
+                    .map_or(0, |s| prost::encoding::message::encoded_len(4, &s)),
+            }
+        } else {
+            match facts.proxmox.as_mut().and_then(|p| p.guests.pop()) {
+                Some(guest) => prost::encoding::message::encoded_len(3, &guest),
+                None => break,
+            }
+        };
+        truncated = true;
+        len = len.saturating_sub(cut);
+        if len <= MAX_FACTS_BYTES {
+            len = facts.encoded_len();
+        }
+    }
+    facts.truncated = truncated;
+    facts
 }
 
 type Run = Pin<Box<dyn Future<Output = Result<SourceFacts, ScanFailed>> + Send>>;
@@ -189,7 +250,9 @@ async fn schedule(
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use lodestore_proto::agent::v1::ProxmoxFacts;
+    use lodestore_proto::agent::v1::{
+        Database, DatabaseServer, GuestKind, ProxmoxFacts, ProxmoxGuest,
+    };
 
     use super::*;
 
@@ -219,8 +282,12 @@ mod tests {
             })
         };
         let shutdown = CancellationToken::new();
-        let (discovery, _task) =
-            Discovery::start(run, Duration::from_secs(10), Duration::from_secs(5), shutdown);
+        let (discovery, _task) = Discovery::start(
+            run,
+            Duration::from_secs(10),
+            Duration::from_secs(5),
+            shutdown,
+        );
         tokio::time::sleep(Duration::from_secs(2)).await;
         let first = discovery.current().expect("the first run succeeded");
         assert_eq!(first.proxmox.as_ref().unwrap().node, "pve1");
@@ -233,5 +300,166 @@ mod tests {
 
         tokio::time::sleep(Duration::from_secs(3)).await;
         assert!(discovery.current().unwrap().age_ms >= after.age_ms + 3_000);
+    }
+
+    fn hangs() -> Run {
+        Box::pin(std::future::pending())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn current_is_none_before_the_first_run() {
+        let (discovery, _task) = Discovery::start(
+            hangs,
+            Duration::from_secs(10),
+            Duration::from_secs(5),
+            CancellationToken::new(),
+        );
+        assert!(discovery.current().is_none());
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert!(discovery.current().is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hung_run_does_not_block_or_pile_up() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+        let run = move || -> Run {
+            if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                Box::pin(async { Ok(facts("pve1")) })
+            } else {
+                hangs()
+            }
+        };
+        let (discovery, _task) = Discovery::start(
+            run,
+            Duration::from_secs(10),
+            Duration::from_secs(5),
+            CancellationToken::new(),
+        );
+        let clone = discovery.clone();
+        tokio::time::sleep(Duration::from_secs(300)).await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "a hung run is not restarted"
+        );
+        let started = std::time::Instant::now();
+        let current = discovery.current().expect("the first run succeeded");
+        assert!(started.elapsed() < Duration::from_millis(100));
+        assert_eq!(current.proxmox.unwrap().node, "pve1");
+        assert_eq!(clone.current(), discovery.current());
+    }
+
+    #[tokio::test]
+    async fn discovery_stops_on_shutdown() {
+        // waiting for the hung run, then sleeping after its timeout
+        for timeout in [Duration::from_secs(60), Duration::from_millis(50)] {
+            let shutdown = CancellationToken::new();
+            let (_discovery, task) =
+                Discovery::start(hangs, Duration::from_secs(60), timeout, shutdown.clone());
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            shutdown.cancel();
+            tokio::time::timeout(Duration::from_secs(1), task)
+                .await
+                .expect("the discovery task ends on shutdown")
+                .unwrap();
+        }
+    }
+
+    fn guest(vmid: u32, name: &str, tags: Vec<String>) -> ProxmoxGuest {
+        ProxmoxGuest {
+            kind: GuestKind::Ct as i32,
+            vmid,
+            name: name.into(),
+            uuid: "0192f0c4-7d3a-7000-8000-000000000001".into(),
+            pool: String::new(),
+            tags,
+        }
+    }
+
+    fn with_guests(guests: Vec<ProxmoxGuest>) -> SourceFacts {
+        SourceFacts {
+            proxmox: Some(ProxmoxFacts {
+                cluster: String::new(),
+                node: "pve1".into(),
+                guests,
+            }),
+            ..SourceFacts::default()
+        }
+    }
+
+    fn vmids(facts: &SourceFacts) -> Vec<u32> {
+        let guests = &facts.proxmox.as_ref().unwrap().guests;
+        guests.iter().map(|g| g.vmid).collect()
+    }
+
+    #[test]
+    fn bound_cuts_and_marks_truncated() {
+        let many = (100..1600).map(|v| guest(v, "g", Vec::new())).collect();
+        let cut = bound(with_guests(many));
+        assert!(cut.truncated);
+        assert_eq!(vmids(&cut), (100..1100).collect::<Vec<_>>());
+
+        let tags: Vec<String> = (0..20).map(|i| format!("{i:0>64}")).collect();
+        let big = (100..1100)
+            .map(|v| guest(v, &"n".repeat(64), tags.clone()))
+            .collect();
+        let cut = bound(with_guests(big));
+        assert!(cut.truncated);
+        assert!(cut.encoded_len() <= MAX_FACTS_BYTES);
+        let kept = vmids(&cut);
+        assert!(!kept.is_empty() && kept.len() < 1000);
+        assert_eq!(kept, (100..100 + kept.len() as u32).collect::<Vec<_>>());
+
+        let servers = (0..20)
+            .map(|port| DatabaseServer {
+                port,
+                version: "16.4".into(),
+                databases: (1..=1500)
+                    .map(|oid| Database {
+                        name: format!("db{oid}"),
+                        oid,
+                    })
+                    .collect(),
+                ..DatabaseServer::default()
+            })
+            .collect();
+        let cut = bound(SourceFacts {
+            databases: servers,
+            ..SourceFacts::default()
+        });
+        assert!(cut.truncated);
+        assert_eq!(cut.databases.len(), 16);
+        let total: usize = cut.databases.iter().map(|s| s.databases.len()).sum();
+        assert!(total <= MAX_DATABASES, "{total}");
+
+        let small = with_guests(vec![guest(101, "web", vec!["a".into()])]);
+        assert_eq!(bound(small.clone()), small);
+        assert!(!bound(small).truncated);
+    }
+
+    #[test]
+    fn read_bounded_never_reads_past_the_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let huge = tmp.path().join("huge");
+        File::create(&huge).unwrap().set_len(1 << 40).unwrap();
+        let error = read_bounded(&huge, MAX_PVE_FILE_BYTES).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::FileTooLarge);
+
+        let exact = tmp.path().join("exact");
+        std::fs::write(&exact, vec![b'x'; 4096]).unwrap();
+        assert_eq!(read_bounded(&exact, 4096).unwrap().len(), 4096);
+        assert_eq!(
+            read_bounded(&exact, 4095).unwrap_err().kind(),
+            io::ErrorKind::FileTooLarge
+        );
+
+        let error = read_bounded(Path::new("/dev/zero"), 16).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&exact, &link).unwrap();
+        let error = read_bounded(&link, 4096).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::ELOOP));
     }
 }
