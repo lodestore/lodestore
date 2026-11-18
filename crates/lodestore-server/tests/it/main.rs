@@ -91,6 +91,7 @@ mod schedule;
 mod secrets_upgrade;
 mod snapshot_actions;
 mod source_filter;
+mod sources;
 mod spa;
 mod stdin;
 mod token_upgrade;

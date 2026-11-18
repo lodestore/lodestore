@@ -153,6 +153,7 @@ pub fn collect() -> Heartbeat {
         mounts: mounts(),
         hook_facts: None,
         restore_facts: None,
+        source_facts: None,
     }
 }
 
