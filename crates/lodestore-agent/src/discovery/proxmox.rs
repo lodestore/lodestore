@@ -208,21 +208,72 @@ fn map_key(kind: GuestKind, vmid: u32) -> String {
 
 type Ids = BTreeMap<String, String>;
 
+/// Moves a damaged id file aside: its containers get new ids, which makes
+/// them new instances, as after a reinstall of the node.
+fn quarantine(path: &Path, why: &dyn std::fmt::Display) -> Result<Ids, ScanFailed> {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".corrupt");
+    std::fs::rename(path, path.with_file_name(name)).map_err(failed("the source id file"))?;
+    tracing::warn!(
+        file = %path.display(),
+        %why,
+        "the source id file is damaged; it was moved aside and containers get new ids"
+    );
+    Ok(Ids::new())
+}
+
+/// Any read error other than a missing, damaged, oversized or symlinked file
+/// fails the run and leaves the file alone: a transient error must not renew
+/// every container id.
 fn load_ids(path: &Path) -> Result<Ids, ScanFailed> {
-    match read_bounded(path, MAX_STATE_BYTES) {
-        Ok(bytes) => {
-            let mut ids: Ids = serde_json::from_slice(&bytes)
-                .map_err(|e| ScanFailed(format!("{} cannot be parsed: {e}", path.display())))?;
+    let bytes = match read_bounded(path, MAX_STATE_BYTES) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Ids::new()),
+        Err(e)
+            if e.kind() == io::ErrorKind::FileTooLarge
+                || e.raw_os_error() == Some(libc::ELOOP) =>
+        {
+            return quarantine(path, &e);
+        }
+        Err(e) => return Err(failed("the source id file")(e)),
+    };
+    match serde_json::from_slice::<Ids>(&bytes) {
+        Ok(mut ids) => {
             ids.retain(|_, uuid| uuid::Uuid::parse_str(uuid).is_ok());
             Ok(ids)
         }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Ids::new()),
-        Err(e) => Err(failed("the source id file")(e)),
+        Err(e) => quarantine(path, &e),
     }
 }
 
 fn new_uuid() -> String {
     uuid::Uuid::now_v7().hyphenated().to_string()
+}
+
+/// Only a missing `corosync.conf` together with no `cluster.name` in
+/// `.members` is a node outside a cluster; anything else that does not agree
+/// fails the run, so a guest never changes its key because of a bad read.
+fn cluster_name(root: &Path, members: Option<String>) -> Result<String, ScanFailed> {
+    let conf = match read_bounded(&root.join("corosync.conf"), MAX_PVE_FILE_BYTES) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(failed("corosync.conf")(e)),
+        Ok(bytes) => Some(
+            parse_cluster_name(&String::from_utf8_lossy(&bytes))
+                .ok_or_else(|| ScanFailed("corosync.conf names no cluster".into()))?,
+        ),
+    };
+    if conf != members {
+        return Err(ScanFailed(format!(
+            "corosync.conf names the cluster {conf:?} and .members {members:?}"
+        )));
+    }
+    Ok(conf.unwrap_or_default())
+}
+
+fn smbios_uuid(conf: &GuestConf) -> Option<uuid::Uuid> {
+    conf.smbios_uuid
+        .as_deref()
+        .and_then(|u| uuid::Uuid::parse_str(u).ok())
 }
 
 /// `Ok(None)`: `root` does not exist, this is not a Proxmox node. A `root`
@@ -239,13 +290,8 @@ pub(crate) fn scan(root: &Path, ids_path: &Path) -> Result<Option<Found>, ScanFa
     }
     let members =
         read_bounded(&root.join(".members"), MAX_PVE_FILE_BYTES).map_err(failed(".members"))?;
-    let (node, _member_cluster) = parse_members(&members)?;
-    let cluster = match read_bounded(&root.join("corosync.conf"), MAX_PVE_FILE_BYTES) {
-        Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(failed("corosync.conf")(e)),
-        Ok(bytes) => parse_cluster_name(&String::from_utf8_lossy(&bytes))
-            .ok_or_else(|| ScanFailed("corosync.conf names no cluster".into()))?,
-    };
+    let (node, member_cluster) = parse_members(&members)?;
+    let cluster = cluster_name(root, member_cluster)?;
     let vmlist =
         read_bounded(&root.join(".vmlist"), MAX_PVE_FILE_BYTES).map_err(failed(".vmlist"))?;
     let (listed, mut truncated) = parse_vmlist(&vmlist, &node)?;
@@ -260,38 +306,72 @@ pub(crate) fn scan(root: &Path, ids_path: &Path) -> Result<Option<Found>, ScanFa
         }
     };
 
+    let node_dir = root.join("nodes").join(&node);
+    let confs: Vec<(GuestKind, u32, Option<GuestConf>)> = listed
+        .iter()
+        .map(|&(kind, vmid)| {
+            let dir = if kind == GuestKind::Vm {
+                "qemu-server"
+            } else {
+                "lxc"
+            };
+            let conf = read_conf(&node_dir.join(dir).join(format!("{vmid}.conf")));
+            (kind, vmid, conf.ok().map(|text| parse_guest_conf(&text)))
+        })
+        .collect();
+    let mut smbios_seen: HashMap<uuid::Uuid, usize> = HashMap::new();
+    for (_, _, conf) in confs.iter().filter(|(kind, ..)| *kind == GuestKind::Vm) {
+        if let Some(uuid) = conf.as_ref().and_then(smbios_uuid) {
+            *smbios_seen.entry(uuid).or_default() += 1;
+        }
+    }
+
     let mut ids: Ids = old_ids
         .iter()
         .filter(|(key, _)| listed.iter().any(|&(k, v)| map_key(k, v) == **key))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    let node_dir = root.join("nodes").join(&node);
+    let mut fresh = Vec::new();
     let mut guests = Vec::new();
-    for (kind, vmid) in listed {
-        let dir = if kind == GuestKind::Vm {
-            "qemu-server"
-        } else {
-            "lxc"
-        };
-        let conf = match read_conf(&node_dir.join(dir).join(format!("{vmid}.conf"))) {
-            Ok(text) => parse_guest_conf(&text),
-            Err(_) => {
-                truncated = true;
-                GuestConf::default()
-            }
-        };
+    for (kind, vmid, conf) in confs {
         let key = map_key(kind, vmid);
-        let uuid = match conf
-            .smbios_uuid
-            .as_deref()
-            .filter(|_| kind == GuestKind::Vm)
-        {
+        let own = match (kind, &conf) {
+            (GuestKind::Vm, None) => {
+                truncated = true;
+                continue;
+            }
+            (GuestKind::Vm, Some(conf)) if conf.smbios_uuid.is_some() => Some(smbios_uuid(conf)),
+            _ => None,
+        };
+        let uuid = match own {
             Some(own) => {
                 ids.remove(&key);
-                own.to_ascii_lowercase()
+                match own.filter(|u| !u.is_nil() && smbios_seen.get(u) == Some(&1)) {
+                    Some(uuid) => uuid.hyphenated().to_string(),
+                    None => {
+                        tracing::warn!(
+                            vmid,
+                            "the VM has a SMBIOS uuid that is empty, invalid or shared with another VM of this node; it is not reported"
+                        );
+                        truncated = true;
+                        continue;
+                    }
+                }
             }
-            None => ids.entry(key).or_insert_with(new_uuid).clone(),
+            None => match ids.get(&key) {
+                Some(uuid) => uuid.clone(),
+                None => {
+                    let uuid = new_uuid();
+                    ids.insert(key.clone(), uuid.clone());
+                    fresh.push(uuid.clone());
+                    uuid
+                }
+            },
         };
+        let conf = conf.unwrap_or_else(|| {
+            truncated = true;
+            GuestConf::default()
+        });
         let name = if kind == GuestKind::Vm {
             conf.name
         } else {
@@ -307,8 +387,17 @@ pub(crate) fn scan(root: &Path, ids_path: &Path) -> Result<Option<Found>, ScanFa
         });
     }
     if ids != old_ids {
-        let json = serde_json::to_vec(&ids).map_err(|e| ScanFailed(e.to_string()))?;
-        write_private_file(ids_path, &json).map_err(failed("the source id file"))?;
+        let written = serde_json::to_vec(&ids)
+            .map_err(io::Error::other)
+            .and_then(|json| write_private_file(ids_path, &json));
+        if let Err(error) = written {
+            tracing::warn!(
+                %error,
+                "the source id file cannot be written; guests with new ids are not reported until it can"
+            );
+            truncated |= !fresh.is_empty();
+            guests.retain(|g| !fresh.contains(&g.uuid));
+        }
     }
     Ok(Some(Found {
         proxmox: ProxmoxFacts {
@@ -383,7 +472,30 @@ mod tests {
         pub fn found(&self) -> Found {
             self.scan().expect("scan").expect("a Proxmox node")
         }
+
+        pub fn ids(&self) -> Ids {
+            serde_json::from_slice(&std::fs::read(&self.ids).unwrap()).unwrap()
+        }
+
+        pub fn corrupt(&self) -> PathBuf {
+            self.ids.with_file_name("source-ids.json.corrupt")
+        }
+
+        pub fn save_ids(&self, ids: &[(&str, &str)]) {
+            let ids: Ids = ids
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            std::fs::create_dir_all(self.ids.parent().unwrap()).unwrap();
+            std::fs::write(&self.ids, serde_json::to_vec(&ids).unwrap()).unwrap();
+        }
     }
+
+    pub(super) fn guest(found: &Found, vmid: u32) -> Option<&ProxmoxGuest> {
+        found.proxmox.guests.iter().find(|g| g.vmid == vmid)
+    }
+
+    const SAVED: &str = "0192f0c4-7d3a-7000-8000-000000000001";
 
     #[test]
     fn scan_reads_the_node_guests() {
@@ -469,5 +581,259 @@ mod tests {
         pve.write(".members", r#"{"version": 3}"#);
         assert!(pve.scan().is_err(), ".members without nodename");
         unchanged();
+    }
+
+    #[test]
+    fn container_uuid_is_kept_and_renewed_for_a_reused_vmid() {
+        let pve = Pve::new();
+        pve.members("pve1", None);
+        pve.write("nodes/pve1/lxc/200.conf", "hostname: dns\n");
+        pve.write(
+            "nodes/pve1/qemu-server/101.conf",
+            "name: web\nsmbios1: uuid=0b6f1a2c-3d4e-4f50-8172-93a4b5c6d7e8\n",
+        );
+        pve.vmlist(&[(200, "lxc", "pve1"), (101, "qemu", "pve1")]);
+        let first = guest(&pve.found(), 200).unwrap().uuid.clone();
+        assert_eq!(guest(&pve.found(), 200).unwrap().uuid, first);
+        assert_eq!(pve.ids().keys().collect::<Vec<_>>(), ["ct/200"]);
+
+        pve.vmlist(&[(101, "qemu", "pve1")]);
+        assert!(guest(&pve.found(), 200).is_none());
+        assert!(!pve.ids().contains_key("ct/200"));
+        pve.vmlist(&[(200, "lxc", "pve1"), (101, "qemu", "pve1")]);
+        let reused = guest(&pve.found(), 200).unwrap().uuid.clone();
+        assert_ne!(reused, first);
+
+        pve.write("nodes/pve1/qemu-server/200.conf", "name: now-a-vm\n");
+        pve.vmlist(&[(200, "qemu", "pve1")]);
+        let vm = guest(&pve.found(), 200).unwrap().clone();
+        assert_eq!(vm.kind, GuestKind::Vm as i32);
+        assert!(!pve.ids().contains_key("ct/200"));
+        pve.vmlist(&[(200, "lxc", "pve1")]);
+        let back = guest(&pve.found(), 200).unwrap().uuid.clone();
+        assert!(back != reused && back != vm.uuid);
+    }
+
+    #[test]
+    fn failed_listing_keeps_the_state() {
+        let pve = Pve::new();
+        pve.members("pve1", None);
+        pve.save_ids(&[("ct/200", SAVED)]);
+        let before = std::fs::read(&pve.ids).unwrap();
+        assert!(pve.scan().is_err());
+        assert_eq!(std::fs::read(&pve.ids).unwrap(), before);
+
+        pve.vmlist(&[(200, "lxc", "pve1")]);
+        pve.write("nodes/pve1/lxc/200.conf", "hostname: dns\n");
+        std::fs::write(&pve.ids, "{ broken").unwrap();
+        let found = pve.found();
+        assert_ne!(guest(&found, 200).unwrap().uuid, SAVED);
+        assert_eq!(std::fs::read_to_string(pve.corrupt()).unwrap(), "{ broken");
+
+        std::fs::write(&pve.ids, "[1, 2").unwrap();
+        pve.found();
+        assert_eq!(std::fs::read_to_string(pve.corrupt()).unwrap(), "[1, 2");
+    }
+
+    #[test]
+    fn transient_read_error_keeps_the_file() {
+        let pve = Pve::new();
+        pve.members("pve1", None);
+        pve.vmlist(&[(200, "lxc", "pve1")]);
+        std::fs::create_dir_all(&pve.ids).unwrap();
+        assert!(pve.scan().is_err());
+        assert!(pve.ids.is_dir());
+        assert!(!pve.corrupt().exists());
+    }
+
+    #[test]
+    fn unwritable_state_reports_no_new_uuid() {
+        let pve = Pve::new();
+        pve.members("pve1", None);
+        pve.save_ids(&[("ct/200", SAVED)]);
+        pve.vmlist(&[(200, "lxc", "pve1"), (201, "lxc", "pve1")]);
+        pve.write("nodes/pve1/lxc/200.conf", "hostname: a\n");
+        pve.write("nodes/pve1/lxc/201.conf", "hostname: b\n");
+        let blocker = pve.ids.with_file_name(".source-ids.json.tmp");
+        std::fs::create_dir_all(&blocker).unwrap();
+
+        let found = pve.found();
+        assert_eq!(guest(&found, 200).unwrap().uuid, SAVED);
+        assert!(guest(&found, 201).is_none());
+        assert!(found.truncated);
+
+        std::fs::remove_dir(&blocker).unwrap();
+        let found = pve.found();
+        let new = guest(&found, 201).unwrap().uuid.clone();
+        assert!(!found.truncated);
+        assert_eq!(pve.ids()["ct/201"], new);
+        assert_eq!(guest(&pve.found(), 201).unwrap().uuid, new);
+    }
+
+    #[test]
+    fn duplicate_smbios_uuid_is_not_reported() {
+        let pve = Pve::new();
+        pve.members("pve1", None);
+        let shared = "0b6f1a2c-3d4e-4f50-8172-93a4b5c6d7e8";
+        pve.write(
+            "nodes/pve1/qemu-server/101.conf",
+            &format!("name: a\nsmbios1: uuid={shared}\n"),
+        );
+        pve.write(
+            "nodes/pve1/qemu-server/102.conf",
+            &format!("name: b\nsmbios1: uuid={}\n", shared.to_ascii_uppercase()),
+        );
+        pve.write(
+            "nodes/pve1/qemu-server/103.conf",
+            "name: c\nsmbios1: uuid=00000000-0000-0000-0000-000000000000\n",
+        );
+        pve.write("nodes/pve1/qemu-server/104.conf", "name: d\n");
+        pve.write("nodes/pve1/lxc/200.conf", "hostname: e\n");
+        pve.vmlist(&[
+            (101, "qemu", "pve1"),
+            (102, "qemu", "pve1"),
+            (103, "qemu", "pve1"),
+            (104, "qemu", "pve1"),
+            (200, "lxc", "pve1"),
+        ]);
+        let found = pve.found();
+        assert!(found.truncated);
+        let vmids: Vec<u32> = found.proxmox.guests.iter().map(|g| g.vmid).collect();
+        assert_eq!(vmids, [104, 200]);
+        let ids = pve.ids();
+        assert!(
+            ["vm/101", "vm/102", "vm/103"]
+                .iter()
+                .all(|k| !ids.contains_key(*k))
+        );
+    }
+
+    #[test]
+    fn unreadable_corosync_conf_is_a_failed_run() {
+        let pve = Pve::new();
+        pve.members("pve1", Some("b"));
+        pve.vmlist(&[(200, "lxc", "pve1")]);
+        pve.write("nodes/pve1/lxc/200.conf", "hostname: dns\n");
+        pve.save_ids(&[("ct/200", SAVED), ("ct/999", SAVED)]);
+        let before = std::fs::read(&pve.ids).unwrap();
+        let corosync = pve.root.join("corosync.conf");
+
+        assert!(pve.scan().is_err(), "cluster.name without corosync.conf");
+        std::fs::create_dir(&corosync).unwrap();
+        assert!(pve.scan().is_err(), "corosync.conf is a directory");
+        std::fs::remove_dir(&corosync).unwrap();
+        std::fs::File::create(&corosync)
+            .unwrap()
+            .set_len(MAX_PVE_FILE_BYTES + 1)
+            .unwrap();
+        assert!(pve.scan().is_err(), "corosync.conf over the limit");
+        pve.write("corosync.conf", "totem {\n  version: 2\n}\n");
+        assert!(pve.scan().is_err(), "no cluster_name");
+        pve.write("corosync.conf", "totem {\n  cluster_name: a\n}\n");
+        assert!(pve.scan().is_err(), "cluster_name differs from .members");
+        assert_eq!(std::fs::read(&pve.ids).unwrap(), before);
+
+        pve.write("corosync.conf", "totem {\n  cluster_name: b\n}\n");
+        assert_eq!(pve.found().proxmox.cluster, "b");
+    }
+
+    #[test]
+    fn vm_with_unreadable_conf_is_not_reported_under_a_new_uuid() {
+        let pve = Pve::new();
+        pve.members("pve1", None);
+        let conf = pve.root.join("nodes/pve1/qemu-server/101.conf");
+        pve.write("nodes/pve1/qemu-server/101.conf", "name: web\n");
+        pve.write("nodes/pve1/lxc/200.conf", "hostname: dns\ntags: a\n");
+        pve.vmlist(&[(101, "qemu", "pve1"), (200, "lxc", "pve1")]);
+        let found = pve.found();
+        let (vm, ct) = (
+            guest(&found, 101).unwrap().uuid.clone(),
+            guest(&found, 200).unwrap().uuid.clone(),
+        );
+        assert_eq!(pve.ids()["vm/101"], vm);
+
+        std::fs::remove_file(&conf).unwrap();
+        std::fs::create_dir(&conf).unwrap();
+        let found = pve.found();
+        assert!(guest(&found, 101).is_none());
+        assert!(found.truncated);
+        assert_eq!(pve.ids()["vm/101"], vm);
+        std::fs::remove_dir(&conf).unwrap();
+        pve.write("nodes/pve1/qemu-server/101.conf", "name: web\n");
+        assert_eq!(guest(&pve.found(), 101).unwrap().uuid, vm);
+
+        let big = format!("name: big\n{}\n", "x".repeat(MAX_GUEST_CONF_BYTES as usize));
+        pve.write("nodes/pve1/qemu-server/104.conf", &big);
+        pve.vmlist(&[
+            (101, "qemu", "pve1"),
+            (104, "qemu", "pve1"),
+            (200, "lxc", "pve1"),
+        ]);
+        let found = pve.found();
+        assert!(guest(&found, 104).is_none());
+        assert!(found.truncated);
+        assert!(!pve.ids().contains_key("vm/104"));
+
+        std::fs::remove_file(pve.root.join("nodes/pve1/lxc/200.conf")).unwrap();
+        let found = pve.found();
+        let ct_now = guest(&found, 200).unwrap();
+        assert_eq!(ct_now.uuid, ct);
+        assert!(ct_now.name.is_empty() && ct_now.tags.is_empty());
+        assert!(found.truncated);
+
+        let mut bytes = b"#desc \xff here\nname: lossy\n".to_vec();
+        bytes.extend_from_slice(b"smbios1: uuid=0b6f1a2c-3d4e-4f50-8172-93a4b5c6d7e8\n");
+        std::fs::write(&conf, bytes).unwrap();
+        let found = pve.found();
+        let vm = guest(&found, 101).unwrap();
+        assert_eq!(vm.name, "lossy");
+        assert_eq!(vm.uuid, "0b6f1a2c-3d4e-4f50-8172-93a4b5c6d7e8");
+    }
+
+    #[test]
+    fn source_ids_file_is_private_and_bounded() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let pve = Pve::new();
+        pve.members("pve1", None);
+        pve.vmlist(&[(200, "lxc", "pve1")]);
+        pve.write("nodes/pve1/lxc/200.conf", "hostname: dns\n");
+        pve.save_ids(&[]);
+        std::fs::set_permissions(&pve.ids, std::fs::Permissions::from_mode(0o644)).unwrap();
+        pve.found();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&pve.ids), 0o600);
+
+        let target = pve.ids.with_file_name("elsewhere.json");
+        let planted = serde_json::to_vec(&serde_json::json!({ "ct/200": SAVED })).unwrap();
+        std::fs::write(&target, &planted).unwrap();
+        std::fs::remove_file(&pve.ids).unwrap();
+        std::os::unix::fs::symlink(&target, &pve.ids).unwrap();
+        let found = pve.found();
+        assert_ne!(guest(&found, 200).unwrap().uuid, SAVED);
+        let moved = std::fs::symlink_metadata(pve.corrupt()).unwrap();
+        assert!(moved.file_type().is_symlink());
+        assert_eq!(std::fs::read(&target).unwrap(), planted);
+        let replaced = std::fs::symlink_metadata(&pve.ids).unwrap();
+        assert!(replaced.file_type().is_file());
+        assert_eq!(mode(&pve.ids), 0o600);
+
+        std::fs::File::create(&pve.ids)
+            .unwrap()
+            .set_len(64 << 20)
+            .unwrap();
+        let found = pve.found();
+        assert!(guest(&found, 200).is_some());
+        assert_eq!(std::fs::metadata(pve.corrupt()).unwrap().len(), 64 << 20);
+        assert_eq!(pve.ids().len(), 1);
+    }
+
+    #[test]
+    fn node_outside_a_cluster() {
+        let pve = Pve::new();
+        pve.members("pve1", None);
+        pve.vmlist(&[]);
+        let facts = pve.found().proxmox;
+        assert_eq!((facts.cluster.as_str(), facts.node.as_str()), ("", "pve1"));
     }
 }
