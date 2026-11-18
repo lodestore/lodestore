@@ -51,6 +51,7 @@ An `http://` address that is not on the loopback interface works, but the token 
 | `lode server snapshots list --host <host> [--limit N] [--source-type TYPE] [--source KEY]` | `snapshots:read` |
 | `lode server snapshots mark <id> --reason TEXT` and `clear <id> --reason TEXT` | `snapshots:delete` |
 | `lode server snapshots delete <id> [--yes]` | `snapshots:delete` |
+| `lode policy validate <file>...` | None; checks the files offline, see [Validate policy files](#validate-policy-files) |
 | `lode apply -f <file or folder> [--dry-run] [--prune] [--adopt] [--manager NAME] [--yes]` | `policies:read` and `policies:write`, plus `snapshots:delete` when the files set or change `retention`, run a policy with retention more often, change `paths`, `exclude`, `oneFileSystem`, `excludeCaches`, `source`, `schedule.timezone` or `repository` of a policy with retention, or (with `--prune`) delete a policy with retention, and `hooks:write` when they change `hooks` or bring more hosts under a policy with hooks |
 | `lode gc [--dry-run] <repo>`, `lode gc status <repo>`, `lode gc unlock <repo>` (also `lode server gc ...`) | See [Cleanup](#cleanup) |
 | `lode server check <repo> [--level structure\|packs\|restore]` | See [Integrity checks](#integrity-checks) |
@@ -102,6 +103,10 @@ A CI job that fails on drift and one that applies:
 lode apply -f policies/ --prune --dry-run
 lode apply -f policies/ --prune
 ```
+
+### Validate policy files
+
+`lode policy validate <file>...` reads one or more policy YAML files, each with any number of documents, and checks them offline with the rules the server applies on `lode apply`: unknown fields, the schedule, retention, limits, `spec.paths` and `spec.source` (a `source` needs `apiVersion: lodestore.io/v1alpha2`). It needs no server address and no token. A problem is printed as `file.yaml:LINE:COL: message` on stderr, and the command exits with code 3 when any file has one, 0 otherwise. With `--json` it prints one report with the problems of each file. It checks the shape of the policy, not what a server runs: a policy with a source other than `files` is valid here and is refused by this version of the server with 422.
 
 ### Run limit
 
@@ -285,7 +290,7 @@ Lists print a table with the same columns and status words as the web interface.
 | 0 | Done |
 | 1 | The server or the network failed; the message is the server's |
 | 2 | Wrong flags, the server address or token is not set, `lode apply` found an invalid file, `lode gc` got an unknown repository, or `lode gc unlock` has no terminal and no `--yes` |
-| 3 | `lode check` or `lode server check` found problems in the repository |
+| 3 | `lode check` or `lode server check` found problems in the repository, or `lode policy validate` found a file with problems |
 | 4 | `lode apply --dry-run` found changes |
 | 13 | The token was refused: unknown, expired or revoked, or it lacks the scope named in the message |
 
