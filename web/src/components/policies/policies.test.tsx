@@ -2338,7 +2338,7 @@ describe("Retention section", () => {
 		).toBeVisible();
 		expect(
 			screen.getByText(
-				"Applied per host to this policy's snapshots after each successful backup. Snapshots from lode runs and other policies are never touched.",
+				"Applied per host and source to this policy's snapshots after each successful backup. Snapshots from lode runs and other policies are never touched.",
 			),
 		).toBeVisible();
 		const keepWithin = screen.getByRole("textbox", { name: "Keep within" });

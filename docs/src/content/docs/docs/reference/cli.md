@@ -48,10 +48,11 @@ An `http://` address that is not on the loopback interface works, but the token 
 | `lode server jobs logs <id> [--follow]` | `jobs:read` |
 | `lode server jobs run --host <host> [--policy NAME]...` | `jobs:run`; see [Run limit](#run-limit) |
 | `lode server jobs cancel <id>` and `lode server jobs rerun <id>` | `jobs:run`; `rerun` is subject to the [run limit](#run-limit) |
-| `lode server snapshots list --host <host> [--limit N]` | `snapshots:read` |
+| `lode server snapshots list --host <host> [--limit N] [--source-type TYPE] [--source KEY]` | `snapshots:read` |
 | `lode server snapshots mark <id> --reason TEXT` and `clear <id> --reason TEXT` | `snapshots:delete` |
 | `lode server snapshots delete <id> [--yes]` | `snapshots:delete` |
-| `lode apply -f <file or folder> [--dry-run] [--prune] [--adopt] [--manager NAME] [--yes]` | `policies:read` and `policies:write`, plus `snapshots:delete` when the files set or change `retention`, run a policy with retention more often, change `paths`, `exclude`, `oneFileSystem`, `excludeCaches` or `repository` of a policy with retention, or (with `--prune`) delete a policy with retention, and `hooks:write` when they change `hooks` or bring more hosts under a policy with hooks |
+| `lode policy validate <file>...` | None; checks the files offline, see [Validate policy files](#validate-policy-files) |
+| `lode apply -f <file or folder> [--dry-run] [--prune] [--adopt] [--manager NAME] [--yes]` | `policies:read` and `policies:write`, plus `snapshots:delete` when the files set or change `retention`, run a policy with retention more often, change `paths`, `exclude`, `oneFileSystem`, `excludeCaches`, `source`, `schedule.timezone` or `repository` of a policy with retention, or (with `--prune`) delete a policy with retention, and `hooks:write` when they change `hooks` or bring more hosts under a policy with hooks |
 | `lode gc [--dry-run] <repo>`, `lode gc status <repo>`, `lode gc unlock <repo>` (also `lode server gc ...`) | See [Cleanup](#cleanup) |
 | `lode server check <repo> [--level structure\|packs\|restore]` | See [Integrity checks](#integrity-checks) |
 | `lode server find <pattern> [--host HOST]... [--label KEY=VALUE]...` | `snapshots:read`; see [Find a file](#find-a-file) |
@@ -92,7 +93,7 @@ The last line starts with `Applied:` when something was applied. Colors appear o
 
 On a terminal, `--prune` shows the plan first and asks `Delete N policies? [y/N]`. Without a terminal, as in CI, `--prune` itself is the consent and deletes without asking. Run `--dry-run` first when you want to see the deletions before they happen. `--prune` refuses to run, with exit code 2, when the files contain no policy at all (an empty file or one with only comments), so a template that renders to nothing cannot delete every policy of the manager.
 
-The token needs `policies:read` and `policies:write`. When the files add or change a `retention` block, it also needs `snapshots:delete`, because retention makes the server delete snapshots; without it the server refuses with exit code 13. The same scope is needed to run a policy that has retention more often: the server compares the shortest gap between two runs of the cron schedule over the next 366 days, in the time zone of the policy, before and after the change. A schedule that runs less often, or at another time of day, needs only `policies:write`. The scope is also needed to change `paths`, `exclude`, `oneFileSystem`, `excludeCaches` or `repository` of a policy that has retention before or after the edit, and to delete a policy with retention, which `--prune` does when the files no longer contain it; `--dry-run` shows the refusal beforehand, and without the scope the command exits with code 13. Reordering paths is not a change; reordering or repeating an exclude is, and `/etc` and `/etc/` differ.
+The token needs `policies:read` and `policies:write`. When the files add or change a `retention` block, it also needs `snapshots:delete`, because retention makes the server delete snapshots; without it the server refuses with exit code 13. The same scope is needed to run a policy that has retention more often: the server compares the shortest gap between two runs of the cron schedule over the next 366 days, in the time zone of the policy, before and after the change. A schedule that runs less often, or at another time of day, needs only `policies:write`. The scope is also needed to change `paths`, `exclude`, `oneFileSystem`, `excludeCaches`, `source`, `schedule.timezone` (a missing zone is UTC) or `repository` of a policy that has retention before or after the edit, and to delete a policy with retention, which `--prune` does when the files no longer contain it; `--dry-run` shows the refusal beforehand, and without the scope the command exits with code 13. Reordering paths is not a change; reordering or repeating an exclude is, and `/etc` and `/etc/` differ.
 
 When the files add, change or remove `hooks`, or widen a policy that has hooks (change its `repository`, or its selector other than to a shorter `hosts` list or more `matchLabels`), whichever hosts are enrolled, the token also needs `hooks:write`, because hooks run commands as root on the hosts. The server then refuses the whole run with exit code 13 and names the scope and the policies. `--dry-run` shows the same refusal before anything is applied. Deleting a policy without retention, with or without `--prune`, needs only `policies:write`. A problem in a file is printed as `file.yaml:LINE:COL: message` on stderr, with exit code 2.
 
@@ -102,6 +103,10 @@ A CI job that fails on drift and one that applies:
 lode apply -f policies/ --prune --dry-run
 lode apply -f policies/ --prune
 ```
+
+### Validate policy files
+
+`lode policy validate <file>...` reads one or more policy YAML files, each with any number of documents, and checks them offline with the rules the server applies on `lode apply`: unknown fields, the schedule, retention, limits, `spec.paths` and `spec.source` (a `source` needs `apiVersion: lodestore.io/v1alpha2`). It needs no server address and no token. A problem is printed as `file.yaml:LINE:COL: message` on stderr, and the command exits with code 3 when any file has one, 0 otherwise. With `--json` it prints one report with the problems of each file. It checks the shape of the policy, not what a server runs: a policy with a source other than `files` is valid here and is refused by this version of the server with 422.
 
 ### Run limit
 
@@ -257,7 +262,7 @@ Exit codes: 0 when the search finished or stopped at a limit, 1 when the search 
 
 `lode server restore <snapshot> --host <host>` asks the agent on that host to restore. The snapshot is the full id from `lode server snapshots list`.
 
-The token needs `restore:host` to restore into a folder, and `restore:in-place` with `--in-place`. The two scopes are independent: `restore:in-place` does not allow a restore into a folder. Downloading files or an archive in the web interface or through the API is a third scope, `restore:download`; it does not allow a restore onto a host.
+The token needs `restore:host` to restore into a folder, and `restore:in-place` with `--in-place`. The two scopes are independent: `restore:in-place` does not allow a restore into a folder. This command restores files: for a snapshot of a guest or a database the server answers 422 ("This snapshot is a proxmox-vm backup and cannot be restored as files.") and `lode` exits with code 1 with that message. The four scopes `restore:guest`, `restore:guest-in-place`, `restore:db` and `restore:db-in-place` are reserved for those restores; no command uses them yet, and neither `restore:host` nor `restore:in-place` includes them. Downloading files or an archive in the web interface or through the API is a third scope, `restore:download`; it does not allow a restore onto a host.
 
 By default the command also restores file owners, POSIX ACLs and other `system.*` attributes, `security.*` and `trusted.*` extended attributes, setuid/setgid bits and file capabilities. The agent keeps the setuid/setgid bits and the capabilities only in a restore in place; into a new folder it restores the owners and drops them. A token may ask for any of it only with `restore:in-place`; a token with `restore:host` alone must pass `--no-owners`, or the server refuses with 403 and names the scope. The local `lode restore`, run by whoever holds the bucket, always restores owners, ACLs and labels.
 
@@ -285,7 +290,7 @@ Lists print a table with the same columns and status words as the web interface.
 | 0 | Done |
 | 1 | The server or the network failed; the message is the server's |
 | 2 | Wrong flags, the server address or token is not set, `lode apply` found an invalid file, `lode gc` got an unknown repository, or `lode gc unlock` has no terminal and no `--yes` |
-| 3 | `lode check` or `lode server check` found problems in the repository |
+| 3 | `lode check` or `lode server check` found problems in the repository, or `lode policy validate` found a file with problems |
 | 4 | `lode apply --dry-run` found changes |
 | 13 | The token was refused: unknown, expired or revoked, or it lacks the scope named in the message |
 
@@ -305,12 +310,14 @@ The server never lifts these limits; the flag acts only in the `lode restore` pr
 
 ### Which snapshot is `latest`
 
-`latest` (also `latest:/path`) in `lode restore`, `lode ls` and `lode dump` is not the newest by the time in the manifest, which the host that wrote it sets. It is the newest snapshot that carries a signature, ordered by the time the storage reports for the snapshot object. Equal times are broken by the larger snapshot id.
+`latest` (also `latest:/path`) in `lode restore`, `lode ls` and `lode dump` is not the newest by the time in the manifest, which the host that wrote it sets. It is the newest snapshot of `files` that carries a signature, ordered by the time the storage reports for the snapshot object. Equal times are broken by the larger snapshot id. A snapshot of another source (a guest or a database) is never chosen by plain `latest`, and a WAL batch is never chosen by anything.
+
+`latest@<source key>` (also `latest@<source key>:/path`) chooses by the same rules among the signed snapshots of one source instance, for example `lode ls latest@postgres/7123456789012345678/16384`. It reads every host of the repository, as `latest` does for files (the server API chooses the latest of a source inside one host only), so a guest that moved to another node keeps its newest backup under the same key. To pin one host, name a snapshot id from `lode snapshots --source-type TYPE`. The key is the canonical key of [ADR 0007](/docs/adr/0007-source-model/); a key that is not canonical is a usage error (exit code 2), and a key with no signed snapshot exits with code 1. The character is `@` because `:` already separates the path.
 
 - A snapshot is signed when the Lodestore server has checked it, or when `lode backup` with the repository password has checked and signed it itself. `lode snapshots` marks the rest.
 - `lode` explains the choice on stderr. It warns about snapshots that claim a time in the future, about unsigned snapshots stored after the chosen one (name one by id to restore it), and about signature records that could not be opened. A signed snapshot stored more than ten minutes in the future is skipped with a warning; if every signed snapshot is, the command exits with code 1.
 - If the repository holds signatures but no snapshot is signed, the command exits with code 1, like an unknown id, and asks for an id. `lode snapshots` lists them.
-- In a repository that no Lodestore 0.2 server has opened, nothing is signed yet. `latest` is then the snapshot the storage wrote last, ignoring any stored more than ten minutes in the future, and `lode` warns that a host with writer credentials could have written it. If every snapshot is stored in the future, the command exits with code 1 and asks for an id. In this mode `latest` protects against nothing a host with writer credentials can do; name the snapshot by its id, or open the repository with a 0.2 server first.
+- In a repository that no Lodestore 0.2 server has opened, nothing is signed yet. `latest` is then the snapshot of `files` that the storage wrote last (a snapshot whose manifest claims another source is skipped, and `latest@<source key>` finds none), ignoring any stored more than ten minutes in the future, and `lode` warns that a host with writer credentials could have written it. If every snapshot is stored in the future, the command exits with code 1 and asks for an id. In this mode `latest` protects against nothing a host with writer credentials can do; name the snapshot by its id, or open the repository with a 0.2 server first.
 - On a machine where `lode` has already seen signatures in a repository, it remembers that in a cache file (below). If the signatures later disappear, as when `locks/attest-*` objects are deleted from a folder repository, `latest` exits with code 1 and asks for an id instead of falling back to the rule above, and `lode backup` exits with an error and writes nothing. A machine without that file cannot know, and falls back.
 
 ```sh
@@ -318,7 +325,7 @@ lode snapshots
 lode snapshots --json
 ```
 
-`lode snapshots` prints a mark after the paths when the repository holds signatures: `unverified` for a snapshot nothing signed and `owner` for one signed with the repository password. A snapshot signed by the server has no mark. In a repository without signatures there are no marks. With `--json`, each snapshot has `verified_by`: `"server"`, `"owner"` or `null`.
+`lode snapshots` prints a mark after the paths when the repository holds signatures: `unverified` for a snapshot nothing signed and `owner` for one signed with the repository password. A snapshot signed by the server has no mark. In a repository without signatures there are no marks. With `--json`, each snapshot has `verified_by`: `"server"`, `"owner"` or `null`, `source_type` (`files` for a snapshot nothing signed a source for) and `source_label`, a label such as "VM 101 · web" or `null`. `lode snapshots --source-type TYPE` lists the snapshots of one signed source type (`files`, `proxmox-vm`, `proxmox-ct`, `postgres`, `postgres-wal` or `mysql`; any other value is a usage error). `lode server snapshots list` takes `--source-type TYPE` and `--source KEY` (one source instance on that host, by its canonical key) and prints the same two fields.
 
 ### Backup in a repository the server has upgraded
 

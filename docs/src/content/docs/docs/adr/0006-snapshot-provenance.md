@@ -46,7 +46,7 @@ Cleanup quarantines a snapshot it cannot read and lets an administrator exclude 
 
 ### Format
 
-`format_version` stays 1. `ProvenanceRecord` and `sealed_provenance` were frozen with ADR 0005 and `attest-vectors.json`; no byte layout and no test vector is added or changed.
+`format_version` stays 1. `ProvenanceRecord` and `sealed_provenance` were frozen with ADR 0005 and `attest-vectors.json`; no byte layout and no test vector is added or changed. [ADR 0007](/docs/adr/0007-source-model/) later added the optional field 6 (`source`) to `ProvenanceRecord` for snapshots that are not `files`; the bytes of records of `files` are those described here, and the rule for `latest` below applies to `files` unless a source is named.
 
 ## Consequences
 

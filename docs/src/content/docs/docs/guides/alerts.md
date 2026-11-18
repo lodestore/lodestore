@@ -9,7 +9,8 @@ Lodestore watches the fleet and raises an alert when something needs a person. A
 | Type | Severity | Fires when | Clears when |
 |------|----------|------------|-------------|
 | Backup failed | critical | The last attempt of a policy on a host failed. Consecutive failures are one alert and show the latest error. | The policy has a successful backup on that host. |
-| No recent backup | warning | A policy has no successful backup on a host within its limit, see [the limit](#no-recent-backup-the-dead-man-rule). | The policy has a successful backup on that host. |
+| No recent backup | warning | A policy has no successful backup of a source on a host within its limit, see [the limit](#no-recent-backup-the-dead-man-rule). For a policy of files the source is the host; for guests and databases it is each guest or database. | The policy has a successful backup of that source on that host. |
+| Source no longer selected | warning | A guest or database that the policy backed up on a host is no longer selected by the policy (deleted, replaced or out of the selector), see [below](#source-no-longer-selected). One alert for 24 hours from the moment the policy stopped selecting it. | After 24 hours, or when the policy selects the source again. |
 | Agent offline | warning | The agent has not been connected for longer than the offline threshold (default 15 minutes). | The agent connects. |
 | Check failed | critical | The last finished [integrity check](/docs/guides/checks/) of a repository and level failed or stopped. | The next finished check of that level passes. |
 | Certificate expiring | warning, critical once expired | A certificate expires in fewer days than the certificate threshold (default 14): an agent certificate or the server gRPC certificate. | The certificate is renewed or replaced. |
@@ -18,6 +19,8 @@ Lodestore watches the fleet and raises an alert when something needs a person. A
 | Repository unavailable | critical | The server does not open a repository because the configuration stored in the bucket does not match what the server recorded. One alert per repository. | The configuration matches again and the repository opens. |
 | Agent session conflict | warning | Two live sessions of one agent from different addresses (for IPv6, different /56 prefixes), or five live sessions of one agent replaced within ten minutes. The alert shows both addresses. | No such conflict for 24 hours. A revoked host raises none. |
 | Agent certificate rejected | critical | The server refused a certificate of an agent because it is not the one the server issued last. The alert shows the serial and the address of the caller. | No such refusal for 24 hours. A revoked host raises none. |
+
+`source_instance_gone` is raised once for each source that a policy used to back up on a host and no longer expects. It does not depend on when the last backup of that source succeeded or on the limit of the policy. It does not appear for a policy of files, whose source is the host. See [below](#source-no-longer-selected).
 
 `snapshot_quarantined` means cleanup is stopped for that repository until you deal with the snapshot: open the repository page and use the **Free up space** card to review the quarantined snapshots. See [Freeing up space](/docs/guides/gc/).
 
@@ -49,10 +52,17 @@ A policy that stays silent is the failure no error message reports, so Lodestore
 - If the policy sets `spec.alerts.maxAge`, that is the limit, see [Backup policies](/docs/guides/policies/#alerts).
 - Otherwise it is twice the longest gap between the next scheduled runs plus the jitter. A daily policy with 15 minutes of jitter gets about 48 hours and 15 minutes.
 - A policy with no schedule and no `maxAge` has no limit and never raises this alert.
+- The limit and the age are counted for each source the policy expects on the host. For a policy of files that is the host, and nothing differs from before. For guests and databases it is each guest or database, so one overdue backup of forty is one alert and a guest backed up often does not hide another. While the server does not know the list of sources a policy selects, every source of the policy that has snapshots is expected, so that an unknown list never silences the alert.
 
 The age counts from the last successful backup, which is the newest complete snapshot that the server has signed, by the time the server received it. A snapshot that nothing signed, such as one planted with stolen writer keys, does not reset the age. When there is no successful backup yet, it counts from the later of the time the host enrolled and the time the policy was created. The same limit decides which hosts the Overview shows as overdue and the value of the metric `lodestore_backup_overdue_after_seconds`.
 
 After the server restarts, an agent that is not yet connected is not reported offline until the offline threshold has passed since the start, so a restart does not send a wave of alerts.
+
+### Source no longer selected
+
+A source stops being expected when its policy no longer selects it: a guest was deleted or replaced, a database was recreated, or the policy's selector changed. The server then stops the missing-backup alert for that source and records the moment it first saw the source missing, in the first alert cycle after the change. From that moment it raises exactly one alert, **Source no longer selected** (`source_instance_gone`), for 24 hours, whatever the time of the last successful backup and whatever the limit of the policy. The alert names the source and the host. It is not raised again unless the policy selects the source again and then stops selecting it.
+
+The snapshots of the source stay under the retention rules, and its two newest good snapshots are kept even when nothing new arrives (see [retention](/docs/guides/policies/#retention)). Delete them by hand when you no longer need them. A guest that moves to another node, or a database that fails over to another host, is a new source of the new host: the old one raises this alert once and the new one has its own missing-backup alert and retention.
 
 ## Reminders and silences
 
@@ -80,7 +90,7 @@ A channel is a place alerts are sent to. Add them under Settings, Notifications,
 | Email | SMTP host, port, security (`starttls` or `tls`), optional user name and password, a `from` address and the recipients. Without recipients the message goes to the administrator's email (Settings, User). Plain SMTP without TLS is not supported. |
 | Webhook | A URL and an optional secret. See [the webhook payload](#the-webhook-payload). |
 
-A channel created in the web interface before 0.2 with every alert type checked also receives `snapshot_quarantined`, `repository_unavailable`, `agent_session_conflict` and `agent_certificate_rejected` after the update. A channel with a chosen list is left as it is; check the new types yourself if you want them.
+A channel created in the web interface before 0.2 with every alert type checked also receives `snapshot_quarantined`, `repository_unavailable`, `agent_session_conflict` and `agent_certificate_rejected` after the update. A channel created in the web interface with every alert type checked also receives `source_instance_gone`. A channel with a chosen list is left as it is; check the new types yourself if you want them.
 
 Use **Send test message** on a channel to check it end to end. The result of the last delivery is shown in the channel list. Secrets entered in the web interface are encrypted in the server database and are never shown again; leaving a secret field empty on edit keeps the saved one.
 
@@ -123,7 +133,7 @@ notifications:
 | `name` | Required, unique. |
 | `type` | `telegram`, `slack`, `email` or `webhook`. |
 | `enabled` | `true` by default. |
-| `alerts` | List of `backup_failed`, `no_recent_backup`, `agent_offline`, `check_failed`, `certificate_expiring`, `agent_update_failed`, `snapshot_quarantined`, `repository_unavailable`, `agent_session_conflict`, `agent_certificate_rejected`. All when left out; an empty list is an error. |
+| `alerts` | List of `backup_failed`, `no_recent_backup`, `agent_offline`, `check_failed`, `certificate_expiring`, `agent_update_failed`, `snapshot_quarantined`, `repository_unavailable`, `agent_session_conflict`, `agent_certificate_rejected`, `source_instance_gone`. All when left out; an empty list is an error. |
 | `bot_token_file`, `chat_id` | Telegram. |
 | `webhook_url_file` | Slack. |
 | `smtp_host`, `port`, `security`, `username`, `password_file`, `from`, `to` | Email. `port` is `587` by default, `security` is `starttls` by default (`tls` for a connection that is encrypted from the start, usually port 465). |
@@ -180,9 +190,9 @@ The webhook sends the format of the Alertmanager webhook receiver, version 4, so
 
 - `status` is `firing` for a new alert and for a reminder, and `resolved` when the cause is gone. A resolved message has the real `endsAt`.
 - `receiver` is the name of the channel. `fingerprint` and `groupKey` stay the same for the whole life of an alert, so a receiver can match a resolved message to the alert it closes.
-- `labels.alertname` is `LodestoreBackupFailed`, `LodestoreNoRecentBackup`, `LodestoreAgentOffline`, `LodestoreCheckFailed`, `LodestoreCertificateExpiring`, `LodestoreAgentUpdateFailed`, `LodestoreSnapshotQuarantined`, `LodestoreRepositoryUnavailable`, `LodestoreAgentSessionConflict` or `LodestoreAgentCertificateRejected`, the same names as in the [Prometheus rules](/docs/reference/metrics/#importing-the-dashboard-and-the-rules). `severity` is `critical` or `warning`.
+- `labels.alertname` is `LodestoreBackupFailed`, `LodestoreNoRecentBackup`, `LodestoreAgentOffline`, `LodestoreCheckFailed`, `LodestoreCertificateExpiring`, `LodestoreAgentUpdateFailed`, `LodestoreSnapshotQuarantined`, `LodestoreRepositoryUnavailable`, `LodestoreAgentSessionConflict`, `LodestoreAgentCertificateRejected` or `LodestoreSourceInstanceGone`, the same names as in the [Prometheus rules](/docs/reference/metrics/#importing-the-dashboard-and-the-rules). `severity` is `critical` or `warning`.
 - Other labels depend on the type and are present only when they apply: `host` and `host_id`, `policy`, `repository` and `level` (a check), `cert` (`agent` or `grpc`).
-- `annotations.summary` is the title shown in the web interface and `annotations.description` its detail line.
+- `annotations.summary` is the title shown in the web interface and `annotations.description` its detail line. For the alerts of a guest or database, the title names the source (for example "VM 101 · web") next to the host.
 - A test message has `alertname` `LodestoreTest` and severity `info`.
 
 The target is a receiver that accepts this body, not the API of Alertmanager itself, which expects a different request. If you run Prometheus, let Prometheus and Alertmanager raise alerts from the [rules](/docs/reference/metrics/#importing-the-dashboard-and-the-rules) instead.
