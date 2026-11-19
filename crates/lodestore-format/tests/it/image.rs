@@ -382,6 +382,7 @@ async fn image_load_picks_the_named_disk_among_neighbours() {
         .put_tree_raw(&encode_tree(vec![
             dir_node("disk", &[disk]),
             dir_node("other", &[other]),
+            dir_node("resized", &[disk]),
         ]))
         .unwrap();
     let root = w
@@ -390,8 +391,16 @@ async fn image_load_picks_the_named_disk_among_neighbours() {
             dir_node("disks", &[disks]),
         ]))
         .unwrap();
+    let mut meta = ImageMeta {
+        read_mode: ReadMode::Full,
+        disk_size: 8 * MIB,
+    }
+    .to_meta("disk");
+    meta.insert(disk_meta_key("other", DISK_SIZE), (4 * MIB).to_string());
+    meta.insert(disk_meta_key("resized", DISK_SIZE), (4 * MIB).to_string());
+    let claim = source::encode(&SourceKey::parse("image/disk").unwrap(), &meta).unwrap();
     let id = w
-        .commit_snapshot_raw(root, vec![b"/".to_vec()])
+        .commit_snapshot_raw_with(root, vec![b"/".to_vec()], claim)
         .await
         .unwrap();
 
@@ -404,6 +413,11 @@ async fn image_load_picks_the_named_disk_among_neighbours() {
         load_image(&mut r, &id, "other").await,
         Err(Error::Corrupt { .. })
     ));
+    let resized = load_image(&mut r, &id, "resized").await.unwrap_err();
+    assert!(
+        matches!(&resized, Error::Corrupt { reason, .. } if reason.contains("the snapshot says")),
+        "{resized:?}"
+    );
     assert!(matches!(
         load_image(&mut r, &id, "missing").await,
         Err(Error::Corrupt { .. })

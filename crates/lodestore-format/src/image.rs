@@ -479,7 +479,7 @@ impl LoadedImage {
 }
 
 /// Finds `/disks/NAME` in a snapshot by exact name, whatever else the
-/// snapshot holds, and checks its segments.
+/// snapshot holds, and checks its segments against the size the source meta records.
 pub async fn load_image<S: BlobStore>(
     reader: &mut Reader<S>,
     id: &BlobId,
@@ -507,8 +507,18 @@ pub async fn load_image<S: BlobStore>(
     let segments = reader
         .list_dir(id, format!("/disks/{disk_name}").as_bytes())
         .await?;
+    let layout = parse_layout(&segments)?;
+    let manifest = reader.snapshot(id).await?;
+    let (_, meta) = crate::source::decode(manifest.source.as_ref())?;
+    let meta = ImageMeta::from_meta(&meta, disk_name)?;
+    if layout.size != meta.disk_size {
+        return Err(bad(format!(
+            "the segments hold {} bytes; the snapshot says the disk has {}",
+            layout.size, meta.disk_size
+        )));
+    }
     Ok(LoadedImage {
         name: disk_name.as_bytes().to_vec(),
-        layout: parse_layout(&segments)?,
+        layout,
     })
 }
