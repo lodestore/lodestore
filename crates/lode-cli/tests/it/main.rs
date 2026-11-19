@@ -17,6 +17,7 @@ mod gc_cli;
 mod gc_writer_marker;
 mod image_bitmap;
 mod image_cli;
+mod image_qemu;
 mod image_restore;
 mod keys;
 mod policy_validate;
