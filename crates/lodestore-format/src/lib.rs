@@ -9,6 +9,7 @@ pub mod crypto;
 pub mod error;
 pub mod fs;
 pub mod gc;
+pub mod image;
 pub mod index;
 pub mod keys;
 pub mod locks;

@@ -57,6 +57,9 @@ pub const INDEX_FLUSH_PACKS: usize = 8;
 // needs a content-list indirection and so a higher min_reader_version.
 const MAX_CONTENT_IDS: usize = (MAX_TREE_ULEN - (2 << 20)) / 34;
 
+mod image;
+pub use image::{ImageOptions, ImageOutcome};
+
 pub type IssueFn<'a> = Box<dyn Fn(&IssueEvent<'_>) + 'a>;
 pub type TreeSinkFn<'a> = Box<dyn FnMut(&BlobId, &[u8]) + 'a>;
 

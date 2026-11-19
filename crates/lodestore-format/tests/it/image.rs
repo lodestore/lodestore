@@ -1,0 +1,411 @@
+use std::fs;
+#[cfg(target_os = "linux")]
+use std::os::fd::OwnedFd;
+use std::path::Path;
+
+use lodestore_format::Error;
+use lodestore_format::crypto::{BLOB_TYPE_DATA, BlobId, Entropy};
+#[cfg(target_os = "linux")]
+use lodestore_format::fs::walk::data_extents;
+use lodestore_format::image::{
+    ChunkRef, IMAGE_CHUNK_SIZE, ImageExtent, ImageMeta, ImageSource, ReadMode, SEGMENT_CHUNKS,
+    load_image, segment_nodes,
+};
+use lodestore_format::keys::KdfCost;
+use lodestore_format::pack::CODEC_RAW;
+use lodestore_format::pb;
+use lodestore_format::reader::{Reader, RestoreOptions};
+use lodestore_format::repo::{InitOptions, PendingInit, Repository};
+use lodestore_format::source;
+use lodestore_format::store::LocalFsStore;
+use lodestore_format::tree::encode_tree;
+use lodestore_format::writer::{BackupOptions, ImageOptions, Writer};
+use rand_chacha::ChaCha20Rng;
+use rand_chacha::rand_core::{Rng, SeedableRng};
+
+const C: u64 = IMAGE_CHUNK_SIZE;
+const MIB: u64 = 1 << 20;
+const LOW_KDF: KdfCost = KdfCost {
+    memory_kib: 64,
+    iterations: 1,
+    parallelism: 1,
+};
+
+async fn init_repo(dir: &Path) -> LocalFsStore {
+    let store = LocalFsStore::new(dir.to_path_buf());
+    let mut entropy = Entropy::os();
+    let options = InitOptions {
+        kdf: LOW_KDF,
+        ..Default::default()
+    };
+    PendingInit::generate(&mut entropy, options)
+        .unwrap()
+        .commit(&store, b"pw", &mut entropy)
+        .await
+        .unwrap();
+    store
+}
+
+async fn writer(dir: &Path) -> Writer<LocalFsStore> {
+    let store = LocalFsStore::new(dir.to_path_buf());
+    let repo = Repository::open(&store, b"pw").await.unwrap();
+    let keys = repo.read_keys().write_keys(repo.config_hash());
+    Writer::new(store, keys, repo.config()).await.unwrap()
+}
+
+async fn reader(dir: &Path) -> Reader<LocalFsStore> {
+    let store = LocalFsStore::new(dir.to_path_buf());
+    let repo = Repository::open(&store, b"pw").await.unwrap();
+    Reader::open(store, repo.read_keys().duplicate(), repo.config()).unwrap()
+}
+
+fn random_bytes(len: usize, seed: u8) -> Vec<u8> {
+    let mut rng = ChaCha20Rng::from_seed([seed; 32]);
+    let mut out = vec![0u8; len];
+    rng.fill_bytes(&mut out);
+    out
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Lie {
+    ShortExtents,
+    EmptyExtent,
+    ShortRead,
+}
+
+/// An image in memory; the byte ranges in `holes` are reported as holes.
+struct MemSource {
+    data: Vec<u8>,
+    holes: Vec<(u64, u64)>,
+    lie: Option<Lie>,
+    reads: Vec<u64>,
+}
+
+impl MemSource {
+    fn new(data: Vec<u8>, holes: Vec<(u64, u64)>) -> Self {
+        MemSource {
+            data,
+            holes,
+            lie: None,
+            reads: Vec::new(),
+        }
+    }
+}
+
+impl ImageSource for MemSource {
+    fn size(&self) -> u64 {
+        self.data.len() as u64
+    }
+
+    async fn extents(&mut self, offset: u64, len: u64) -> Result<Vec<ImageExtent>, Error> {
+        let end = offset + len;
+        let mut out = Vec::new();
+        let mut pos = offset;
+        while pos < end {
+            let inside = self.holes.iter().find(|&&(s, l)| s <= pos && pos < s + l);
+            let (run, zero) = match inside {
+                Some(&(s, l)) => ((s + l).min(end) - pos, true),
+                None => {
+                    let next = self.holes.iter().map(|h| h.0).filter(|&s| s > pos).min();
+                    (next.unwrap_or(end).min(end) - pos, false)
+                }
+            };
+            out.push(ImageExtent { len: run, zero });
+            pos += run;
+        }
+        match self.lie {
+            Some(Lie::ShortExtents) => {
+                if let Some(last) = out.last_mut() {
+                    last.len -= 1;
+                }
+            }
+            Some(Lie::EmptyExtent) => out.insert(
+                0,
+                ImageExtent {
+                    len: 0,
+                    zero: false,
+                },
+            ),
+            _ => {}
+        }
+        Ok(out)
+    }
+
+    async fn read(&mut self, offset: u64, len: usize) -> Result<Vec<u8>, Error> {
+        self.reads.push(offset);
+        let start = usize::try_from(offset).unwrap();
+        let mut out = self.data[start..start + len].to_vec();
+        if self.lie == Some(Lie::ShortRead) {
+            out.pop();
+        }
+        Ok(out)
+    }
+}
+
+/// Chunks 0, 3 and 4 hold no data (3 is a hole, 4 is zero bytes the source
+/// calls data); 1 and 2 are data, 5 is data in a 1 MiB tail.
+fn holey_image() -> MemSource {
+    let mut data = random_bytes((5 * C + MIB) as usize, 7);
+    data[..C as usize].fill(0);
+    data[3 * C as usize..5 * C as usize].fill(0);
+    MemSource::new(data, vec![(0, C), (3 * C, C)])
+}
+
+// macOS filesystems may not keep a hole between writes, so only Linux asserts them.
+#[cfg(target_os = "linux")]
+fn file_data_extents(path: &Path, size: u64) -> Option<Vec<(u64, u64)>> {
+    let fd: OwnedFd = fs::File::open(path).unwrap().into();
+    data_extents(&fd, size)
+}
+
+fn file_node(name: &str, ids: &[BlobId], size: u64) -> pb::Node {
+    pb::Node {
+        name: name.as_bytes().to_vec(),
+        r#type: pb::NodeType::File as i32,
+        size,
+        content: ids.iter().map(|id| id.to_vec()).collect(),
+        ..Default::default()
+    }
+}
+
+fn dir_node(name: &str, subtrees: &[BlobId]) -> pb::Node {
+    pb::Node {
+        name: name.as_bytes().to_vec(),
+        r#type: pb::NodeType::Dir as i32,
+        subtrees: subtrees.iter().map(|id| id.to_vec()).collect(),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn image_roundtrip_with_holes_across_segments() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_dir = tmp.path().join("repo");
+    fs::create_dir(&repo_dir).unwrap();
+    init_repo(&repo_dir).await;
+    let mut source = holey_image();
+    let original = source.data.clone();
+
+    let mut w = writer(&repo_dir).await;
+    let done = w
+        .backup_image(
+            "disk",
+            &mut source,
+            BackupOptions::default(),
+            ImageOptions { segment_chunks: 2 },
+            &|_| {},
+        )
+        .await
+        .unwrap();
+    assert_eq!(source.reads, vec![C, 2 * C, 4 * C, 5 * C]);
+
+    let mut r = reader(&repo_dir).await;
+    let id = done.outcome.snapshot_id;
+    let snapshot = r.snapshot(&id).await.unwrap();
+    assert_eq!(snapshot.paths, vec![b"/disks/disk".to_vec()]);
+    assert_eq!(snapshot.source, Some(done.source.clone()));
+    let (key, meta) = source::decode(snapshot.source.as_ref()).unwrap();
+    assert_eq!(key.as_str(), "image/disk");
+    let parsed = ImageMeta::from_meta(&meta, "disk").unwrap();
+    assert_eq!(parsed.read_mode, ReadMode::Full);
+    assert_eq!(parsed.disk_size, original.len() as u64);
+
+    let names: Vec<_> = r
+        .list_dir(&id, b"/disks/disk")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|n| n.name)
+        .collect();
+    assert_eq!(
+        names,
+        vec![b"000000".to_vec(), b"000001".to_vec(), b"000002".to_vec()]
+    );
+
+    let out = tmp.path().join("out");
+    let report = r
+        .restore_image(&id, "disk", &out, &RestoreOptions::default(), &|_| {})
+        .await
+        .unwrap();
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    let restored = out.join("disk.img");
+    assert!(
+        fs::read(&restored).unwrap() == original,
+        "the image differs"
+    );
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        file_data_extents(&restored, original.len() as u64),
+        Some(vec![(C, 2 * C), (5 * C, MIB)])
+    );
+}
+
+#[tokio::test]
+async fn image_all_zero_writes_no_data_blob() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_dir = tmp.path().join("repo");
+    fs::create_dir(&repo_dir).unwrap();
+    init_repo(&repo_dir).await;
+    let mut source = MemSource::new(vec![0; 3 * C as usize], vec![(0, C)]);
+
+    let mut w = writer(&repo_dir).await;
+    let done = w
+        .backup_image(
+            "zeros",
+            &mut source,
+            BackupOptions::default(),
+            ImageOptions::default(),
+            &|_| {},
+        )
+        .await
+        .unwrap();
+    assert_eq!(done.outcome.stats.bytes_added, 0);
+    assert_eq!(done.outcome.stats.bytes_total, 3 * C);
+
+    let mut r = reader(&repo_dir).await;
+    let segments = r
+        .list_dir(&done.outcome.snapshot_id, b"/disks/zeros")
+        .await
+        .unwrap();
+    assert_eq!(segments.len(), 1);
+    assert!(segments[0].content.is_empty());
+    assert_eq!(
+        segments[0].sparse_extents,
+        vec![pb::Extent {
+            offset: 0,
+            length: 0
+        }]
+    );
+}
+
+#[tokio::test]
+async fn image_empty_roundtrip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_dir = tmp.path().join("repo");
+    fs::create_dir(&repo_dir).unwrap();
+    init_repo(&repo_dir).await;
+    let mut source = MemSource::new(Vec::new(), Vec::new());
+
+    let mut w = writer(&repo_dir).await;
+    let done = w
+        .backup_image(
+            "empty",
+            &mut source,
+            BackupOptions::default(),
+            ImageOptions::default(),
+            &|_| {},
+        )
+        .await
+        .unwrap();
+
+    let mut r = reader(&repo_dir).await;
+    let out = tmp.path().join("out");
+    r.restore_image(
+        &done.outcome.snapshot_id,
+        "empty",
+        &out,
+        &RestoreOptions::default(),
+        &|_| {},
+    )
+    .await
+    .unwrap();
+    assert_eq!(fs::metadata(out.join("empty.img")).unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn image_backup_rejects_a_lying_source() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_dir = tmp.path().join("repo");
+    fs::create_dir(&repo_dir).unwrap();
+    init_repo(&repo_dir).await;
+    let mut w = writer(&repo_dir).await;
+
+    for lie in [Lie::ShortExtents, Lie::EmptyExtent, Lie::ShortRead] {
+        let mut source = MemSource::new(random_bytes(2 * C as usize, 3), Vec::new());
+        source.lie = Some(lie);
+        let err = w
+            .backup_image(
+                "liar",
+                &mut source,
+                BackupOptions::default(),
+                ImageOptions::default(),
+                &|_| {},
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
+        let listed = reader(&repo_dir).await.list_snapshots().await.unwrap();
+        assert!(listed.entries.is_empty());
+    }
+
+    let mut honest = MemSource::new(random_bytes(C as usize, 3), Vec::new());
+    for bad_name in ["", "a/b", ".", "..", "a\nb"] {
+        let err = w
+            .backup_image(
+                bad_name,
+                &mut honest,
+                BackupOptions::default(),
+                ImageOptions::default(),
+                &|_| {},
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::InvalidInput(_)), "{bad_name:?}");
+    }
+}
+
+#[tokio::test]
+async fn image_load_picks_the_named_disk_among_neighbours() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_dir = tmp.path().join("repo");
+    fs::create_dir(&repo_dir).unwrap();
+    init_repo(&repo_dir).await;
+    let mut w = writer(&repo_dir).await;
+
+    let conf = w.put_blob_raw(BLOB_TYPE_DATA, CODEC_RAW, b"vm", 2).unwrap();
+    let config = w
+        .put_tree_raw(&encode_tree(vec![file_node("vm.conf", &[conf], 2)]))
+        .unwrap();
+    let holes = |size: u64| {
+        let chunks = vec![ChunkRef::Zero; size.div_ceil(C) as usize];
+        segment_nodes(size, &chunks, SEGMENT_CHUNKS).unwrap()
+    };
+    let disk = w.put_tree_raw(&encode_tree(holes(8 * MIB))).unwrap();
+    let mut broken = holes(4 * MIB);
+    broken[0].name = b"x".to_vec();
+    let other = w.put_tree_raw(&encode_tree(broken)).unwrap();
+    let disks = w
+        .put_tree_raw(&encode_tree(vec![
+            dir_node("disk", &[disk]),
+            dir_node("other", &[other]),
+        ]))
+        .unwrap();
+    let root = w
+        .put_tree_raw(&encode_tree(vec![
+            dir_node("config", &[config]),
+            dir_node("disks", &[disks]),
+        ]))
+        .unwrap();
+    let id = w
+        .commit_snapshot_raw(root, vec![b"/".to_vec()])
+        .await
+        .unwrap();
+
+    let mut r = reader(&repo_dir).await;
+    let loaded = load_image(&mut r, &id, "disk").await.unwrap();
+    assert_eq!(loaded.layout.size, 8 * MIB);
+    assert_eq!(loaded.layout.chunk_table(), vec![ChunkRef::Zero; 2]);
+    assert_eq!(loaded.file_name(), b"disk.img");
+    assert!(matches!(
+        load_image(&mut r, &id, "other").await,
+        Err(Error::Corrupt { .. })
+    ));
+    assert!(matches!(
+        load_image(&mut r, &id, "missing").await,
+        Err(Error::Corrupt { .. })
+    ));
+    assert!(matches!(
+        load_image(&mut r, &id, "a/b").await,
+        Err(Error::InvalidInput(_))
+    ));
+}

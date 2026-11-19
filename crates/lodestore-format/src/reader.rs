@@ -19,6 +19,7 @@ use crate::crypto::{BLOB_TYPE_DATA, BLOB_TYPE_TREE, BlobId, Key32, RepoId, open_
 use crate::error::{Error, Result};
 use crate::fs::filter::PathMatcher;
 use crate::fs::restore::{RestoreSettings, Restorer, check_extents};
+use crate::image::load_image;
 use crate::index::{
     BlobLocation, INDEX_PREFIX, Index, MAX_SHARD_SIZE, SupersedesTrust, fetch_attested_shard_bytes,
     fetch_shard_bytes, hex32, index_object_key, open_shard, parse_hex32,
@@ -1165,6 +1166,60 @@ impl<S: BlobStore> Reader<S> {
                 current: walk.path_of(&node.name),
             });
         }
+        let stats = restorer.take_stats();
+        Ok(RestoreReport {
+            files: stats.restored,
+            bytes: stats.bytes,
+            skipped: stats.skipped,
+            verified: stats.verified,
+            would_write: stats.would_write,
+            would_skip: stats.would_skip,
+            unapplied: restorer.take_unapplied(),
+            errors: restorer.take_failures(),
+        })
+    }
+
+    /// Restores the disk `disk_name` of an image snapshot as the one sparse
+    /// file `<target>/<disk_name>.img`; holes stay holes.
+    pub async fn restore_image(
+        &mut self,
+        snapshot_id: &BlobId,
+        disk_name: &str,
+        target: &Path,
+        options: &RestoreOptions,
+        progress: &dyn Fn(&RestoreProgress),
+    ) -> Result<RestoreReport> {
+        if !options.path.is_empty() || options.include.is_some() {
+            return Err(Error::InvalidInput(
+                "an image is restored whole: no path and no include filter".into(),
+            ));
+        }
+        let image = load_image(self, snapshot_id, disk_name).await?;
+        let node = image.file_node()?;
+        let settings = RestoreSettings {
+            overwrite: options.overwrite,
+            verify: options.verify && !options.dry_run,
+            dry_run: options.dry_run,
+            k_id: Key32::new(*self.keys.k_id()),
+            seed: self.keys.cdc_seed(),
+            restore_owners: !options.skip_owners,
+            keep_privileges: true,
+        };
+        self.walk.reset();
+        let mut restorer = Restorer::open(target, settings)?;
+        match self.restore_file(&mut restorer, &node).await {
+            Ok(()) => {}
+            Err(e @ (Error::Corrupt { .. } | Error::Crypto)) => {
+                restorer.record_failure(&node.name, e.to_string());
+            }
+            Err(e) => return Err(e),
+        }
+        let stats = restorer.stats();
+        progress(&RestoreProgress {
+            files_done: stats.restored + stats.skipped + stats.would_write + stats.would_skip,
+            bytes_done: stats.bytes,
+            current: node.name.clone(),
+        });
         let stats = restorer.take_stats();
         Ok(RestoreReport {
             files: stats.restored,
