@@ -15,7 +15,7 @@
 #   orb create ubuntu lodestore-test
 #   orb config set machine.lodestore-test.cpu 4
 #   orb config set machine.lodestore-test.memory_mib 4096
-#   orb run -m lodestore-test bash -c 'sudo apt-get install -y build-essential curl acl pkg-config lld &&
+#   orb run -m lodestore-test bash -c 'sudo apt-get install -y build-essential curl acl pkg-config lld qemu-utils &&
 #     curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.99.0 &&
 #     curl -LsSf https://get.nexte.st/latest/linux-arm | tar zxf - -C ~/.cargo/bin'
 # The machine's ~/.cargo/config.toml links with lld, which cuts the relink of a test binary

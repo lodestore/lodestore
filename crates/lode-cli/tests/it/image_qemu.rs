@@ -70,6 +70,22 @@ impl Rig {
         self.bitmaps.retain(|(n, _)| n != name);
     }
 
+    fn resize(&mut self, size: u64) {
+        self.qcow.resize(size);
+        self.bitmaps.clear();
+        self.size = size;
+    }
+
+    fn has_bitmap(&self, name: &str) -> bool {
+        self.bitmaps.iter().any(|(n, _)| n == name)
+    }
+
+    fn ensure_bitmap(&mut self, name: &str) {
+        if !self.has_bitmap(name) {
+            self.add_bitmap(name);
+        }
+    }
+
     fn export(&self, bitmaps: &[&str]) -> NbdExport {
         NbdExport::start(&self.qcow, self.socks.path(), bitmaps)
     }
@@ -198,62 +214,98 @@ fn window_write(rig: &mut Rig, round: u64) {
     rig.write(5 * MIB + 123 + 7 * round, 5000, 0xee);
 }
 
-fn run_rotation(granule: u64) {
-    let mut rig = Rig::new(granule, DISK);
-    round_writes(&mut rig, 0);
+fn generation_name(name: &str, generation: u64) -> String {
+    let (prefix, _) = name.rsplit_once("-g").expect("a generation suffix");
+    format!("{prefix}-g{generation}")
+}
 
-    let export = rig.export(&[]);
-    let first = rig.backup(&[]);
-    export.stop();
-    assert_eq!(read_mode(&first), ("full", Some("no_bitmap")));
-    rig.assert_restores_to_the_disk(&first);
-    let mut current = text(&first, "next_bitmap").to_owned();
-    let mut following = text(&first, "bitmap_to_create").to_owned();
-    let mut previous = first["snapshot_id"].as_str().unwrap().to_owned();
+/// The rotation a backup script performs: the bitmap to read, the one that
+/// follows it and the last snapshot.
+struct Chain {
+    current: String,
+    following: String,
+    previous: String,
+}
 
-    for round in 1..=5u64 {
-        if round == 1 {
-            rig.add_bitmap(&current);
-            rig.add_bitmap(&following);
-            round_writes(&mut rig, round);
-        } else {
-            round_writes(&mut rig, round);
-            rig.add_bitmap(&following);
-        }
+impl Chain {
+    fn start(rig: &mut Rig) -> (Self, Value) {
+        round_writes(rig, 0);
+        let export = rig.export(&[]);
+        let first = rig.backup(&[]);
+        export.stop();
+        assert_eq!(read_mode(&first), ("full", Some("no_bitmap")));
+        rig.assert_restores_to_the_disk(&first);
+        let chain = Self {
+            current: text(&first, "next_bitmap").to_owned(),
+            following: text(&first, "bitmap_to_create").to_owned(),
+            previous: first["snapshot_id"].as_str().unwrap().to_owned(),
+        };
+        (chain, first)
+    }
 
-        let export = rig.export(&[&current, &following]);
+    fn generation(&self) -> u64 {
+        self.current.rsplit_once("-g").unwrap().1.parse().unwrap()
+    }
+
+    fn skip_generation(&mut self) {
+        let next = self.generation() + 1;
+        self.current = generation_name(&self.current, next);
+        self.following = generation_name(&self.current, next + 1);
+    }
+
+    fn run(&mut self, rig: &mut Rig, round: u64, export_bitmaps: bool) -> Value {
+        rig.ensure_bitmap(&self.current);
+        round_writes(rig, round);
+        rig.ensure_bitmap(&self.following);
+
+        let names = [self.current.as_str(), self.following.as_str()];
+        let export = rig.export(if export_bitmaps { &names } else { &[] });
         rig.log.clear();
-        let summary = rig.backup(&["--bitmap", &current]);
+        let summary = rig.backup(&["--bitmap", &self.current]);
         export.stop();
 
-        assert_eq!(
-            text(&summary, "bitmap"),
-            current,
-            "granule {granule}, round {round}"
-        );
-        assert_eq!(text(&summary, "next_bitmap"), following, "round {round}");
-        if round == 1 {
-            assert_eq!(read_mode(&summary), ("full", Some("no_state")));
-        } else {
-            assert_eq!(
-                read_mode(&summary),
-                ("incremental", None),
-                "granule {granule}, round {round}"
-            );
+        if read_mode(&summary).0 == "incremental" {
             assert_eq!(
                 summary["parent"].as_str(),
-                Some(previous.as_str()),
+                Some(self.previous.as_str()),
                 "round {round}"
             );
-            rig.assert_reads_inside(&current);
+            assert_eq!(
+                text(&summary, "next_bitmap"),
+                self.following,
+                "round {round}"
+            );
+            rig.assert_reads_inside(&self.current);
         }
         rig.assert_restores_to_the_disk(&summary);
 
-        window_write(&mut rig, round);
-        rig.remove_bitmap(&current);
-        previous = summary["snapshot_id"].as_str().unwrap().to_owned();
-        current = following;
-        following = text(&summary, "bitmap_to_create").to_owned();
+        window_write(rig, round);
+        let next = text(&summary, "next_bitmap").to_owned();
+        if next != self.current && rig.has_bitmap(&self.current) {
+            rig.remove_bitmap(&self.current);
+        }
+        self.previous = summary["snapshot_id"].as_str().unwrap().to_owned();
+        self.current = next;
+        self.following = text(&summary, "bitmap_to_create").to_owned();
+        summary
+    }
+}
+
+fn run_rotation(granule: u64) {
+    let mut rig = Rig::new(granule, DISK);
+    let (mut chain, _) = Chain::start(&mut rig);
+    for round in 1..=5u64 {
+        let summary = chain.run(&mut rig, round, true);
+        let expected = if round == 1 {
+            ("full", Some("no_state"))
+        } else {
+            ("incremental", None)
+        };
+        assert_eq!(
+            read_mode(&summary),
+            expected,
+            "granule {granule}, round {round}"
+        );
     }
 }
 
@@ -266,4 +318,61 @@ fn qemu_incremental_matches_the_disk_at_every_granularity() {
     for granule in [512, 64 << 10, 4 << 20, 16 << 20] {
         run_rotation(granule);
     }
+}
+
+#[test]
+#[ignore = "needs qemu-img, qemu-nbd and qemu-io"]
+fn qemu_export_without_the_bitmap_reads_in_full() {
+    if !qemu::available() {
+        return;
+    }
+    let mut rig = Rig::new(64 << 10, DISK);
+    let (mut chain, _) = Chain::start(&mut rig);
+    for round in 1..=2 {
+        chain.run(&mut rig, round, true);
+    }
+    let lost = chain.run(&mut rig, 3, false);
+    assert_eq!(read_mode(&lost), ("full", Some("bitmap_missing")));
+    let restart = chain.run(&mut rig, 4, true);
+    assert_eq!(read_mode(&restart), ("full", Some("no_state")));
+    let again = chain.run(&mut rig, 5, true);
+    assert_eq!(read_mode(&again), ("incremental", None));
+}
+
+#[test]
+#[ignore = "needs qemu-img, qemu-nbd and qemu-io"]
+fn qemu_resize_forces_a_full_read() {
+    if !qemu::available() {
+        return;
+    }
+    let mut rig = Rig::new(64 << 10, DISK);
+    let (mut chain, _) = Chain::start(&mut rig);
+    for round in 1..=2 {
+        chain.run(&mut rig, round, true);
+    }
+
+    rig.resize(DISK + 8 * MIB);
+    rig.write(DISK + MIB, 70_000, 0x5a);
+    chain.skip_generation();
+    let grown = chain.run(&mut rig, 3, true);
+    assert_eq!(read_mode(&grown), ("full", Some("gen_mismatch")));
+    assert_eq!(
+        chain.run(&mut rig, 4, true)["image"]["read_mode"],
+        "incremental"
+    );
+
+    rig.resize(DISK + 4 * MIB);
+    chain.skip_generation();
+    let shrunk = chain.run(&mut rig, 5, true);
+    assert_eq!(read_mode(&shrunk), ("full", Some("gen_mismatch")));
+
+    rig.resize(DISK);
+    rig.resize(DISK + 4 * MIB);
+    chain.skip_generation();
+    let regrown = chain.run(&mut rig, 6, true);
+    assert_eq!(read_mode(&regrown), ("full", Some("gen_mismatch")));
+    assert_eq!(
+        chain.run(&mut rig, 7, true)["image"]["read_mode"],
+        "incremental"
+    );
 }
