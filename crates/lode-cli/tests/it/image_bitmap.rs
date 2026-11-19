@@ -11,7 +11,7 @@ use assert_cmd::Command;
 use lodestore_format::attest::{ensure_upgraded, read_attestations};
 use lodestore_format::chunker::blob_id;
 use lodestore_format::crypto::{BLOB_TYPE_DATA, Entropy, RepoId};
-use lodestore_format::image::BitmapNames;
+use lodestore_format::image::{BitmapNames, ImageState};
 use lodestore_format::index::parse_hex32;
 use lodestore_format::provenance::ProvenanceSet;
 use lodestore_format::repo::Repository;
@@ -196,6 +196,16 @@ impl TestExport {
         self.lock().data.clone()
     }
 
+    fn resize(&self, len: usize) {
+        let mut s = self.lock();
+        let old = s.data.len();
+        if len > old {
+            s.data.extend(pseudo_random(len - old));
+        } else {
+            s.data.truncate(len);
+        }
+    }
+
     fn settled(&self) -> MutexGuard<'_, Shared> {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
@@ -309,6 +319,20 @@ impl Env {
         let mut cmd = self.backup(&self.export.uri(), extra);
         cmd.env("XDG_CACHE_HOME", cache);
         summary_of(cmd)
+    }
+
+    fn state_file(&self) -> PathBuf {
+        state_files(&self.cache()).pop().expect("a state file")
+    }
+
+    fn rewrite_state(&self, change: impl FnOnce(&mut ImageState)) {
+        let path = self.state_file();
+        let key = SourceKey::image(EXPORT).unwrap();
+        let repo_id = repo_id_of(&self.repo);
+        let mut state =
+            ImageState::parse(&fs::read(&path).unwrap(), &repo_id, HOST.as_bytes(), &key).unwrap();
+        change(&mut state);
+        fs::write(path, state.encode(&repo_id, HOST.as_bytes(), &key)).unwrap();
     }
 
     fn assert_restores(&self, summary: &Value) {
@@ -758,4 +782,106 @@ fn image_bitmap_newer_snapshot_forces_a_full_read() {
     let ours = env.run_bitmap(2);
     assert_eq!(read_mode(&ours), ("full", Some("parent_not_newest")));
     env.assert_restores(&ours);
+}
+
+#[test]
+fn image_bitmap_resized_disk_reads_in_full() {
+    let env = setup();
+    let export = &env.export;
+    for g in [1, 2, 3] {
+        export.add_bitmap(&env.bitmap(g));
+    }
+    export.export_bitmaps(&[&env.bitmap(1), &env.bitmap(2)]);
+    env.run(&[]);
+    env.run_bitmap(1);
+    let size = export.data().len();
+
+    export.resize(size + (1 << 20));
+    export.export_bitmaps(&[&env.bitmap(2), &env.bitmap(3)]);
+    let grown = env.run_bitmap(2);
+    assert_eq!(read_mode(&grown), ("full", Some("size_changed")));
+    env.assert_restores(&grown);
+
+    export.add_bitmap(&env.bitmap(4));
+    export.resize(size - (1 << 20));
+    export.export_bitmaps(&[&env.bitmap(3), &env.bitmap(4)]);
+    let shrunk = env.run_bitmap(3);
+    assert_eq!(read_mode(&shrunk), ("full", Some("size_changed")));
+    env.assert_restores(&shrunk);
+
+    export.remove_bitmap(&env.bitmap(4));
+    export.resize(size - (1 << 20) - CHUNK);
+    export.resize(size - (1 << 20));
+    for g in [5, 6] {
+        export.add_bitmap(&env.bitmap(g));
+    }
+    export.export_bitmaps(&[&env.bitmap(5), &env.bitmap(6)]);
+    let recreated = env.run_bitmap(5);
+    assert_eq!(read_mode(&recreated), ("full", Some("gen_mismatch")));
+    env.assert_restores(&recreated);
+
+    export.add_bitmap(&env.bitmap(7));
+    export.write(8192, &[0x3C; 4096]);
+    export.export_bitmaps(&[&env.bitmap(6), &env.bitmap(7)]);
+    let again = env.run_bitmap(6);
+    assert_eq!(read_mode(&again), ("incremental", None));
+    env.assert_restores(&again);
+}
+
+#[test]
+fn image_bitmap_tampered_state_reads_in_full() {
+    let env = setup();
+    let export = &env.export;
+    for g in [1, 2, 3, 4] {
+        export.add_bitmap(&env.bitmap(g));
+    }
+    export.export_bitmaps(&[&env.bitmap(1), &env.bitmap(2)]);
+    env.run_bitmap(1);
+
+    env.rewrite_state(|s| s.bitmap_gen += 1);
+    export.export_bitmaps(&[&env.bitmap(2), &env.bitmap(3)]);
+    let ahead = env.run_bitmap(2);
+    assert_eq!(read_mode(&ahead), ("full", Some("gen_mismatch")));
+    env.assert_restores(&ahead);
+
+    let behind = env.run_bitmap(2);
+    assert_eq!(read_mode(&behind), ("full", Some("gen_mismatch")));
+    env.assert_restores(&behind);
+
+    export.export_bitmaps(&[&env.bitmap(3), &env.bitmap(4)]);
+    fs::write(env.state_file(), b"garbage").unwrap();
+    let garbage = env.run_bitmap(3);
+    assert_eq!(read_mode(&garbage), ("full", Some("state_unreadable")));
+    env.assert_restores(&garbage);
+}
+
+#[test]
+fn image_bitmap_two_exports_with_an_explicit_name_read_in_full() {
+    let env = setup();
+    let a = &env.export;
+    for g in [1, 2] {
+        a.add_bitmap(&env.bitmap(g));
+    }
+    a.export_bitmaps(&[&env.bitmap(1), &env.bitmap(2)]);
+    let first = env.run_at(&a.uri(), &["--name", EXPORT]);
+    assert_eq!(read_mode(&first), ("full", Some("no_bitmap")));
+    env.run_at(&a.uri(), &["--name", EXPORT, "--bitmap", &env.bitmap(1)]);
+    assert_eq!(env.state_bytes().len(), 1);
+
+    let mut other = disk();
+    other[CHUNK..2 * CHUNK].copy_from_slice(&pseudo_random(CHUNK));
+    let b = TestExport::start(other);
+    for g in [2, 3, 4] {
+        b.add_bitmap(&env.bitmap(g));
+    }
+    b.export_bitmaps(&[&env.bitmap(2), &env.bitmap(3)]);
+    let swapped = env.run_at(&b.uri(), &["--name", EXPORT, "--bitmap", &env.bitmap(2)]);
+    assert_eq!(read_mode(&swapped), ("full", Some("source_changed")));
+    assert_eq!(env.restored(&swapped), b.data());
+
+    b.write(2 * CHUNK as u64 + 8192, &[0x77; 4096]);
+    b.export_bitmaps(&[&env.bitmap(3), &env.bitmap(4)]);
+    let next = env.run_at(&b.uri(), &["--name", EXPORT, "--bitmap", &env.bitmap(3)]);
+    assert_eq!(read_mode(&next), ("incremental", None));
+    assert_eq!(env.restored(&next), b.data());
 }
