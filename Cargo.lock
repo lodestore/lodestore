@@ -2216,6 +2216,7 @@ dependencies = [
  "insta",
  "lodestore-agent",
  "lodestore-format",
+ "lodestore-nbd",
  "lodestore-policy",
  "lodestore-testkit",
  "reqwest",
@@ -2317,10 +2318,23 @@ dependencies = [
  "lodestore-agent",
  "lodestore-format",
  "lodestore-fuzzkit",
+ "lodestore-nbd",
  "lodestore-proto",
  "prost",
  "rand_chacha 0.10.0",
  "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "lodestore-nbd"
+version = "0.2.0"
+dependencies = [
+ "lodestore-format",
+ "proptest",
+ "rand_chacha 0.10.0",
+ "tempfile",
+ "thiserror",
  "tokio",
 ]
 

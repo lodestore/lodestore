@@ -14,8 +14,9 @@ test-hooks = ["lodestore-format/test-hooks"]
 lodestore-format = { path = "../lodestore-format" }
 lodestore-agent = { path = "../lodestore-agent" }
 lodestore-proto = { path = "../lodestore-proto" }
+lodestore-nbd = { path = "../lodestore-nbd" }
 prost = "0.14.4"
-tokio = { version = "1.53.2", features = ["rt", "time"] }
+tokio = { version = "1.53.2", features = ["rt", "time", "io-util"] }
 tempfile = "3.27.0"
 rand_chacha = "0.10.0"
 blake3 = "1.8.7"

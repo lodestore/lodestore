@@ -117,6 +117,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "image_state"
+path = "fuzz_targets/image_state.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "verify_shard"
 path = "fuzz_targets/verify_shard.rs"
 test = false
@@ -168,6 +175,20 @@ bench = false
 [[bin]]
 name = "snapshot_open"
 path = "fuzz_targets/snapshot_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nbd_client"
+path = "fuzz_targets/nbd_client.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nbd_server"
+path = "fuzz_targets/nbd_server.rs"
 test = false
 doc = false
 bench = false

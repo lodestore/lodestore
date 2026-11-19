@@ -3,23 +3,31 @@
 
 use std::fs;
 use std::path::Path;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 
 use lodestore_format::crypto::{BLOB_TYPE_TREE, BlobId};
+use lodestore_format::image::ImageState;
 use lodestore_format::index::open_shard;
 use lodestore_format::pack::{ENTRY_LEN, PACK_MAGIC, PACK_PREFIX_LEN, read_pack_header};
 use lodestore_format::pb::{Node, NodeType};
 use lodestore_format::reader::Reader;
 use lodestore_format::repo::Repository;
+use lodestore_format::source::SourceKey;
 use lodestore_format::store::LocalFsStore;
 use lodestore_format::tree::decode_tree;
+use lodestore_nbd::{Client, serve};
 use lodestore_proto::agent::v1::plan_item::Kind;
 use lodestore_proto::agent::v1::{
     ChunkLoc, PackAccess, PlanChunks, PlanEnter, PlanEntry, PlanItem, PlanLeave, RestorePlanBatch,
     RestoreTotals,
 };
 use prost::Message;
+use tokio::io::{AsyncRead, AsyncWrite, DuplexStream, ReadBuf, duplex};
 
 use crate::stores;
+use crate::{NBD_BITMAPS, NBD_READ_LEN, NBD_STATUS_LEN, nbd_export, nbd_limits, nbd_runtime};
 
 type Seeds = Vec<(&'static str, Vec<u8>)>;
 
@@ -181,6 +189,83 @@ fn restore_plan_seeds() -> Vec<Vec<u8>> {
     ]
 }
 
+struct Tap {
+    inner: DuplexStream,
+    log: Arc<Mutex<Vec<u8>>>,
+}
+
+impl AsyncRead for Tap {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for Tap {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let polled = Pin::new(&mut self.inner).poll_write(cx, buf);
+        if let Poll::Ready(Ok(n)) = &polled {
+            let mut log = self.log.lock().unwrap_or_else(|e| e.into_inner());
+            log.extend_from_slice(buf.get(..*n).unwrap_or_default());
+        }
+        polled
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+fn nbd_transcripts() -> Result<Seeds, String> {
+    let (client_end, server_end) = duplex(64 << 10);
+    let from_client = Arc::new(Mutex::new(Vec::new()));
+    let from_server = Arc::new(Mutex::new(Vec::new()));
+    let client_end = Tap {
+        inner: client_end,
+        log: Arc::clone(&from_client),
+    };
+    let server_end = Tap {
+        inner: server_end,
+        log: Arc::clone(&from_server),
+    };
+    let limits = nbd_limits();
+    let mut export = nbd_export();
+    let (served, client) = nbd_runtime().block_on(async {
+        tokio::join!(serve(server_end, &mut export, &limits), async {
+            let mut client = Client::handshake(client_end, "", &NBD_BITMAPS, limits).await?;
+            client.read(0, NBD_READ_LEN as u32).await?;
+            client.block_status(0, NBD_STATUS_LEN as u32).await?;
+            client.disconnect().await
+        })
+    });
+    served.map_err(|e| format!("the NBD seed server: {e}"))?;
+    client.map_err(|e| format!("the NBD seed client: {e}"))?;
+    let take = |log: &Arc<Mutex<Vec<u8>>>| log.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let mut out: Seeds = Vec::new();
+    for (name, bytes) in [
+        ("nbd_client", take(&from_server)),
+        ("nbd_server", take(&from_client)),
+    ] {
+        out.push((
+            name,
+            bytes.get(..bytes.len() / 2).unwrap_or_default().to_vec(),
+        ));
+        out.push((name, bytes));
+    }
+    Ok(out)
+}
+
 pub fn seeds(fixtures: &Path) -> Seeds {
     try_seeds(fixtures).unwrap_or_else(|e| panic!("seed inputs: {e}"))
 }
@@ -321,6 +406,37 @@ pub fn try_seeds(fixtures: &Path) -> Result<Seeds, String> {
         out.push(("source_decode", key.into_bytes()));
     }
 
+    let binding = vectors(fixtures, "image-binding-vectors.json")?;
+    for claimed in hex_fields(&binding, "claimed")? {
+        out.push(("image_layout", claimed));
+    }
+    for field in ["name", "input"] {
+        for text in string_fields(&binding, field)? {
+            out.push(("image_state", text.into_bytes()));
+        }
+    }
+    if let Ok(key) = SourceKey::image("disk") {
+        let state = ImageState {
+            parent: [0x22; 32],
+            bitmap_gen: 3,
+            disk_size: 20 << 20,
+            source: [0x33; 32],
+        };
+        let good = state.encode(&[0x11; 16], b"host-a", &key);
+        let text = String::from_utf8_lossy(&good).into_owned();
+        out.push(("image_state", good));
+        out.push((
+            "image_state",
+            text.replace("\"version\":1", "\"version\":2").into_bytes(),
+        ));
+        out.push((
+            "image_state",
+            text.replace("\"bitmap_gen\":3", "\"bitmap_gen\":0")
+                .into_bytes(),
+        ));
+        out.push(("image_state", text.replace("host", "hosts").into_bytes()));
+    }
+
     let mut reader = Reader::open(&store, repo.read_keys().duplicate(), repo.config())
         .map_err(|e| format!("open a reader: {e}"))?;
     let mut pending = Vec::new();
@@ -390,6 +506,7 @@ pub fn try_seeds(fixtures: &Path) -> Result<Seeds, String> {
         "minisign_signature",
         b"lodestore-agent 1.2.3 x86_64".to_vec(),
     ));
+    out.extend(nbd_transcripts()?);
     out.extend(
         restore_plan_seeds()
             .into_iter()

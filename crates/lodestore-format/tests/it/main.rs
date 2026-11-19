@@ -25,6 +25,7 @@ mod gc_repack;
 mod gc_trust;
 mod golden;
 mod image;
+mod image_binding;
 mod index_props;
 mod init_race;
 mod list_independence;

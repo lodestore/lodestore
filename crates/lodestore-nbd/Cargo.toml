@@ -1,0 +1,19 @@
+[package]
+name = "lodestore-nbd"
+description = "NBD client and read-only server for Lodestore disk images"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+tokio = { version = "1.53.2", features = ["io-util", "net", "time", "rt"] }
+thiserror = "2.0.21"
+lodestore-format = { path = "../lodestore-format" }
+
+[dev-dependencies]
+tokio = { version = "1.53.2", features = ["macros", "rt-multi-thread", "test-util"] }
+tempfile = "3.27.0"
+lodestore-format = { path = "../lodestore-format", features = ["test-hooks"] }
+proptest = "1.12.0"
+rand_chacha = "0.10.0"

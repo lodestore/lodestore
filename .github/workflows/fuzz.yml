@@ -19,6 +19,9 @@ on:
       - crates/lodestore-format/src/gc/**
       - crates/lodestore-agent/src/update/minisign.rs
       - crates/lodestore-agent/src/jobs/restore.rs
+      - crates/lodestore-nbd/**
+      - crates/lodestore-format/src/image.rs
+      - crates/lodestore-format/src/writer/image.rs
       - crates/lodestore-fuzzkit/**
       - fuzz/**
       - .github/workflows/fuzz.yml
@@ -50,7 +53,7 @@ jobs:
           EVENT: ${{ github.event_name }}
         run: |
           if [ "$EVENT" = pull_request ]; then
-            echo 'list=["index_shard","tree_decode"]' >> "$GITHUB_OUTPUT"
+            echo 'list=["index_shard","tree_decode","image_layout","image_state","nbd_client","nbd_server"]' >> "$GITHUB_OUTPUT"
             echo "seconds=30" >> "$GITHUB_OUTPUT"
           else
             list=$(for f in fuzz/fuzz_targets/*.rs; do basename "$f" .rs; done | jq -R . | jq -sc .)
@@ -117,6 +120,24 @@ jobs:
           path: fuzz/artifacts/${{ matrix.target }}/
           if-no-files-found: ignore
           retention-days: 30
+
+  image-props:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          cache-on-failure: true
+      - uses: taiki-e/install-action@68a389c788b2cd04016ce8c80ee23b80d2ab3d68
+        with:
+          tool: nextest@0.9.148
+      - name: Run the image properties with 512 cases
+        run: PROPTEST_CASES=512 cargo nextest run -p lodestore-nbd --test it --no-fail-fast -E 'test(/^image_props::/)'
 
   report:
     needs: fuzz

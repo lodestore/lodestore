@@ -12,13 +12,17 @@
 //! segments agree. Everything below is read from a bucket and is untrusted.
 
 use std::fmt::Write as _;
+use std::future::Future;
+use std::pin::Pin;
 
-use crate::crypto::BlobId;
+use crate::crypto::RepoId;
+use crate::crypto::{BLOB_TYPE_DATA, BlobId};
 use crate::error::{Error, Result};
 use crate::fs::restore::check_extents;
 use crate::pb;
 use crate::reader::Reader;
-use crate::source::Meta;
+use crate::snapshot::SnapshotEntry;
+use crate::source::{Meta, SourceKey};
 use crate::store::BlobStore;
 use crate::tree::validate_name;
 
@@ -37,6 +41,9 @@ pub const META_LAYOUT: &str = "image_layout";
 pub const META_CHUNK_SIZE: &str = "chunk_size";
 pub const META_READ_MODE: &str = "read_mode";
 pub const DISK_SIZE: &str = "size";
+pub const DISK_BITMAP_NAME: &str = "bitmap_name";
+pub const DISK_BITMAP_GEN: &str = "bitmap_gen";
+pub const DISK_FULL_REASON: &str = "full_reason";
 
 fn bad(reason: impl Into<String>) -> Error {
     Error::corrupt("image", reason)
@@ -85,6 +92,9 @@ pub struct ImageExtent {
     pub len: u64,
     /// Reading the run yields zeros.
     pub zero: bool,
+    /// The dirty bitmap marks these bytes as changed since the parent. Without
+    /// a bitmap the source agreed on with the writer, this is always `false`.
+    pub dirty: bool,
 }
 
 /// Where the bytes of an image come from. `extents(offset, len)` covers
@@ -101,11 +111,43 @@ pub trait ImageSource {
 
     fn read(&mut self, offset: u64, len: usize) -> impl Future<Output = Result<Vec<u8>>> + Send;
 
+    /// Whether `dirty` on the extents comes from a dirty bitmap.
+    fn has_dirty(&self) -> bool {
+        false
+    }
+
     /// Called after the last read; an error means the source changed while it
     /// was read, and the backup writes no snapshot.
     fn finish(&mut self) -> Result<()> {
         Ok(())
     }
+}
+
+/// Where the bytes of a parent chunk come from. In `lode` this is a
+/// [`Reader`], whose `read_blob` checks the keyed id of what it returns.
+pub trait ParentChunks: Send {
+    fn chunk<'a>(
+        &'a mut self,
+        id: &'a BlobId,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>>> + Send + 'a>>;
+}
+
+impl<S: BlobStore> ParentChunks for Reader<S> {
+    fn chunk<'a>(
+        &'a mut self,
+        id: &'a BlobId,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>>> + Send + 'a>> {
+        Box::pin(self.read_blob(id, BLOB_TYPE_DATA))
+    }
+}
+
+/// The snapshot an incremental image run builds on. `disk_size` and `table`
+/// come from the parent's own tree, never from a cache.
+pub struct ImageParent<'a> {
+    pub snapshot_id: BlobId,
+    pub disk_size: u64,
+    pub table: Vec<ChunkRef>,
+    pub chunks: &'a mut dyn ParentChunks,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,6 +201,31 @@ impl ImageMeta {
         ])
     }
 
+    /// `to_meta` plus the bitmap that collects changes after this snapshot and
+    /// the reason for a full read.
+    pub fn to_meta_bound(
+        &self,
+        disk_name: &str,
+        binding: Option<&BitmapBinding>,
+        full_reason: Option<FullReason>,
+    ) -> Meta {
+        let mut meta = self.to_meta(disk_name);
+        if let Some(b) = binding {
+            meta.insert(disk_meta_key(disk_name, DISK_BITMAP_NAME), b.name.clone());
+            meta.insert(
+                disk_meta_key(disk_name, DISK_BITMAP_GEN),
+                b.generation.to_string(),
+            );
+        }
+        if let Some(reason) = full_reason {
+            meta.insert(
+                disk_meta_key(disk_name, DISK_FULL_REASON),
+                reason.as_str().to_owned(),
+            );
+        }
+        meta
+    }
+
     /// Fails closed on a layout this build does not read; keys it does not
     /// know are skipped.
     pub fn from_meta(meta: &Meta, disk_name: &str) -> Result<Self> {
@@ -188,6 +255,417 @@ impl ImageMeta {
             read_mode,
             disk_size,
         })
+    }
+}
+
+/// Why a run read the whole image although a bitmap was named.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FullReason {
+    NoBitmap,
+    BitmapMissing,
+    NoState,
+    StateUnreadable,
+    NoParent,
+    ParentNotNewest,
+    ParentUnreadable,
+    NameChanged,
+    GenMismatch,
+    SizeChanged,
+    SourceChanged,
+}
+
+impl FullReason {
+    pub const ALL: [FullReason; 11] = [
+        FullReason::NoBitmap,
+        FullReason::BitmapMissing,
+        FullReason::NoState,
+        FullReason::StateUnreadable,
+        FullReason::NoParent,
+        FullReason::ParentNotNewest,
+        FullReason::ParentUnreadable,
+        FullReason::NameChanged,
+        FullReason::GenMismatch,
+        FullReason::SizeChanged,
+        FullReason::SourceChanged,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FullReason::NoBitmap => "no_bitmap",
+            FullReason::BitmapMissing => "bitmap_missing",
+            FullReason::NoState => "no_state",
+            FullReason::StateUnreadable => "state_unreadable",
+            FullReason::NoParent => "no_parent",
+            FullReason::ParentNotNewest => "parent_not_newest",
+            FullReason::ParentUnreadable => "parent_unreadable",
+            FullReason::NameChanged => "name_changed",
+            FullReason::GenMismatch => "gen_mismatch",
+            FullReason::SizeChanged => "size_changed",
+            FullReason::SourceChanged => "source_changed",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|r| r.as_str() == text)
+    }
+
+    /// `None` when the snapshot records no reason; an unknown code is an error.
+    pub fn from_meta(meta: &Meta, disk_name: &str) -> Result<Option<Self>> {
+        let Some(code) = meta.get(&disk_meta_key(disk_name, DISK_FULL_REASON)) else {
+            return Ok(None);
+        };
+        Self::parse(code)
+            .map(Some)
+            .ok_or_else(|| bad("the full read reason is not one this build knows"))
+    }
+}
+
+/// The bitmap that collects the changes made after a snapshot, and its generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BitmapBinding {
+    pub name: String,
+    pub generation: u64,
+}
+
+impl BitmapBinding {
+    /// `None` when the snapshot records no binding; one key without the other
+    /// or a malformed value is an error.
+    pub fn from_meta(meta: &Meta, disk_name: &str) -> Result<Option<Self>> {
+        let name = meta.get(&disk_meta_key(disk_name, DISK_BITMAP_NAME));
+        let generation = meta.get(&disk_meta_key(disk_name, DISK_BITMAP_GEN));
+        let (name, generation) = match (name, generation) {
+            (None, None) => return Ok(None),
+            (Some(name), Some(generation)) => (name, generation),
+            _ => return Err(bad("the bitmap name and generation are not both recorded")),
+        };
+        if name.is_empty() || name.bytes().any(|b| b < 0x20 || b == 0x7f) {
+            return Err(bad("the bitmap name is empty or has control characters"));
+        }
+        let generation = decimal(generation)
+            .filter(|&n| n >= 1)
+            .ok_or_else(|| bad("the bitmap generation is not a positive decimal"))?;
+        Ok(Some(BitmapBinding {
+            name: name.clone(),
+            generation,
+        }))
+    }
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    bytes.iter().fold(String::new(), |mut out, b| {
+        let _ = write!(out, "{b:02x}");
+        out
+    })
+}
+
+/// Exactly 64 lower-case hex digits.
+fn hex32_lower(text: &str) -> Option<[u8; 32]> {
+    let canonical =
+        text.len() == 64 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    if canonical {
+        blake3::Hash::from_hex(text).ok().map(|h| *h.as_bytes())
+    } else {
+        None
+    }
+}
+
+/// Names one instance in the repository: BLAKE3 of the host name, a zero
+/// byte and the source key.
+pub fn instance_id(hostname: &[u8], key: &SourceKey) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(hostname);
+    hasher.update(&[0]);
+    hasher.update(key.as_str().as_bytes());
+    *hasher.finalize().as_bytes()
+}
+
+/// Builds and reads the bitmap names `lode-{repo16}-{inst16}-g{N}` of one
+/// instance in one repository.
+#[derive(Debug, Clone)]
+pub struct BitmapNames {
+    prefix: String,
+}
+
+impl BitmapNames {
+    pub fn new(repo_id: &RepoId, hostname: &[u8], key: &SourceKey) -> Self {
+        let instance = instance_id(hostname, key);
+        BitmapNames {
+            prefix: format!(
+                "lode-{}-{}-g",
+                hex_lower(repo_id.get(..8).unwrap_or_default()),
+                hex_lower(instance.get(..8).unwrap_or_default())
+            ),
+        }
+    }
+
+    pub fn name(&self, generation: u64) -> String {
+        format!("{}{generation}", self.prefix)
+    }
+
+    pub fn first(&self) -> String {
+        self.name(1)
+    }
+
+    /// The generation of a name of this instance; `None` for any other name.
+    /// The top value is refused so that `generation + 1` never overflows.
+    pub fn parse(&self, name: &str) -> Option<u64> {
+        decimal(name.strip_prefix(self.prefix.as_str())?).filter(|n| (1..u64::MAX).contains(n))
+    }
+
+    pub fn binding(&self, generation: u64) -> BitmapBinding {
+        BitmapBinding {
+            name: self.name(generation),
+            generation,
+        }
+    }
+}
+
+pub const MAX_STATE_BYTES: usize = 4096;
+const STATE_VERSION: u64 = 1;
+const STATE_KEYS: [&str; 9] = [
+    "version",
+    "repo_id",
+    "host",
+    "key",
+    "source",
+    "parent",
+    "bitmap_gen",
+    "disk_size",
+    "chunk_size",
+];
+
+/// The identity of the local source, from its canonical URI.
+pub fn source_identity(canonical: &str) -> [u8; 32] {
+    *blake3::hash(canonical.as_bytes()).as_bytes()
+}
+
+/// A cache of the binding the last run recorded. The bucket is the truth: the
+/// chunk ids come from the parent's tree, not from here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageState {
+    pub parent: BlobId,
+    pub bitmap_gen: u64,
+    pub disk_size: u64,
+    pub source: [u8; 32],
+}
+
+impl ImageState {
+    pub fn encode(&self, repo_id: &RepoId, hostname: &[u8], key: &SourceKey) -> Vec<u8> {
+        let value = serde_json::json!({
+            "version": STATE_VERSION,
+            "repo_id": hex_lower(repo_id),
+            "host": hex_lower(hostname),
+            "key": key.as_str(),
+            "source": hex_lower(&self.source),
+            "parent": hex_lower(&self.parent),
+            "bitmap_gen": self.bitmap_gen,
+            "disk_size": self.disk_size,
+            "chunk_size": IMAGE_CHUNK_SIZE,
+        });
+        serde_json::to_vec(&value).unwrap_or_default()
+    }
+
+    /// Accepts only what `encode` writes for this repository, host and instance.
+    pub fn parse(bytes: &[u8], repo_id: &RepoId, hostname: &[u8], key: &SourceKey) -> Result<Self> {
+        if bytes.len() > MAX_STATE_BYTES {
+            return Err(bad("the image state file is too large"));
+        }
+        let value: serde_json::Value =
+            serde_json::from_slice(bytes).map_err(|_| bad("the image state is not JSON"))?;
+        let object = value
+            .as_object()
+            .filter(|o| {
+                o.len() == STATE_KEYS.len() && STATE_KEYS.iter().all(|k| o.contains_key(*k))
+            })
+            .ok_or_else(|| bad("the image state does not have exactly the known fields"))?;
+        let text = |name: &str| object.get(name).and_then(serde_json::Value::as_str);
+        let number = |name: &str| object.get(name).and_then(serde_json::Value::as_u64);
+        if number("version") != Some(STATE_VERSION) {
+            return Err(bad("the image state has another version"));
+        }
+        if text("repo_id") != Some(hex_lower(repo_id).as_str())
+            || text("host") != Some(hex_lower(hostname).as_str())
+            || text("key") != Some(key.as_str())
+        {
+            return Err(bad(
+                "the image state belongs to another repository or instance",
+            ));
+        }
+        let source = text("source")
+            .and_then(hex32_lower)
+            .ok_or_else(|| bad("the image state source is not 64 lower-case hex digits"))?;
+        let parent = text("parent")
+            .and_then(hex32_lower)
+            .ok_or_else(|| bad("the image state parent is not 64 lower-case hex digits"))?;
+        let bitmap_gen = number("bitmap_gen")
+            .filter(|&n| n >= 1)
+            .ok_or_else(|| bad("the image state generation is not a positive integer"))?;
+        let disk_size = number("disk_size")
+            .filter(|&n| n <= MAX_IMAGE_SIZE)
+            .ok_or_else(|| bad("the image state disk size is missing or too large"))?;
+        if number("chunk_size") != Some(IMAGE_CHUNK_SIZE) {
+            return Err(bad("the image state has another chunk size"));
+        }
+        let state = ImageState {
+            parent,
+            bitmap_gen,
+            disk_size,
+            source,
+        };
+        // A repeated key or other spelling would parse to the same fields.
+        if state.encode(repo_id, hostname, key) != bytes {
+            return Err(bad("the image state is not in the canonical spelling"));
+        }
+        Ok(state)
+    }
+}
+
+/// What reading the state file gave.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StateRead {
+    Missing,
+    Unreadable,
+    Found(ImageState),
+}
+
+/// One snapshot of an instance as the bucket records it; what could not be
+/// read is `None`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstanceSnapshot {
+    pub id: BlobId,
+    pub parent: Option<BlobId>,
+    pub disk_size: Option<u64>,
+    pub binding: Option<BitmapBinding>,
+    /// The snapshot records a bitmap binding that does not parse; decide counts it as a fork.
+    pub binding_unreadable: bool,
+}
+
+/// The snapshots whose claim is `key` and whose manifest host is `hostname`,
+/// in the order given.
+pub fn instance_snapshots(
+    entries: &[SnapshotEntry],
+    key: &SourceKey,
+    hostname: &[u8],
+) -> Vec<InstanceSnapshot> {
+    let disk = key.segment(1);
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let snapshot = &entry.snapshot;
+            let (claimed, meta) = crate::source::decode(snapshot.source.as_ref()).ok()?;
+            if &claimed != key || snapshot.hostname != hostname {
+                return None;
+            }
+            Some(InstanceSnapshot {
+                id: entry.id,
+                parent: BlobId::try_from(snapshot.parent.as_slice()).ok(),
+                disk_size: disk
+                    .as_deref()
+                    .and_then(|d| ImageMeta::from_meta(&meta, d).ok())
+                    .map(|m| m.disk_size),
+                binding: disk
+                    .as_deref()
+                    .and_then(|d| BitmapBinding::from_meta(&meta, d).ok().flatten()),
+                binding_unreadable: disk
+                    .as_deref()
+                    .is_some_and(|d| BitmapBinding::from_meta(&meta, d).is_err()),
+            })
+        })
+        .collect()
+}
+
+pub struct DecideInput<'a> {
+    pub names: &'a BitmapNames,
+    pub bitmap: Option<u64>,
+    pub export_has_bitmap: bool,
+    pub export_has_next: bool,
+    pub export_size: u64,
+    pub source: [u8; 32],
+    pub state: &'a StateRead,
+    /// Oldest first; the last one is the newest.
+    pub instance: &'a [InstanceSnapshot],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadPlan {
+    Full(FullReason),
+    Incremental { parent: BlobId },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Decision {
+    pub plan: ReadPlan,
+    /// The binding of the next bitmap, if the export confirmed it before the first read.
+    pub record: Option<BitmapBinding>,
+    /// The generation to propose when no bitmap is bound.
+    pub restart: u64,
+}
+
+/// Reads the whole image whenever any field of the binding is missing or differs.
+pub fn decide(input: &DecideInput<'_>) -> Decision {
+    let record = input
+        .bitmap
+        .and_then(|n| n.checked_add(1))
+        .filter(|_| input.export_has_next)
+        .map(|next| input.names.binding(next));
+    let highest = input
+        .instance
+        .iter()
+        .filter_map(|s| s.binding.as_ref().map(|b| b.generation))
+        .chain(input.bitmap)
+        .max()
+        .unwrap_or(0);
+    Decision {
+        plan: plan(input),
+        record,
+        restart: highest.saturating_add(1),
+    }
+}
+
+fn plan(input: &DecideInput<'_>) -> ReadPlan {
+    use FullReason::*;
+    let Some(n) = input.bitmap else {
+        return ReadPlan::Full(NoBitmap);
+    };
+    if !input.export_has_bitmap {
+        return ReadPlan::Full(BitmapMissing);
+    }
+    let state = match input.state {
+        StateRead::Missing => return ReadPlan::Full(NoState),
+        StateRead::Unreadable => return ReadPlan::Full(StateUnreadable),
+        StateRead::Found(state) => state,
+    };
+    if state.source != input.source {
+        return ReadPlan::Full(SourceChanged);
+    }
+    let Some((newest, older)) = input.instance.split_last() else {
+        return ReadPlan::Full(NoParent);
+    };
+    if newest.id != state.parent {
+        return ReadPlan::Full(ParentNotNewest);
+    }
+    let (Some(disk_size), Some(binding)) = (newest.disk_size, &newest.binding) else {
+        return ReadPlan::Full(ParentUnreadable);
+    };
+    if binding.name != input.names.name(binding.generation) {
+        return ReadPlan::Full(NameChanged);
+    }
+    if binding.generation != n || state.bitmap_gen != n {
+        return ReadPlan::Full(GenMismatch);
+    }
+    let forked = older.iter().any(|s| {
+        s.binding.as_ref().is_some_and(|b| b.generation >= n)
+            || s.binding_unreadable
+            || (newest.parent.is_some() && s.parent == newest.parent)
+    });
+    if forked {
+        return ReadPlan::Full(GenMismatch);
+    }
+    if state.disk_size != disk_size || disk_size != input.export_size {
+        return ReadPlan::Full(SizeChanged);
+    }
+    ReadPlan::Incremental {
+        parent: state.parent,
     }
 }
 
@@ -376,9 +854,11 @@ fn check_segment(node: &pb::Node) -> Result<()> {
 }
 
 impl ImageLayout {
-    /// One entry per chunk of the image.
-    pub fn chunk_table(&self) -> Vec<ChunkRef> {
-        let total = usize::try_from(self.size.div_ceil(IMAGE_CHUNK_SIZE)).unwrap_or(0);
+    /// One entry per chunk of the image; a layout whose ids do not fill its
+    /// extents is an error, never a table with zero chunks in their place.
+    pub fn chunk_table(&self) -> Result<Vec<ChunkRef>> {
+        let total = usize::try_from(self.size.div_ceil(IMAGE_CHUNK_SIZE))
+            .map_err(|_| bad("the image has too many chunks"))?;
         let mut table = vec![ChunkRef::Zero; total];
         let per_segment = self.segment_size / IMAGE_CHUNK_SIZE;
         for (index, segment) in self.segments.iter().enumerate() {
@@ -387,22 +867,20 @@ impl ImageLayout {
             for e in &segment.sparse_extents {
                 let first = base.saturating_add(e.offset / IMAGE_CHUNK_SIZE);
                 for k in 0..e.length.div_ceil(IMAGE_CHUNK_SIZE) {
-                    let Some(id) = ids
+                    let id = ids
                         .next()
-                        .and_then(|raw| BlobId::try_from(raw.as_slice()).ok())
-                    else {
-                        return table;
-                    };
+                        .ok_or_else(|| bad("a segment has fewer chunk ids than chunks"))?;
+                    let id = BlobId::try_from(id.as_slice())
+                        .map_err(|_| bad("a chunk id is not 32 bytes"))?;
                     let slot = usize::try_from(first.saturating_add(k))
                         .ok()
-                        .and_then(|at| table.get_mut(at));
-                    if let Some(slot) = slot {
-                        *slot = ChunkRef::Data(id);
-                    }
+                        .and_then(|at| table.get_mut(at))
+                        .ok_or_else(|| bad("a chunk lies outside the image"))?;
+                    *slot = ChunkRef::Data(id);
                 }
             }
         }
-        table
+        Ok(table)
     }
 }
 

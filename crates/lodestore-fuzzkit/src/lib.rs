@@ -8,7 +8,9 @@ pub mod seeds;
 pub mod stores;
 
 use std::collections::HashSet;
+use std::pin::Pin;
 use std::sync::OnceLock;
+use std::task::{Context, Poll};
 
 use lodestore_agent::update::minisign::{PublicKey, Signature, TrustedRelease};
 use lodestore_format::attest::{
@@ -23,8 +25,8 @@ use lodestore_format::crypto::{
 use lodestore_format::error::Result;
 use lodestore_format::fs::restore::check_extents;
 use lodestore_format::image::{
-    IMAGE_CHUNK_SIZE, ImageMeta, SEGMENT_CHUNKS, merge_head, merge_segments, parse_layout,
-    segment_nodes,
+    BitmapBinding, BitmapNames, FullReason, IMAGE_CHUNK_SIZE, ImageMeta, ImageState,
+    SEGMENT_CHUNKS, merge_head, merge_segments, parse_layout, segment_nodes,
 };
 use lodestore_format::index::{Index, SupersedesTrust, open_shard};
 use lodestore_format::keys::{
@@ -40,9 +42,11 @@ use lodestore_format::pb;
 use lodestore_format::snapshot::{ENVELOPE_VERSION, open_snapshot};
 use lodestore_format::source::{self, SourceKey};
 use lodestore_format::tree::{decode_tree, hooks};
+use lodestore_nbd::{Client, Limits as NbdLimits, MemExport, serve};
 use prost::Message;
 use rand_chacha::ChaCha20Rng;
 use rand_chacha::rand_core::SeedableRng;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 pub fn pack_prefix(data: &[u8]) {
     let _ = parse_prefix(data);
@@ -307,7 +311,9 @@ pub fn image_layout(data: &[u8]) {
         );
         // The chunk table is one entry per chunk; only a one-segment image is built here.
         if layout.size <= SEGMENT_CHUNKS * IMAGE_CHUNK_SIZE {
-            let table = layout.chunk_table();
+            let table = layout
+                .chunk_table()
+                .expect("a parsed layout has a chunk table");
             assert_eq!(table.len() as u64, layout.size.div_ceil(IMAGE_CHUNK_SIZE));
             let per_segment = layout.segment_size.div_ceil(IMAGE_CHUNK_SIZE).max(1);
             let again = segment_nodes(layout.size, &table, per_segment)
@@ -325,12 +331,45 @@ pub fn image_layout(data: &[u8]) {
     if let Ok(claimed) = pb::Source::decode(data)
         && let Ok((key, meta)) = source::decode(Some(&claimed))
         && let Some(name) = source::label(&key, &meta)
-        && let Ok(parsed) = ImageMeta::from_meta(&meta, &name)
     {
+        let _ = BitmapBinding::from_meta(&meta, &name);
+        let _ = FullReason::from_meta(&meta, &name);
+        if let Ok(parsed) = ImageMeta::from_meta(&meta, &name) {
+            assert_eq!(
+                ImageMeta::from_meta(&parsed.to_meta(&name), &name).ok(),
+                Some(parsed),
+                "image meta must read back what it writes"
+            );
+        }
+    }
+}
+
+/// A state file is refused or one `encode` would have written, and a bitmap
+/// name is refused or the one `name` builds for its generation.
+pub fn image_state(data: &[u8]) {
+    let repo: RepoId = [0x11; 16];
+    let Ok(key) = SourceKey::image("disk") else {
+        return;
+    };
+    if let Ok(state) = ImageState::parse(data, &repo, b"host-a", &key) {
         assert_eq!(
-            ImageMeta::from_meta(&parsed.to_meta(&name), &name).ok(),
-            Some(parsed),
-            "image meta must read back what it writes"
+            ImageState::parse(
+                &state.encode(&repo, b"host-a", &key),
+                &repo,
+                b"host-a",
+                &key
+            )
+            .ok(),
+            Some(state),
+            "an encoded state must parse to what was encoded"
+        );
+    }
+    let names = BitmapNames::new(&repo, b"host-a", &key);
+    if let Some(generation) = names.parse(&String::from_utf8_lossy(data)) {
+        assert_eq!(
+            names.name(generation).as_bytes(),
+            data,
+            "a parsed bitmap name is the one built for its generation"
         );
     }
 }
@@ -408,6 +447,113 @@ pub fn snapshot_open(data: &[u8]) {
     let _ = open_snapshot(private_key, repo_id, blake3::hash(data).as_bytes(), data);
 }
 
+pub(crate) const NBD_BITMAPS: [&str; 2] = ["b0", "b1"];
+pub(crate) const NBD_READ_LEN: u64 = 64 << 10;
+pub(crate) const NBD_STATUS_LEN: u64 = 1 << 20;
+
+pub(crate) fn nbd_limits() -> NbdLimits {
+    NbdLimits {
+        max_export_size: 1 << 40,
+        ..NbdLimits::default()
+    }
+}
+
+pub(crate) fn nbd_export() -> MemExport {
+    static DATA: OnceLock<Vec<u8>> = OnceLock::new();
+    let data = DATA.get_or_init(|| {
+        let mut data: Vec<u8> = (0..NBD_STATUS_LEN)
+            .map(|i| ((i * 31 + (i >> 12)) % 251 + 1) as u8)
+            .collect();
+        data[(64 << 10)..(512 << 10)].fill(0);
+        data
+    });
+    MemExport::new(data.clone())
+        .with_bitmap("b0", vec![4096..8192, (256 << 10)..(320 << 10)])
+        .with_bitmap(
+            "b1",
+            vec![(768 << 10)..(769 << 10), (900 << 10)..(901 << 10)],
+        )
+}
+
+pub(crate) fn nbd_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("a current-thread runtime builds")
+}
+
+struct Scripted<'a> {
+    input: &'a [u8],
+    pos: usize,
+}
+
+impl AsyncRead for Scripted<'_> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let rest = self.input.get(self.pos..).unwrap_or_default();
+        let n = rest.len().min(buf.remaining());
+        buf.put_slice(rest.get(..n).unwrap_or_default());
+        self.pos += n;
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl AsyncWrite for Scripted<'_> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Poll::Ready(Ok(buf.len()))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+/// The bytes a hostile server sends: the client either refuses them or reads
+/// what they say, and never holds more than the replies it may accept.
+pub fn nbd_client(data: &[u8]) {
+    nbd_runtime().block_on(async {
+        let stream = Scripted {
+            input: data,
+            pos: 0,
+        };
+        let Ok(mut client) = Client::handshake(stream, "", &NBD_BITMAPS, nbd_limits()).await else {
+            return;
+        };
+        let size = client.size();
+        if size > 0 {
+            let len = NBD_READ_LEN.min(size).min(u64::from(client.max_read()));
+            let _ = client.read(0, len as u32).await;
+            let _ = client
+                .block_status(0, NBD_STATUS_LEN.min(size) as u32)
+                .await;
+        }
+        let _ = client.disconnect().await;
+    });
+}
+
+/// The bytes a hostile client sends: the server answers or hangs up, and
+/// never writes to the export.
+pub fn nbd_server(data: &[u8]) {
+    nbd_runtime().block_on(async {
+        let stream = Scripted {
+            input: data,
+            pos: 0,
+        };
+        let _ = serve(stream, &mut nbd_export(), &NbdLimits::default()).await;
+    });
+}
+
 pub use restore_plan::restore_plan;
 pub use stores::{snapshot_resolves, verify_shard};
 
@@ -428,6 +574,9 @@ pub const TARGETS: &[(&str, Target)] = &[
     ("provenance_open", provenance_open),
     ("source_decode", source_decode),
     ("image_layout", image_layout),
+    ("image_state", image_state),
+    ("nbd_client", nbd_client),
+    ("nbd_server", nbd_server),
     ("verify_shard", verify_shard),
     ("snapshot_resolves", snapshot_resolves),
     ("restore_plan", restore_plan),

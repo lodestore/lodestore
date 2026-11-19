@@ -8,13 +8,15 @@ use anyhow::{Context, Result};
 use indicatif::{HumanBytes, ProgressBar};
 use lodestore_format::attest::{put_attestation, seal_provenance};
 use lodestore_format::check::is_data_error;
-use lodestore_format::crypto::{BlobId, Entropy};
+use lodestore_format::crypto::{BlobId, Entropy, RepoId};
 use lodestore_format::fs;
 use lodestore_format::fs::filter::PathMatcher;
 use lodestore_format::fs::raw::FileSource;
 use lodestore_format::fs::walk::WalkOptions;
 use lodestore_format::image::{
-    IMAGE_NAME_RULE, ImageSource, ReadMode, SEGMENT_CHUNKS, valid_image_name,
+    BitmapNames, ChunkRef, DecideInput, FullReason, IMAGE_NAME_RULE, ImageParent, ImageSource,
+    ImageState, MAX_IMAGE_SIZE, ReadMode, ReadPlan, SEGMENT_CHUNKS, StateRead, decide,
+    instance_snapshots, load_image, source_identity, valid_image_name,
 };
 use lodestore_format::index::hex32;
 use lodestore_format::locks::UNMARKED_WRITER_LIMIT;
@@ -22,6 +24,7 @@ use lodestore_format::pb;
 use lodestore_format::provenance;
 use lodestore_format::reader::Reader;
 use lodestore_format::snapshot::{ParentTree, SnapshotEntry, find_parent};
+use lodestore_format::source::SourceKey;
 use lodestore_format::store::Store;
 use lodestore_format::verify_snapshot::{
     check_snapshot_resolves, snapshot_index_refs, verify_shard,
@@ -29,10 +32,12 @@ use lodestore_format::verify_snapshot::{
 use lodestore_format::writer::{
     BackupOptions, BackupOutcome, BackupProgress, Deadline, ImageOptions, Writer, canonical_roots,
 };
+use lodestore_nbd::{Client, Limits, NbdSource, NbdUri, is_nbd_uri};
 use serde::Serialize;
 
 use super::resolve_spec;
 use crate::cli::{BackupFlags, SecretArgs, UsageError};
+use crate::image_state;
 use crate::open::{Marker, Strict, open_for_write};
 use crate::output::{JsonPath, Output, StatsJson, Throttle, spinner, warn_skipped};
 
@@ -68,6 +73,18 @@ struct ImageJson {
     key: String,
     size: u64,
     read_mode: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    full_reason: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bitmap: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_bitmap: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bitmap_to_create: Option<String>,
+    #[serde(skip)]
+    mode_text: String,
+    #[serde(skip)]
+    next_hint: Option<String>,
 }
 
 /// The first Ctrl+C asks the backup to wind down (open packs are uploaded and
@@ -413,18 +430,40 @@ async fn backup_stdin(
     finish(out, outcome, parent_id, None)
 }
 
+enum ImageInput {
+    File(FileSource),
+    Nbd(NbdUri),
+}
+
 async fn run_image(url: &str, args: &SecretArgs, out: Output, flags: BackupFlags) -> Result<u8> {
-    let path = flags.image.clone().unwrap_or_default();
-    if path.contains("://") {
-        return Err(UsageError("--image reads a file or a block device".into()).into());
-    }
-    let name = match &flags.name {
-        Some(name) => name.clone(),
-        None => std::path::Path::new(&path)
+    let spec = flags.image.clone().unwrap_or_default();
+    let (nbd, default_name) = if is_nbd_uri(&spec) {
+        let uri = NbdUri::parse(&spec).map_err(|e| UsageError(format!("{spec:?}: {e}")))?;
+        let export = Some(uri.export.clone()).filter(|e| !e.is_empty());
+        (Some(uri), export)
+    } else if spec.contains("://") {
+        return Err(UsageError(
+            "--image reads a file, a block device or an nbd+unix:// export".into(),
+        )
+        .into());
+    } else {
+        let file_name = std::path::Path::new(&spec)
             .file_name()
             .and_then(|n| n.to_str())
-            .map(str::to_owned)
-            .ok_or_else(|| UsageError(format!("{path:?} has no usable file name; use --name")))?,
+            .map(str::to_owned);
+        (None, file_name)
+    };
+    let explicit_name = flags.name.is_some();
+    let name = match (flags.name.clone(), default_name) {
+        (Some(name), _) | (None, Some(name)) => name,
+        (None, None) if nbd.is_some() => {
+            return Err(
+                UsageError("--name is needed for an NBD export without a name".into()).into(),
+            );
+        }
+        (None, None) => {
+            return Err(UsageError(format!("{spec:?} has no usable file name; use --name")).into());
+        }
     };
     if !valid_image_name(&name) {
         return Err(UsageError(format!("{name:?} is not an image name: {IMAGE_NAME_RULE}")).into());
@@ -435,68 +474,346 @@ async fn run_image(url: &str, args: &SecretArgs, out: Output, flags: BackupFlags
         )
         .into());
     }
-    let mut source =
-        FileSource::open(path.as_ref()).with_context(|| format!("cannot open {path}"))?;
-    super::device::warn_if_in_use(path.as_ref());
-    let size = source.size();
+    if flags.bitmap.is_some() && nbd.is_none() {
+        return Err(UsageError("--bitmap needs an nbd+unix:// --image".into()).into());
+    }
+    if flags.bitmap.is_some() && args.writer_keys.is_some() {
+        return Err(UsageError(
+            "--bitmap cannot be used with --writer-keys: writer keys cannot read snapshots".into(),
+        )
+        .into());
+    }
+    let input = match nbd {
+        Some(uri) => ImageInput::Nbd(uri),
+        None => {
+            let source =
+                FileSource::open(spec.as_ref()).with_context(|| format!("cannot open {spec}"))?;
+            super::device::warn_if_in_use(spec.as_ref());
+            ImageInput::File(source)
+        }
+    };
     let hostname = flags
         .host
         .clone()
         .map_or_else(fs::hostname, String::into_bytes);
     let opened = open_for_write(url, args, &hostname, flags.no_gc_check).await?;
     let deadline = unmarked_deadline(&opened.marker);
-    let mut writer = opened.writer;
-    let mut strict = opened.strict;
-    let segment_chunks = segment_chunks();
-    let throttle = Throttle::new();
-    let bar = if out.json { None } else { spinner() };
-    let progress = progress_sink(out, &throttle, bar.as_ref());
-    let result = writer
-        .backup_image(
-            &name,
-            &mut source,
-            BackupOptions {
-                hostname: Some(hostname.clone()),
-                tags: flags.tag,
-                cancel: cancel_on_ctrl_c(),
-                deadline,
-                ..Default::default()
-            },
-            ImageOptions { segment_chunks },
-            &progress,
-        )
-        .await;
-    if let Some(bar) = &bar {
-        bar.finish_and_clear();
-    }
-    let done = match result {
-        Ok(done) => done,
-        Err(e) => {
-            opened.marker.close().await;
-            return Err(e.into());
-        }
+    let key = SourceKey::image(&name)?;
+    let run = ImageRun {
+        names: BitmapNames::new(&opened.repo_id, &hostname, &key),
+        writer: opened.writer,
+        reader: opened.reader,
+        strict: opened.strict,
+        repo_id: opened.repo_id,
+        hostname,
+        name,
+        key,
+        tags: flags.tag,
+        deadline,
+        out,
     };
-    let signed = match &mut strict {
-        Some(strict) => {
+    let result = run.go(input, flags.bitmap.as_deref(), explicit_name).await;
+    opened.marker.close().await;
+    result
+}
+
+struct ImageRun {
+    writer: Writer<Store>,
+    reader: Option<Reader<Store>>,
+    strict: Option<Strict>,
+    repo_id: RepoId,
+    hostname: Vec<u8>,
+    name: String,
+    key: SourceKey,
+    names: BitmapNames,
+    tags: Vec<String>,
+    deadline: Option<Deadline>,
+    out: Output,
+}
+
+/// What the run knows about the dirty bitmap of an NBD export; a file has none.
+struct Binding {
+    nbd: bool,
+    bitmap: Option<u64>,
+    has_next: bool,
+    state: StateRead,
+    state_path: Option<PathBuf>,
+    source_id: [u8; 32],
+}
+
+impl ImageRun {
+    /// The order is the safety: the state file is read into memory and removed
+    /// before anything connects to the export, so any failure after this point
+    /// leaves no state behind, and it is written back only once the snapshot is
+    /// confirmed.
+    async fn go(self, input: ImageInput, bitmap: Option<&str>, explicit_name: bool) -> Result<u8> {
+        let bitmap = bitmap
+            .map(|text| {
+                self.names.parse(text).ok_or_else(|| {
+                    let zero = self.names.name(0);
+                    let prefix = zero.strip_suffix('0').unwrap_or(&zero);
+                    UsageError(format!(
+                        "the dirty bitmap of {} on {} in this repository is named {prefix}<N>, with N from 1",
+                        self.key,
+                        String::from_utf8_lossy(&self.hostname)
+                    ))
+                })
+            })
+            .transpose()?;
+        let uri = match input {
+            ImageInput::File(mut source) => {
+                let binding = Binding {
+                    nbd: false,
+                    bitmap: None,
+                    has_next: false,
+                    state: StateRead::Missing,
+                    state_path: None,
+                    source_id: source_identity(&self.name),
+                };
+                return self.write(&mut source, binding).await;
+            }
+            ImageInput::Nbd(uri) => uri,
+        };
+        let source_id = source_identity(&uri.canonical());
+        let state_path = image_state::state_path(&self.repo_id, &self.hostname, &self.key);
+        let (_lock, state) = match &state_path {
+            None => {
+                eprintln!(
+                    "warning: no cache folder (set HOME or XDG_CACHE_HOME); every backup of an NBD export reads the image in full"
+                );
+                (None, StateRead::Missing)
+            }
+            Some(path) => {
+                let lock = image_state::lock(path, &self.key)?;
+                let state = image_state::load(path, &self.repo_id, &self.hostname, &self.key);
+                if let StateRead::Found(found) = &state
+                    && found.source != source_id
+                    && !explicit_name
+                {
+                    return Err(UsageError(format!(
+                        "the export behind {} changed since the last backup on this machine; pass --name to say which instance this export is",
+                        self.key
+                    ))
+                    .into());
+                }
+                image_state::consume(path)?;
+                (Some(lock), state)
+            }
+        };
+        let wanted: Vec<String> = bitmap
+            .map(|n| vec![self.names.name(n), self.names.name(n.saturating_add(1))])
+            .unwrap_or_default();
+        let wanted: Vec<&str> = wanted.iter().map(String::as_str).collect();
+        let limits = Limits {
+            max_export_size: MAX_IMAGE_SIZE,
+            ..Default::default()
+        };
+        let client = Client::connect(&uri, &wanted, limits)
+            .await
+            .map_err(|e| anyhow::anyhow!("cannot open the NBD export {}: {e}", uri.canonical()))?;
+        let mut source = NbdSource::new(client);
+        let has_next =
+            bitmap.is_some_and(|n| source.has_context(&self.names.name(n.saturating_add(1))));
+        let binding = Binding {
+            nbd: true,
+            bitmap,
+            has_next,
+            state,
+            state_path,
+            source_id,
+        };
+        let result = self.write(&mut source, binding).await;
+        let _ = source.into_client().disconnect().await;
+        result
+    }
+
+    async fn write<I: ImageSource>(mut self, source: &mut I, binding: Binding) -> Result<u8> {
+        let nbd = binding.nbd;
+        let size = source.size();
+        let mut instance = Vec::new();
+        if let (true, Some(reader)) = (nbd, &self.reader) {
+            let mut entries =
+                parent_candidates(reader, self.strict.as_ref(), &self.hostname).await?;
+            if let Some(strict) = &self.strict {
+                entries.retain(|e| strict.provenance.source_of(&e.id) == self.key);
+            }
+            instance = instance_snapshots(&entries, &self.key, &self.hostname);
+        }
+        let decision = decide(&DecideInput {
+            names: &self.names,
+            bitmap: binding.bitmap,
+            export_has_bitmap: source.has_dirty(),
+            export_has_next: binding.has_next,
+            export_size: size,
+            source: binding.source_id,
+            state: &binding.state,
+            instance: &instance,
+        });
+        let mut plan = decision.plan;
+        let mut table = None;
+        if let ReadPlan::Incremental { parent } = plan {
+            let found = match self.reader.as_mut() {
+                Some(reader) => parent_table(reader, &parent, &self.name, size).await,
+                None => None,
+            };
+            match found {
+                Some(t) => table = Some((parent, t)),
+                None => plan = ReadPlan::Full(FullReason::ParentUnreadable),
+            }
+        }
+        let throttle = Throttle::new();
+        let bar = if self.out.json { None } else { spinner() };
+        let progress = progress_sink(self.out, &throttle, bar.as_ref());
+        let incremental_from = table.as_ref().map(|(id, _)| *id);
+        let parent = match (table, self.reader.as_mut()) {
+            (Some((snapshot_id, table)), Some(reader)) => Some(ImageParent {
+                snapshot_id,
+                disk_size: size,
+                table,
+                chunks: reader,
+            }),
+            _ => None,
+        };
+        let full_reason = match plan {
+            ReadPlan::Full(reason) if nbd => Some(reason),
+            _ => None,
+        };
+        let result = self
+            .writer
+            .backup_image(
+                &self.name,
+                source,
+                parent,
+                BackupOptions {
+                    hostname: Some(self.hostname.clone()),
+                    tags: std::mem::take(&mut self.tags),
+                    cancel: cancel_on_ctrl_c(),
+                    deadline: self.deadline.take(),
+                    ..Default::default()
+                },
+                ImageOptions {
+                    segment_chunks: segment_chunks(),
+                    bitmap: decision.record.clone(),
+                    full_reason,
+                },
+                &progress,
+            )
+            .await;
+        if let Some(bar) = &bar {
+            bar.finish_and_clear();
+        }
+        let done = result?;
+        if let Some(strict) = &mut self.strict {
             check_and_sign(
                 strict,
-                &writer,
+                &self.writer,
                 &done.outcome,
-                &hostname,
+                &self.hostname,
                 Some(done.source.clone()),
             )
-            .await
+            .await?;
         }
-        None => Ok(()),
+        if let (Some(record), Some(path), false) = (
+            &decision.record,
+            &binding.state_path,
+            done.outcome.incomplete,
+        ) {
+            let state = ImageState {
+                parent: done.outcome.snapshot_id,
+                bitmap_gen: record.generation,
+                disk_size: size,
+                source: binding.source_id,
+            };
+            if let Err(e) =
+                image_state::save(path, &state, &self.repo_id, &self.hostname, &self.key)
+            {
+                eprintln!(
+                    "warning: cannot save the image state {}: {e:#}; the next backup reads the image in full",
+                    path.display()
+                );
+            }
+        }
+        let mode_text = match (incremental_from, full_reason) {
+            (Some(id), _) => format!("incremental read from {}", &hex32(&id)[..8]),
+            (None, Some(reason)) => format!("full read ({})", reason.as_str()),
+            (None, None) => "full read".to_owned(),
+        };
+        let mut image = ImageJson {
+            key: done.source.key.clone(),
+            size,
+            read_mode: if incremental_from.is_some() {
+                ReadMode::Incremental.as_str()
+            } else {
+                ReadMode::Full.as_str()
+            },
+            full_reason: full_reason.map(FullReason::as_str),
+            bitmap: None,
+            next_bitmap: None,
+            bitmap_to_create: None,
+            mode_text,
+            next_hint: None,
+        };
+        if nbd {
+            let (next, create) = match &decision.record {
+                Some(b) => (b.generation, b.generation.saturating_add(1)),
+                None => (decision.restart, decision.restart.saturating_add(1)),
+            };
+            let (next, create) = (self.names.name(next), self.names.name(create));
+            image.next_hint = Some(format!(
+                "next backup: create {create} before it starts, then pass --bitmap {next}"
+            ));
+            image.bitmap = binding.bitmap.map(|n| self.names.name(n));
+            image.next_bitmap = Some(next);
+            image.bitmap_to_create = Some(create);
+            match (binding.bitmap, &decision.record) {
+                (Some(n), None) => eprintln!(
+                    "note: {} was not exported before the read, so the next backup reads the image in full",
+                    self.names.name(n.saturating_add(1))
+                ),
+                (None, _) => eprintln!(
+                    "note: incremental backups need dirty bitmaps; see the disk image recipe"
+                ),
+                _ => {}
+            }
+        }
+        finish(
+            self.out,
+            done.outcome,
+            incremental_from.map(|id| hex32(&id)),
+            Some(image),
+        )
+    }
+}
+
+async fn parent_table(
+    reader: &mut Reader<Store>,
+    parent: &BlobId,
+    name: &str,
+    size: u64,
+) -> Option<Vec<ChunkRef>> {
+    let loaded = match load_image(reader, parent, name).await {
+        Ok(loaded) => loaded,
+        Err(e) => {
+            eprintln!(
+                "warning: the parent snapshot {} cannot be used ({e}); reading the image in full",
+                hex32(parent)
+            );
+            return None;
+        }
     };
-    opened.marker.close().await;
-    signed?;
-    let image = ImageJson {
-        key: done.source.key.clone(),
-        size,
-        read_mode: ReadMode::Full.as_str(),
-    };
-    finish(out, done.outcome, None, Some(image))
+    if loaded.layout.size != size {
+        return None;
+    }
+    match loaded.layout.chunk_table() {
+        Ok(table) => Some(table),
+        Err(e) => {
+            eprintln!(
+                "warning: the parent snapshot {} cannot be used ({e}); reading the image in full",
+                hex32(parent)
+            );
+            None
+        }
+    }
 }
 
 #[cfg(debug_assertions)]
@@ -641,13 +958,16 @@ fn finish(
         println!("snapshot {id} saved");
         if let Some(image) = &image {
             println!(
-                "image {}: {}, {} read; {} read, {} added to the repository",
+                "image {}: {}, {}; {} read, {} added to the repository",
                 image.key,
                 HumanBytes(image.size),
-                image.read_mode,
+                image.mode_text,
                 HumanBytes(stats.bytes_read),
                 HumanBytes(stats.bytes_added)
             );
+            if let Some(hint) = &image.next_hint {
+                println!("{hint}");
+            }
         } else {
             println!(
                 "files: {} new, {} changed, {} unchanged; {} read, {} added to the repository",
