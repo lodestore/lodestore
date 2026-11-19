@@ -730,6 +730,7 @@ pub async fn run_backup(env: &Env, cfg: &Cfg, w: &mut World, spec: &RunSpec) -> 
     let parent = match (parent_reader.as_mut(), parent_table) {
         (Some(chunks), Some((snapshot_id, table))) => Some(ImageParent {
             snapshot_id,
+            disk_size: size,
             table,
             chunks,
         }),

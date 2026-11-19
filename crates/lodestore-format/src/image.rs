@@ -141,10 +141,11 @@ impl<S: BlobStore> ParentChunks for Reader<S> {
     }
 }
 
-/// The snapshot an incremental image run builds on. `table` comes from the
-/// parent's own tree, never from a cache.
+/// The snapshot an incremental image run builds on. `disk_size` and `table`
+/// come from the parent's own tree, never from a cache.
 pub struct ImageParent<'a> {
     pub snapshot_id: BlobId,
+    pub disk_size: u64,
     pub table: Vec<ChunkRef>,
     pub chunks: &'a mut dyn ParentChunks,
 }
