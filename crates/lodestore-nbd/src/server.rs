@@ -321,8 +321,9 @@ where
                     let min = export.min_block();
                     let mut info = INFO_BLOCK_SIZE.to_be_bytes().to_vec();
                     info.extend_from_slice(&min.to_be_bytes());
-                    info.extend_from_slice(&4096.max(min).min(limits.max_read).to_be_bytes());
-                    info.extend_from_slice(&limits.max_read.to_be_bytes());
+                    let max = read_max(export, limits);
+                    info.extend_from_slice(&4096.max(min).min(max).to_be_bytes());
+                    info.extend_from_slice(&max.to_be_bytes());
                     out.extend(option_reply(opt, REP_INFO, &info));
                 }
                 out.extend(option_reply(opt, REP_ACK, &[]));
@@ -433,6 +434,10 @@ where
     }
 }
 
+fn read_max<E: Export>(export: &E, limits: &Limits) -> u32 {
+    limits.max_read.max(export.min_block().max(512))
+}
+
 fn read_reply<E: Export>(
     export: &mut E,
     limits: &Limits,
@@ -440,7 +445,7 @@ fn read_reply<E: Export>(
     offset: u64,
     length: u32,
 ) -> Vec<u8> {
-    if length > limits.max_read {
+    if length > read_max(export, limits) {
         return error_chunk(cookie, EOVERFLOW);
     }
     if let Some(errno) = range_errno(export, offset, length) {

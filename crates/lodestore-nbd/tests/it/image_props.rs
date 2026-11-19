@@ -429,10 +429,19 @@ fn image_props_incremental_equals_full_read() {
 
 const CONTROL_GRANULE: u64 = 4 << 10;
 
-async fn rig(chunks: usize) -> (Env, Cfg, World) {
+fn transports() -> [Transport; 2] {
+    [
+        Transport::Direct(ZeroHint::Never),
+        Transport::Nbd {
+            block_max: Limits::default().max_read,
+        },
+    ]
+}
+
+async fn rig(chunks: usize, transport: Transport) -> (Env, Cfg, World) {
     let cfg = Cfg {
         segment_chunks: 2,
-        transport: Transport::Direct(ZeroHint::Never),
+        transport,
     };
     let disk = initial_disk(&vec![Some(1); chunks], 0);
     (Env::new().await, cfg, World::new(disk, CONTROL_GRANULE))
@@ -449,6 +458,7 @@ fn write_4k(chunk: u64, seed: u8) -> WriteOp {
 struct Judged {
     out: RunOutcome,
     reference: BlobId,
+    restored: Vec<u8>,
     restore_matches: bool,
 }
 
@@ -459,6 +469,11 @@ impl Judged {
 
     fn incremental(&self) -> bool {
         matches!(self.out.plan, ReadPlan::Incremental { .. })
+    }
+
+    fn lost(&self, op: &WriteOp) -> bool {
+        let at = op.offset as usize..(op.offset + op.len) as usize;
+        self.restored.get(at.clone()) != self.out.frozen.get(at)
     }
 }
 
@@ -473,13 +488,18 @@ async fn judge(env: &Env, cfg: &Cfg, w: &mut World, spec: &RunSpec) -> Judged {
     Judged {
         out,
         reference,
+        restored,
         restore_matches,
     }
 }
 
+fn window_write() -> WriteOp {
+    write_4k(1, 9)
+}
+
 async fn first_run_with_a_window_write(env: &Env, cfg: &Cfg, w: &mut World) {
     let spec = RunSpec {
-        window: Some(write_4k(1, 9)),
+        window: Some(window_write()),
         ..RunSpec::plain()
     };
     let one = judge(env, cfg, w, &spec).await;
@@ -493,7 +513,7 @@ async fn first_run_with_a_window_write(env: &Env, cfg: &Cfg, w: &mut World) {
 /// The old contract, one bitmap cleared after a successful run, loses a write
 /// that lands between the end of the read and the clear.
 async fn image_props_clear_after_backup_loses_a_window_write() {
-    let (env, cfg, mut w) = rig(3).await;
+    let (env, cfg, mut w) = rig(3, Transport::Direct(ZeroHint::Never)).await;
     first_run_with_a_window_write(&env, &cfg, &mut w).await;
     w.bitmaps.clear_current();
     w.write(&write_4k(2, 5));
@@ -529,30 +549,48 @@ async fn image_props_small_block_max_backs_up() {
 }
 
 #[tokio::test]
-/// A `g{N+1}` that is disabled records nothing, so a write made during the read is lost.
-async fn image_props_disabled_next_bitmap_loses_a_window_write() {
-    let (env, cfg, mut w) = rig(3).await;
-    let next = w.bitmaps.n + 1;
-    w.bitmaps.ensure(next);
-    w.bitmaps.disable(next);
-    first_run_with_a_window_write(&env, &cfg, &mut w).await;
-    w.write(&write_4k(2, 5));
-    let two = judge(&env, &cfg, &mut w, &RunSpec::plain()).await;
-    assert!(two.incremental(), "{:?}", two.out.plan);
-    assert_ne!(
-        two.root_tree(),
-        two.reference,
-        "the full-read comparison must catch the write a disabled g{{N+1}} missed"
-    );
-    assert!(!two.restore_matches, "the restore must show the lost write");
+/// A `g{N+1}` that is disabled records nothing, so the write made during the
+/// read and the write made after it are both lost.
+async fn image_props_disabled_next_bitmap_loses_both_writes() {
+    for transport in transports() {
+        let (env, cfg, mut w) = rig(3, transport).await;
+        let next = w.bitmaps.n + 1;
+        w.bitmaps.ensure(next);
+        w.bitmaps.disable(next);
+        first_run_with_a_window_write(&env, &cfg, &mut w).await;
+        let later = write_4k(2, 5);
+        w.write(&later);
+        let two = judge(&env, &cfg, &mut w, &RunSpec::plain()).await;
+        assert!(two.incremental(), "{transport:?}: {:?}", two.out.plan);
+        assert_ne!(
+            two.root_tree(),
+            two.reference,
+            "{transport:?}: the full-read comparison must catch the writes a disabled g{{N+1}} missed"
+        );
+        assert!(
+            !two.restore_matches,
+            "{transport:?}: the restore must show the lost writes"
+        );
+        assert!(
+            two.lost(&window_write()),
+            "{transport:?}: the write during the read is lost"
+        );
+        assert!(
+            two.lost(&later),
+            "{transport:?}: the write after the read is lost"
+        );
+    }
 }
 
 #[tokio::test]
 /// A disk reverted or replaced behind the same socket, its bitmaps kept, leaves
 /// bytes of the old disk in the increment.
 async fn image_props_replaced_or_reverted_disk_is_missed() {
-    for variant in ["revert", "replace"] {
-        let (env, cfg, mut w) = rig(3).await;
+    for (transport, variant) in transports()
+        .into_iter()
+        .flat_map(|t| ["revert", "replace"].map(|v| (t, v)))
+    {
+        let (env, cfg, mut w) = rig(3, transport).await;
         if variant == "revert" {
             let old = w.disk.clone();
             w.write(&write_4k(0, 3));
@@ -563,15 +601,19 @@ async fn image_props_replaced_or_reverted_disk_is_missed() {
             w.disk = initial_disk(&[Some(2); 3], 0);
         }
         let two = judge(&env, &cfg, &mut w, &RunSpec::plain()).await;
-        assert!(two.incremental(), "{variant}: {:?}", two.out.plan);
+        assert!(
+            two.incremental(),
+            "{transport:?} {variant}: {:?}",
+            two.out.plan
+        );
         assert_ne!(
             two.root_tree(),
             two.reference,
-            "{variant}: the full-read comparison must catch a swapped disk"
+            "{transport:?} {variant}: the full-read comparison must catch a swapped disk"
         );
         assert!(
             !two.restore_matches,
-            "{variant}: the restore must show the swapped disk"
+            "{transport:?} {variant}: the restore must show the swapped disk"
         );
     }
 }
@@ -579,13 +621,15 @@ async fn image_props_replaced_or_reverted_disk_is_missed() {
 #[tokio::test]
 /// The same sequence under the rotation of `g{N}` and `g{N+1}` keeps the write.
 async fn image_props_rotation_keeps_a_window_write() {
-    let (env, cfg, mut w) = rig(3).await;
-    first_run_with_a_window_write(&env, &cfg, &mut w).await;
-    w.write(&write_4k(2, 5));
-    let two = judge(&env, &cfg, &mut w, &RunSpec::plain()).await;
-    assert!(two.incremental(), "{:?}", two.out.plan);
-    assert_eq!(two.root_tree(), two.reference);
-    assert!(two.restore_matches);
+    for transport in transports() {
+        let (env, cfg, mut w) = rig(3, transport).await;
+        first_run_with_a_window_write(&env, &cfg, &mut w).await;
+        w.write(&write_4k(2, 5));
+        let two = judge(&env, &cfg, &mut w, &RunSpec::plain()).await;
+        assert!(two.incremental(), "{transport:?}: {:?}", two.out.plan);
+        assert_eq!(two.root_tree(), two.reference, "{transport:?}");
+        assert!(two.restore_matches, "{transport:?}");
+    }
 }
 
 #[tokio::test]
@@ -593,7 +637,7 @@ async fn image_props_rotation_keeps_a_window_write() {
 /// had, is an increment that reuses the old tail: the rule that a name is
 /// never reused is what keeps this out of `lode`.
 async fn image_props_reused_name_after_a_resize_is_detected() {
-    let (env, cfg, mut w) = rig(3).await;
+    let (env, cfg, mut w) = rig(3, Transport::Direct(ZeroHint::Never)).await;
     first_run_with_a_window_write(&env, &cfg, &mut w).await;
     let (n, size) = (w.bitmaps.n, w.disk.len());
     w.disk.truncate(C as usize);
@@ -612,7 +656,7 @@ async fn image_props_reused_name_after_a_resize_is_detected() {
 /// The same resize with a skipped generation reads the disk in full, and the
 /// run after it is an increment again.
 async fn image_props_new_generation_after_a_resize_reads_in_full() {
-    let (env, cfg, mut w) = rig(3).await;
+    let (env, cfg, mut w) = rig(3, Transport::Direct(ZeroHint::Never)).await;
     first_run_with_a_window_write(&env, &cfg, &mut w).await;
     let size = w.disk.len() as u64;
     w.resize(C);
@@ -635,7 +679,7 @@ async fn image_props_new_generation_after_a_resize_reads_in_full() {
 /// A bitmap cleared without a backup and a parent that no longer matches it:
 /// `decide` cannot see the drift, the comparison with a full read does.
 async fn image_props_stale_bitmap_is_detected() {
-    let (env, cfg, mut w) = rig(3).await;
+    let (env, cfg, mut w) = rig(3, Transport::Direct(ZeroHint::Never)).await;
     first_run_with_a_window_write(&env, &cfg, &mut w).await;
     w.write(&write_4k(0, 3));
     w.bitmaps.clear_current();

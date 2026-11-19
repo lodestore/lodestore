@@ -460,6 +460,22 @@ fn instance_snapshots_pick_the_instance() {
         }),
         ..Default::default()
     };
+    let undecodable = |n: u8, host: &[u8], claim: &str, parent: &[u8]| SnapshotEntry {
+        id: id(n),
+        snapshot: pb::Snapshot {
+            hostname: host.to_vec(),
+            parent: parent.to_vec(),
+            source: Some(pb::Source {
+                key: claim.to_owned(),
+                meta: vec![pb::SourceMeta {
+                    key: "Bad".to_owned(),
+                    value: "x".to_owned(),
+                }],
+            }),
+            ..Default::default()
+        },
+        modified_ms: None,
+    };
     let entries = vec![
         entry(1, HOST, &key(), &bound(2), &[]),
         entry(2, HOST, &other_key, &image.to_meta("other"), &[]),
@@ -473,6 +489,9 @@ fn instance_snapshots_pick_the_instance() {
         entry(6, HOST, &key(), &broken_binding, &[1; 31]),
         entry(7, HOST, &key(), &broken_size, &[1; 32]),
         entry(8, HOST, &key(), &bound(5), &[2; 32]),
+        undecodable(9, HOST, key().as_str(), &[1; 32]),
+        undecodable(10, HOST, other_key.as_str(), &[1; 32]),
+        undecodable(11, b"h2", key().as_str(), &[1; 32]),
     ];
     let got = instance_snapshots(&entries, &key(), HOST);
     assert_eq!(
@@ -485,8 +504,17 @@ fn instance_snapshots_pick_the_instance() {
             },
             snapshot(7, Some(1), None, Some(4)),
             snapshot(8, Some(2), Some(SIZE), Some(5)),
+            InstanceSnapshot {
+                binding_unreadable: true,
+                ..snapshot(9, Some(1), None, None)
+            },
         ]
     );
+    let mut case = base();
+    case.instance.push(got[got.len() - 1].clone());
+    assert_eq!(reason(&case), FullReason::ParentNotNewest);
+    case.state = StateRead::Found(state(9, 3, SIZE, source_a()));
+    assert_eq!(reason(&case), FullReason::ParentUnreadable);
 }
 
 fn with(edit: impl FnOnce(&mut Case)) -> Case {
@@ -690,6 +718,63 @@ fn decide_refuses_a_forked_generation() {
         );
     });
     assert_eq!(reason(&unreadable), FullReason::GenMismatch);
+    let unreadable_in_the_chain = with(|c| {
+        c.instance.insert(
+            1,
+            InstanceSnapshot {
+                binding_unreadable: true,
+                ..snapshot(8, Some(1), Some(SIZE), None)
+            },
+        );
+    });
+    assert_eq!(
+        reason(&unreadable_in_the_chain),
+        FullReason::GenMismatch,
+        "an unreadable binding between the root and the newest"
+    );
+}
+
+#[test]
+fn an_unreadable_older_binding_forces_full_reads_for_good() {
+    let bound = |mode, generation| {
+        ImageMeta {
+            read_mode: mode,
+            disk_size: SIZE,
+        }
+        .to_meta_bound("disk", Some(&names().binding(generation)), None)
+    };
+    let mut broken = bound(ReadMode::Incremental, 3);
+    broken.remove(&disk_meta_key("disk", "bitmap_gen"));
+    let mut entries = vec![
+        entry(1, HOST, &key(), &bound(ReadMode::Full, 2), &[]),
+        entry(2, HOST, &key(), &broken, &[1; 32]),
+        entry(3, HOST, &key(), &bound(ReadMode::Incremental, 4), &[2; 32]),
+    ];
+    let chain = [
+        (ReadMode::Full, Vec::new()),
+        (ReadMode::Incremental, vec![4; 32]),
+        (ReadMode::Incremental, vec![5; 32]),
+    ];
+    for (step, (mode, parent)) in chain.into_iter().enumerate() {
+        let newest = 3 + step as u8;
+        let generation = 4 + step as u64;
+        let case = Case {
+            bitmap: Some(generation),
+            state: StateRead::Found(state(newest, generation, SIZE, source_a())),
+            instance: instance_snapshots(&entries, &key(), HOST),
+            ..base()
+        };
+        assert_eq!(reason(&case), FullReason::GenMismatch, "run {step}");
+        let decision = case.decide();
+        assert_eq!(decision.record, Some(names().binding(generation + 1)));
+        entries.push(entry(
+            newest + 1,
+            HOST,
+            &key(),
+            &bound(mode, generation + 1),
+            &parent,
+        ));
+    }
 }
 
 #[test]
@@ -770,7 +855,7 @@ struct Raw {
     state_size_ok: bool,
     export_size_ok: bool,
     empty: bool,
-    older: Vec<(Option<u8>, Option<u64>, bool)>,
+    older: Vec<(Option<u8>, Option<u64>, bool, bool)>,
     newest_parent: Option<u8>,
     newest_binding: bool,
     newest_gen_ok: bool,
@@ -798,6 +883,7 @@ fn raw() -> impl Strategy<Value = Raw> {
             prop::option::of(0u8..3),
             prop::option::of(1u64..=4),
             any::<bool>(),
+            prop::bool::weighted(0.3),
         ),
         0..3,
     );
@@ -858,14 +944,17 @@ fn build(raw: &Raw) -> Case {
         .older
         .iter()
         .enumerate()
-        .map(|(i, (parent, generation, sized))| {
-            snapshot(
-                20 + i as u8,
-                parent_of(*parent),
-                sized.then_some(SIZE),
-                *generation,
-            )
-        })
+        .map(
+            |(i, (parent, generation, sized, unreadable))| InstanceSnapshot {
+                binding_unreadable: *unreadable,
+                ..snapshot(
+                    20 + i as u8,
+                    parent_of(*parent),
+                    sized.then_some(SIZE),
+                    generation.filter(|_| !unreadable),
+                )
+            },
+        )
         .collect();
     let generation = if raw.newest_gen_ok {
         raw.n
@@ -939,6 +1028,7 @@ fn everything_holds(case: &Case) -> Option<BlobId> {
         && state.bitmap_gen == n
         && older.iter().all(|s| {
             s.binding.as_ref().is_none_or(|b| b.generation < n)
+                && !s.binding_unreadable
                 && (newest.parent.is_none() || s.parent != newest.parent)
         })
         && state.disk_size == sized

@@ -971,6 +971,10 @@ fn chunk_table_refuses_a_layout_it_cannot_fill() {
     short.segments[0].content.pop();
     assert!(short.chunk_table().is_err(), "an id is missing");
 
+    let mut extra = layout.clone();
+    extra.segments[0].content.push(vec![9; 32]);
+    assert!(extra.chunk_table().is_err(), "an id is left over");
+
     let mut narrow = layout.clone();
     narrow.segments[1].content[0].truncate(31);
     assert!(narrow.chunk_table().is_err(), "an id is not 32 bytes");

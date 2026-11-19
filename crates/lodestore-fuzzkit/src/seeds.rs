@@ -27,7 +27,9 @@ use prost::Message;
 use tokio::io::{AsyncRead, AsyncWrite, DuplexStream, ReadBuf, duplex};
 
 use crate::stores;
-use crate::{NBD_BITMAPS, NBD_READ_LEN, NBD_STATUS_LEN, nbd_export, nbd_limits, nbd_runtime};
+use crate::{
+    NBD_BITMAPS, NBD_READ_LEN, NBD_STATUS_LEN, nbd_export, nbd_extents, nbd_limits, nbd_runtime,
+};
 
 type Seeds = Vec<(&'static str, Vec<u8>)>;
 
@@ -246,6 +248,13 @@ fn nbd_transcripts() -> Result<Seeds, String> {
             let mut client = Client::handshake(client_end, "", &NBD_BITMAPS, limits).await?;
             client.read(0, NBD_READ_LEN as u32).await?;
             client.block_status(0, NBD_STATUS_LEN as u32).await?;
+            let (client, found) = nbd_extents(client).await;
+            let found = found.map_err(|e| lodestore_nbd::Error::Protocol(e.to_string()))?;
+            if !found.iter().any(|e| e.dirty) {
+                return Err(lodestore_nbd::Error::Protocol(
+                    "the NBD seed saw no dirty extent".into(),
+                ));
+            }
             client.disconnect().await
         })
     });

@@ -13,10 +13,12 @@ use lodestore_format::chunker::blob_id;
 use lodestore_format::crypto::{BLOB_TYPE_DATA, Entropy, RepoId};
 use lodestore_format::image::{BitmapNames, ImageState};
 use lodestore_format::index::parse_hex32;
+use lodestore_format::pb;
 use lodestore_format::provenance::ProvenanceSet;
 use lodestore_format::repo::Repository;
 use lodestore_format::source::SourceKey;
 use lodestore_format::store::LocalFsStore;
+use lodestore_format::writer::{BackupOptions, Writer};
 use lodestore_nbd::{Limits, MemExport, serve};
 use serde_json::Value;
 
@@ -780,6 +782,55 @@ fn image_bitmap_newer_snapshot_forces_a_full_read() {
 
     export.export_bitmaps(&[&env.bitmap(2), &env.bitmap(3)]);
     let ours = env.run_bitmap(2);
+    assert_eq!(read_mode(&ours), ("full", Some("parent_not_newest")));
+    env.assert_restores(&ours);
+}
+
+fn plant_snapshot_with_broken_meta(env: &Env, claim: &str) {
+    let src = env._tmp.path().join("planted");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("f"), b"planted").unwrap();
+    block_on(async {
+        let store = LocalFsStore::new(env.repo.clone());
+        let repository = Repository::open(&store, PASSWORD.as_bytes()).await.unwrap();
+        let keys = repository.read_keys().write_keys(repository.config_hash());
+        let mut writer = Writer::new(&store, keys, repository.config())
+            .await
+            .unwrap();
+        let options = BackupOptions {
+            hostname: Some(HOST.as_bytes().to_vec()),
+            source: Some(pb::Source {
+                key: claim.to_owned(),
+                meta: vec![pb::SourceMeta {
+                    key: "Bad".to_owned(),
+                    value: "x".to_owned(),
+                }],
+            }),
+            ..Default::default()
+        };
+        writer.backup(&[src], options, &|_| {}).await.unwrap();
+    });
+}
+
+#[test]
+fn image_bitmap_same_host_snapshot_with_broken_meta_forces_a_full_read() {
+    let env = setup();
+    let export = &env.export;
+    for g in [1, 2, 3, 4] {
+        export.add_bitmap(&env.bitmap(g));
+    }
+    export.export_bitmaps(&[&env.bitmap(1), &env.bitmap(2)]);
+    env.run(&[]);
+    env.run_bitmap(1);
+
+    plant_snapshot_with_broken_meta(&env, "image/other");
+    export.export_bitmaps(&[&env.bitmap(2), &env.bitmap(3)]);
+    let unrelated = env.run_bitmap(2);
+    assert_eq!(read_mode(&unrelated), ("incremental", None));
+
+    plant_snapshot_with_broken_meta(&env, "image/disk");
+    export.export_bitmaps(&[&env.bitmap(3), &env.bitmap(4)]);
+    let ours = env.run_bitmap(3);
     assert_eq!(read_mode(&ours), ("full", Some("parent_not_newest")));
     env.assert_restores(&ours);
 }
