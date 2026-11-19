@@ -359,6 +359,79 @@ async fn image_backup_rejects_a_lying_source() {
 }
 
 #[tokio::test]
+async fn image_backup_fails_when_the_source_changes() {
+    use std::os::unix::fs::FileExt;
+    use std::time::Duration;
+
+    use lodestore_format::fs::raw::FileSource;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_dir = tmp.path().join("repo");
+    fs::create_dir(&repo_dir).unwrap();
+    init_repo(&repo_dir).await;
+    let mut w = writer(&repo_dir).await;
+    let image = tmp.path().join("disk.raw");
+
+    let rewrite = |file: &fs::File| file.write_all_at(b"changed", C + 10).unwrap();
+    let grow = |file: &fs::File| file.set_len(3 * C).unwrap();
+    for change in [&rewrite as &dyn Fn(&fs::File), &grow] {
+        fs::write(&image, random_bytes(2 * C as usize, 5)).unwrap();
+        // past the coarse clock tick of the last write, so the change moves mtime
+        std::thread::sleep(Duration::from_millis(50));
+        let mut source = FileSource::open(&image).unwrap();
+        change(&fs::OpenOptions::new().write(true).open(&image).unwrap());
+        let err = w
+            .backup_image(
+                "disk",
+                &mut source,
+                BackupOptions::default(),
+                ImageOptions::default(),
+                &|_| {},
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, Error::InvalidInput(m) if m.contains("changed while it was read")),
+            "{err:?}"
+        );
+        let listed = reader(&repo_dir).await.list_snapshots().await.unwrap();
+        assert!(listed.entries.is_empty());
+    }
+
+    fs::write(&image, random_bytes(2 * C as usize, 6)).unwrap();
+    let mut source = FileSource::open(&image).unwrap();
+    w.backup_image(
+        "disk",
+        &mut source,
+        BackupOptions::default(),
+        ImageOptions::default(),
+        &|_| {},
+    )
+    .await
+    .expect("an unchanged source is backed up");
+}
+
+#[test]
+fn image_source_refuses_a_fifo_without_blocking() {
+    use lodestore_format::fs::raw::FileSource;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let fifo = tmp.path().join("fifo");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || tx.send(FileSource::open(&fifo).err()).unwrap());
+    let err = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("opening a FIFO does not block")
+        .expect("a FIFO is refused");
+    assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
+}
+
+#[tokio::test]
 async fn image_load_picks_the_named_disk_among_neighbours() {
     let tmp = tempfile::tempdir().unwrap();
     let repo_dir = tmp.path().join("repo");

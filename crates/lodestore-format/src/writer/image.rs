@@ -122,7 +122,8 @@ impl<S: BlobStore> Writer<S> {
 
         let mut run = Session::new(self, progress);
         run.apply(&mut options);
-        let chunks = match read_chunks(&mut run, source, size, chunk_count, &path).await {
+        let read = read_chunks(&mut run, source, size, chunk_count, &path).await;
+        let chunks = match read.and_then(|chunks| source.finish().map(|()| chunks)) {
             Ok(chunks) => chunks,
             Err(e) => {
                 run.wind_down().await?;

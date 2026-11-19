@@ -3,7 +3,7 @@
 use std::fs::File;
 use std::io::{ErrorKind, Seek, SeekFrom};
 use std::os::fd::OwnedFd;
-use std::os::unix::fs::{FileExt, FileTypeExt};
+use std::os::unix::fs::{FileExt, FileTypeExt, MetadataExt};
 use std::path::Path;
 
 use rustix::fs::{Mode, OFlags};
@@ -19,29 +19,65 @@ pub struct FileSource {
     size: u64,
     /// `(offset, length)` of the data of a sparse file; `None` reads as all data.
     data: Option<Vec<(u64, u64)>>,
+    stamp: Stamp,
+}
+
+/// What must not change while the image is read.
+#[derive(Debug, PartialEq, Eq)]
+enum Stamp {
+    File {
+        len: u64,
+        mtime: (i64, i64),
+        ctime: (i64, i64),
+    },
+    Device(u64),
+}
+
+fn stamp(file: &mut File) -> Result<Stamp> {
+    let meta = file.metadata()?;
+    let kind = meta.file_type();
+    if kind.is_file() {
+        Ok(Stamp::File {
+            len: meta.len(),
+            mtime: (meta.mtime(), meta.mtime_nsec()),
+            ctime: (meta.ctime(), meta.ctime_nsec()),
+        })
+    } else if kind.is_block_device() {
+        Ok(Stamp::Device(file.seek(SeekFrom::End(0))?))
+    } else {
+        Err(Error::InvalidInput("not a regular file or a block device".into()))
+    }
 }
 
 impl FileSource {
     pub fn open(path: &Path) -> Result<FileSource> {
-        let mut file = File::open(path)?;
-        let kind = file.metadata()?.file_type();
-        if kind.is_file() {
-            let size = file.metadata()?.len();
-            let data = data_extents(&OwnedFd::from(file.try_clone()?), size);
-            Ok(FileSource { file, size, data })
-        } else if kind.is_block_device() {
-            let size = file.seek(SeekFrom::End(0))?;
-            Ok(FileSource {
-                file,
-                size,
-                data: None,
-            })
-        } else {
-            Err(Error::InvalidInput(format!(
+        // NONBLOCK so that a FIFO at `path` fails the type check instead of hanging the open.
+        let fd = rustix::fs::open(
+            path,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK,
+            Mode::empty(),
+        )
+        .map_err(|e| Error::Io(e.into()))?;
+        let mut file = File::from(fd);
+        let stamp = stamp(&mut file).map_err(|e| match e {
+            Error::InvalidInput(_) => Error::InvalidInput(format!(
                 "{} is not a regular file or a block device",
                 path.display()
-            )))
-        }
+            )),
+            e => e,
+        })?;
+        let flags = rustix::fs::fcntl_getfl(&file).map_err(|e| Error::Io(e.into()))?;
+        rustix::fs::fcntl_setfl(&file, flags - OFlags::NONBLOCK).map_err(|e| Error::Io(e.into()))?;
+        let (size, data) = match stamp {
+            Stamp::File { len, .. } => (len, data_extents(&OwnedFd::from(file.try_clone()?), len)),
+            Stamp::Device(size) => (size, None),
+        };
+        Ok(FileSource {
+            file,
+            size,
+            data,
+            stamp,
+        })
     }
 }
 
@@ -83,6 +119,17 @@ impl ImageSource for FileSource {
         }
         push(pos, end, true);
         Ok(out)
+    }
+
+    fn finish(&mut self) -> Result<()> {
+        if stamp(&mut self.file)? != self.stamp {
+            return Err(Error::InvalidInput(
+                "the image source changed while it was read; stop what writes to it, \
+                 or back up a snapshot of it, and run the backup again"
+                    .into(),
+            ));
+        }
+        Ok(())
     }
 
     async fn read(&mut self, offset: u64, len: usize) -> Result<Vec<u8>> {

@@ -402,3 +402,27 @@ async fn image_latest_refuses_owner_snapshots_of_two_hostnames() {
         assert_eq!(&fs::read(out.join("sda.img")).unwrap(), want, "{host}");
     }
 }
+
+#[test]
+fn image_backup_refuses_a_fifo() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    init_repo(&repo);
+    let fifo = tmp.path().join("fifo");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let refused = lode(&repo)
+        .args(["backup", "--image"])
+        .arg(&fifo)
+        .timeout(std::time::Duration::from_secs(20))
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&refused.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains("not a regular file or a block device"),
+        "{stderr}"
+    );
+}

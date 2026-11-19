@@ -104,7 +104,9 @@ The layout is final from phase 22:
 - The snapshot metadata says how to read it: `image_layout` (`1`), `chunk_size` and `read_mode` (`full`). Each disk has `disk_{h}_size`, the size of the image in bytes.
 - `image-vectors.json` freezes the layout; it is a new file, and `lodestore-format` fuzzes the decoder (`image_layout`).
 
-A reader that does not know the layout or the chunk size refuses the snapshot; it does not guess.
+A reader that does not know the layout or the chunk size refuses the snapshot; it does not guess. It also refuses an image whose segments add up to another size than `disk_{h}_size`.
+
+A backup reads the source once, without a snapshot of its own, so an image is crash-consistent at best. After the last read `lode` checks the source again and fails without a snapshot when a regular file changed its size, modification time or change time, or a block device changed its size; it warns when the device is mounted or held by another device.
 
 #### Restoring to a block device
 

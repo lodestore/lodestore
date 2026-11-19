@@ -15,6 +15,28 @@ pub fn open_device(path: &Path) -> Result<(File, u64)> {
     open_checked(path)
 }
 
+/// Warns when the block device a backup reads is in use: its image is then
+/// crash-consistent at best.
+pub fn warn_if_in_use(path: &Path) {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        if !std::fs::metadata(path).is_ok_and(|m| m.file_type().is_block_device()) {
+            return;
+        }
+        match in_use(path) {
+            Ok(Some(why)) => eprintln!(
+                "warning: {why}; the image is crash-consistent at best, \
+                 and the backup fails if the device size changes"
+            ),
+            Ok(None) => {}
+            Err(e) => eprintln!("warning: {e:#}"),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = path;
+}
+
 #[cfg(not(target_os = "linux"))]
 fn open_checked(_path: &Path) -> Result<(File, u64)> {
     anyhow::bail!("--to-device works on Linux only")

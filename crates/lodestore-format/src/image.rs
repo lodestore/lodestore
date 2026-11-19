@@ -100,6 +100,12 @@ pub trait ImageSource {
     ) -> impl Future<Output = Result<Vec<ImageExtent>>> + Send;
 
     fn read(&mut self, offset: u64, len: usize) -> impl Future<Output = Result<Vec<u8>>> + Send;
+
+    /// Called after the last read; an error means the source changed while it
+    /// was read, and the backup writes no snapshot.
+    fn finish(&mut self) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

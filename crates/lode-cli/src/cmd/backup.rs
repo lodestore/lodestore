@@ -437,6 +437,7 @@ async fn run_image(url: &str, args: &SecretArgs, out: Output, flags: BackupFlags
     }
     let mut source =
         FileSource::open(path.as_ref()).with_context(|| format!("cannot open {path}"))?;
+    super::device::warn_if_in_use(path.as_ref());
     let size = source.size();
     let hostname = flags
         .host

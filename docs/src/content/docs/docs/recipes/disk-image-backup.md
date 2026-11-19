@@ -11,7 +11,7 @@ description: Back up a raw disk image file or a block device with lode, and rest
 - Fixed chunks of 4 MiB. A chunk of zeros is stored as a hole and takes no space in the repository, and a chunk seen before is stored once.
 - The image is split into segments of 256 GiB in the snapshot. The largest image is 16 TiB (64 segments).
 
-Back up a quiet disk. A device that a running virtual machine or database writes to is read while it changes, and the copy is not consistent. Take a snapshot of the volume first (for example an LVM snapshot) or stop the machine, and back up that.
+Back up a quiet disk. A device that a running virtual machine or database writes to is read while it changes, and the copy is not consistent. Take a snapshot of the volume first (for example an LVM snapshot) or stop the machine, and back up that. An image of a disk in use is crash-consistent at best, like a disk after a power cut. `lode` warns when the device is mounted or held by another device, and checks the source again after the last read: when a file changed its size, modification time or change time, or a device changed its size, the backup fails and writes no snapshot. A write that leaves the size of a device as it was is not seen.
 
 ## Back up
 
