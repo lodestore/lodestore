@@ -1,9 +1,11 @@
 use std::fs;
+use std::future::Future;
 use std::io::Write as _;
 #[cfg(target_os = "linux")]
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use lodestore_format::Error;
@@ -1138,6 +1140,10 @@ impl DirtySource {
             read_calls: 0,
         }
     }
+
+    fn untouched(&self) -> bool {
+        self.extent_calls == 0 && self.read_calls == 0
+    }
 }
 
 impl ImageSource for DirtySource {
@@ -1179,6 +1185,34 @@ impl ImageSource for DirtySource {
 
     fn has_dirty(&self) -> bool {
         self.has_dirty
+    }
+}
+
+enum Failure {
+    Error,
+    Short,
+}
+
+struct FailingChunks {
+    inner: Reader<LocalFsStore>,
+    how: Failure,
+}
+
+impl ParentChunks for FailingChunks {
+    fn chunk<'a>(
+        &'a mut self,
+        id: &'a BlobId,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, Error>> + Send + 'a>> {
+        Box::pin(async move {
+            match self.how {
+                Failure::Error => Err(Error::InvalidInput("the parent is gone".into())),
+                Failure::Short => {
+                    let mut bytes = self.inner.chunk(id).await?;
+                    bytes.pop();
+                    Ok(bytes)
+                }
+            }
+        })
     }
 }
 
@@ -1292,6 +1326,16 @@ async fn restored(repo: &Path, id: &BlobId, out: &Path) -> Vec<u8> {
     fs::read(out.join("disk.img")).unwrap()
 }
 
+async fn snapshot_count(repo: &Path) -> usize {
+    reader(repo)
+        .await
+        .list_snapshots()
+        .await
+        .unwrap()
+        .entries
+        .len()
+}
+
 fn overwrite(data: &mut [u8], at: u64, len: u64, seed: u8) {
     data[at as usize..(at + len) as usize].copy_from_slice(&random_bytes(len as usize, seed));
 }
@@ -1344,4 +1388,320 @@ async fn image_incremental_reuses_parent_chunks() {
     assert_eq!(done.outcome.root_tree, full.outcome.root_tree);
     let out = tmp.path().join("out");
     assert!(restored(&repo, &done.outcome.snapshot_id, &out).await == data);
+}
+
+#[tokio::test]
+async fn image_incremental_merges_the_short_last_chunk() {
+    let tail_start = 2 * C;
+    for tail_is_data in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = fresh_repo(tmp.path()).await;
+        let size = 2 * C + MIB + 512;
+        let mut data = random_bytes(size as usize, 5);
+        if !tail_is_data {
+            data[tail_start as usize..].fill(0);
+        }
+        let parent = full_read(
+            &repo,
+            &mut DirtySource::new(data.clone(), Vec::new()),
+            Some(binding(2)),
+            None,
+        )
+        .await;
+
+        let middle = tail_start + 512 * 1024;
+        let last = size - 4096;
+        overwrite(&mut data, middle, 4096, 6);
+        overwrite(&mut data, last, 4096, 7);
+        let mut source = DirtySource::new(data.clone(), vec![(middle, 4096), (last, 4096)]);
+        let done = incremental(&repo, parent.outcome.snapshot_id, &mut source, 3)
+            .await
+            .unwrap();
+        assert_eq!(source.bytes_read, 8192, "tail_is_data={tail_is_data}");
+        assert_eq!(done.outcome.stats.bytes_read, 8192);
+
+        let full = full_read(
+            &repo,
+            &mut DirtySource::new(data.clone(), Vec::new()),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(done.outcome.root_tree, full.outcome.root_tree);
+        let out = tmp.path().join("out");
+        assert!(restored(&repo, &done.outcome.snapshot_id, &out).await == data);
+    }
+}
+
+#[tokio::test]
+async fn image_incremental_requires_parent_chunks_in_index() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = fresh_repo(tmp.path()).await;
+    let data = random_bytes((2 * C) as usize, 8);
+    let parent = full_read(
+        &repo,
+        &mut DirtySource::new(data.clone(), Vec::new()),
+        Some(binding(2)),
+        None,
+    )
+    .await;
+    let mut table = parent_table(&repo, &parent.outcome.snapshot_id).await;
+    table[1] = ChunkRef::Data([9; 32]);
+    let before = snapshot_count(&repo).await;
+
+    let mut source = DirtySource::new(data, Vec::new());
+    let mut r = reader(&repo).await;
+    let err = incremental_with(
+        &repo,
+        parent.outcome.snapshot_id,
+        table,
+        &mut r,
+        &mut source,
+        Some(binding(3)),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
+    assert_eq!(snapshot_count(&repo).await, before);
+}
+
+fn pack_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+    for entry in fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            pack_files(&path, out);
+        } else {
+            out.push(path);
+        }
+    }
+}
+
+#[tokio::test]
+async fn image_incremental_parent_chunk_failure_stops_the_run() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = fresh_repo(tmp.path()).await;
+    let mut other = random_bytes((2 * C) as usize, 20);
+    other.truncate((2 * C) as usize);
+    let mut w = writer(&repo).await;
+    w.backup_image(
+        "other",
+        &mut DirtySource::new(other, Vec::new()),
+        None,
+        fixed_time(),
+        image_options(None, None),
+        &|_| {},
+    )
+    .await
+    .unwrap();
+    let mut packs_before = Vec::new();
+    pack_files(&repo.join("packs"), &mut packs_before);
+
+    let mut data = random_bytes((2 * C) as usize, 21);
+    let parent = full_read(
+        &repo,
+        &mut DirtySource::new(data.clone(), Vec::new()),
+        Some(binding(2)),
+        None,
+    )
+    .await;
+    let mut packs_after = Vec::new();
+    pack_files(&repo.join("packs"), &mut packs_after);
+    let parent_packs: Vec<_> = packs_after
+        .iter()
+        .filter(|p| !packs_before.contains(p))
+        .collect();
+    assert!(!parent_packs.is_empty());
+    let other_pack = packs_before[0].clone();
+
+    overwrite(&mut data, 4096, 4096, 22);
+    let table = parent_table(&repo, &parent.outcome.snapshot_id).await;
+    let before = snapshot_count(&repo).await;
+
+    for how in [Failure::Error, Failure::Short] {
+        let short = matches!(how, Failure::Short);
+        let mut chunks = FailingChunks {
+            inner: reader(&repo).await,
+            how,
+        };
+        let mut source = DirtySource::new(data.clone(), vec![(4096, 4096)]);
+        let err = incremental_with(
+            &repo,
+            parent.outcome.snapshot_id,
+            table.clone(),
+            &mut chunks,
+            &mut source,
+            Some(binding(3)),
+        )
+        .await
+        .unwrap_err();
+        if short {
+            assert!(matches!(err, Error::Corrupt { .. }), "{err:?}");
+        }
+        assert_eq!(snapshot_count(&repo).await, before);
+    }
+
+    let foreign = fs::read(&other_pack).unwrap();
+    for pack in parent_packs {
+        fs::write(pack, &foreign).unwrap();
+    }
+    let mut source = DirtySource::new(data, vec![(4096, 4096)]);
+    let mut r = reader(&repo).await;
+    incremental_with(
+        &repo,
+        parent.outcome.snapshot_id,
+        table,
+        &mut r,
+        &mut source,
+        Some(binding(3)),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(snapshot_count(&repo).await, before);
+}
+
+#[tokio::test]
+async fn image_incremental_rejects_a_mismatched_table() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = fresh_repo(tmp.path()).await;
+    let data = random_bytes((2 * C) as usize, 9);
+    let parent = full_read(
+        &repo,
+        &mut DirtySource::new(data.clone(), Vec::new()),
+        Some(binding(2)),
+        None,
+    )
+    .await;
+    let table = parent_table(&repo, &parent.outcome.snapshot_id).await;
+    let mut longer = table.clone();
+    longer.push(ChunkRef::Zero);
+    let shorter = table[..1].to_vec();
+    for bad in [longer, shorter] {
+        let mut source = DirtySource::new(data.clone(), Vec::new());
+        let mut r = reader(&repo).await;
+        let err = incremental_with(
+            &repo,
+            parent.outcome.snapshot_id,
+            bad,
+            &mut r,
+            &mut source,
+            Some(binding(3)),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
+        assert!(source.untouched());
+    }
+}
+
+#[tokio::test]
+async fn image_incremental_requires_a_dirty_source() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = fresh_repo(tmp.path()).await;
+    let data = random_bytes(C as usize, 10);
+    let parent = full_read(
+        &repo,
+        &mut DirtySource::new(data.clone(), Vec::new()),
+        Some(binding(2)),
+        None,
+    )
+    .await;
+    let table = parent_table(&repo, &parent.outcome.snapshot_id).await;
+
+    let mut blind = DirtySource::new(data.clone(), Vec::new());
+    blind.has_dirty = false;
+    let mut r = reader(&repo).await;
+    let err = incremental_with(
+        &repo,
+        parent.outcome.snapshot_id,
+        table.clone(),
+        &mut r,
+        &mut blind,
+        Some(binding(3)),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
+    assert!(blind.untouched());
+
+    let mut source = DirtySource::new(data, Vec::new());
+    let err = incremental_with(
+        &repo,
+        parent.outcome.snapshot_id,
+        table,
+        &mut r,
+        &mut source,
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
+    assert!(source.untouched());
+}
+
+async fn meta_of(repo: &Path, done: &ImageOutcome) -> (Vec<u8>, Meta) {
+    let r = reader(repo).await;
+    let snapshot = r.snapshot(&done.outcome.snapshot_id).await.unwrap();
+    let (_, meta) = source::decode(snapshot.source.as_ref()).unwrap();
+    (snapshot.parent, meta)
+}
+
+#[tokio::test]
+async fn image_incremental_meta_records_the_binding() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = fresh_repo(tmp.path()).await;
+    let data = random_bytes(C as usize, 11);
+    let plain = full_read(
+        &repo,
+        &mut DirtySource::new(data.clone(), Vec::new()),
+        None,
+        None,
+    )
+    .await;
+    let (parent, meta) = meta_of(&repo, &plain).await;
+    assert!(parent.is_empty());
+    assert_eq!(BitmapBinding::from_meta(&meta, "disk").unwrap(), None);
+    assert_eq!(FullReason::from_meta(&meta, "disk").unwrap(), None);
+    assert_eq!(
+        ImageMeta::from_meta(&meta, "disk").unwrap().read_mode,
+        ReadMode::Full
+    );
+
+    let first = full_read(
+        &repo,
+        &mut DirtySource::new(data.clone(), Vec::new()),
+        Some(binding(2)),
+        Some(FullReason::NoState),
+    )
+    .await;
+    let (parent, meta) = meta_of(&repo, &first).await;
+    assert!(parent.is_empty());
+    assert_eq!(
+        BitmapBinding::from_meta(&meta, "disk").unwrap(),
+        Some(binding(2))
+    );
+    assert_eq!(
+        FullReason::from_meta(&meta, "disk").unwrap(),
+        Some(FullReason::NoState)
+    );
+    assert_eq!(
+        ImageMeta::from_meta(&meta, "disk").unwrap().read_mode,
+        ReadMode::Full
+    );
+
+    let mut source = DirtySource::new(data, Vec::new());
+    let next = incremental(&repo, first.outcome.snapshot_id, &mut source, 3)
+        .await
+        .unwrap();
+    let (parent, meta) = meta_of(&repo, &next).await;
+    assert_eq!(parent, first.outcome.snapshot_id.to_vec());
+    assert_eq!(
+        BitmapBinding::from_meta(&meta, "disk").unwrap(),
+        Some(binding(3))
+    );
+    assert_eq!(FullReason::from_meta(&meta, "disk").unwrap(), None);
+    assert_eq!(
+        ImageMeta::from_meta(&meta, "disk").unwrap().read_mode,
+        ReadMode::Incremental
+    );
+    assert_eq!(source.bytes_read, 0);
 }
