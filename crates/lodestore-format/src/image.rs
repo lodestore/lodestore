@@ -48,7 +48,14 @@ pub fn valid_image_name(name: &str) -> bool {
         && name != "."
         && name != ".."
         && !name.bytes().any(|b| b == b'/' || b < 0x20 || b == 0x7f)
+        && crate::source::encoded_segment_len(name) <= MAX_ENCODED_NAME_LEN
 }
+
+/// Room for the name in a source key: `image/` and the percent-encoded name.
+const MAX_ENCODED_NAME_LEN: usize = crate::source::MAX_KEY_LEN - "image/".len();
+
+pub const IMAGE_NAME_RULE: &str = "1 to 200 bytes, at most 506 once each byte outside \
+    A-Z a-z 0-9 - . _ ~ counts as three, without '/' or control characters, and not . or ..";
 
 /// The meta key of one disk's field. The name hashes into the key because a
 /// meta key is `[a-z0-9_]{1,64}` and a disk name is any UTF-8 up to 200 bytes.

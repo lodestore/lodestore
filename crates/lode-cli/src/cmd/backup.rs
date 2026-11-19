@@ -13,7 +13,9 @@ use lodestore_format::fs;
 use lodestore_format::fs::filter::PathMatcher;
 use lodestore_format::fs::raw::FileSource;
 use lodestore_format::fs::walk::WalkOptions;
-use lodestore_format::image::{ImageSource, ReadMode, SEGMENT_CHUNKS, valid_image_name};
+use lodestore_format::image::{
+    IMAGE_NAME_RULE, ImageSource, ReadMode, SEGMENT_CHUNKS, valid_image_name,
+};
 use lodestore_format::index::hex32;
 use lodestore_format::locks::UNMARKED_WRITER_LIMIT;
 use lodestore_format::pb;
@@ -425,10 +427,7 @@ async fn run_image(url: &str, args: &SecretArgs, out: Output, flags: BackupFlags
             .ok_or_else(|| UsageError(format!("{path:?} has no usable file name; use --name")))?,
     };
     if !valid_image_name(&name) {
-        return Err(UsageError(format!(
-            "{name:?} is not an image name: 1 to 200 bytes, without '/' or control characters, and not . or .."
-        ))
-        .into());
+        return Err(UsageError(format!("{name:?} is not an image name: {IMAGE_NAME_RULE}")).into());
     }
     if args.writer_keys.is_some() && flags.parent.is_some() {
         return Err(UsageError(

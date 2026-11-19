@@ -222,6 +222,13 @@ fn is_unreserved(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~')
 }
 
+/// The length of `raw` once percent-encoded into a key segment.
+pub(crate) fn encoded_segment_len(raw: &str) -> usize {
+    raw.bytes()
+        .map(|b| if is_unreserved(b) { 1 } else { 3 })
+        .sum()
+}
+
 fn encode_segment(raw: &str, out: &mut String) {
     for b in raw.bytes() {
         if is_unreserved(b) {

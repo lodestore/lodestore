@@ -8,7 +8,7 @@ use crate::chunker::blob_id;
 use crate::crypto::{BLOB_TYPE_DATA, BlobId};
 use crate::error::{Error, Result};
 use crate::image::{
-    ChunkRef, DISKS_DIR, IMAGE_CHUNK_SIZE, ImageExtent, ImageMeta, ImageSource, MAX_IMAGE_NAME_LEN,
+    ChunkRef, DISKS_DIR, IMAGE_CHUNK_SIZE, IMAGE_NAME_RULE, ImageExtent, ImageMeta, ImageSource,
     ReadMode, SEGMENT_CHUNKS, check_shape, segment_nodes, valid_image_name,
 };
 use crate::pb;
@@ -95,8 +95,7 @@ impl<S: BlobStore> Writer<S> {
     ) -> Result<ImageOutcome> {
         if !valid_image_name(name) {
             return Err(Error::InvalidInput(format!(
-                "{name:?} is not an image name: 1 to {MAX_IMAGE_NAME_LEN} bytes, \
-                 without '/' or control characters, and not . or .."
+                "{name:?} is not an image name: {IMAGE_NAME_RULE}"
             )));
         }
         if options.parent.is_some() || options.source.is_some() {

@@ -9,9 +9,9 @@ use lodestore_format::fs::restore::check_extents;
 #[cfg(target_os = "linux")]
 use lodestore_format::fs::walk::data_extents;
 use lodestore_format::image::{
-    ChunkRef, DISK_SIZE, IMAGE_CHUNK_SIZE, ImageExtent, ImageMeta, ImageSource, MAX_IMAGE_SIZE,
-    MAX_SEGMENTS, ReadMode, SEGMENT_CHUNKS, disk_meta_key, load_image, merge_head, merge_segments,
-    parse_layout, segment_name, segment_nodes, valid_image_name,
+    ChunkRef, DISK_SIZE, IMAGE_CHUNK_SIZE, ImageExtent, ImageMeta, ImageSource, MAX_IMAGE_NAME_LEN,
+    MAX_IMAGE_SIZE, MAX_SEGMENTS, ReadMode, SEGMENT_CHUNKS, disk_meta_key, load_image, merge_head,
+    merge_segments, parse_layout, segment_name, segment_nodes, valid_image_name,
 };
 use lodestore_format::keys::KdfCost;
 use lodestore_format::pack::CODEC_RAW;
@@ -667,13 +667,15 @@ fn image_source_keys() {
             "{name:?}"
         );
     }
-    // A name of 200 bytes can spell a source key past the key limit.
-    let wide = "ü".repeat(100);
+    // Every accepted name fits its source key: 84 two-byte characters encode to 504 bytes.
+    let wide = "ü".repeat(84);
     assert!(valid_image_name(&wide));
-    assert!(matches!(
-        SourceKey::image(&wide),
-        Err(Error::InvalidInput(m)) if m.contains("too long")
-    ));
+    assert!(SourceKey::image(&wide).is_ok());
+    let wider = "ü".repeat(85);
+    assert!(!valid_image_name(&wider));
+    assert!(SourceKey::image(&wider).is_err());
+    let ascii = "a".repeat(MAX_IMAGE_NAME_LEN);
+    assert!(valid_image_name(&ascii) && SourceKey::image(&ascii).is_ok());
     for text in [
         "image",
         "image/",
@@ -699,6 +701,12 @@ fn names() -> impl Strategy<Value = String> {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
+
+    #[test]
+    fn image_name_rule_matches_the_source_key(chars in prop::collection::vec(any::<char>(), 1..=210)) {
+        let name: String = chars.into_iter().collect();
+        prop_assert_eq!(valid_image_name(&name), SourceKey::image(&name).is_ok(), "{:?}", name);
+    }
     #[test]
     fn image_keys_are_injective(a in names(), b in names(), same in any::<bool>()) {
         let b = if same { a.clone() } else { b };
