@@ -110,6 +110,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> ImageSource for NbdSource<S> {
         }
         let (start, end) = self.window(offset, len)?;
         let min = u64::from(self.client.block_size().min);
+        // The status length is a hint the server may cut short; the block max bounds payloads, not status requests (NBD proto.md, "Size constraints").
         let cap = u64::from(u32::MAX) - u64::from(u32::MAX) % min;
         let mut pieces: Vec<ImageExtent> = Vec::new();
         let mut pos = start;
