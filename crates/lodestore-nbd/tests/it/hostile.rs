@@ -979,4 +979,9 @@ async fn client_reads_many_descending_holes_fast() {
         descending <= ascending * 4 + Duration::from_secs(1),
         "{N} descending holes took {descending:?}, ascending {ascending:?}"
     );
+    // A loose ceiling still fails a check that turned quadratic in both orders.
+    assert!(
+        ascending < Duration::from_secs(10),
+        "{N} ascending holes took {ascending:?}"
+    );
 }
