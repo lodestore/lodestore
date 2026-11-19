@@ -194,6 +194,33 @@ pub(crate) async fn require_roots_capability(
     ))
 }
 
+/// Whether the restore could replace an existing file with the whole image;
+/// only that needs more than `restore:host`. An unknown snapshot is left to
+/// `enqueue_restore` to report.
+pub(crate) async fn replaces_a_disk_image(
+    state: &AppState,
+    snapshot_id: &str,
+    items: &[Vec<u8>],
+    conflict: ConflictPolicy,
+) -> Result<bool, ApiError> {
+    if items != [b"/".to_vec()]
+        || !matches!(
+            conflict,
+            ConflictPolicy::OverwriteChanged | ConflictPolicy::Unspecified
+        )
+    {
+        return Ok(false);
+    }
+    let row = sqlx::query("SELECT source_type FROM snapshots WHERE id = $1")
+        .bind(snapshot_id)
+        .fetch_optional(&state.db.pool)
+        .await?;
+    Ok(match row {
+        Some(row) => row.try_get::<String, _>("source_type")? == "image",
+        None => false,
+    })
+}
+
 pub async fn enqueue_restore(
     state: &AppState,
     req: RestoreRequest,
@@ -216,6 +243,11 @@ pub async fn enqueue_restore(
         .ok_or_else(|| ApiError::NotFound("The snapshot was not found.".into()))?;
     let source_type: String = snapshot.try_get("source_type")?;
     let mut image = None;
+    if source_type == "image" && req.in_place {
+        return Err(invalid(
+            "A disk image cannot be restored in place; restore it into a folder.",
+        ));
+    }
     if source_type == "image" && req.items == [b"/".to_vec()] {
         image = Some(signed_image(state, &req.snapshot_id).await?);
     } else if source_type != "files" && source_type != "image" {

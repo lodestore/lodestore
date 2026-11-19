@@ -13,14 +13,18 @@ use lodestore_format::index::{hex32, parse_hex32};
 use lodestore_format::pb;
 use lodestore_format::provenance::owner_record;
 use lodestore_format::repo::Repository;
+use lodestore_format::selection::Selection;
 use lodestore_format::source::{self, SourceKey};
 use lodestore_format::store::LocalFsStore;
 use lodestore_format::tree::encode_tree;
 use lodestore_format::writer::{BackupOptions, ImageOptions, Writer};
 use lodestore_proto::agent::v1::ConflictPolicy;
+use lodestore_server::browse::tree::reader;
 use lodestore_server::catalog::sync_repository;
+use lodestore_server::download::archive::{ArchiveFormat, write_archive};
 use lodestore_server::error::ApiError;
 use lodestore_server::jobs::restore::{IMAGE_ENQUEUE_LIMIT, RestoreRequest, enqueue_restore};
+use serde_json::{Value, json};
 use sqlx::Row;
 
 const PASSWORD: &[u8] = b"test-password";
@@ -403,6 +407,194 @@ async fn image_restore_refuses_a_newer_layout() {
         };
         assert!(message.contains("newer"), "{message}");
         assert_eq!(jobs_queued(ts).await, 0);
+        env.stop().await;
+    }
+}
+
+/// A running agent and a signed two-chunk image snapshot, synced into the catalog.
+async fn small_image(backend: &common::Backend) -> (AgentEnv, String) {
+    let env = AgentEnv::start(backend).await;
+    let mut data = vec![0u8; 3 * CHUNK];
+    data[CHUNK..CHUNK + 4096].fill(0x5a);
+    let file = env.work.path().join("small.raw");
+    fs::write(&file, data).unwrap();
+    let snapshot = write_image_snapshot(env.ts(), &file, &env.hostname).await;
+    sync_repository(env.ts().state(), &env.repo).await.unwrap();
+    (env, snapshot)
+}
+
+fn restore_body(
+    env: &AgentEnv,
+    snapshot: &str,
+    item: &str,
+    destination: &Path,
+    in_place: bool,
+    conflict: &str,
+) -> Value {
+    json!({
+        "snapshot_id": snapshot,
+        "items": [data_encoding::BASE64URL_NOPAD.encode(item.as_bytes())],
+        "target_host_id": env.host,
+        "destination": destination.to_string_lossy(),
+        "in_place": in_place,
+        "conflict": conflict,
+        "restore_owners": false,
+    })
+}
+
+async fn post_as(env: &AgentEnv, scopes: &[&str], body: &Value) -> (u16, Value) {
+    let client = common::bearer_client(&env.ts().issue_token(scopes).await);
+    let response = client
+        .post(format!("{}/api/v1/restores", env.ts().rest_url()))
+        .json(body)
+        .send()
+        .await
+        .unwrap();
+    (response.status().as_u16(), response.json().await.unwrap())
+}
+
+async fn finish(env: &AgentEnv, queued: &[Value]) {
+    for body in queued {
+        let id = body["job_id"].as_str().unwrap();
+        let job = env.wait_job(id).await;
+        assert_eq!(job["state"], "succeeded", "{job}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn image_restore_in_place_is_refused() {
+    for backend in backends() {
+        let (env, snapshot) = small_image(&backend).await;
+        let root = Path::new("/");
+        for item in ["/", "/disks/disk"] {
+            let body = restore_body(&env, &snapshot, item, root, true, "skip_existing");
+            let (status, answer) =
+                post_as(&env, &["restore:host", "restore:in-place"], &body).await;
+            assert_eq!(status, 422, "[{}] {answer}", backend.name());
+            let message = answer["message"].as_str().unwrap();
+            assert!(
+                message.contains("A disk image cannot be restored in place"),
+                "{message}"
+            );
+            let (status, _) = post_as(&env, &["restore:host"], &body).await;
+            assert_eq!(status, 403);
+        }
+        assert_eq!(jobs_queued(env.ts()).await, 0);
+        env.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn image_restore_overwrite_needs_the_in_place_scope() {
+    for backend in backends() {
+        let (env, snapshot) = small_image(&backend).await;
+        let out = |name: &str| env.work.path().join(name);
+        let host = ["restore:host"];
+        let whole = |name: &str, conflict: &str| {
+            restore_body(&env, &snapshot, "/", &out(name), false, conflict)
+        };
+
+        let (status, answer) = post_as(&env, &host, &whole("a", "overwrite_changed")).await;
+        assert_eq!(status, 403, "[{}] {answer}", backend.name());
+        assert_eq!(
+            answer["message"],
+            "The token needs the restore:in-place scope to replace an existing disk image file."
+        );
+        assert_eq!(jobs_queued(env.ts()).await, 0);
+
+        let mut queued = Vec::new();
+        for (name, conflict) in [("b", "stop_if_not_empty"), ("c", "skip_existing")] {
+            let (status, answer) = post_as(&env, &host, &whole(name, conflict)).await;
+            assert_eq!(status, 201, "{conflict}: {answer}");
+            queued.push(answer);
+        }
+        let both = ["restore:host", "restore:in-place"];
+        let (status, answer) = post_as(&env, &both, &whole("d", "overwrite_changed")).await;
+        assert_eq!(status, 201, "{answer}");
+        queued.push(answer);
+        let segments = restore_body(
+            &env,
+            &snapshot,
+            "/disks/disk",
+            &out("e"),
+            false,
+            "overwrite_changed",
+        );
+        let (status, answer) = post_as(&env, &host, &segments).await;
+        assert_eq!(status, 201, "{answer}");
+        queued.push(answer);
+
+        finish(&env, &queued).await;
+        env.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn image_restore_session_overwrite_needs_a_recent_password() {
+    for backend in backends() {
+        let (env, snapshot) = small_image(&backend).await;
+        sqlx::query("UPDATE sessions SET authenticated_at = $1")
+            .bind(lodestore_server::db::now_ms() - 16 * 60_000)
+            .execute(&env.ts().state().db.pool)
+            .await
+            .unwrap();
+        let out = env.work.path().join("out");
+
+        let body = restore_body(&env, &snapshot, "/", &out, false, "overwrite_changed");
+        let response = env.api.post("/api/v1/restores", &body).await;
+        assert_eq!(response.status(), 403, "[{}]", backend.name());
+        let answer: Value = response.json().await.unwrap();
+        assert_eq!(answer["code"], "step_up_required");
+        assert_eq!(jobs_queued(env.ts()).await, 0);
+
+        let body = restore_body(&env, &snapshot, "/", &out, false, "stop_if_not_empty");
+        let response = env.api.post("/api/v1/restores", &body).await;
+        assert_eq!(response.status(), 201);
+        let answer: Value = response.json().await.unwrap();
+        finish(&env, &[answer]).await;
+        env.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn image_download_lists_segments() {
+    for backend in backends() {
+        let (env, snapshot) = small_image(&backend).await;
+        let ts = env.ts();
+        let mut reader = reader(ts.state(), &env.repo).await.unwrap();
+        let id = parse_hex32(&snapshot).unwrap();
+        let selection = Selection::from_paths([b"/".to_vec()]).unwrap();
+
+        let handle = tokio::runtime::Handle::current();
+        let names = tokio::task::spawn_blocking(move || {
+            let mut out = Vec::new();
+            write_archive(
+                &handle,
+                &mut reader,
+                &id,
+                &selection,
+                ArchiveFormat::Zip,
+                &mut out,
+            )
+            .unwrap();
+            let archive = zip::ZipArchive::new(std::io::Cursor::new(out)).unwrap();
+            archive
+                .file_names()
+                .map(|name| name.unwrap().into_owned())
+                .collect::<Vec<_>>()
+        })
+        .await
+        .unwrap();
+
+        for segment in ["000000", "000001"] {
+            let wanted = format!("disks/disk/{segment}");
+            assert!(
+                names.iter().any(|n| n.ends_with(&wanted)),
+                "[{}] {names:?}",
+                backend.name()
+            );
+        }
+        assert!(!names.iter().any(|n| n.ends_with(".img")), "{names:?}");
         env.stop().await;
     }
 }
