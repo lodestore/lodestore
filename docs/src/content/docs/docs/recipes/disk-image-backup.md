@@ -106,7 +106,7 @@ When two disks on one host are exported under the same name, `lode` takes them f
 | `parent_not_newest` | The newest snapshot of this image is not the one this machine recorded: another machine, or another run, wrote a newer one. |
 | `parent_unreadable` | The previous snapshot has no bitmap binding or no size, or its contents cannot be read. |
 | `name_changed` | The bitmap recorded in the previous snapshot is not named for this repository, host and image. |
-| `gen_mismatch` | The generation of `--bitmap` is not the one the previous snapshot recorded, or the chain of generations has forked, which includes an older snapshot of the image whose bitmap record cannot be read; every run is a full read until that snapshot is removed by retention. This is also the answer after a resize that skipped a generation. |
+| `gen_mismatch` | The generation of `--bitmap` is not the one the previous snapshot recorded, or the chain of generations has forked, which includes an older snapshot of the image whose bitmap record cannot be read; every run is a full read until server retention forgets that snapshot; without a server it stays. This is also the answer after a resize that skipped a generation. |
 | `size_changed` | The disk has another size than at the previous backup. |
 
 A full read is not a failure. It is deduplicated, so it reads the whole disk and adds to the repository only what changed. When the cache is lost, the next backup is a full read of an unchanged disk and stores nothing new. After a refused previous snapshot `lode` reuses nothing from it.
