@@ -19,13 +19,14 @@ export const sourceTypeIcon: Record<SourceType, LucideIcon> = {
 	mysql: Database,
 };
 
-const labels: Record<SourceType | "postgres-wal", string> = {
+const labels: Record<SourceType | "postgres-wal" | "image", string> = {
 	files: copy.sources.type.files,
 	"proxmox-vm": copy.sources.type.proxmoxVm,
 	"proxmox-ct": copy.sources.type.proxmoxCt,
 	postgres: copy.sources.type.postgres,
 	"postgres-wal": copy.sources.type.postgresWal,
 	mysql: copy.sources.type.mysql,
+	image: copy.sources.type.image,
 };
 
 export const sourceTypeLabel = (type: string): string =>
