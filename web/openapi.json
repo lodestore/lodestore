@@ -5626,7 +5626,7 @@
             }
           },
           "403": {
-            "description": "The token lacks `restore:host` for a new folder, or `restore:in-place` for a restore in place, with `restore_owners`, or to replace an existing disk image file; or `step_up_required`: a session restores in place, with `restore_owners`, replaces a disk image file, or restores to an agent that does not check restore folders, and the password was not entered in the last 15 minutes",
+            "description": "The token lacks `restore:host` for a new folder, or `restore:in-place` for a restore in place, with `restore_owners`, or for a whole disk image (`/`) with `overwrite_changed`, which could replace an existing disk image file; or `step_up_required`: a session restores in place, with `restore_owners`, replaces a disk image file, or restores to an agent that does not check restore folders, and the password was not entered in the last 15 minutes",
             "content": {
               "application/json": {
                 "schema": {
