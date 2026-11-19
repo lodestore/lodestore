@@ -259,6 +259,87 @@ fn image_state_rejects_hostile_files() {
     assert!(ImageState::parse(&good, &REPO, HOST, &key()).is_ok());
 }
 
+fn state_error(bytes: &[u8], repo: &RepoId, host: &[u8], key: &SourceKey) -> String {
+    ImageState::parse(bytes, repo, host, key)
+        .unwrap_err()
+        .to_string()
+}
+
+#[test]
+fn image_state_names_the_check_that_failed() {
+    let good = good_state();
+    let set = |field: &'static str, value: Value| {
+        edited(&good, move |o| {
+            o.insert(field.to_owned(), value);
+        })
+    };
+    let renamed = edited(&good, |o| {
+        o.remove("chunk_size");
+        o.insert("chunk_sizes".to_owned(), json!(1));
+    });
+    let rows: Vec<(&str, Vec<u8>, &str)> = vec![
+        (
+            "an extra field",
+            set("path", json!("/dev/vda")),
+            "exactly the known fields",
+        ),
+        ("a renamed field", renamed, "exactly the known fields"),
+        (
+            "another repository",
+            set("repo_id", json!("08".repeat(16))),
+            "another repository or instance",
+        ),
+        (
+            "another host",
+            set("host", json!("6832")),
+            "another repository or instance",
+        ),
+        (
+            "another key",
+            set("key", json!("image/other")),
+            "another repository or instance",
+        ),
+        (
+            "a source in capitals",
+            set("source", json!("A".repeat(64))),
+            "source is not 64 lower-case hex digits",
+        ),
+        (
+            "a parent in capitals",
+            set("parent", json!("A".repeat(64))),
+            "parent is not 64 lower-case hex digits",
+        ),
+    ];
+    for (label, bytes, expected) in rows {
+        let message = state_error(&bytes, &REPO, HOST, &key());
+        assert!(message.contains(expected), "{label}: {message}");
+    }
+}
+
+fn state_of_len(len: usize) -> (Vec<u8>, Vec<u8>, SourceKey) {
+    let s = state(9, 3, SIZE, source_a());
+    for name in ["d", "dd"] {
+        let key = SourceKey::image(name).unwrap();
+        let bare = s.encode(&REPO, b"", &key).len();
+        if let Some(extra) = len.checked_sub(bare).filter(|n| n % 2 == 0) {
+            let host = vec![b'h'; extra / 2];
+            let bytes = s.encode(&REPO, &host, &key);
+            assert_eq!(bytes.len(), len);
+            return (bytes, host, key);
+        }
+    }
+    unreachable!("one of the two key lengths has the right parity");
+}
+
+#[test]
+fn image_state_size_limit_is_exact() {
+    let (bytes, host, key) = state_of_len(MAX_STATE_BYTES);
+    assert!(ImageState::parse(&bytes, &REPO, &host, &key).is_ok());
+    let (bytes, host, key) = state_of_len(MAX_STATE_BYTES + 1);
+    let message = state_error(&bytes, &REPO, &host, &key);
+    assert!(message.contains("too large"), "{message}");
+}
+
 #[test]
 fn bitmap_names_reject_other_names() {
     let names = names();
@@ -317,7 +398,7 @@ fn image_binding_meta_rejects() {
         meta.insert(gen_key.clone(), generation.to_owned());
         rows.push(meta);
     }
-    for name in ["", "a\nb", "a\u{7f}"] {
+    for name in ["", "a\nb", "a\u{1f}", "a\u{7f}"] {
         let mut meta = good.clone();
         meta.insert(name_key.clone(), name.to_owned());
         rows.push(meta);
@@ -325,6 +406,10 @@ fn image_binding_meta_rejects() {
     for meta in rows {
         assert!(BitmapBinding::from_meta(&meta, "disk").is_err(), "{meta:?}");
     }
+    let mut spaced = good.clone();
+    spaced.insert(name_key.clone(), "a b".to_owned());
+    let binding = BitmapBinding::from_meta(&spaced, "disk").unwrap().unwrap();
+    assert_eq!(binding.name, "a b");
 
     let mut unknown = good.clone();
     unknown.insert(reason_key, "because".to_owned());

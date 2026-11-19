@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-pub const MIN_QEMU: (u32, u32) = (8, 2);
+pub const MIN_QEMU: (u32, u32) = (10, 1);
 
 const TOOLS: [&str; 3] = ["qemu-img", "qemu-nbd", "qemu-io"];
 

@@ -218,6 +218,8 @@ async fn image_roundtrip_with_holes_across_segments() {
         .await
         .unwrap();
     assert_eq!(source.reads, vec![C, 2 * C, 4 * C, 5 * C]);
+    assert_eq!(done.outcome.stats.bytes_read, 3 * C + MIB);
+    assert!(!source.has_dirty());
 
     let mut r = reader(&repo_dir).await;
     let id = done.outcome.snapshot_id;
@@ -1406,6 +1408,41 @@ async fn image_incremental_reuses_parent_chunks() {
         .unwrap()
         .index_refs;
     assert!(snapshot.index_refs.iter().any(|s| parent_refs.contains(s)));
+
+    let full = full_read(
+        &repo,
+        &mut DirtySource::new(data.clone(), Vec::new()),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(done.outcome.root_tree, full.outcome.root_tree);
+    let out = tmp.path().join("out");
+    assert!(restored(&repo, &done.outcome.snapshot_id, &out).await == data);
+}
+
+#[tokio::test]
+async fn image_incremental_reads_a_whole_chunk_only_when_all_of_it_is_dirty() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = fresh_repo(tmp.path()).await;
+    let mut data = random_bytes((3 * C) as usize, 9);
+    let parent = full_read(
+        &repo,
+        &mut DirtySource::new(data.clone(), Vec::new()),
+        Some(binding(2)),
+        None,
+    )
+    .await;
+    assert_eq!(parent.outcome.stats.bytes_read, 3 * C);
+
+    overwrite(&mut data, 0, ZERO_BLOCK, 10);
+    overwrite(&mut data, C, C, 11);
+    let mut source = DirtySource::new(data.clone(), vec![(0, ZERO_BLOCK), (C, C)]);
+    let done = incremental(&repo, parent.outcome.snapshot_id, &mut source, 3)
+        .await
+        .unwrap();
+    assert_eq!(source.bytes_read, ZERO_BLOCK + C);
+    assert_eq!(done.outcome.stats.bytes_read, ZERO_BLOCK + C);
 
     let full = full_read(
         &repo,
