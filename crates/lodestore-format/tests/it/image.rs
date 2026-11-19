@@ -5,21 +5,25 @@ use std::path::Path;
 
 use lodestore_format::Error;
 use lodestore_format::crypto::{BLOB_TYPE_DATA, BlobId, Entropy};
+use lodestore_format::fs::restore::check_extents;
 #[cfg(target_os = "linux")]
 use lodestore_format::fs::walk::data_extents;
 use lodestore_format::image::{
-    ChunkRef, IMAGE_CHUNK_SIZE, ImageExtent, ImageMeta, ImageSource, ReadMode, SEGMENT_CHUNKS,
-    load_image, segment_nodes,
+    ChunkRef, DISK_SIZE, IMAGE_CHUNK_SIZE, ImageExtent, ImageMeta, ImageSource, MAX_IMAGE_SIZE,
+    MAX_SEGMENTS, ReadMode, SEGMENT_CHUNKS, disk_meta_key, load_image, merge_head, merge_segments,
+    parse_layout, segment_name, segment_nodes, valid_image_name,
 };
 use lodestore_format::keys::KdfCost;
 use lodestore_format::pack::CODEC_RAW;
 use lodestore_format::pb;
 use lodestore_format::reader::{Reader, RestoreOptions};
 use lodestore_format::repo::{InitOptions, PendingInit, Repository};
-use lodestore_format::source;
+use lodestore_format::source::{self, Meta, SourceKey, SourceType};
 use lodestore_format::store::LocalFsStore;
 use lodestore_format::tree::encode_tree;
 use lodestore_format::writer::{BackupOptions, ImageOptions, Writer};
+use proptest::prelude::*;
+use prost::Message;
 use rand_chacha::ChaCha20Rng;
 use rand_chacha::rand_core::{Rng, SeedableRng};
 
@@ -408,4 +412,371 @@ async fn image_load_picks_the_named_disk_among_neighbours() {
         load_image(&mut r, &id, "a/b").await,
         Err(Error::InvalidInput(_))
     ));
+}
+
+fn image_cases() -> impl Strategy<Value = (u64, Vec<ChunkRef>, u64)> {
+    (
+        0u64..=13,
+        0..C,
+        prop::collection::vec(prop::option::of(any::<[u8; 32]>()), 14),
+        1u64..=4,
+    )
+        .prop_map(|(full, tail, refs, per_segment)| {
+            let size = full * C + tail;
+            let count = usize::try_from(size.div_ceil(C)).unwrap();
+            let chunks = refs
+                .into_iter()
+                .take(count)
+                .map(|r| r.map_or(ChunkRef::Zero, ChunkRef::Data))
+                .collect();
+            (size, chunks, per_segment)
+        })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    #[test]
+    fn image_layout_round_trips((size, chunks, per_segment) in image_cases()) {
+        let nodes = segment_nodes(size, &chunks, per_segment).unwrap();
+        let layout = parse_layout(&nodes).unwrap();
+        prop_assert_eq!(layout.size, size);
+        prop_assert_eq!(layout.chunk_table(), chunks.clone());
+        let again = segment_nodes(size, &chunks, per_segment).unwrap();
+        prop_assert_eq!(
+            nodes.iter().map(Message::encode_to_vec).collect::<Vec<_>>(),
+            again.iter().map(Message::encode_to_vec).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn image_merge_matches_concatenation((size, chunks, per_segment) in image_cases()) {
+        let layout = parse_layout(&segment_nodes(size, &chunks, per_segment).unwrap()).unwrap();
+        let merged = merge_segments(&layout, b"x.img");
+        let extents = check_extents(&merged).unwrap();
+        prop_assert_eq!(merged.size, size);
+        let ids: Vec<Vec<u8>> = chunks
+            .iter()
+            .filter_map(|c| match c {
+                ChunkRef::Data(id) => Some(id.to_vec()),
+                ChunkRef::Zero => None,
+            })
+            .collect();
+        prop_assert_eq!(&merged.content, &ids);
+        for (k, chunk) in chunks.iter().enumerate() {
+            let from = k as u64 * C;
+            let to = (from + C).min(size);
+            let covered = extents.iter().any(|&(o, l)| o <= from && to <= o + l);
+            let touched = extents.iter().any(|&(o, l)| l > 0 && o < to && from < o + l);
+            prop_assert_eq!(covered, matches!(chunk, ChunkRef::Data(_)));
+            prop_assert_eq!(touched, covered);
+        }
+        let mut head = merged.clone();
+        head.content.clear();
+        prop_assert_eq!(merge_head(&layout, b"x.img"), head);
+    }
+}
+
+fn base_segments() -> Vec<pb::Node> {
+    let chunks = [
+        ChunkRef::Data([1; 32]),
+        ChunkRef::Zero,
+        ChunkRef::Data([2; 32]),
+        ChunkRef::Data([3; 32]),
+        ChunkRef::Data([4; 32]),
+    ];
+    segment_nodes(4 * C + MIB, &chunks, 2).unwrap()
+}
+
+fn extent(offset: u64, length: u64) -> pb::Extent {
+    pb::Extent { offset, length }
+}
+
+#[test]
+fn image_layout_rejects_hostile_segments() {
+    type Edit = fn(&mut Vec<pb::Node>);
+    let table: Vec<(&str, &str, Edit)> = vec![
+        ("a skipped segment", "named", |n| {
+            n.remove(1);
+        }),
+        ("name 1", "named", |n| n[0].name = b"1".to_vec()),
+        ("name 0000001", "named", |n| n[0].name = b"0000001".to_vec()),
+        ("name 00000a", "named", |n| n[0].name = b"00000a".to_vec()),
+        ("a directory", "plain file", |n| {
+            n[0].r#type = pb::NodeType::Dir as i32;
+        }),
+        ("a hardlink", "plain file", |n| n[0].hardlink_group = 7),
+        ("extent past size", "sparse extents", |n| {
+            n[2].sparse_extents = vec![extent(0, MIB + 1)];
+        }),
+        ("extents out of order", "sparse extents", |n| {
+            n[1].sparse_extents = vec![extent(C, C), extent(0, C)];
+        }),
+        ("offset plus length overflows", "sparse extents", |n| {
+            n[0].sparse_extents = vec![extent(u64::MAX - 1, 5)];
+        }),
+        ("adjacent extents", "adjacent extents are not merged", |n| {
+            n[1].sparse_extents = vec![extent(0, C), extent(C, C)];
+        }),
+        ("extent starts inside a chunk", "chunk boundaries", |n| {
+            n[0].sparse_extents = vec![extent(1, C)];
+        }),
+        ("extent ends inside a chunk", "chunk boundaries", |n| {
+            n[0].sparse_extents = vec![extent(0, C - 1)];
+        }),
+        (
+            "empty extent with chunk ids",
+            "without data lists chunks",
+            |n| {
+                n[0].sparse_extents = vec![extent(0, 0)];
+            },
+        ),
+        ("empty extent next to data", "empty extent", |n| {
+            n[0].sparse_extents = vec![extent(0, C), extent(2 * C, 0)];
+        }),
+        ("no extents", "no extents", |n| n[0].sparse_extents.clear()),
+        ("one id too many", "do not match", |n| {
+            n[0].content.push(vec![9; 32]);
+        }),
+        ("one id too few", "do not match", |n| {
+            n[1].content.pop();
+        }),
+        ("an id of 31 bytes", "not 32 bytes", |n| {
+            n[0].content[0] = vec![1; 31];
+        }),
+        ("a short middle segment", "whole numbers", |n| n[1].size = C),
+        ("a middle segment of 4 MiB + 1", "whole numbers", |n| {
+            n[0].size = C + 1;
+            n[1].size = C + 1;
+        }),
+        (
+            "a last segment larger than the first",
+            "larger than the others",
+            |n| {
+                n[2].size = 3 * C;
+            },
+        ),
+        ("an empty last segment", "larger than the others", |n| {
+            n[2].size = 0;
+            n[2].sparse_extents = vec![extent(0, 0)];
+            n[2].content.clear();
+        }),
+        (
+            "a segment above the segment limit",
+            "larger than a segment",
+            |n| {
+                n.truncate(1);
+                n[0].size = (SEGMENT_CHUNKS + 1) * C;
+            },
+        ),
+    ];
+    for (label, expect, edit) in table {
+        let mut nodes = base_segments();
+        edit(&mut nodes);
+        match parse_layout(&nodes) {
+            Err(Error::Corrupt { reason, .. }) => {
+                assert!(reason.contains(expect), "{label}: {reason}");
+            }
+            other => panic!("{label}: {other:?}"),
+        }
+    }
+
+    let no_segments = parse_layout(&[]).unwrap_err().to_string();
+    assert!(no_segments.contains("no segments"), "{no_segments}");
+    let many: Vec<pb::Node> = (0..=MAX_SEGMENTS)
+        .map(|i| pb::Node {
+            name: segment_name(i),
+            r#type: pb::NodeType::File as i32,
+            sparse_extents: vec![extent(0, 0)],
+            ..Default::default()
+        })
+        .collect();
+    let too_many = parse_layout(&many).unwrap_err().to_string();
+    assert!(too_many.contains("more than 64"), "{too_many}");
+    assert!(parse_layout(&base_segments()).is_ok());
+}
+
+#[test]
+fn image_layout_accepts_the_largest_image() {
+    let nodes: Vec<pb::Node> = (0..MAX_SEGMENTS)
+        .map(|i| pb::Node {
+            name: segment_name(i),
+            r#type: pb::NodeType::File as i32,
+            size: SEGMENT_CHUNKS * C,
+            sparse_extents: vec![extent(0, 0)],
+            ..Default::default()
+        })
+        .collect();
+    let layout = parse_layout(&nodes).unwrap();
+    assert_eq!(layout.size, MAX_IMAGE_SIZE);
+    let head = merge_head(&layout, b"x.img");
+    assert_eq!(head.size, MAX_IMAGE_SIZE);
+    assert_eq!(head.sparse_extents, vec![extent(0, 0)]);
+}
+
+#[test]
+fn image_worst_segment_fits_a_tree_blob() {
+    let chunks: Vec<ChunkRef> = (0..SEGMENT_CHUNKS)
+        .map(|i| {
+            let mut id = [0u8; 32];
+            id[..8].copy_from_slice(&i.to_le_bytes());
+            id[8] = 0xff;
+            if i < SEGMENT_CHUNKS / 2 && i % 2 == 0 {
+                ChunkRef::Zero
+            } else {
+                ChunkRef::Data(id)
+            }
+        })
+        .collect();
+    let nodes = segment_nodes(SEGMENT_CHUNKS * C, &chunks, SEGMENT_CHUNKS).unwrap();
+    assert_eq!(nodes.len(), 1);
+    let blob = encode_tree(nodes.clone());
+    assert!(
+        blob.len() < lodestore_format::pack::MAX_TREE_ULEN,
+        "{}",
+        blob.len()
+    );
+    assert_eq!(parse_layout(&nodes).unwrap().chunk_table(), chunks);
+}
+
+#[test]
+fn image_source_keys() {
+    let long = "a".repeat(200);
+    for name in ["disk", "vm-101.raw", "a b", "ü", "100%", long.as_str()] {
+        let key = SourceKey::image(name).unwrap();
+        assert_eq!(key.kind(), SourceType::Image);
+        assert!(key.as_str().starts_with("image/"));
+        assert_eq!(SourceKey::parse(key.as_str()).unwrap(), key);
+        assert_eq!(source::label(&key, &Meta::new()).as_deref(), Some(name));
+    }
+    assert_eq!(SourceKey::image("a b").unwrap().as_str(), "image/a%20b");
+    let too_long = "a".repeat(201);
+    for name in [
+        "",
+        too_long.as_str(),
+        "a/b",
+        ".",
+        "..",
+        "a\nb",
+        "a\u{7f}",
+        "a\0b",
+    ] {
+        assert!(!valid_image_name(name), "{name:?}");
+        assert!(
+            matches!(SourceKey::image(name), Err(Error::InvalidInput(_))),
+            "{name:?}"
+        );
+    }
+    // A name of 200 bytes can spell a source key past the key limit.
+    let wide = "ü".repeat(100);
+    assert!(valid_image_name(&wide));
+    assert!(matches!(
+        SourceKey::image(&wide),
+        Err(Error::InvalidInput(m)) if m.contains("too long")
+    ));
+    for text in [
+        "image",
+        "image/",
+        "image/a/b",
+        "image/a%2fb",
+        "image/%2E%2E",
+        "image/a%0Ab",
+    ] {
+        assert!(SourceKey::parse(text).is_err(), "{text}");
+    }
+    assert_eq!(SourceType::parse("image").unwrap(), SourceType::Image);
+    assert_eq!(SourceType::ALL.len(), 7);
+    assert_eq!(SourceType::ALL.last(), Some(&SourceType::Image));
+    assert_eq!(SourceType::Image.as_str(), "image");
+}
+
+fn names() -> impl Strategy<Value = String> {
+    prop::collection::vec(any::<char>(), 1..=40)
+        .prop_map(|c| c.into_iter().collect::<String>())
+        .prop_filter("a valid image name", |n| valid_image_name(n))
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    #[test]
+    fn image_keys_are_injective(a in names(), b in names(), same in any::<bool>()) {
+        let b = if same { a.clone() } else { b };
+        let (ka, kb) = (SourceKey::image(&a).unwrap(), SourceKey::image(&b).unwrap());
+        prop_assert_eq!(ka == kb, a == b);
+        prop_assert_eq!(SourceKey::parse(ka.as_str()).unwrap(), ka);
+    }
+
+    #[test]
+    fn image_meta_round_trips(size in 0..=MAX_IMAGE_SIZE, incremental in any::<bool>(), name in names()) {
+        let read_mode = if incremental { ReadMode::Incremental } else { ReadMode::Full };
+        let meta = ImageMeta { read_mode, disk_size: size };
+        let written = meta.to_meta(&name);
+        prop_assert_eq!(ImageMeta::from_meta(&written, &name).unwrap(), meta);
+        prop_assert!(source::encode(&SourceKey::image(&name).unwrap(), &written).is_ok());
+    }
+}
+
+#[test]
+fn image_meta_round_trips_and_rejects() {
+    let good = ImageMeta {
+        read_mode: ReadMode::Full,
+        disk_size: 20 * MIB,
+    }
+    .to_meta("disk");
+    let size_key = disk_meta_key("disk", DISK_SIZE);
+    assert_eq!(good.keys().map(String::as_str).collect::<Vec<_>>().len(), 4);
+    assert_eq!(good.get(&size_key).map(String::as_str), Some("20971520"));
+    assert!(source::encode(&SourceKey::image("disk").unwrap(), &good).is_ok());
+
+    let with = |key: &str, value: &str| {
+        let mut meta = good.clone();
+        meta.insert(key.to_owned(), value.to_owned());
+        meta
+    };
+    let without = |key: &str| {
+        let mut meta = good.clone();
+        meta.remove(key);
+        meta
+    };
+    let too_big = (MAX_IMAGE_SIZE + 1).to_string();
+    let rejected = [
+        with("image_layout", "2"),
+        with("image_layout", "x"),
+        without("image_layout"),
+        with("chunk_size", "1048576"),
+        without("chunk_size"),
+        with("read_mode", "bogus"),
+        without("read_mode"),
+        with(&size_key, "01"),
+        with(&size_key, "+5"),
+        with(&size_key, ""),
+        with(&size_key, &too_big),
+        with(&size_key, "18446744073709551616"),
+        without(&size_key),
+    ];
+    for meta in rejected {
+        assert!(
+            matches!(
+                ImageMeta::from_meta(&meta, "disk"),
+                Err(Error::Corrupt { .. })
+            ),
+            "{meta:?}"
+        );
+    }
+    let newer = ImageMeta::from_meta(&with("image_layout", "2"), "disk")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        newer.contains("layout 2 is newer than this build reads"),
+        "{newer}"
+    );
+    assert!(ImageMeta::from_meta(&good, "other").is_err());
+
+    let mut later = with("read_mode", "incremental");
+    later.insert(disk_meta_key("disk", "bitmap_gen"), "3".into());
+    later.insert("vm_uuid".into(), "x".into());
+    let parsed = ImageMeta::from_meta(&later, "disk").unwrap();
+    assert_eq!(parsed.read_mode, ReadMode::Incremental);
+    assert_eq!(parsed.disk_size, 20 * MIB);
 }

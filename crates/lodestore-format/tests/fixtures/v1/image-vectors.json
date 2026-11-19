@@ -1,0 +1,486 @@
+{
+  "chunk_id_key": "0303030303030303030303030303030303030303030303030303030303030303",
+  "constants": {
+    "chunk_size": 4194304,
+    "layout_version": "1",
+    "max_image_size": 17592186044416,
+    "max_name_len": 200,
+    "max_segments": 64,
+    "segment_chunks": 65536
+  },
+  "layout": [
+    {
+      "chunks": "DDDD",
+      "description": "whole segments on a segment boundary",
+      "merged": {
+        "content": [
+          "5fc543af524060c8bc2fd6ac2b6a1cac6aa102c26470f3854355b8c0576b98b0",
+          "a8ccd14ab5e55847d4f9629691b7c23899c9b5a4f7ecf7537d1aec988420bc95",
+          "6ca0dbdcf70873c4fa9d168c20b43f11a58b4cd0d9d66d790bd3b3c5f3858900",
+          "31f396412745c9bfdd708071c9d114103c2f17ae65d4deb235044bf8b6089d15"
+        ],
+        "name": "disk.img",
+        "size": 16777216,
+        "sparse_extents": [
+          {
+            "length": 16777216,
+            "offset": 0
+          }
+        ]
+      },
+      "segment_chunks": 2,
+      "segments": [
+        {
+          "content": [
+            "5fc543af524060c8bc2fd6ac2b6a1cac6aa102c26470f3854355b8c0576b98b0",
+            "a8ccd14ab5e55847d4f9629691b7c23899c9b5a4f7ecf7537d1aec988420bc95"
+          ],
+          "name": "000000",
+          "size": 8388608,
+          "sparse_extents": [
+            {
+              "length": 8388608,
+              "offset": 0
+            }
+          ]
+        },
+        {
+          "content": [
+            "6ca0dbdcf70873c4fa9d168c20b43f11a58b4cd0d9d66d790bd3b3c5f3858900",
+            "31f396412745c9bfdd708071c9d114103c2f17ae65d4deb235044bf8b6089d15"
+          ],
+          "name": "000001",
+          "size": 8388608,
+          "sparse_extents": [
+            {
+              "length": 8388608,
+              "offset": 0
+            }
+          ]
+        }
+      ],
+      "size": 16777216,
+      "tree": "0a5a0a063030303030301001588080800462205fc543af524060c8bc2fd6ac2b6a1cac6aa102c26470f3854355b8c0576b98b06220a8ccd14ab5e55847d4f9629691b7c23899c9b5a4f7ecf7537d1aec988420bc956a0510808080040a5a0a063030303030311001588080800462206ca0dbdcf70873c4fa9d168c20b43f11a58b4cd0d9d66d790bd3b3c5f3858900622031f396412745c9bfdd708071c9d114103c2f17ae65d4deb235044bf8b6089d156a051080808004"
+    },
+    {
+      "chunks": "DZDDZ",
+      "description": "a hole in the middle and one at the end of a segment",
+      "merged": {
+        "content": [
+          "062281c245954d9db7c0158c535ccd8d78364d02b4c0bbf917f8e14eefe06a14",
+          "37fbb11b1b41f5ca689c07caa2328c8890b1e8f3403ca01ebfb8bc4585c50add",
+          "c7c1e94e34832a306f76f1f25391e050208c771d29ab5a378047f72480b6f689"
+        ],
+        "name": "disk.img",
+        "size": 20971520,
+        "sparse_extents": [
+          {
+            "length": 4194304,
+            "offset": 0
+          },
+          {
+            "length": 8388608,
+            "offset": 8388608
+          }
+        ]
+      },
+      "segment_chunks": 3,
+      "segments": [
+        {
+          "content": [
+            "062281c245954d9db7c0158c535ccd8d78364d02b4c0bbf917f8e14eefe06a14",
+            "37fbb11b1b41f5ca689c07caa2328c8890b1e8f3403ca01ebfb8bc4585c50add"
+          ],
+          "name": "000000",
+          "size": 12582912,
+          "sparse_extents": [
+            {
+              "length": 4194304,
+              "offset": 0
+            },
+            {
+              "length": 4194304,
+              "offset": 8388608
+            }
+          ]
+        },
+        {
+          "content": [
+            "c7c1e94e34832a306f76f1f25391e050208c771d29ab5a378047f72480b6f689"
+          ],
+          "name": "000001",
+          "size": 8388608,
+          "sparse_extents": [
+            {
+              "length": 4194304,
+              "offset": 0
+            }
+          ]
+        }
+      ],
+      "size": 20971520,
+      "tree": "0a660a06303030303030100158808080066220062281c245954d9db7c0158c535ccd8d78364d02b4c0bbf917f8e14eefe06a14622037fbb11b1b41f5ca689c07caa2328c8890b1e8f3403ca01ebfb8bc4585c50add6a0510808080026a0a088080800410808080020a380a06303030303031100158808080046220c7c1e94e34832a306f76f1f25391e050208c771d29ab5a378047f72480b6f6896a051080808002"
+    },
+    {
+      "chunks": "DDZ",
+      "description": "a hole at the end of the image",
+      "merged": {
+        "content": [
+          "8a8117af4204391b8317e7a87529dde9931b226a4531d9129a168442c43ef790",
+          "2a76e7b94e2ba447a2900dfc5d002e6b250d1b361a2547daf50144bb6afa5db7"
+        ],
+        "name": "disk.img",
+        "size": 12582912,
+        "sparse_extents": [
+          {
+            "length": 8388608,
+            "offset": 0
+          }
+        ]
+      },
+      "segment_chunks": 3,
+      "segments": [
+        {
+          "content": [
+            "8a8117af4204391b8317e7a87529dde9931b226a4531d9129a168442c43ef790",
+            "2a76e7b94e2ba447a2900dfc5d002e6b250d1b361a2547daf50144bb6afa5db7"
+          ],
+          "name": "000000",
+          "size": 12582912,
+          "sparse_extents": [
+            {
+              "length": 8388608,
+              "offset": 0
+            }
+          ]
+        }
+      ],
+      "size": 12582912,
+      "tree": "0a5a0a063030303030301001588080800662208a8117af4204391b8317e7a87529dde9931b226a4531d9129a168442c43ef79062202a76e7b94e2ba447a2900dfc5d002e6b250d1b361a2547daf50144bb6afa5db76a051080808004"
+    },
+    {
+      "chunks": "DDD",
+      "description": "a short last chunk of data",
+      "merged": {
+        "content": [
+          "cc4b6331437954cf7d5d6be03ebd87afc841ba4d9f5c71ecc090128a09cfaba3",
+          "fcdb82f29aaa6dce3636d9443c9ad7b28b37e581e49fbb1a9209417c6563a09b",
+          "8a9e70e655cfd95cb40d5ef059ed15f419181384b98167dc64b6c76fed68652e"
+        ],
+        "name": "disk.img",
+        "size": 9437184,
+        "sparse_extents": [
+          {
+            "length": 9437184,
+            "offset": 0
+          }
+        ]
+      },
+      "segment_chunks": 2,
+      "segments": [
+        {
+          "content": [
+            "cc4b6331437954cf7d5d6be03ebd87afc841ba4d9f5c71ecc090128a09cfaba3",
+            "fcdb82f29aaa6dce3636d9443c9ad7b28b37e581e49fbb1a9209417c6563a09b"
+          ],
+          "name": "000000",
+          "size": 8388608,
+          "sparse_extents": [
+            {
+              "length": 8388608,
+              "offset": 0
+            }
+          ]
+        },
+        {
+          "content": [
+            "8a9e70e655cfd95cb40d5ef059ed15f419181384b98167dc64b6c76fed68652e"
+          ],
+          "name": "000001",
+          "size": 1048576,
+          "sparse_extents": [
+            {
+              "length": 1048576,
+              "offset": 0
+            }
+          ]
+        }
+      ],
+      "size": 9437184,
+      "tree": "0a5a0a06303030303030100158808080046220cc4b6331437954cf7d5d6be03ebd87afc841ba4d9f5c71ecc090128a09cfaba36220fcdb82f29aaa6dce3636d9443c9ad7b28b37e581e49fbb1a9209417c6563a09b6a0510808080040a360a0630303030303110015880804062208a9e70e655cfd95cb40d5ef059ed15f419181384b98167dc64b6c76fed68652e6a0410808040"
+    },
+    {
+      "chunks": "DZ",
+      "description": "a short last chunk that is a hole",
+      "merged": {
+        "content": [
+          "5e5dfc7e58999f56e60a977dba2052820077e1e2a6427aba79da53cb72a475c7"
+        ],
+        "name": "disk.img",
+        "size": 4194305,
+        "sparse_extents": [
+          {
+            "length": 4194304,
+            "offset": 0
+          }
+        ]
+      },
+      "segment_chunks": 2,
+      "segments": [
+        {
+          "content": [
+            "5e5dfc7e58999f56e60a977dba2052820077e1e2a6427aba79da53cb72a475c7"
+          ],
+          "name": "000000",
+          "size": 4194305,
+          "sparse_extents": [
+            {
+              "length": 4194304,
+              "offset": 0
+            }
+          ]
+        }
+      ],
+      "size": 4194305,
+      "tree": "0a380a063030303030301001588180800262205e5dfc7e58999f56e60a977dba2052820077e1e2a6427aba79da53cb72a475c76a051080808002"
+    },
+    {
+      "chunks": "ZZDD",
+      "description": "a segment that is all hole",
+      "merged": {
+        "content": [
+          "18b849b2ec06e24984a5172a4249d00a303c59c21a0561a020fa4fe50682ac61",
+          "bc7bac64d8f9741d5ea9b8ded06a8c9ad924210dd6b60ae4f7445d38822f2e00"
+        ],
+        "name": "disk.img",
+        "size": 16777216,
+        "sparse_extents": [
+          {
+            "length": 8388608,
+            "offset": 8388608
+          }
+        ]
+      },
+      "segment_chunks": 2,
+      "segments": [
+        {
+          "content": [],
+          "name": "000000",
+          "size": 8388608,
+          "sparse_extents": [
+            {
+              "length": 0,
+              "offset": 0
+            }
+          ]
+        },
+        {
+          "content": [
+            "18b849b2ec06e24984a5172a4249d00a303c59c21a0561a020fa4fe50682ac61",
+            "bc7bac64d8f9741d5ea9b8ded06a8c9ad924210dd6b60ae4f7445d38822f2e00"
+          ],
+          "name": "000001",
+          "size": 8388608,
+          "sparse_extents": [
+            {
+              "length": 8388608,
+              "offset": 0
+            }
+          ]
+        }
+      ],
+      "size": 16777216,
+      "tree": "0a110a06303030303030100158808080046a000a5a0a0630303030303110015880808004622018b849b2ec06e24984a5172a4249d00a303c59c21a0561a020fa4fe50682ac616220bc7bac64d8f9741d5ea9b8ded06a8c9ad924210dd6b60ae4f7445d38822f2e006a051080808004"
+    },
+    {
+      "chunks": "DD",
+      "description": "a dense segment",
+      "merged": {
+        "content": [
+          "9ac9419db0065f0c84ff8d2a5582f71ad38417f9bc015f700796b6e6746adbfc",
+          "66793b781c5a1bf7122d1c961cf734dd568db7de2529e3849cc25f326c717c42"
+        ],
+        "name": "disk.img",
+        "size": 8388608,
+        "sparse_extents": [
+          {
+            "length": 8388608,
+            "offset": 0
+          }
+        ]
+      },
+      "segment_chunks": 2,
+      "segments": [
+        {
+          "content": [
+            "9ac9419db0065f0c84ff8d2a5582f71ad38417f9bc015f700796b6e6746adbfc",
+            "66793b781c5a1bf7122d1c961cf734dd568db7de2529e3849cc25f326c717c42"
+          ],
+          "name": "000000",
+          "size": 8388608,
+          "sparse_extents": [
+            {
+              "length": 8388608,
+              "offset": 0
+            }
+          ]
+        }
+      ],
+      "size": 8388608,
+      "tree": "0a5a0a063030303030301001588080800462209ac9419db0065f0c84ff8d2a5582f71ad38417f9bc015f700796b6e6746adbfc622066793b781c5a1bf7122d1c961cf734dd568db7de2529e3849cc25f326c717c426a051080808004"
+    },
+    {
+      "chunks": "ZZZ",
+      "description": "an image of nothing but holes",
+      "merged": {
+        "content": [],
+        "name": "disk.img",
+        "size": 12582912,
+        "sparse_extents": [
+          {
+            "length": 0,
+            "offset": 0
+          }
+        ]
+      },
+      "segment_chunks": 8,
+      "segments": [
+        {
+          "content": [],
+          "name": "000000",
+          "size": 12582912,
+          "sparse_extents": [
+            {
+              "length": 0,
+              "offset": 0
+            }
+          ]
+        }
+      ],
+      "size": 12582912,
+      "tree": "0a110a06303030303030100158808080066a00"
+    },
+    {
+      "chunks": "",
+      "description": "an image of zero length",
+      "merged": {
+        "content": [],
+        "name": "disk.img",
+        "size": 0,
+        "sparse_extents": [
+          {
+            "length": 0,
+            "offset": 0
+          }
+        ]
+      },
+      "segment_chunks": 8,
+      "segments": [
+        {
+          "content": [],
+          "name": "000000",
+          "size": 0,
+          "sparse_extents": [
+            {
+              "length": 0,
+              "offset": 0
+            }
+          ]
+        }
+      ],
+      "size": 0,
+      "tree": "0a0c0a0630303030303010016a00"
+    }
+  ],
+  "meta": {
+    "claimed": "0a0a696d6167652f6469736b12150a0a6368756e6b5f73697a6512073431393433303412260a1a6469736b5f626336653565336464383331306333375f73697a651208323039373135323012110a0c696d6167655f6c61796f757412013112110a09726561645f6d6f6465120466756c6c",
+    "disk_keys": [
+      {
+        "meta_key": "disk_bc6e5e3dd8310c37_size",
+        "name": "disk"
+      },
+      {
+        "meta_key": "disk_c95e5a48e784bd89_size",
+        "name": "a b"
+      },
+      {
+        "meta_key": "disk_9b7670f4a74372fd_size",
+        "name": "ü"
+      }
+    ],
+    "keys": [
+      "chunk_size",
+      "disk_bc6e5e3dd8310c37_size",
+      "image_layout",
+      "read_mode"
+    ],
+    "values": {
+      "chunk_size": "4194304",
+      "disk_bc6e5e3dd8310c37_size": "20971520",
+      "image_layout": "1",
+      "read_mode": "full"
+    }
+  },
+  "rejected_layouts": [
+    {
+      "description": "adjacent extents that were not merged",
+      "error": "corrupt image: adjacent extents are not merged",
+      "tree": "0a660a063030303030301001588080800462200101010101010101010101010101010101010101010101010101010101010101622002020202020202020202020202020202020202020202020202020202020202026a0510808080026a0a08808080021080808002"
+    },
+    {
+      "description": "a segment named 000001 first",
+      "error": "corrupt image: segments are not named 000000, 000001, ... in order",
+      "tree": "0a5a0a063030303030311001588080800462200101010101010101010101010101010101010101010101010101010101010101622001010101010101010101010101010101010101010101010101010101010101016a051080808004"
+    },
+    {
+      "description": "an extent that starts inside a chunk",
+      "error": "corrupt image: an extent does not lie on chunk boundaries",
+      "tree": "0a5c0a063030303030301001588080800462200101010101010101010101010101010101010101010101010101010101010101622002020202020202020202020202020202020202020202020202020202020202026a07080110ffffff03"
+    },
+    {
+      "description": "one chunk id more than the extents hold",
+      "error": "corrupt image: the chunk ids do not match the data extents",
+      "tree": "0a7c0a0630303030303010015880808004622001010101010101010101010101010101010101010101010101010101010101016220020202020202020202020202020202020202020202020202020202020202020262205df833615d3cd8e1514eb547efc744c60ce323368cf3b20434c46bf840339a506a051080808004"
+    }
+  ],
+  "source_keys": {
+    "accepted": [
+      {
+        "input": "disk",
+        "key": "image/disk"
+      },
+      {
+        "input": "vm-101.raw",
+        "key": "image/vm-101.raw"
+      },
+      {
+        "input": "a b",
+        "key": "image/a%20b"
+      },
+      {
+        "input": "100%",
+        "key": "image/100%25"
+      },
+      {
+        "input": "ü",
+        "key": "image/%C3%BC"
+      },
+      {
+        "input": "sda",
+        "key": "image/sda"
+      }
+    ],
+    "name_of_201_bytes": "invalid input: source: an image name is 1 to 200 bytes without '/' or control characters, and not . or ..",
+    "rejected": {
+      "image": "invalid input: source: wrong number of segments for the source type",
+      "image/": "invalid input: source: segment must be 1 to 255 bytes",
+      "image/%C3%BC%FF": "invalid input: source: segment is not UTF-8",
+      "image/.": "invalid input: source: an image name is 1 to 200 bytes without '/' or control characters, and not . or ..",
+      "image/..": "invalid input: source: an image name is 1 to 200 bytes without '/' or control characters, and not . or ..",
+      "image/a%0Ab": "invalid input: source: an image name is 1 to 200 bytes without '/' or control characters, and not . or ..",
+      "image/a%2fb": "invalid input: source: segment is not in canonical percent-encoding",
+      "image/a%7Fb": "invalid input: source: an image name is 1 to 200 bytes without '/' or control characters, and not . or ..",
+      "image/a/b": "invalid input: source: wrong number of segments for the source type"
+    }
+  }
+}

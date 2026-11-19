@@ -21,6 +21,11 @@ use lodestore_format::crypto::{
     seal_provenance_body, seal_snapshot_body, seal_snapshot_key, seal_writer_marker_body,
 };
 use lodestore_format::error::Result;
+use lodestore_format::fs::restore::check_extents;
+use lodestore_format::image::{
+    IMAGE_CHUNK_SIZE, ImageMeta, SEGMENT_CHUNKS, merge_head, merge_segments, parse_layout,
+    segment_nodes,
+};
 use lodestore_format::index::{Index, SupersedesTrust, open_shard};
 use lodestore_format::keys::{
     MAX_SLOT_SIZE, MasterKey, ReadKeys, RecoveryKey, WriteKeys, looks_like_recovery_key,
@@ -282,6 +287,54 @@ pub fn source_decode(data: &[u8]) {
     }
 }
 
+/// A hostile segment list is either refused or one the writer would have
+/// written, and the merged file node it makes is a valid sparse file.
+pub fn image_layout(data: &[u8]) {
+    if let Ok(tree) = pb::Tree::decode(data)
+        && let Ok(layout) = parse_layout(&tree.nodes)
+    {
+        let merged = merge_segments(&layout, b"x.img");
+        assert!(
+            check_extents(&merged).is_ok(),
+            "a merged image must have valid extents"
+        );
+        let mut head = merged.clone();
+        head.content.clear();
+        assert_eq!(
+            merge_head(&layout, b"x.img"),
+            head,
+            "the head is the node without its ids"
+        );
+        // The chunk table is one entry per chunk; only a one-segment image is built here.
+        if layout.size <= SEGMENT_CHUNKS * IMAGE_CHUNK_SIZE {
+            let table = layout.chunk_table();
+            assert_eq!(table.len() as u64, layout.size.div_ceil(IMAGE_CHUNK_SIZE));
+            let per_segment = layout.segment_size.div_ceil(IMAGE_CHUNK_SIZE).max(1);
+            let again = segment_nodes(layout.size, &table, per_segment)
+                .expect("a parsed layout is one the writer can write");
+            assert_eq!(again.len(), layout.segments.len());
+            for (a, b) in again.iter().zip(&layout.segments) {
+                assert_eq!(
+                    (&a.name, a.size, &a.content, &a.sparse_extents),
+                    (&b.name, b.size, &b.content, &b.sparse_extents),
+                    "a parsed segment must be the canonical one"
+                );
+            }
+        }
+    }
+    if let Ok(claimed) = pb::Source::decode(data)
+        && let Ok((key, meta)) = source::decode(Some(&claimed))
+        && let Some(name) = source::label(&key, &meta)
+        && let Ok(parsed) = ImageMeta::from_meta(&meta, &name)
+    {
+        assert_eq!(
+            ImageMeta::from_meta(&parsed.to_meta(&name), &name).ok(),
+            Some(parsed),
+            "image meta must read back what it writes"
+        );
+    }
+}
+
 const PASSWORD_WORK_BUDGET: u64 = 1 << 10;
 
 fn fixed_recovery_key() -> &'static RecoveryKey {
@@ -374,6 +427,7 @@ pub const TARGETS: &[(&str, Target)] = &[
     ("attest_open", attest_open),
     ("provenance_open", provenance_open),
     ("source_decode", source_decode),
+    ("image_layout", image_layout),
     ("verify_shard", verify_shard),
     ("snapshot_resolves", snapshot_resolves),
     ("restore_plan", restore_plan),

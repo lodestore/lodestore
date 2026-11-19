@@ -24,6 +24,7 @@ use lodestore_format::crypto::{
     open_snapshot_key, seal_frame, seal_index_shard, seal_pack_header, seal_pack_key,
     seal_provenance_body, seal_snapshot_body, seal_snapshot_key,
 };
+use lodestore_format::image;
 use lodestore_format::index::{Index, index_object_key, open_shard, seal_shard_superseding};
 use lodestore_format::keys::{
     KdfCost, MasterKey, ReadKeys, RecoveryKey, cdc_seed, open_password_slot, open_recovery_slot,
@@ -803,5 +804,231 @@ fn vectors_generate_v1() {
         .open(path())
         .unwrap_or_else(|e| panic!("{}: {e}; the v1 vectors are frozen", path().display()));
     let text = serde_json::to_string_pretty(&vectors()).unwrap();
+    std::io::Write::write_all(&mut out, format!("{text}\n").as_bytes()).unwrap();
+}
+
+fn image_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/v1/image-vectors.json")
+}
+
+fn image_vectors() -> Value {
+    const C: u64 = image::IMAGE_CHUNK_SIZE;
+    const MIB: u64 = 1 << 20;
+    let k_id = [3u8; 32];
+
+    let node_json = |n: &pb::Node| {
+        json!({
+            "name": String::from_utf8_lossy(&n.name),
+            "size": n.size,
+            "content": n.content.iter().map(|id| hex(id)).collect::<Vec<_>>(),
+            "sparse_extents": n
+                .sparse_extents
+                .iter()
+                .map(|e| json!({ "offset": e.offset, "length": e.length }))
+                .collect::<Vec<_>>(),
+        })
+    };
+    let tree_hex = |nodes: &[pb::Node]| {
+        hex(&pb::Tree {
+            nodes: nodes.to_vec(),
+        }
+        .encode_to_vec())
+    };
+
+    // D is a data chunk, Z a hole; chunk ids are the keyed hash of a fixed text.
+    let cases: [(&str, u64, &str, u64); 9] = [
+        ("whole segments on a segment boundary", 4 * C, "DDDD", 2),
+        (
+            "a hole in the middle and one at the end of a segment",
+            5 * C,
+            "DZDDZ",
+            3,
+        ),
+        ("a hole at the end of the image", 3 * C, "DDZ", 3),
+        ("a short last chunk of data", 2 * C + MIB, "DDD", 2),
+        ("a short last chunk that is a hole", C + 1, "DZ", 2),
+        ("a segment that is all hole", 4 * C, "ZZDD", 2),
+        ("a dense segment", 2 * C, "DD", 2),
+        ("an image of nothing but holes", 3 * C, "ZZZ", 8),
+        ("an image of zero length", 0, "", 8),
+    ];
+    let layout: Vec<Value> = cases
+        .iter()
+        .enumerate()
+        .map(|(case, &(description, size, mask, per_segment))| {
+            let chunks: Vec<image::ChunkRef> = mask
+                .chars()
+                .enumerate()
+                .map(|(i, c)| match c {
+                    'D' => image::ChunkRef::Data(blob_id(
+                        &k_id,
+                        format!("image vector {case} chunk {i}").as_bytes(),
+                    )),
+                    _ => image::ChunkRef::Zero,
+                })
+                .collect();
+            let nodes = image::segment_nodes(size, &chunks, per_segment).unwrap();
+            let parsed = image::parse_layout(&nodes).unwrap();
+            assert_eq!(parsed.chunk_table(), chunks);
+            let merged = image::merge_segments(&parsed, b"disk.img");
+            json!({
+                "description": description,
+                "size": size,
+                "chunks": mask,
+                "segment_chunks": per_segment,
+                "segments": nodes.iter().map(node_json).collect::<Vec<_>>(),
+                "tree": tree_hex(&nodes),
+                "merged": node_json(&merged),
+            })
+        })
+        .collect();
+
+    let id = |n: u8| blob_id(&k_id, &[n]).to_vec();
+    let two = || {
+        let chunks = [
+            image::ChunkRef::Data([1; 32]),
+            image::ChunkRef::Data([2; 32]),
+        ];
+        image::segment_nodes(2 * C, &chunks, 2).unwrap()
+    };
+    let four = || {
+        let chunks = [image::ChunkRef::Data([1; 32]); 4];
+        image::segment_nodes(4 * C, &chunks, 2).unwrap()
+    };
+    let mut adjacent = two();
+    adjacent[0].sparse_extents = vec![
+        pb::Extent {
+            offset: 0,
+            length: C,
+        },
+        pb::Extent {
+            offset: C,
+            length: C,
+        },
+    ];
+    let mut skipped = four();
+    skipped.remove(0);
+    let mut unaligned = two();
+    unaligned[0].sparse_extents = vec![pb::Extent {
+        offset: 1,
+        length: 2 * C - 1,
+    }];
+    let mut extra_id = two();
+    extra_id[0].content.push(id(9));
+    let rejected_nodes: [(&str, Vec<pb::Node>); 4] = [
+        ("adjacent extents that were not merged", adjacent),
+        ("a segment named 000001 first", skipped),
+        ("an extent that starts inside a chunk", unaligned),
+        ("one chunk id more than the extents hold", extra_id),
+    ];
+    let rejected_layouts: Vec<Value> = rejected_nodes
+        .iter()
+        .map(|(description, nodes)| {
+            json!({
+                "description": description,
+                "tree": tree_hex(nodes),
+                "error": image::parse_layout(nodes).unwrap_err().to_string(),
+            })
+        })
+        .collect();
+
+    let accepted: Vec<Value> = ["disk", "vm-101.raw", "a b", "100%", "ü", "sda"]
+        .iter()
+        .map(|name| {
+            let key = SourceKey::image(name).unwrap();
+            assert_eq!(&SourceKey::parse(key.as_str()).unwrap(), &key);
+            json!({ "input": name, "key": key.as_str() })
+        })
+        .collect();
+    let rejected_keys: serde_json::Map<String, Value> = [
+        "image",
+        "image/",
+        "image/a/b",
+        "image/.",
+        "image/..",
+        "image/a%2fb",
+        "image/a%0Ab",
+        "image/a%7Fb",
+        "image/%C3%BC%FF",
+    ]
+    .into_iter()
+    .map(|bad| {
+        let error = SourceKey::parse(bad).unwrap_err().to_string();
+        (bad.to_owned(), json!(error))
+    })
+    .collect();
+    let too_long = SourceKey::image(&"a".repeat(201)).unwrap_err().to_string();
+
+    let disk_meta = image::ImageMeta {
+        read_mode: image::ReadMode::Full,
+        disk_size: 20 * MIB,
+    }
+    .to_meta("disk");
+    let claimed = source::encode(&SourceKey::image("disk").unwrap(), &disk_meta)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        image::ImageMeta::from_meta(&disk_meta, "disk")
+            .unwrap()
+            .disk_size,
+        20 * MIB
+    );
+
+    let disk_keys: Vec<Value> = ["disk", "a b", "ü"]
+        .iter()
+        .map(|name| {
+            json!({
+                "name": name,
+                "meta_key": image::disk_meta_key(name, image::DISK_SIZE),
+            })
+        })
+        .collect();
+
+    json!({
+        "constants": {
+            "chunk_size": image::IMAGE_CHUNK_SIZE,
+            "segment_chunks": image::SEGMENT_CHUNKS,
+            "max_image_size": image::MAX_IMAGE_SIZE,
+            "max_segments": image::MAX_SEGMENTS,
+            "max_name_len": image::MAX_IMAGE_NAME_LEN,
+            "layout_version": image::LAYOUT_VERSION,
+        },
+        "chunk_id_key": hex(&k_id),
+        "layout": layout,
+        "rejected_layouts": rejected_layouts,
+        "source_keys": {
+            "accepted": accepted,
+            "rejected": rejected_keys,
+            "name_of_201_bytes": too_long,
+        },
+        "meta": {
+            "disk_keys": disk_keys,
+            "keys": disk_meta.keys().collect::<Vec<_>>(),
+            "values": disk_meta,
+            "claimed": hex(&claimed.encode_to_vec()),
+        },
+    })
+}
+
+#[test]
+fn image_vectors_match() {
+    let committed: Value =
+        serde_json::from_str(&fs::read_to_string(image_path()).unwrap()).unwrap();
+    assert_eq!(image_vectors(), committed);
+}
+
+#[test]
+#[ignore = "generates frozen fixtures; run once via LODE_GENERATE_FIXTURES=1 cargo nextest run -p lodestore-format --run-ignored only image_vectors_generate_v1"]
+fn image_vectors_generate_v1() {
+    if std::env::var_os("LODE_GENERATE_FIXTURES").is_none() {
+        eprintln!("skipped: set LODE_GENERATE_FIXTURES=1 to generate fixtures");
+        return;
+    }
+    let mut out = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(image_path())
+        .unwrap_or_else(|e| panic!("{}: {e}; the v1 vectors are frozen", image_path().display()));
+    let text = serde_json::to_string_pretty(&image_vectors()).unwrap();
     std::io::Write::write_all(&mut out, format!("{text}\n").as_bytes()).unwrap();
 }

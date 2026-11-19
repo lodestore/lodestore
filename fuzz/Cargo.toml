@@ -110,6 +110,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "image_layout"
+path = "fuzz_targets/image_layout.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "verify_shard"
 path = "fuzz_targets/verify_shard.rs"
 test = false
