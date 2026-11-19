@@ -6,11 +6,13 @@ use lodestore_format::Error;
 use lodestore_format::fs::filter::PathMatcher;
 use lodestore_format::fs::restore::Unapplied;
 use lodestore_format::image::ImageMeta;
+use lodestore_format::index::hex32;
 use lodestore_format::reader::{
-    Overwrite, RestoreFailure, RestoreOptions, RestoreProgress, parse_snapshot_path,
+    Overwrite, Reader, RestoreFailure, RestoreOptions, RestoreProgress, parse_snapshot_path,
 };
 use lodestore_format::snapshot::SnapshotEntry;
 use lodestore_format::source::{self, SourceType};
+use lodestore_format::store::Store;
 use serde::Serialize;
 
 use crate::cli::{RestoreFlags, SecretArgs, UsageError};
@@ -54,13 +56,35 @@ struct SummaryJson<'a> {
     errors: Vec<FailureJson<'a>>,
 }
 
-/// The disk of a snapshot the manifest claims as a disk image, with its meta.
-fn image_disk(entry: &SnapshotEntry) -> Option<(String, source::Meta)> {
-    let (key, meta) = source::decode(entry.snapshot.source.as_ref()).ok()?;
-    if key.kind() != SourceType::Image {
-        return None;
+/// The disk of a snapshot that is a disk image, with its meta. A signed
+/// snapshot is an image only when its signed source says so; the manifest's
+/// claim decides only for an unsigned one.
+async fn image_disk(
+    reader: &Reader<Store>,
+    entry: &SnapshotEntry,
+) -> Result<Option<(String, source::Meta)>> {
+    let provenance = reader.provenance().await?;
+    let claimed = source::decode(entry.snapshot.source.as_ref()).ok();
+    if provenance.signer(&entry.id).is_some() {
+        let key = provenance.source_of(&entry.id);
+        if key.kind() != SourceType::Image {
+            return Ok(None);
+        }
+        let name = source::label(&key, &source::Meta::new())
+            .context("the signed source of this snapshot names no disk")?;
+        return Ok(Some((name, claimed.map(|(_, m)| m).unwrap_or_default())));
     }
-    Some((source::label(&key, &meta)?, meta))
+    let Some((key, meta)) = claimed.filter(|(k, _)| k.kind() == SourceType::Image) else {
+        return Ok(None);
+    };
+    if provenance.attested_any() {
+        eprintln!(
+            "warning: nothing signed snapshot {}; restoring it as the disk image its manifest names",
+            &hex32(&entry.id)[..8]
+        );
+    }
+    let name = source::label(&key, &meta).context("the manifest names no disk")?;
+    Ok(Some((name, meta)))
 }
 
 fn overwrite_mode(name: &str) -> Overwrite {
@@ -141,7 +165,7 @@ pub async fn run(
         skip_owners: false,
     };
     let image = if path.is_empty() {
-        image_disk(&entry)
+        image_disk(&reader, &entry).await?
     } else {
         None
     };
