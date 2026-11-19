@@ -39,7 +39,7 @@ pub async fn run(
         .map(|t| {
             SourceType::parse(t).map_err(|_| {
                 UsageError(format!(
-                    "unknown source type {t:?}; use files, proxmox-vm, proxmox-ct, postgres, postgres-wal or mysql"
+                    "unknown source type {t:?}; use files, proxmox-vm, proxmox-ct, postgres, postgres-wal, mysql or image"
                 ))
             })
         })

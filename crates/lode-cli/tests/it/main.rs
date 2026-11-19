@@ -15,6 +15,7 @@ mod e2e_local;
 mod find_server_cli;
 mod gc_cli;
 mod gc_writer_marker;
+mod image_cli;
 mod keys;
 mod policy_validate;
 mod provenance_cli;
