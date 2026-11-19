@@ -266,7 +266,7 @@ pub enum ZeroHint {
 #[derive(Debug, Clone, Copy)]
 pub enum Transport {
     Direct(ZeroHint),
-    Nbd,
+    Nbd { block_max: u32 },
 }
 
 fn inside(ranges: &[Range<u64>], start: u64, end: u64) -> bool {
@@ -572,14 +572,17 @@ async fn open_source(
                 server: None,
             }
         }
-        Transport::Nbd => {
+        Transport::Nbd { block_max } => {
             let mut export = MemExport::new(frozen.to_vec()).min_block(512);
             for (name, ranges) in exports {
                 export = export.with_bitmap(&name, ranges);
             }
             let refuse = export.dirty_only_switch();
             let (client_side, server_side) = tokio::io::duplex(1 << 20);
-            let limits = Limits::default();
+            let limits = Limits {
+                max_read: block_max,
+                ..Limits::default()
+            };
             let server = tokio::spawn(async move {
                 let mut export = export;
                 let served = serve(server_side, &mut export, &limits).await;
