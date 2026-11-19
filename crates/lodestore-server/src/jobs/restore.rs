@@ -20,7 +20,8 @@ use crate::state::AppState;
 
 pub const MAX_ITEMS: usize = 10_000;
 pub const IMAGE_ENQUEUE_LIMIT: usize = 2;
-static IMAGE_ENQUEUE: Semaphore = Semaphore::const_new(IMAGE_ENQUEUE_LIMIT);
+/// Bounds the image layouts the server holds at once, in enqueue checks and in plans.
+pub static IMAGE_ENQUEUE: Semaphore = Semaphore::const_new(IMAGE_ENQUEUE_LIMIT);
 
 #[derive(Debug, Clone)]
 pub struct RestoreRequest {

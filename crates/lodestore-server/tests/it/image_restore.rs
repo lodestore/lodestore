@@ -71,7 +71,7 @@ async fn owner_sign(ts: &TestServer, snapshot: &str, source: Option<lodestore_fo
 }
 
 /// Writes a disk image snapshot the way `lode backup --image` does and signs it as the owner.
-async fn write_image_snapshot(ts: &TestServer, file: &Path, hostname: &str) -> String {
+pub(crate) async fn write_image_snapshot(ts: &TestServer, file: &Path, hostname: &str) -> String {
     let store = LocalFsStore::new(ts.local_repo_root("main"));
     let repo = Repository::open(&store, PASSWORD).await.unwrap();
     let keys = repo.read_keys().write_keys(repo.config_hash());

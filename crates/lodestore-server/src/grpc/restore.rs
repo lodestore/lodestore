@@ -23,9 +23,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::Status;
 
 use crate::catalog;
-use crate::grpc::registry::Registry;
+use crate::grpc::registry::{PlanSlot, Registry};
 use crate::grpc::{internal, internal_or_unavailable};
-use crate::jobs::restore::RestoreRecord;
+use crate::jobs::restore::{IMAGE_ENQUEUE, RestoreRecord};
 use crate::repos::checks::open_store;
 use crate::repos::db::server_access_checked;
 use crate::state::AppState;
@@ -264,7 +264,17 @@ impl Planner {
         self.push(kind, &used).await
     }
 
-    async fn run_image(mut self, snapshot_id: BlobId, disk_name: String) -> Result<(), Status> {
+    async fn run_image(
+        mut self,
+        snapshot_id: BlobId,
+        disk_name: String,
+        _slot: PlanSlot,
+    ) -> Result<(), Status> {
+        // the layout and the merged node of a 16 TiB image hold hundreds of MB until the plan ends
+        let _permit = IMAGE_ENQUEUE.acquire().await.map_err(internal)?;
+        if self.tx.is_closed() {
+            return Err(Status::cancelled("the plan stream was closed"));
+        }
         let image = load_image(&mut self.reader, &snapshot_id, &disk_name)
             .await
             .map_err(read_error)?;
@@ -320,6 +330,15 @@ pub async fn restore_plan(
     job_id: &str,
 ) -> Result<ReceiverStream<Result<RestorePlanBatch, Status>>, Status> {
     let mut record = authorize(state, agent_id, job_id).await?;
+    let image = match record.image.take() {
+        Some(name) => {
+            let slot = state.registry.claim_plan(job_id).ok_or_else(|| {
+                Status::aborted("a plan of this disk image is still running; try again")
+            })?;
+            Some((name, slot))
+        }
+        None => None,
+    };
     let selection = record
         .items()
         .ok_or_else(|| internal("the stored selection is not base64"))
@@ -345,8 +364,8 @@ pub async fn restore_plan(
         size: 0,
         sent: false,
     };
-    let task = match record.image.take() {
-        Some(name) => tokio::spawn(planner.run_image(snapshot_id, name)),
+    let task = match image {
+        Some((name, slot)) => tokio::spawn(planner.run_image(snapshot_id, name, slot)),
         None => tokio::spawn(planner.run(snapshot_id, selection)),
     };
     let job_id = job_id.to_string();
