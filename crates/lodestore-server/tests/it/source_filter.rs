@@ -240,3 +240,70 @@ async fn source_filter_latest_of_one_instance() {
         ts.stop().await;
     }
 }
+
+fn image<'a>(id: char, host: &'a str, key: &'a str, received: i64) -> Row<'a> {
+    Row {
+        id,
+        host,
+        source_type: "image",
+        source_ref: key,
+        label: key.strip_prefix("image/"),
+        received,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn source_filter_image_instances_are_separate() {
+    for backend in backends() {
+        let (ts, api, repo) = start(&backend, &["h1"]).await;
+        let t = now_ms() - 20_000;
+        seed(&ts, &repo, files('1', "h1", t)).await;
+        seed(&ts, &repo, image('2', "h1", "image/disk", t + 1)).await;
+        seed(&ts, &repo, image('3', "h1", "image/disk", t + 2)).await;
+        seed(&ts, &repo, image('4', "h1", "image/other", t + 3)).await;
+        seed(&ts, &repo, files('5', "h1", t + 4)).await;
+        seed(&ts, &repo, image('6', "h1", "image/other", t + 5)).await;
+        let list = |query: &str| format!("/api/v1/restore/snapshots?host=h1{query}");
+
+        let all = json(&api, &list("")).await;
+        assert_eq!(all["total"], 6);
+        assert_eq!(all["latest_verified_id"], sid('5'));
+
+        let disk = json(&api, &list("&source=image%2Fdisk")).await;
+        assert_eq!(ids(&disk), ["3", "2"]);
+        assert_eq!(disk["total"], 2);
+        assert_eq!(disk["latest_verified_id"], sid('3'));
+
+        let other = json(&api, &list("&source=image%2Fother")).await;
+        assert_eq!(ids(&other), ["6", "4"]);
+        assert_eq!(other["latest_verified_id"], sid('6'));
+
+        let by_type = json(&api, &list("&source_type=image")).await;
+        assert_eq!(ids(&by_type), ["6", "4", "3", "2"]);
+
+        let mismatch = api
+            .get(&list("&source=image%2Fdisk&source_type=files"))
+            .await;
+        assert_eq!(mismatch.status(), 422);
+        assert!(
+            mismatch
+                .text()
+                .await
+                .unwrap()
+                .contains("The source key does not belong to the source type.")
+        );
+        let unknown = api.get(&list("&source_type=unknown")).await;
+        assert_eq!(unknown.status(), 422);
+        assert!(unknown.text().await.unwrap().contains("mysql or image"));
+
+        let counts = json(&api, "/api/v1/hosts/h1/snapshots").await;
+        assert_eq!(
+            counts["source_counts"],
+            serde_json::json!([
+                {"source_type": "files", "count": 2},
+                {"source_type": "image", "count": 4},
+            ])
+        );
+        ts.stop().await;
+    }
+}

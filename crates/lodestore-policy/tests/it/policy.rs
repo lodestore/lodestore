@@ -609,6 +609,15 @@ fn source_blocks_reject_unknown_fields() {
 }
 
 #[test]
+fn policy_refuses_the_image_source() {
+    let all = parse_yaml(&sourced("    type: image\n")).unwrap_err();
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert_eq!(all[0].path.as_deref(), Some("spec.source.type"), "{all:?}");
+    assert!(all[0].message.contains("unknown variant"), "{all:?}");
+    assert_eq!((all[0].line, all[0].column), (Some(8), Some(11)));
+}
+
+#[test]
 fn source_block_errors_name_the_path() {
     let text = sourced("    type: proxmox-vm\n    vmids: [abc]\n");
     let all = parse_yaml(&text).unwrap_err();

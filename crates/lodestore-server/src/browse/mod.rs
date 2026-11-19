@@ -98,7 +98,7 @@ pub struct RestoreQuery {
     pub before: Option<String>,
     /// Page size, 1 to 200; 50 by default.
     pub limit: Option<u32>,
-    /// Only snapshots of this source type: files, proxmox-vm, proxmox-ct, postgres, postgres-wal or mysql.
+    /// Only snapshots of this source type: files, proxmox-vm, proxmox-ct, postgres, postgres-wal, mysql or image.
     pub source_type: Option<String>,
     /// Canonical source instance key; narrows the list and latest_verified_id to that instance on this host. The same key on another host, as after a migration, is another instance.
     pub source: Option<String>,

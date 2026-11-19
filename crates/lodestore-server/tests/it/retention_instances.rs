@@ -268,6 +268,45 @@ async fn retention_instances_reused_vmid_is_a_new_instance() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retention_instances_image_instances_keep_their_own_history() {
+    for backend in backends() {
+        let mut inst = Instances::start(&backend, &["h1"]).await;
+        let refs = ["image/disk", "image/other", ""];
+        for key in refs {
+            inst.put_days("h1", key, 4).await;
+        }
+        let policy = policy("    keepLast: 1\n");
+        let name = backend.name();
+
+        let plan = inst.plan(&policy).await;
+        for key in refs {
+            let items: Vec<&Planned> = plan["h1"].iter().filter(|i| i.1 == key).collect();
+            assert_eq!(items.len(), 4, "{name} {key}");
+            assert_eq!(items.iter().filter(|i| i.2).count(), 2, "{name} {key}");
+        }
+
+        inst.run(&policy, "h1").await;
+        let both = [T0 + 3 * DAY_MS, T0 + 2 * DAY_MS];
+        let left = inst.left("h1").await;
+        for key in refs {
+            assert_eq!(left[key], both, "{name} {key}");
+        }
+
+        inst.put("h1", "image/disk", T0 + 9 * DAY_MS).await;
+        inst.run(&policy, "h1").await;
+        let left = inst.left("h1").await;
+        assert_eq!(
+            left["image/disk"],
+            [T0 + 9 * DAY_MS, T0 + 3 * DAY_MS],
+            "{name}"
+        );
+        assert_eq!(left["image/other"], both, "{name}");
+        assert_eq!(left[""], both, "{name}");
+        inst.ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn retention_instances_recreated_database_is_a_new_instance() {
     for backend in backends() {
         let mut inst = Instances::start(&backend, &["h1"]).await;
