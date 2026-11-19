@@ -9,7 +9,7 @@ use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 use super::restore::{
-    RestoreRequest, agent_declares_roots, enqueue_restore, replaces_a_disk_image,
+    RestoreRequest, agent_declares_roots, enqueue_restore_checked,
     require_roots_capability,
 };
 use super::{
@@ -915,11 +915,8 @@ pub async fn create_restore(
         .iter()
         .map(|item| decode_b64(item))
         .collect::<Result<Vec<_>, _>>()?;
-    let replaces =
-        replaces_a_disk_image(&state, &body.snapshot_id, &items, body.conflict.to_proto()).await?;
     if let Principal::Session(user) = auth.principal()
         && (body.in_place
-            || replaces
             || body.restore_owners
             || !agent_declares_roots(&state, &body.target_host_id).await?)
     {
@@ -933,13 +930,10 @@ pub async fn create_restore(
     if body.restore_owners {
         auth.require_also(Scope::RestoreInPlace, RESTORE_OWNERS_PURPOSE)?;
     }
-    if replaces {
-        auth.require_also(Scope::RestoreInPlace, RESTORE_IMAGE_OVERWRITE_PURPOSE)?;
-    }
     if matches!(auth.principal(), Principal::Token { .. }) {
         require_roots_capability(&state, &body.target_host_id).await?;
     }
-    let job_id = enqueue_restore(
+    let job_id = enqueue_restore_checked(
         &state,
         RestoreRequest {
             snapshot_id: body.snapshot_id,
@@ -952,6 +946,7 @@ pub async fn create_restore(
             accept_unverified: body.accept_unverified,
         },
         &auth.actor(),
+        || auth.require_also_or_step_up(Scope::RestoreInPlace, RESTORE_IMAGE_OVERWRITE_PURPOSE),
     )
     .await?;
     Ok((StatusCode::CREATED, Json(RestoreCreated { job_id })))

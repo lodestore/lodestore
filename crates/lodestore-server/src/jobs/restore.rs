@@ -196,36 +196,32 @@ pub(crate) async fn require_roots_capability(
 }
 
 /// Whether the restore could replace an existing file with the whole image;
-/// only that needs more than `restore:host`. An unknown snapshot is left to
-/// `enqueue_restore` to report.
-pub(crate) async fn replaces_a_disk_image(
-    state: &AppState,
-    snapshot_id: &str,
-    items: &[Vec<u8>],
-    conflict: ConflictPolicy,
-) -> Result<bool, ApiError> {
-    if items != [b"/".to_vec()]
-        || !matches!(
-            conflict,
+/// only that needs more than `restore:host`.
+fn replaces_a_disk_image(source_type: &str, req: &RestoreRequest) -> bool {
+    source_type == "image"
+        && req.items == [b"/".to_vec()]
+        && matches!(
+            req.conflict,
             ConflictPolicy::OverwriteChanged | ConflictPolicy::Unspecified
         )
-    {
-        return Ok(false);
-    }
-    let row = sqlx::query("SELECT source_type FROM snapshots WHERE id = $1")
-        .bind(snapshot_id)
-        .fetch_optional(&state.db.pool)
-        .await?;
-    Ok(match row {
-        Some(row) => row.try_get::<String, _>("source_type")? == "image",
-        None => false,
-    })
 }
 
 pub async fn enqueue_restore(
     state: &AppState,
     req: RestoreRequest,
     started_by: &str,
+) -> Result<String, ApiError> {
+    enqueue_restore_checked(state, req, started_by, || Ok(())).await
+}
+
+/// [`enqueue_restore`] that calls `on_image_replace` when the restore could
+/// replace an existing file with a whole disk image, decided from the same
+/// snapshot row the restore is queued from.
+pub async fn enqueue_restore_checked(
+    state: &AppState,
+    req: RestoreRequest,
+    started_by: &str,
+    on_image_replace: impl FnOnce() -> Result<(), ApiError>,
 ) -> Result<String, ApiError> {
     let destination = check_destination(&req)?;
     if req.items.is_empty() {
@@ -248,6 +244,9 @@ pub async fn enqueue_restore(
         return Err(invalid(
             "A disk image cannot be restored in place; restore it into a folder.",
         ));
+    }
+    if replaces_a_disk_image(&source_type, &req) {
+        on_image_replace()?;
     }
     if source_type == "image" && req.items == [b"/".to_vec()] {
         image = Some(signed_image(state, &req.snapshot_id).await?);
