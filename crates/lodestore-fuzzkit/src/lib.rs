@@ -311,7 +311,9 @@ pub fn image_layout(data: &[u8]) {
         );
         // The chunk table is one entry per chunk; only a one-segment image is built here.
         if layout.size <= SEGMENT_CHUNKS * IMAGE_CHUNK_SIZE {
-            let table = layout.chunk_table();
+            let table = layout
+                .chunk_table()
+                .expect("a parsed layout has a chunk table");
             assert_eq!(table.len() as u64, layout.size.div_ceil(IMAGE_CHUNK_SIZE));
             let per_segment = layout.segment_size.div_ceil(IMAGE_CHUNK_SIZE).max(1);
             let again = segment_nodes(layout.size, &table, per_segment)

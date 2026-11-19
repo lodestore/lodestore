@@ -854,9 +854,11 @@ fn check_segment(node: &pb::Node) -> Result<()> {
 }
 
 impl ImageLayout {
-    /// One entry per chunk of the image.
-    pub fn chunk_table(&self) -> Vec<ChunkRef> {
-        let total = usize::try_from(self.size.div_ceil(IMAGE_CHUNK_SIZE)).unwrap_or(0);
+    /// One entry per chunk of the image; a layout whose ids do not fill its
+    /// extents is an error, never a table with zero chunks in their place.
+    pub fn chunk_table(&self) -> Result<Vec<ChunkRef>> {
+        let total = usize::try_from(self.size.div_ceil(IMAGE_CHUNK_SIZE))
+            .map_err(|_| bad("the image has too many chunks"))?;
         let mut table = vec![ChunkRef::Zero; total];
         let per_segment = self.segment_size / IMAGE_CHUNK_SIZE;
         for (index, segment) in self.segments.iter().enumerate() {
@@ -865,22 +867,20 @@ impl ImageLayout {
             for e in &segment.sparse_extents {
                 let first = base.saturating_add(e.offset / IMAGE_CHUNK_SIZE);
                 for k in 0..e.length.div_ceil(IMAGE_CHUNK_SIZE) {
-                    let Some(id) = ids
+                    let id = ids
                         .next()
-                        .and_then(|raw| BlobId::try_from(raw.as_slice()).ok())
-                    else {
-                        return table;
-                    };
+                        .ok_or_else(|| bad("a segment has fewer chunk ids than chunks"))?;
+                    let id = BlobId::try_from(id.as_slice())
+                        .map_err(|_| bad("a chunk id is not 32 bytes"))?;
                     let slot = usize::try_from(first.saturating_add(k))
                         .ok()
-                        .and_then(|at| table.get_mut(at));
-                    if let Some(slot) = slot {
-                        *slot = ChunkRef::Data(id);
-                    }
+                        .and_then(|at| table.get_mut(at))
+                        .ok_or_else(|| bad("a chunk lies outside the image"))?;
+                    *slot = ChunkRef::Data(id);
                 }
             }
         }
-        table
+        Ok(table)
     }
 }
 

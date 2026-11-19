@@ -504,7 +504,10 @@ async fn image_load_picks_the_named_disk_among_neighbours() {
     let mut r = reader(&repo_dir).await;
     let loaded = load_image(&mut r, &id, "disk").await.unwrap();
     assert_eq!(loaded.layout.size, 8 * MIB);
-    assert_eq!(loaded.layout.chunk_table(), vec![ChunkRef::Zero; 2]);
+    assert_eq!(
+        loaded.layout.chunk_table().unwrap(),
+        vec![ChunkRef::Zero; 2]
+    );
     assert_eq!(loaded.file_name(), b"disk.img");
     assert_eq!(
         loaded.head().unwrap(),
@@ -757,7 +760,7 @@ proptest! {
         let nodes = segment_nodes(size, &chunks, per_segment).unwrap();
         let layout = parse_layout(&nodes).unwrap();
         prop_assert_eq!(layout.size, size);
-        prop_assert_eq!(layout.chunk_table(), chunks.clone());
+        prop_assert_eq!(layout.chunk_table().unwrap(), chunks.clone());
         let again = segment_nodes(size, &chunks, per_segment).unwrap();
         prop_assert_eq!(
             nodes.iter().map(Message::encode_to_vec).collect::<Vec<_>>(),
@@ -952,7 +955,30 @@ fn image_worst_segment_fits_a_tree_blob() {
         "{}",
         blob.len()
     );
-    assert_eq!(parse_layout(&nodes).unwrap().chunk_table(), chunks);
+    assert_eq!(parse_layout(&nodes).unwrap().chunk_table().unwrap(), chunks);
+}
+
+#[test]
+fn chunk_table_refuses_a_layout_it_cannot_fill() {
+    let chunks: Vec<ChunkRef> = (1..=3u8).map(|i| ChunkRef::Data([i; 32])).collect();
+    let nodes = segment_nodes(3 * C, &chunks, 2).unwrap();
+    let layout = parse_layout(&nodes).unwrap();
+    assert_eq!(layout.chunk_table().unwrap(), chunks);
+
+    let mut short = layout.clone();
+    short.segments[0].content.pop();
+    assert!(short.chunk_table().is_err(), "an id is missing");
+
+    let mut narrow = layout.clone();
+    narrow.segments[1].content[0].truncate(31);
+    assert!(narrow.chunk_table().is_err(), "an id is not 32 bytes");
+
+    let mut small = layout.clone();
+    small.size = C;
+    assert!(
+        small.chunk_table().is_err(),
+        "an extent lands past the table"
+    );
 }
 
 #[test]
@@ -1264,6 +1290,7 @@ async fn parent_table(repo: &Path, parent: &BlobId) -> Vec<ChunkRef> {
         .unwrap()
         .layout
         .chunk_table()
+        .unwrap()
 }
 
 async fn incremental_with(

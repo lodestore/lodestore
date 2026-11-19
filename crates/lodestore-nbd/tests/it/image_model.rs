@@ -695,7 +695,13 @@ pub async fn run_backup(env: &Env, cfg: &Cfg, w: &mut World, spec: &RunSpec) -> 
         let mut reader = env.reader().await;
         match load_image(&mut reader, &parent, "disk").await {
             Ok(image) if image.layout.size == size => {
-                parent_table = Some((parent, image.layout.chunk_table()));
+                parent_table = Some((
+                    parent,
+                    image
+                        .layout
+                        .chunk_table()
+                        .expect("a loaded layout has a chunk table"),
+                ));
                 parent_reader = Some(CountingParent {
                     inner: reader,
                     count: 0,
