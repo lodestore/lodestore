@@ -76,12 +76,9 @@ fn open_checked(path: &Path) -> Result<(File, u64)> {
 #[cfg(target_os = "linux")]
 fn in_use(path: &Path) -> Result<Option<String>> {
     use std::fs;
-    use std::io::Read;
     use std::path::PathBuf;
 
     use anyhow::Context;
-
-    const MAX_MOUNTINFO: u64 = 4 << 20;
 
     let canonical =
         fs::canonicalize(path).with_context(|| format!("cannot resolve {}", path.display()))?;
@@ -100,9 +97,8 @@ fn in_use(path: &Path) -> Result<Option<String>> {
     let sys = fs::canonicalize(PathBuf::from("/sys/dev/block").join(numbers.trim()))
         .map_err(|e| unverifiable("sysfs", e))?;
 
-    let mut raw = Vec::new();
-    fs::File::open("/proc/self/mountinfo")
-        .and_then(|f| f.take(MAX_MOUNTINFO).read_to_end(&mut raw))
+    let raw = fs::File::open("/proc/self/mountinfo")
+        .and_then(|f| read_capped(f, MAX_MOUNTINFO))
         .map_err(|e| unverifiable("mountinfo", e))?;
     for line in String::from_utf8_lossy(&raw).lines() {
         let mut fields = line.split(' ');
@@ -130,4 +126,36 @@ fn in_use(path: &Path) -> Result<Option<String>> {
         )));
     }
     Ok(None)
+}
+
+#[cfg(any(target_os = "linux", test))]
+const MAX_MOUNTINFO: u64 = 4 << 20;
+
+/// Reads all of `source`, or fails when it holds more than `max` bytes: a
+/// mount table cut short could hide the mount that makes a device busy.
+#[cfg(any(target_os = "linux", test))]
+fn read_capped(source: impl std::io::Read, max: u64) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut raw = Vec::new();
+    source.take(max + 1).read_to_end(&mut raw)?;
+    if raw.len() as u64 > max {
+        return Err(std::io::Error::other(format!(
+            "it is larger than {max} bytes"
+        )));
+    }
+    Ok(raw)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_MOUNTINFO, read_capped};
+
+    #[test]
+    fn mount_table_over_the_limit_is_refused() {
+        let max = MAX_MOUNTINFO as usize;
+        assert_eq!(read_capped(&vec![b'a'; max][..], MAX_MOUNTINFO).unwrap().len(), max);
+        assert!(read_capped(&vec![b'a'; max + 1][..], MAX_MOUNTINFO).is_err());
+        assert_eq!(read_capped(&b"x"[..], 0).ok(), None);
+        assert_eq!(read_capped(&b""[..], 0).unwrap(), b"");
+    }
 }
