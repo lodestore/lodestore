@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 lodestore-format = { path = "../lodestore-format" }
 lodestore-policy = { path = "../lodestore-policy" }
+lodestore-nbd = { path = "../lodestore-nbd" }
 clap = { version = "4.6.7", features = ["derive"] }
 tokio = { version = "1.53.2", features = ["rt", "signal", "time", "net"] }
 anyhow = "1.0.104"

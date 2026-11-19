@@ -546,8 +546,9 @@ pub struct BackupFlags {
     #[arg(long, requires = "name", conflicts_with = "paths")]
     pub stdin: bool,
 
-    /// Back up a disk image: a regular file or a block device, read whole;
-    /// zero chunks are stored as holes
+    /// Back up a disk image: a regular file or a block device, read whole, or
+    /// an NBD export `nbd+unix:///EXPORT?socket=PATH`; zero chunks are stored
+    /// as holes
     #[arg(
         long,
         value_name = "SOURCE",
@@ -557,6 +558,12 @@ pub struct BackupFlags {
         ]
     )]
     pub image: Option<String>,
+
+    /// With an NBD --image: the dirty bitmap of the export that collects the
+    /// changes since the last backup, named `lode-<repo>-<instance>-g<N>`. The
+    /// export must also offer the next one, `...-g<N+1>`
+    #[arg(long, value_name = "BITMAP", requires = "image")]
+    pub bitmap: Option<String>,
 
     /// With --stdin or --image: the name of the stream or the disk image
     /// (default for --image: the file name of SOURCE). A stream is stored as

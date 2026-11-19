@@ -9,7 +9,7 @@ use lodestore_format::attest::{
     read_attestations_complete,
 };
 use lodestore_format::config::MAX_CONFIG_SIZE;
-use lodestore_format::crypto::{BlobId, Entropy};
+use lodestore_format::crypto::{BlobId, Entropy, RepoId};
 use lodestore_format::index::{hex32, parse_hex32};
 use lodestore_format::keys::{ReadKeys, WriteKeys};
 use lodestore_format::locks::{
@@ -109,6 +109,7 @@ impl Marker {
 }
 
 pub struct Opened {
+    pub repo_id: RepoId,
     pub writer: Writer<Store>,
     /// `Some` when the repository was opened with a secret, so the caller can
     /// read the parent snapshot; with writer keys it is `None`.
@@ -153,7 +154,7 @@ fn cache_base() -> Option<PathBuf> {
         })
 }
 
-fn cache_dir(repo_id: &[u8]) -> Option<PathBuf> {
+pub(crate) fn cache_dir(repo_id: &[u8]) -> Option<PathBuf> {
     cache_base().map(|base| {
         base.join("lode")
             .join(data_encoding::HEXLOWER.encode(repo_id))
@@ -359,6 +360,7 @@ pub async fn open_for_write(
     .await;
     match opened {
         Ok((writer, reader, strict)) => Ok(Opened {
+            repo_id: *repo.read_keys().repo_id(),
             writer,
             reader,
             marker,
@@ -397,6 +399,7 @@ async fn open_with_writer_keys(
     if let Some(refusal) = writer_keys_refusal(&hints, upgrade_marked(&keys.repo_id), no_gc_check) {
         anyhow::bail!(refusal);
     }
+    let repo_id = keys.repo_id;
     let marker = put_marker(url, &keys, hostname).await?;
     let opened = async {
         let writer = Writer::connect(store, keys)
@@ -409,6 +412,7 @@ async fn open_with_writer_keys(
     .await;
     match opened {
         Ok(writer) => Ok(Opened {
+            repo_id,
             writer,
             reader: None,
             marker,
