@@ -1,4 +1,5 @@
 use crate::common::{PASSWORD, cache_dir_of, init_repo, lode, pseudo_random};
+use crate::planted::{attacker_keys, plant_blobs};
 
 use std::fs;
 use std::ops::Range;
@@ -7,7 +8,12 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
-use lodestore_format::image::BitmapNames;
+use lodestore_format::attest::{ensure_upgraded, read_attestations};
+use lodestore_format::chunker::blob_id;
+use lodestore_format::crypto::{BLOB_TYPE_DATA, Entropy, RepoId};
+use lodestore_format::image::{BitmapNames, ImageState};
+use lodestore_format::index::parse_hex32;
+use lodestore_format::provenance::ProvenanceSet;
 use lodestore_format::repo::Repository;
 use lodestore_format::source::SourceKey;
 use lodestore_format::store::LocalFsStore;
@@ -190,6 +196,16 @@ impl TestExport {
         self.lock().data.clone()
     }
 
+    fn resize(&self, len: usize) {
+        let mut s = self.lock();
+        let old = s.data.len();
+        if len > old {
+            s.data.extend(pseudo_random(len - old));
+        } else {
+            s.data.truncate(len);
+        }
+    }
+
     fn settled(&self) -> MutexGuard<'_, Shared> {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
@@ -232,17 +248,28 @@ fn disk() -> Vec<u8> {
     data
 }
 
-fn names_of(repo: &Path, host: &str, image: &str) -> BitmapNames {
-    let rt = tokio::runtime::Builder::new_current_thread()
+fn block_on<F: std::future::Future>(f: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .unwrap();
-    let repo_id = rt.block_on(async {
+        .unwrap()
+        .block_on(f)
+}
+
+fn repo_id_of(repo: &Path) -> RepoId {
+    block_on(async {
         let store = LocalFsStore::new(repo.to_path_buf());
         let repository = Repository::open(&store, PASSWORD.as_bytes()).await.unwrap();
         *repository.read_keys().repo_id()
-    });
-    BitmapNames::new(&repo_id, host.as_bytes(), &SourceKey::image(image).unwrap())
+    })
+}
+
+fn names_of(repo: &Path, host: &str, image: &str) -> BitmapNames {
+    BitmapNames::new(
+        &repo_id_of(repo),
+        host.as_bytes(),
+        &SourceKey::image(image).unwrap(),
+    )
 }
 
 struct Env {
@@ -285,19 +312,34 @@ impl Env {
     }
 
     fn run_at(&self, uri: &str, extra: &[&str]) -> Value {
-        let out = self
-            .backup(uri, extra)
-            .assert()
-            .success()
-            .get_output()
-            .stdout
-            .clone();
-        String::from_utf8(out)
-            .unwrap()
-            .lines()
-            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-            .find(|v| v["type"] == "backup_summary")
-            .expect("a backup_summary line")
+        summary_of(self.backup(uri, extra))
+    }
+
+    fn run_in_cache(&self, cache: &Path, extra: &[&str]) -> Value {
+        let mut cmd = self.backup(&self.export.uri(), extra);
+        cmd.env("XDG_CACHE_HOME", cache);
+        summary_of(cmd)
+    }
+
+    fn state_file(&self) -> PathBuf {
+        state_files(&self.cache()).pop().expect("a state file")
+    }
+
+    fn rewrite_state(&self, change: impl FnOnce(&mut ImageState)) {
+        let path = self.state_file();
+        let key = SourceKey::image(EXPORT).unwrap();
+        let repo_id = repo_id_of(&self.repo);
+        let mut state =
+            ImageState::parse(&fs::read(&path).unwrap(), &repo_id, HOST.as_bytes(), &key).unwrap();
+        change(&mut state);
+        fs::write(path, state.encode(&repo_id, HOST.as_bytes(), &key)).unwrap();
+    }
+
+    fn assert_restores(&self, summary: &Value) {
+        assert!(
+            self.restored(summary) == self.export.data(),
+            "restore differs from the disk"
+        );
     }
 
     fn run_bitmap(&self, generation: u64) -> Value {
@@ -330,6 +372,16 @@ impl Env {
         let state = state_files(&self.cache()).pop().expect("a state file");
         state.with_extension("lock")
     }
+}
+
+fn summary_of(mut cmd: Command) -> Value {
+    let out = cmd.assert().success().get_output().stdout.clone();
+    String::from_utf8(out)
+        .unwrap()
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .find(|v| v["type"] == "backup_summary")
+        .expect("a backup_summary line")
 }
 
 fn read_mode(summary: &Value) -> (&str, Option<&str>) {
@@ -623,4 +675,213 @@ fn image_bitmap_aborted_run_forces_a_full_read() {
     let third = env.run_bitmap(2);
     assert_eq!(read_mode(&third), ("full", Some("no_state")));
     assert_eq!(env.restored(&third), export.data());
+}
+
+fn signed_snapshots(repo: &Path) -> ProvenanceSet {
+    block_on(async {
+        let store = LocalFsStore::new(repo.to_path_buf());
+        let repository = Repository::open(&store, PASSWORD.as_bytes()).await.unwrap();
+        let set = read_attestations(&store, repository.read_keys())
+            .await
+            .unwrap();
+        ProvenanceSet::from_attested(&set, repository.read_keys())
+    })
+}
+
+fn plant_then_upgrade(repo: &Path, content: &[u8]) {
+    block_on(async {
+        let store = LocalFsStore::new(repo.to_path_buf());
+        let repository = Repository::open(&store, PASSWORD.as_bytes()).await.unwrap();
+        let keys = attacker_keys(&repository);
+        let id = blob_id(&keys.k_id, content);
+        plant_blobs(&store, &keys, &[(id, BLOB_TYPE_DATA)]).await;
+        ensure_upgraded(&store, repository.read_keys(), &mut Entropy::os())
+            .await
+            .unwrap();
+    });
+}
+
+#[test]
+fn image_bitmap_rejected_snapshot_forces_a_full_read() {
+    let env = setup();
+    let export = &env.export;
+    let lie = pseudo_random(CHUNK);
+    plant_then_upgrade(&env.repo, &lie);
+    for g in [1, 2, 3, 4] {
+        export.add_bitmap(&env.bitmap(g));
+    }
+    export.export_bitmaps(&[&env.bitmap(1), &env.bitmap(2)]);
+    env.run(&[]);
+    env.run_bitmap(1);
+    export.export_bitmaps(&[&env.bitmap(2), &env.bitmap(3)]);
+    let incremental = env.run_bitmap(2);
+    assert_eq!(read_mode(&incremental), ("incremental", None));
+    assert_eq!(signed_snapshots(&env.repo).len(), 3);
+    assert_eq!(env.state_bytes().len(), 1);
+
+    export.write(3 * CHUNK as u64, &lie);
+    export.export_bitmaps(&[&env.bitmap(3), &env.bitmap(4)]);
+    let name = env.bitmap(3);
+    let failed = env
+        .backup(&export.uri(), &["--bitmap", &name])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&failed.get_output().stderr).to_string();
+    assert!(stderr.contains("does not check out"), "{stderr}");
+    assert_eq!(signed_snapshots(&env.repo).len(), 3);
+    assert!(env.state_bytes().is_empty());
+
+    let retry = env.run_bitmap(3);
+    assert_eq!(read_mode(&retry), ("full", Some("no_state")));
+    let signed = signed_snapshots(&env.repo);
+    assert_eq!(signed.len(), 4);
+    assert!(signed.contains(&parse_hex32(retry["snapshot_id"].as_str().unwrap()).unwrap()));
+    env.assert_restores(&retry);
+}
+
+#[test]
+fn image_bitmap_lost_cache_reads_in_full_and_keeps_dedup() {
+    let env = setup();
+    let export = &env.export;
+    for g in [1, 2, 3, 4] {
+        export.add_bitmap(&env.bitmap(g));
+    }
+    export.export_bitmaps(&[&env.bitmap(1), &env.bitmap(2)]);
+    env.run(&[]);
+    env.run_bitmap(1);
+    export.export_bitmaps(&[&env.bitmap(2), &env.bitmap(3)]);
+    let before = env.run_bitmap(2);
+    assert_eq!(read_mode(&before), ("incremental", None));
+    assert_eq!(env.state_bytes().len(), 1);
+
+    fs::remove_dir_all(env.cache()).unwrap();
+    export.export_bitmaps(&[&env.bitmap(3), &env.bitmap(4)]);
+    let after = env.run_bitmap(3);
+    assert_eq!(read_mode(&after), ("full", Some("no_state")));
+    assert_eq!(after["stats"]["bytes_added"], 0, "{after}");
+    env.assert_restores(&after);
+}
+
+#[test]
+fn image_bitmap_newer_snapshot_forces_a_full_read() {
+    let env = setup();
+    let export = &env.export;
+    for g in [1, 2, 3] {
+        export.add_bitmap(&env.bitmap(g));
+    }
+    export.export_bitmaps(&[&env.bitmap(1), &env.bitmap(2)]);
+    env.run(&[]);
+    env.run_bitmap(1);
+
+    let other_machine = tempfile::tempdir().unwrap();
+    let name = env.bitmap(1);
+    let foreign = env.run_in_cache(other_machine.path(), &["--bitmap", &name]);
+    assert_eq!(read_mode(&foreign), ("full", Some("no_state")));
+
+    export.export_bitmaps(&[&env.bitmap(2), &env.bitmap(3)]);
+    let ours = env.run_bitmap(2);
+    assert_eq!(read_mode(&ours), ("full", Some("parent_not_newest")));
+    env.assert_restores(&ours);
+}
+
+#[test]
+fn image_bitmap_resized_disk_reads_in_full() {
+    let env = setup();
+    let export = &env.export;
+    for g in [1, 2, 3] {
+        export.add_bitmap(&env.bitmap(g));
+    }
+    export.export_bitmaps(&[&env.bitmap(1), &env.bitmap(2)]);
+    env.run(&[]);
+    env.run_bitmap(1);
+    let size = export.data().len();
+
+    export.resize(size + (1 << 20));
+    export.export_bitmaps(&[&env.bitmap(2), &env.bitmap(3)]);
+    let grown = env.run_bitmap(2);
+    assert_eq!(read_mode(&grown), ("full", Some("size_changed")));
+    env.assert_restores(&grown);
+
+    export.add_bitmap(&env.bitmap(4));
+    export.resize(size - (1 << 20));
+    export.export_bitmaps(&[&env.bitmap(3), &env.bitmap(4)]);
+    let shrunk = env.run_bitmap(3);
+    assert_eq!(read_mode(&shrunk), ("full", Some("size_changed")));
+    env.assert_restores(&shrunk);
+
+    export.remove_bitmap(&env.bitmap(4));
+    export.resize(size - (1 << 20) - CHUNK);
+    export.resize(size - (1 << 20));
+    for g in [5, 6] {
+        export.add_bitmap(&env.bitmap(g));
+    }
+    export.export_bitmaps(&[&env.bitmap(5), &env.bitmap(6)]);
+    let recreated = env.run_bitmap(5);
+    assert_eq!(read_mode(&recreated), ("full", Some("gen_mismatch")));
+    env.assert_restores(&recreated);
+
+    export.add_bitmap(&env.bitmap(7));
+    export.write(8192, &[0x3C; 4096]);
+    export.export_bitmaps(&[&env.bitmap(6), &env.bitmap(7)]);
+    let again = env.run_bitmap(6);
+    assert_eq!(read_mode(&again), ("incremental", None));
+    env.assert_restores(&again);
+}
+
+#[test]
+fn image_bitmap_tampered_state_reads_in_full() {
+    let env = setup();
+    let export = &env.export;
+    for g in [1, 2, 3, 4] {
+        export.add_bitmap(&env.bitmap(g));
+    }
+    export.export_bitmaps(&[&env.bitmap(1), &env.bitmap(2)]);
+    env.run_bitmap(1);
+
+    env.rewrite_state(|s| s.bitmap_gen += 1);
+    export.export_bitmaps(&[&env.bitmap(2), &env.bitmap(3)]);
+    let ahead = env.run_bitmap(2);
+    assert_eq!(read_mode(&ahead), ("full", Some("gen_mismatch")));
+    env.assert_restores(&ahead);
+
+    let behind = env.run_bitmap(2);
+    assert_eq!(read_mode(&behind), ("full", Some("gen_mismatch")));
+    env.assert_restores(&behind);
+
+    export.export_bitmaps(&[&env.bitmap(3), &env.bitmap(4)]);
+    fs::write(env.state_file(), b"garbage").unwrap();
+    let garbage = env.run_bitmap(3);
+    assert_eq!(read_mode(&garbage), ("full", Some("state_unreadable")));
+    env.assert_restores(&garbage);
+}
+
+#[test]
+fn image_bitmap_two_exports_with_an_explicit_name_read_in_full() {
+    let env = setup();
+    let a = &env.export;
+    for g in [1, 2] {
+        a.add_bitmap(&env.bitmap(g));
+    }
+    a.export_bitmaps(&[&env.bitmap(1), &env.bitmap(2)]);
+    let first = env.run_at(&a.uri(), &["--name", EXPORT]);
+    assert_eq!(read_mode(&first), ("full", Some("no_bitmap")));
+    env.run_at(&a.uri(), &["--name", EXPORT, "--bitmap", &env.bitmap(1)]);
+    assert_eq!(env.state_bytes().len(), 1);
+
+    let mut other = disk();
+    other[CHUNK..2 * CHUNK].copy_from_slice(&pseudo_random(CHUNK));
+    let b = TestExport::start(other);
+    for g in [2, 3, 4] {
+        b.add_bitmap(&env.bitmap(g));
+    }
+    b.export_bitmaps(&[&env.bitmap(2), &env.bitmap(3)]);
+    let swapped = env.run_at(&b.uri(), &["--name", EXPORT, "--bitmap", &env.bitmap(2)]);
+    assert_eq!(read_mode(&swapped), ("full", Some("source_changed")));
+    assert_eq!(env.restored(&swapped), b.data());
+
+    b.write(2 * CHUNK as u64 + 8192, &[0x77; 4096]);
+    b.export_bitmaps(&[&env.bitmap(3), &env.bitmap(4)]);
+    let next = env.run_at(&b.uri(), &["--name", EXPORT, "--bitmap", &env.bitmap(3)]);
+    assert_eq!(read_mode(&next), ("incremental", None));
+    assert_eq!(env.restored(&next), b.data());
 }
