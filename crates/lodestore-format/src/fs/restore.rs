@@ -1205,9 +1205,10 @@ mod tests {
         assert_eq!(restorer.stats().verified, 1);
 
         let dense = noise(6 << 20, 3);
-        let ids: Vec<Vec<u8>> = Chunker::new(dense.as_slice(), &zeroize::Zeroizing::new([0; 32]), 0)
-            .map(|c| c.unwrap().id.to_vec())
-            .collect();
+        let ids: Vec<Vec<u8>> =
+            Chunker::new(dense.as_slice(), &zeroize::Zeroizing::new([0; 32]), 0)
+                .map(|c| c.unwrap().id.to_vec())
+                .collect();
         let node = pb::Node {
             name: b"dense".to_vec(),
             size: dense.len() as u64,
