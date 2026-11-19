@@ -22,7 +22,7 @@ lode backup --image disk.raw
 
 The second command names the image `disk.raw`, the file name of the source. The command prints `snapshot ID saved` and a line with the key of the image (`image/db-disk`), its size and how it was read. With `--json` the `backup_summary` carries `image.key`, `image.size` and `image.read_mode` (`full`).
 
-The name is what identifies the disk. It is 1 to 200 bytes of UTF-8, with no `/`, no control characters and not `.` or `..`; a name made mostly of non-ASCII characters can exceed the 512-byte limit of the key once it is percent-encoded, and is refused before anything is written. A wrong name, or `--image` together with paths, `--stdin`, `--parent` or `--exclude`, exits with code 2.
+The name is what identifies the disk. It is 1 to 200 bytes of UTF-8, with no `/`, no control characters and not `.` or `..`; once percent-encoded it is at most 506 bytes (each byte outside `A-Z a-z 0-9 - . _ ~` counts as three), so a name of non-ASCII characters is shorter: 84 characters like `ü` at most. A wrong name, or `--image` together with paths, `--stdin`, `--parent` or `--exclude`, exits with code 2.
 
 Use one name for one disk. Two different disks backed up under the same name are one instance: they share retention and `latest@image/NAME`. The name, not the device path, is the identity, because `/dev/sdX` changes between boots and a disk can have several paths.
 

@@ -342,7 +342,7 @@ lode snapshots --json
 | Option | Meaning |
 |--------|---------|
 | `--image SOURCE` | The file or block device to read. A value with `://` is refused. Cannot be combined with paths, `--stdin`, `--parent`, `--force-rescan`, `--exclude`, `--exclude-file`, `--one-file-system` or `--exclude-caches` |
-| `--name NAME` | The name of the image, 1 to 200 bytes of UTF-8 with no `/` or control character, not `.` or `..`. Default: the file name of `SOURCE`. `--name` also works with `--stdin`. A name of mostly non-ASCII characters can exceed the 512-byte limit of the key once percent-encoded; the command then refuses it before it writes anything |
+| `--name NAME` | The name of the image, 1 to 200 bytes of UTF-8 with no `/` or control character, not `.` or `..`. Default: the file name of `SOURCE`. `--name` also works with `--stdin`. Percent-encoded it is at most 506 bytes (each byte outside `A-Z a-z 0-9 - . _ ~` counts as three); a longer name is refused before the source is read |
 
 The key of the image is `image/NAME` ([ADR 0007](/docs/adr/0007-source-model/)). With `--json`, `backup_summary` has an `image` object with `key`, `size` (bytes) and `read_mode` (`full`); without it the command prints `snapshot ID saved` and one line about the image. A wrong name, a value with `://` and an incompatible flag exit with code 2. In a repository with signatures the snapshot is signed with the repository password after it is checked, with the source `image/NAME`.
 
