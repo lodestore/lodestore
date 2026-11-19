@@ -939,32 +939,44 @@ async fn server_is_read_only() {
     assert!(o.0.is_empty(), "an oversized write gets no reply");
 }
 
-/// A reply of one-byte holes in descending order is checked in time linear in its size.
-#[tokio::test]
-async fn client_reads_many_descending_holes_fast() {
-    const N: usize = 262_144;
-    let hs = script::handshake(M, None, &[]);
-    let mut bytes = hs;
-    for i in (0..N).rev() {
-        let flags = if i == 0 { D } else { 0 };
-        bytes.extend_from_slice(&script::hole(flags, 1, REQ_OFF + i as u64, 1));
+/// The time a read takes when the reply is `N` one-byte holes in the given order.
+async fn time_of_one_byte_holes(n: usize, descending: bool) -> Duration {
+    let mut bytes = script::handshake(M, None, &[]);
+    let order: Vec<usize> = if descending {
+        (0..n).rev().collect()
+    } else {
+        (0..n).collect()
+    };
+    for (k, i) in order.iter().enumerate() {
+        let flags = if k + 1 == n { D } else { 0 };
+        bytes.extend_from_slice(&script::hole(flags, 1, REQ_OFF + *i as u64, 1));
     }
     let (client, mut server) = duplex(16 << 20);
     server.write_all(&bytes).await.unwrap();
     let limits = Limits {
-        max_extents: N,
-        op_timeout: Duration::from_secs(10),
+        max_extents: n,
+        op_timeout: Duration::from_secs(60),
         ..limits()
     };
     let mut client = Client::handshake(client, "", &[], limits).await.unwrap();
     let started = std::time::Instant::now();
-    let got = client.read(REQ_OFF, N as u32).await.unwrap();
+    let got = client.read(REQ_OFF, n as u32).await.unwrap();
     let elapsed = started.elapsed();
-    assert_eq!(got.len(), N);
+    assert_eq!(got.len(), n);
     assert!(got.iter().all(|&b| b == 0));
-    assert!(
-        elapsed < Duration::from_secs(5),
-        "{N} descending holes took {elapsed:?}"
-    );
     drop(server);
+    elapsed
+}
+
+/// A reply of one-byte holes in descending order is checked in time linear in
+/// its size: it takes about as long as the same holes in ascending order.
+#[tokio::test]
+async fn client_reads_many_descending_holes_fast() {
+    const N: usize = 262_144;
+    let ascending = time_of_one_byte_holes(N, false).await;
+    let descending = time_of_one_byte_holes(N, true).await;
+    assert!(
+        descending <= ascending * 4 + Duration::from_secs(1),
+        "{N} descending holes took {descending:?}, ascending {ascending:?}"
+    );
 }
