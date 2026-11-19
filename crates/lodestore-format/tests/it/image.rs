@@ -118,7 +118,11 @@ impl ImageSource for MemSource {
                     (next.unwrap_or(end).min(end) - pos, false)
                 }
             };
-            out.push(ImageExtent { len: run, zero });
+            out.push(ImageExtent {
+                len: run,
+                zero,
+                dirty: false,
+            });
             pos += run;
         }
         match self.lie {
@@ -132,6 +136,7 @@ impl ImageSource for MemSource {
                 ImageExtent {
                     len: 0,
                     zero: false,
+                    dirty: false,
                 },
             ),
             _ => {}
