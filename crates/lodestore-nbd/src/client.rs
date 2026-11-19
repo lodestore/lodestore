@@ -311,16 +311,7 @@ fn place(
     if covered.len() >= max_pieces {
         return protocol("too many data pieces in one reply");
     }
-    let i = covered.partition_point(|&(s, _)| s < offset);
-    let overlaps_prev = i
-        .checked_sub(1)
-        .and_then(|p| covered.get(p))
-        .is_some_and(|&(_, e)| e > offset);
-    let overlaps_next = covered.get(i).is_some_and(|&(s, _)| s < end);
-    if overlaps_prev || overlaps_next {
-        return protocol("overlapping data ranges");
-    }
-    covered.insert(i, (offset, end));
+    covered.push((offset, end));
     usize::try_from(offset - window.0).or_else(|_| protocol("data offset"))
 }
 
@@ -522,6 +513,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
                 _ => return protocol("an unknown reply chunk type"),
             }
             if done {
+                covered.sort_unstable();
+                if covered.windows(2).any(|w| w[0].1 > w[1].0) {
+                    return protocol("overlapping data ranges");
+                }
                 if total != u64::from(len) {
                     return protocol("the reply does not cover the request");
                 }
