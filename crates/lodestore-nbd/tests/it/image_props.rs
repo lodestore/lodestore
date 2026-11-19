@@ -5,6 +5,7 @@
 use std::cell::Cell;
 
 use lodestore_format::image::{FullReason, ReadPlan};
+use lodestore_nbd::Limits;
 use proptest::prelude::*;
 use proptest::test_runner::{Config, FileFailurePersistence, RngAlgorithm, TestRng, TestRunner};
 
@@ -109,7 +110,9 @@ fn case_strategy() -> impl Strategy<Value = Case> {
         2 => Just(Transport::Direct(ZeroHint::Always)),
         1 => Just(Transport::Direct(ZeroHint::Never)),
         1 => Just(Transport::Direct(ZeroHint::Alternate)),
-        4 => Just(Transport::Nbd),
+        4 => Just(Transport::Nbd {
+            block_max: Limits::default().max_read
+        }),
     ];
     (
         granule,
@@ -188,7 +191,7 @@ async fn run_case(case: &Case, tally: &Tally) -> Result<(), TestCaseError> {
     let mut w = World::new(initial_disk(&case.fills, case.tail), case.granule);
     let mut ex = Expect::default();
     let mut had_incremental = false;
-    if matches!(case.transport, Transport::Nbd) {
+    if matches!(case.transport, Transport::Nbd { .. }) {
         Tally::add(&tally.nbd_cases, 1);
     }
     for step in &case.steps {
@@ -462,7 +465,9 @@ impl Judged {
 async fn judge(env: &Env, cfg: &Cfg, w: &mut World, spec: &RunSpec) -> Judged {
     let out = run_backup(env, cfg, w, spec).await;
     let reference = reference_full_read(env, &out.frozen, out.time, cfg.segment_chunks).await;
-    let snapshot = out.snapshot.expect("the run was accepted");
+    let snapshot = out
+        .snapshot
+        .unwrap_or_else(|| panic!("the run was accepted: {:?}", out.error));
     let restored = restore_bytes(env, &snapshot).await;
     let restore_matches = same_bytes(&restored, &out.frozen).is_ok();
     Judged {
@@ -500,6 +505,75 @@ async fn image_props_clear_after_backup_loses_a_window_write() {
         "the comparison with a full read must catch a write lost in the window"
     );
     assert!(!two.restore_matches, "the restore must show the lost write");
+}
+
+#[tokio::test]
+/// An export whose block max is 512 bytes backs up: status requests are not cut to the read size.
+async fn image_props_small_block_max_backs_up() {
+    let cfg = Cfg {
+        segment_chunks: 2,
+        transport: Transport::Nbd { block_max: 512 },
+    };
+    let disk = initial_disk(&[Some(1); 3], 0);
+    let mut w = World::new(disk, CONTROL_GRANULE);
+    let env = Env::new().await;
+    let one = judge(&env, &cfg, &mut w, &RunSpec::plain()).await;
+    assert!(!one.incremental(), "{:?}", one.out.plan);
+    assert_eq!(one.root_tree(), one.reference);
+    assert!(one.restore_matches);
+    w.write(&write_4k(2, 5));
+    let two = judge(&env, &cfg, &mut w, &RunSpec::plain()).await;
+    assert!(two.incremental(), "{:?}", two.out.plan);
+    assert_eq!(two.root_tree(), two.reference);
+    assert!(two.restore_matches);
+}
+
+#[tokio::test]
+/// A `g{N+1}` that is disabled records nothing, so a write made during the read is lost.
+async fn image_props_disabled_next_bitmap_loses_a_window_write() {
+    let (env, cfg, mut w) = rig(3).await;
+    let next = w.bitmaps.n + 1;
+    w.bitmaps.ensure(next);
+    w.bitmaps.disable(next);
+    first_run_with_a_window_write(&env, &cfg, &mut w).await;
+    w.write(&write_4k(2, 5));
+    let two = judge(&env, &cfg, &mut w, &RunSpec::plain()).await;
+    assert!(two.incremental(), "{:?}", two.out.plan);
+    assert_ne!(
+        two.root_tree(),
+        two.reference,
+        "the full-read comparison must catch the write a disabled g{{N+1}} missed"
+    );
+    assert!(!two.restore_matches, "the restore must show the lost write");
+}
+
+#[tokio::test]
+/// A disk reverted or replaced behind the same socket, its bitmaps kept, leaves
+/// bytes of the old disk in the increment.
+async fn image_props_replaced_or_reverted_disk_is_missed() {
+    for variant in ["revert", "replace"] {
+        let (env, cfg, mut w) = rig(3).await;
+        if variant == "revert" {
+            let old = w.disk.clone();
+            w.write(&write_4k(0, 3));
+            first_run_with_a_window_write(&env, &cfg, &mut w).await;
+            w.disk = old;
+        } else {
+            first_run_with_a_window_write(&env, &cfg, &mut w).await;
+            w.disk = initial_disk(&[Some(2); 3], 0);
+        }
+        let two = judge(&env, &cfg, &mut w, &RunSpec::plain()).await;
+        assert!(two.incremental(), "{variant}: {:?}", two.out.plan);
+        assert_ne!(
+            two.root_tree(),
+            two.reference,
+            "{variant}: the full-read comparison must catch a swapped disk"
+        );
+        assert!(
+            !two.restore_matches,
+            "{variant}: the restore must show the swapped disk"
+        );
+    }
 }
 
 #[tokio::test]

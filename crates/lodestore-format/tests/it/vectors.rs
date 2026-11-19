@@ -869,7 +869,7 @@ fn image_vectors() -> Value {
                 .collect();
             let nodes = image::segment_nodes(size, &chunks, per_segment).unwrap();
             let parsed = image::parse_layout(&nodes).unwrap();
-            assert_eq!(parsed.chunk_table(), chunks);
+            assert_eq!(parsed.chunk_table().unwrap(), chunks);
             let merged = image::merge_segments(&parsed, b"disk.img");
             json!({
                 "description": description,

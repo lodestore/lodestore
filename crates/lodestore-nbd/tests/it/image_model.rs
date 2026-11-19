@@ -119,6 +119,7 @@ pub struct Bitmaps {
     pub n: u64,
     granule: u64,
     gens: BTreeMap<u64, BTreeSet<u64>>,
+    disabled: BTreeSet<u64>,
 }
 
 impl Bitmaps {
@@ -127,11 +128,17 @@ impl Bitmaps {
             n: 1,
             granule,
             gens: BTreeMap::new(),
+            disabled: BTreeSet::new(),
         }
     }
 
     pub fn ensure(&mut self, generation: u64) {
         self.gens.entry(generation).or_default();
+    }
+
+    /// What `qemu-img bitmap --disable` leaves: the bitmap is still offered and records nothing.
+    pub fn disable(&mut self, generation: u64) {
+        self.disabled.insert(generation);
     }
 
     pub fn exists(&self, generation: u64) -> bool {
@@ -141,8 +148,10 @@ impl Bitmaps {
     fn mark(&mut self, offset: u64, len: u64) {
         let first = offset / self.granule;
         let last = (offset + len).div_ceil(self.granule);
-        for set in self.gens.values_mut() {
-            set.extend(first..last);
+        for (generation, set) in &mut self.gens {
+            if !self.disabled.contains(generation) {
+                set.extend(first..last);
+            }
         }
     }
 
@@ -266,7 +275,7 @@ pub enum ZeroHint {
 #[derive(Debug, Clone, Copy)]
 pub enum Transport {
     Direct(ZeroHint),
-    Nbd,
+    Nbd { block_max: u32 },
 }
 
 fn inside(ranges: &[Range<u64>], start: u64, end: u64) -> bool {
@@ -572,14 +581,17 @@ async fn open_source(
                 server: None,
             }
         }
-        Transport::Nbd => {
+        Transport::Nbd { block_max } => {
             let mut export = MemExport::new(frozen.to_vec()).min_block(512);
             for (name, ranges) in exports {
                 export = export.with_bitmap(&name, ranges);
             }
             let refuse = export.dirty_only_switch();
             let (client_side, server_side) = tokio::io::duplex(1 << 20);
-            let limits = Limits::default();
+            let limits = Limits {
+                max_read: block_max,
+                ..Limits::default()
+            };
             let server = tokio::spawn(async move {
                 let mut export = export;
                 let served = serve(server_side, &mut export, &limits).await;
@@ -692,7 +704,13 @@ pub async fn run_backup(env: &Env, cfg: &Cfg, w: &mut World, spec: &RunSpec) -> 
         let mut reader = env.reader().await;
         match load_image(&mut reader, &parent, "disk").await {
             Ok(image) if image.layout.size == size => {
-                parent_table = Some((parent, image.layout.chunk_table()));
+                parent_table = Some((
+                    parent,
+                    image
+                        .layout
+                        .chunk_table()
+                        .expect("a loaded layout has a chunk table"),
+                ));
                 parent_reader = Some(CountingParent {
                     inner: reader,
                     count: 0,

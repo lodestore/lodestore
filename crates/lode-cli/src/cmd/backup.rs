@@ -801,7 +801,19 @@ async fn parent_table(
             return None;
         }
     };
-    (loaded.layout.size == size).then(|| loaded.layout.chunk_table())
+    if loaded.layout.size != size {
+        return None;
+    }
+    match loaded.layout.chunk_table() {
+        Ok(table) => Some(table),
+        Err(e) => {
+            eprintln!(
+                "warning: the parent snapshot {} cannot be used ({e}); reading the image in full",
+                hex32(parent)
+            );
+            None
+        }
+    }
 }
 
 #[cfg(debug_assertions)]

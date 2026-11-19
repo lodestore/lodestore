@@ -321,7 +321,7 @@ where
                     let min = export.min_block();
                     let mut info = INFO_BLOCK_SIZE.to_be_bytes().to_vec();
                     info.extend_from_slice(&min.to_be_bytes());
-                    info.extend_from_slice(&4096.max(min).to_be_bytes());
+                    info.extend_from_slice(&4096.max(min).min(limits.max_read).to_be_bytes());
                     info.extend_from_slice(&limits.max_read.to_be_bytes());
                     out.extend(option_reply(opt, REP_INFO, &info));
                 }

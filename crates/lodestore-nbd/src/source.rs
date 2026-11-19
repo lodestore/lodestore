@@ -110,7 +110,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> ImageSource for NbdSource<S> {
         }
         let (start, end) = self.window(offset, len)?;
         let min = u64::from(self.client.block_size().min);
-        let max = u64::from(self.client.max_read());
+        let cap = u64::from(u32::MAX) - u64::from(u32::MAX) % min;
         let mut pieces: Vec<ImageExtent> = Vec::new();
         let mut pos = start;
         let mut steps = 0;
@@ -119,7 +119,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> ImageSource for NbdSource<S> {
             if steps > MAX_STATUS_STEPS {
                 return Err(fail("the NBD server made too little progress"));
             }
-            let ask = (end - pos).min(max);
+            let ask = (end - pos).min(cap);
             let status = self
                 .client
                 .block_status(
