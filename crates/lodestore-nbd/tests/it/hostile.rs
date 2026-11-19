@@ -569,6 +569,24 @@ fn status_rows() -> Vec<Status> {
         ),
         s("descriptor of length 0", status(D, 1, 1, &[(0, 0)])),
         s("empty descriptor list", status(D, 1, 1, &[])),
+        s(
+            "allocation descriptor with unknown bit",
+            [
+                status(0, 1, 1, &[(4096, 4)]),
+                status(0, 1, 3, &alloc),
+                status(D, 1, 2, &alloc),
+            ]
+            .concat(),
+        ),
+        s(
+            "dirty descriptor with unknown bit",
+            [
+                status(0, 1, 1, &alloc),
+                status(0, 1, 3, &alloc),
+                status(D, 1, 2, &[(4096, 2)]),
+            ]
+            .concat(),
+        ),
         s("NONE without DONE", structured_chunk(0, REPLY_NONE, 1, &[])),
         s("data in a status reply", data(D, 1, 0, &[0; 16])),
     ]
