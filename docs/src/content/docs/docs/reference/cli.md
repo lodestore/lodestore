@@ -337,14 +337,15 @@ lode snapshots --json
 
 ### Disk images
 
-`lode backup --image SOURCE` backs up a regular file or a block device, read whole, as a snapshot of type `image`. See [Back up a disk image](/docs/recipes/disk-image-backup/) for the walk-through.
+`lode backup --image SOURCE` backs up a regular file or a block device, read whole, or an NBD export, read whole or by a dirty bitmap, as a snapshot of type `image`. See [Back up a disk image](/docs/recipes/disk-image-backup/) for the walk-through.
 
 | Option | Meaning |
 |--------|---------|
-| `--image SOURCE` | The file or block device to read. A value with `://` is refused, and so is anything else than a regular file or a block device, such as a FIFO. A source that changed while it was read (a file's size or times, a device's size) fails the backup without a snapshot; a mounted or held device gets a warning. Cannot be combined with paths, `--stdin`, `--parent`, `--force-rescan`, `--exclude`, `--exclude-file`, `--one-file-system` or `--exclude-caches` |
-| `--name NAME` | The name of the image, 1 to 200 bytes of UTF-8 with no `/` or control character, not `.` or `..`. Default: the file name of `SOURCE`. `--name` also works with `--stdin`. Percent-encoded it is at most 506 bytes (each byte outside `A-Z a-z 0-9 - . _ ~` counts as three); a longer name is refused before the source is read |
+| `--image SOURCE` | The file or block device to read, or an NBD export `nbd+unix:///EXPORT?socket=PATH`. Any other value with `://` is refused (TCP and TLS NBD are not accepted), and so is anything else than a regular file, a block device or such an export, such as a FIFO. `PATH` must be an absolute path to the unix socket. A source that changed while it was read (a file's size or times, a device's size) fails the backup without a snapshot; a mounted or held device gets a warning. Cannot be combined with paths, `--stdin`, `--parent`, `--force-rescan`, `--exclude`, `--exclude-file`, `--one-file-system` or `--exclude-caches` |
+| `--name NAME` | The name of the image, 1 to 200 bytes of UTF-8 with no `/` or control character, not `.` or `..`. Default: the file name of `SOURCE`, or the name of the NBD export (an export without a name needs `--name`). `--name` also works with `--stdin`. Percent-encoded it is at most 506 bytes (each byte outside `A-Z a-z 0-9 - . _ ~` counts as three); a longer name is refused before the source is read |
+| `--bitmap BITMAP` | With an `nbd+unix://` `--image` only (code 2 otherwise): the dirty bitmap of the export that has collected the changes since the previous backup of this image, named `lode-{repo16}-{inst16}-g<N>` with `<N>` from 1. The export must also offer `lode-{repo16}-{inst16}-g<N+1>`. The name must be the one of this repository, host and image, which `lode` prints after every backup of an NBD export. Not available with `--writer-keys`, because an increment reads its parent snapshot |
 
-The key of the image is `image/NAME` ([ADR 0007](/docs/adr/0007-source-model/)). With `--json`, `backup_summary` has an `image` object with `key`, `size` (bytes) and `read_mode` (`full`); without it the command prints `snapshot ID saved` and one line about the image. A wrong name, a value with `://` and an incompatible flag exit with code 2. In a repository with signatures the snapshot is signed with the repository password after it is checked, with the source `image/NAME`.
+The key of the image is `image/NAME` ([ADR 0007](/docs/adr/0007-source-model/)). With `--json`, `backup_summary` has an `image` object with `key`, `size` (bytes) and `read_mode` (`full` or `incremental`); without it the command prints `snapshot ID saved` and one line about the image. A wrong name, a value with `://` that is not an `nbd+unix://` export and an incompatible flag exit with code 2. In a repository with signatures the snapshot is signed with the repository password after it is checked, with the source `image/NAME`.
 
 `lode restore SNAPSHOT --target DIR` of such a snapshot writes one sparse file `DIR/NAME.img`. `lode restore SNAPSHOT:/disks/NAME --target DIR` writes its segments (`000000`, `000001`, ...) as ordinary files directly in `DIR`, and joining them in the order of their names gives the image. `--include` cannot be used with a whole image (code 2). If the signatures cannot be read, restoring a whole snapshot by id still works: `lode` warns and restores it as the image its manifest names.
 
@@ -354,6 +355,41 @@ The key of the image is `image/NAME` ([ADR 0007](/docs/adr/0007-source-model/)).
 | `--accept-unverified` | With `--to-device` only (code 2 otherwise): in a repository with signatures, write a snapshot that nothing signed, or whose signatures cannot be read |
 
 The device is opened with `O_EXCL`. A process that has the device open without an exclusive lock, such as a virtual machine that uses it as a disk, is not seen by the check: stop it before the restore. If the write fails after it has started, the command says the device may hold a partial image. `lode restore --verify` and `lode check --level restore` verify the files of an image by slices of 4 MiB.
+
+#### Incremental backup of an NBD export
+
+`lode backup --image nbd+unix:///EXPORT?socket=PATH --bitmap lode-{repo16}-{inst16}-g<N>` reads the export through its own NBD client and, when everything checks out, only the ranges that the bitmap marks as dirty. The rest comes from the previous snapshot of the image on this host, and a chunk that is partly dirty is merged with the bytes of that snapshot, checked by their id. The snapshot is an ordinary snapshot of an image. The export must offer both `g<N>` and `g<N+1>`; the walk-through with the commands and the rules for creating and deleting the bitmaps is in the [recipe](/docs/recipes/disk-image-backup/#incremental-backups-from-a-dirty-bitmap), and [ADR 0007](/docs/adr/0007-source-model/) records the rule that decides between a full and an incremental read.
+
+Without `--name` the image is named after the export, and when `lode`'s own record of the previous backup shows that another export is now behind that name, it refuses and asks for `--name`. With `--name` a changed export is a full read (`source_changed`). Only one backup of an instance runs on a machine at a time. Without a cache folder (neither `HOME` nor `XDG_CACHE_HOME` is set) every backup of an NBD export is a full read.
+
+With `--json`, the `image` object of `backup_summary` for an NBD export has these fields besides `key`, `size` and `read_mode`:
+
+| Field | Meaning |
+|-------|---------|
+| `full_reason` | After a full read, why: one of the codes below. Not present after an increment |
+| `bitmap` | The name of the bitmap that was read. Not present without `--bitmap` |
+| `next_bitmap` | The bitmap to pass as `--bitmap` to the next backup |
+| `bitmap_to_create` | The bitmap to create before the next backup starts, which that backup exports together with `next_bitmap` |
+
+`parent` at the top of `backup_summary` is the snapshot an increment was made against, and `null` after a full read. A backup of an image file has no `full_reason`, `bitmap`, `next_bitmap` or `bitmap_to_create`. Without `--json` the line about the image says `incremental read from ID` or `full read (REASON)`, followed by `next backup: create NAME before it starts, then pass --bitmap NAME`. A note on standard error says when `g<N+1>` was not exported before the read (the run is still incremental and the next one is a full read), and when no bitmap was given.
+
+The codes of `full_reason`:
+
+| Code | The read was full because |
+|------|---------------------------|
+| `no_bitmap` | no `--bitmap` was given |
+| `bitmap_missing` | the export does not offer the bitmap |
+| `no_state` | this machine has no record of the previous backup of the image |
+| `state_unreadable` | that record is damaged or unreadable |
+| `source_changed` | the export is not the one the previous backup read (with `--name`) |
+| `no_parent` | the repository holds no snapshot of the image from this host |
+| `parent_not_newest` | the newest snapshot of the image is not the one that was recorded |
+| `parent_unreadable` | the previous snapshot has no binding or size, or cannot be read |
+| `name_changed` | the bitmap recorded in the previous snapshot is not named for this repository, host and image |
+| `gen_mismatch` | the generation of `--bitmap` is not the recorded one, or the chain of generations has forked |
+| `size_changed` | the disk has another size than at the previous backup |
+
+Exit code 2: a `--bitmap` that is not a name of this repository, host and image (the message gives the form, `...-g<N>`, with `N` from 1), `--bitmap` with a file or a block device or with `--writer-keys`, an NBD address that is not `nbd+unix:///EXPORT?socket=PATH`, an export with no name and no `--name`, and an export that changed behind a name given only by the default. An NBD peer that breaks the protocol or stops answering, and a second backup of the same instance on the machine, exit with code 1 and write no snapshot; the other exit codes of `lode` apply as usual. `lode` removes its record of the previous backup before it connects to the export and writes it back only after the snapshot is confirmed, so after a failure of the peer, the source or the repository the next backup is a full read. A refusal before that point (code 2, or the lock) leaves the record as it was.
 
 ### Backup in a repository the server has upgraded
 

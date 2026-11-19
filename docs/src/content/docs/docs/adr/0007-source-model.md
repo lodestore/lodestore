@@ -101,12 +101,12 @@ The layout is final from phase 22:
 - The segments are the files `/disks/{name}/000000`, `/disks/{name}/000001` and so on (six decimal digits, consecutive from `000000`) in the ordinary tree, and `Snapshot.paths` is `["/disks/{name}"]`.
 - A chunk is 4 MiB, which is also the blob limit of [ADR 0003](/docs/adr/0003-object-layout/), fixed and aligned to the start of the image. A segment holds at most 65 536 chunks (256 GiB). Every segment but the last is a whole number of chunks. The largest image is 64 segments, 16 TiB.
 - The canonical node of a segment lists the ids of the non-zero chunks only, in order, and its extents are always non-empty: `[{0, 0}]` for a segment that is all holes. A reader accepts only this form, so one image has one encoding.
-- The snapshot metadata says how to read it: `image_layout` (`1`), `chunk_size` and `read_mode` (`full`). Each disk has `disk_{h}_size`, the size of the image in bytes.
+- The snapshot metadata says how to read it: `image_layout` (`1`), `chunk_size` and `read_mode` (`full` or `incremental`). Each disk has `disk_{h}_size`, the size of the image in bytes.
 - `image-vectors.json` freezes the layout; it is a new file, and `lodestore-format` fuzzes the decoder (`image_layout`).
 
 A reader that does not know the layout or the chunk size refuses the snapshot; it does not guess. It also refuses an image whose segments add up to another size than `disk_{h}_size`.
 
-A backup reads the source once, without a snapshot of its own, so an image is crash-consistent at best. After the last read `lode` checks the source again and fails without a snapshot when a regular file changed its size, modification time or change time, or a block device changed its size; it warns when the device is mounted or held by another device.
+An incremental backup reuses the chunks of its parent snapshot where the dirty bitmap says nothing changed, and merges a chunk that is only partly dirty with the bytes of the parent, which are checked by their id before they are used (see "Dirty bitmap binding"). A backup reads the source once, without a snapshot of its own, so an image is crash-consistent at best. After the last read `lode` checks the source again and fails without a snapshot when a regular file changed its size, modification time or change time, or a block device changed its size; it warns when the device is mounted or held by another device.
 
 #### Restoring to a block device
 
@@ -116,11 +116,45 @@ The checks have one limit, accepted: the kernel does not tell a device that a pr
 
 ### Dirty bitmap binding
 
-A snapshot of a VM that is a base for an incremental one records in its metadata what binds a dirty bitmap to it: the bitmap name (it contains the repository id and the policy id, so a bitmap of another repository or policy is never reused), its generation, the id of the parent snapshot, the size of the disk, and the VM uuid and `vmgenid`. A mismatch of any of them means a full read, never a trusted bitmap. The key names are fixed by phase 22 together with the writer. The metadata of a disk is keyed `disk_{h}_...`, where `{h}` is the first 16 lower-case hex characters of the BLAKE3 hash (no key) of the bytes of the disk name; the name itself, up to 200 bytes, would not fit a metadata key (`[a-z0-9_]{1,64}`).
+A snapshot that is the base for an incremental one records in its metadata what binds a dirty bitmap to it. A mismatch of any part of the binding means a full read, never a trusted bitmap. The metadata of a disk is keyed `disk_{h}_...`, where `{h}` is the first 16 lower-case hex characters of the BLAKE3 hash (no key) of the bytes of the disk name; the name itself, up to 200 bytes, would not fit a metadata key (`[a-z0-9_]{1,64}`).
 
-Phase 22 writes `image_layout`, `chunk_size`, `read_mode` (`full`) and `disk_{h}_size`. Reserved for the phase of the incremental read (it writes them; phase 22 does not): `disk_{h}_bitmap_name`, `disk_{h}_bitmap_gen`, `disk_{h}_full_reason`, `vm_uuid` and `vmgenid` (phase 26), and the form of the bitmap name, `lode-{repo16}-{inst16}-g{N}`. The codes of `full_reason` are `no_bitmap`, `bitmap_missing`, `no_state`, `state_unreadable`, `no_parent`, `parent_not_newest`, `parent_unreadable`, `name_changed`, `gen_mismatch`, `size_changed` and `source_changed`.
+The binding is written since phase 22.1. The names of the keys, the codes of `full_reason` and the form of the bitmap name are frozen in `image-binding-vectors.json` (`crates/lodestore-format/tests/fixtures/v1`); a change needs a new ADR.
 
-The rule: the decision between a full and an incremental read is made before the first read; the state of the bitmap is spent before the read and written only after the snapshot is confirmed. Nothing in this ADR or in the documentation says that the incremental read exists: it does not yet.
+- `disk_{h}_bitmap_name` and `disk_{h}_bitmap_gen`: the bitmap that collects the changes made since this snapshot, and its generation. Both are written or neither is. They are written only when the export confirmed that bitmap before the first read (see "Rotation").
+- `disk_{h}_full_reason`: why a backup of an NBD export read the whole image. A backup of an image file does not write it.
+- `read_mode` is `full` or `incremental`. `Snapshot.parent` is the snapshot an increment was made against, and is set only on an increment.
+
+Still reserved, not written by any phase so far: `vm_uuid` and `vmgenid` (phase 26).
+
+The codes of `full_reason` are `no_bitmap`, `bitmap_missing`, `no_state`, `state_unreadable`, `source_changed`, `no_parent`, `parent_not_newest`, `parent_unreadable`, `name_changed`, `gen_mismatch` and `size_changed`.
+
+#### The name of a bitmap
+
+The name is `lode-{repo16}-{inst16}-g{N}`. `{repo16}` and `{inst16}` are the first 16 lower-case hex characters of the repository id and of the instance id (BLAKE3 of the host name, a zero byte and the instance key), so a bitmap of another repository, host or image is never taken for this one. `{N}` is the generation, a decimal number from 1 to 18446744073709551614 without a leading zero.
+
+#### Rotation
+
+The contract between `lode` and whatever manages the bitmaps of the disk is a rotation, and it is the only one that `lode` supports.
+
+- A run is given `g{N}`, the bitmap that has collected the changes since the parent snapshot, and the export must also offer `g{N+1}`. The script creates `g{N+1}` before the read and exports both.
+- `lode` reads `g{N}`. The snapshot it writes is bound to `g{N+1}`, which has been collecting changes since before the read began.
+- `g{N}` is deleted only after the snapshot is confirmed. A run that failed leaves everything as it was and is repeated with the same `N`.
+- A bitmap name is never reused and the generation only grows. Nothing resets a bitmap: a bitmap that is recreated gets a new generation.
+
+The binding is written only when the export confirmed `g{N+1}` before the first read; a bitmap that appeared later may have missed writes made during the read. When it was not confirmed, the run is still incremental, because its parent and `g{N}` are what they claim to be, and it records no binding, so the next run reads the image in full.
+
+Over NBD `lode` can check only that `g{N}` and `g{N+1}` exist. qemu does not report an identity or a generation of a bitmap, so a bitmap that was recreated under the same name, or reset, cannot be seen. Protection against that is the contract above.
+
+#### The decision
+
+The decision between a full and an incremental read is made once, before the first read, by one function (`image::decide`), and it is the same function that the differential test calls. It returns the first reason that applies, in this order: `no_bitmap` (no bitmap was named), `bitmap_missing` (the export does not offer it), `no_state`, `state_unreadable`, `source_changed`, `no_parent`, `parent_not_newest`, `parent_unreadable`, `name_changed`, `gen_mismatch`, `size_changed`. Where two reasons apply, the earlier one is reported; a resize that also skipped a generation is `gen_mismatch`, not `size_changed`.
+
+- A chain of generations that has forked is `gen_mismatch`: an older snapshot of the instance has a generation equal to or above `N`, or shares its parent with the newest one (two snapshots made against the same parent, for example on two machines).
+- A run that cannot continue a chain says which bitmap to create next. It proposes a generation above every generation that a snapshot of the instance holds and above the one it was given, so a new chain is never taken for the old one.
+- The identity of the source is local. The state of `lode` keeps a hash of the canonical form of the export address. When it differs from the one in the state and `--name` was not given, `lode` refuses and asks for `--name`, because without it the name of the export decides which instance a disk belongs to. With an explicit `--name` the run is a full read with `source_changed`. The hash is not written to the snapshot.
+- The state is a cache file of the user, one per instance, holding the parent snapshot, the generation, the size of the disk and the hash of the source. It holds no chunk ids; the chunk table comes from the tree of the parent. It is read into memory and removed before `lode` connects to the export, and it is written back only after the snapshot is confirmed. A lost, damaged, stale or copied state gives one full read. A full read still deduplicates against the repository, so it reads the whole disk and stores only what is new.
+
+When the parent is refused, the run is a full read in the strict sense: it reuses no chunk of any parent without reading it, and the bitmaps the export offers serve only to record the binding for the next run.
 
 ### WAL batches
 
@@ -129,6 +163,8 @@ A `postgres-wal` instance is keyed by the cluster. WAL batches have their own po
 ## Provisional and deferred
 
 The chunk size of 4 MiB is no longer provisional: it is final with phase 22, the first phase that writes an image. The shape of the NBD export of PVE 9.2 (`nbdinfo --map`, `query-block`, speed) is a spike of phase 25; the format does not depend on its result.
+
+The incremental read of phase 22.1 supports one way of managing bitmaps, the rotation described above. A bitmap manager that resets a bitmap when a client connects to the export, as the Proxmox provider does, is outside what this version supports: `lode` cannot tell a reset bitmap from a good one, and an increment made from it would silently miss writes. Support for such managers is phase 26 and needs a contract of its own.
 
 Deferred:
 
@@ -141,7 +177,9 @@ Deferred:
 - `format_version` stays 1. The golden vectors that exist did not change; `source-vectors.json` is new.
 - A server of 0.2 does not read policies of `lodestore.io/v1alpha2`, the only version that has `spec.source`. A policy of `files` is exported in the old version and byte for byte as before.
 - An older `lode` counts a record whose source it cannot decode as unreadable, and reads a snapshot of an unknown type only by id. This holds for a snapshot of an image and for `lode` 0.2 and the builds of phases 20 and 21: such a `lode` reads the snapshot only by its id, restores the segments as files, and joining them in the order of their names with `cat` gives the image. The server policy does not accept the type `image`.
-- `image-vectors.json` is new; the other vectors did not change.
+- `image-vectors.json` is new; the other vectors did not change. `image-binding-vectors.json` is new too and freezes the keys of the binding, the codes of `full_reason` and the form of the bitmap name.
+- The snapshot of an increment is an ordinary snapshot of an image: a full tree with a chunk list for every segment. `lode` and the server of phase 22 read and restore it without any change, and `read_mode` `incremental` is a value they already know. Its tree lists every chunk of the image, not only the changed ones.
+- The names of the binding keys and the form of the name of a bitmap change only with a new ADR.
 - The key of an instance is not bound to the host that may claim it (see "A key is not bound to a host"). A compromised host that reports the key of an instance of another host can end up with signed snapshots under that key; `lode latest@<key>` then refuses and names both hosts, and does not choose the newer snapshot.
 - The key of an instance and the layout of an image cannot change under data already written; a change needs a new ADR.
 - A guest that migrates or fails over looks like a new instance, with a new retention history, until a later phase adds a way to say "the same guest". The old group is not deleted by this.
