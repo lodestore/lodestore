@@ -854,7 +854,7 @@ fn check_segment(node: &pb::Node) -> Result<()> {
 }
 
 impl ImageLayout {
-    /// One entry per chunk of the image; a layout whose ids do not fill its
+    /// One entry per chunk of the image; a layout whose ids do not match its
     /// extents is an error, never a table with zero chunks in their place.
     pub fn chunk_table(&self) -> Result<Vec<ChunkRef>> {
         let total = usize::try_from(self.size.div_ceil(IMAGE_CHUNK_SIZE))
@@ -878,6 +878,9 @@ impl ImageLayout {
                         .ok_or_else(|| bad("a chunk lies outside the image"))?;
                     *slot = ChunkRef::Data(id);
                 }
+            }
+            if ids.next().is_some() {
+                return Err(bad("a segment has more chunk ids than chunks"));
             }
         }
         Ok(table)
