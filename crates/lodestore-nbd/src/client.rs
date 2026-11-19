@@ -299,6 +299,7 @@ fn sanitize(raw: &[u8], max: usize) -> String {
 
 fn place(
     covered: &mut Vec<(u64, u64)>,
+    total: &mut u64,
     window: (u64, u64),
     offset: u64,
     len: u64,
@@ -310,6 +311,11 @@ fn place(
     };
     if covered.len() >= max_pieces {
         return protocol("too many data pieces in one reply");
+    }
+    // Pieces lie inside the window, so a sum past its length means overlap; refusing here bounds what is read.
+    *total += len;
+    if *total > window.1 - window.0 {
+        return protocol("overlapping data ranges");
     }
     covered.push((offset, end));
     usize::try_from(offset - window.0).or_else(|_| protocol("data offset"))
@@ -486,12 +492,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
                     }
                     let at = read_u64(&mut self.stream).await?;
                     let n = u64::from(clen) - 8;
-                    let rel = place(&mut covered, window, at, n, max_pieces)?;
+                    let rel = place(&mut covered, &mut total, window, at, n, max_pieces)?;
                     let Some(slot) = buf.get_mut(rel..rel + to_usize(clen - 8)) else {
                         return protocol("a data range outside the request");
                     };
                     read_exact(&mut self.stream, slot).await?;
-                    total += n;
                 }
                 REPLY_OFFSET_HOLE => {
                     if clen != 12 {
@@ -502,8 +507,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
                     if n == 0 {
                         return protocol("an empty hole");
                     }
-                    place(&mut covered, window, at, n, max_pieces)?;
-                    total += n;
+                    place(&mut covered, &mut total, window, at, n, max_pieces)?;
                 }
                 t if t & REPLY_ERROR_BIT != 0 => {
                     let err = self.read_error_chunk(t, clen).await?;

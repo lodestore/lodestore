@@ -369,6 +369,11 @@ fn read_rows() -> Vec<Reply> {
             ]),
         ),
         reply(
+            "the whole window sent again and again without done",
+            Kind::Protocol,
+            cat((0..400).map(|_| data(0, 1, REQ_OFF, &full)).collect()),
+        ),
+        reply(
             "data chunk of 8 bytes",
             Kind::Protocol,
             structured_chunk(D, REPLY_OFFSET_DATA, 1, &[0; 8]),
