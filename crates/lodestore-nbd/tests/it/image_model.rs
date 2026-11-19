@@ -158,6 +158,21 @@ impl Bitmaps {
         out
     }
 
+    /// What the old contract does after a run: the one bitmap is cleared, so
+    /// every write between the end of the read and the clear is lost.
+    pub fn clear_current(&mut self) {
+        self.gens.entry(self.n).or_default().clear();
+    }
+
+    /// What a resize that recreates the bitmaps under the names they had
+    /// would do: the generation is not skipped, nothing is marked dirty.
+    pub fn recreate_under_same_names(&mut self, n: u64) {
+        self.gens.clear();
+        self.n = n;
+        self.ensure(n);
+        self.ensure(n + 1);
+    }
+
     fn rotate(&mut self) {
         self.gens.remove(&self.n);
         self.n += 1;
@@ -485,6 +500,19 @@ pub struct RunSpec {
     pub time_back: bool,
 }
 
+impl RunSpec {
+    pub fn plain() -> Self {
+        RunSpec {
+            failure: Failure::None,
+            window: None,
+            export_bitmap: true,
+            late_next: false,
+            skip_rotation: false,
+            time_back: false,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct Cfg {
     pub segment_chunks: u64,
@@ -777,7 +805,7 @@ async fn full_read(
     hostname: &[u8],
     time: pb::Timestamp,
     segment_chunks: u64,
-) -> BlobId {
+) -> (BlobId, BlobId) {
     let mut source = ModelSource::plain(data.to_vec());
     let options = BackupOptions {
         time: Some(time),
@@ -795,7 +823,7 @@ async fn full_read(
         .backup_image("disk", &mut source, None, options, image, &|_| {})
         .await
         .unwrap();
-    done.outcome.root_tree
+    (done.outcome.snapshot_id, done.outcome.root_tree)
 }
 
 /// What a full read of the same state of the disk gives: same time, same
@@ -806,6 +834,18 @@ pub async fn reference_full_read(
     time: pb::Timestamp,
     segment_chunks: u64,
 ) -> BlobId {
+    reference_full_snapshot(env, data, time, segment_chunks)
+        .await
+        .1
+}
+
+/// The snapshot and the root tree of [`reference_full_read`].
+pub async fn reference_full_snapshot(
+    env: &Env,
+    data: &[u8],
+    time: pb::Timestamp,
+    segment_chunks: u64,
+) -> (BlobId, BlobId) {
     full_read(env, data, REFERENCE_HOST, time, segment_chunks).await
 }
 
@@ -815,7 +855,9 @@ pub async fn other_machine(env: &Env, cfg: &Cfg, w: &mut World) {
     full_read(env, &w.disk, HOST, time, cfg.segment_chunks).await;
 }
 
-pub async fn restore_bytes(env: &Env, id: &BlobId) -> Vec<u8> {
+/// The restored image, or why the restore failed: the error or the failures
+/// the report lists.
+pub async fn restore_outcome(env: &Env, id: &BlobId) -> Result<Vec<u8>, String> {
     let tmp = tempfile::tempdir().unwrap();
     let out: &Path = &tmp.path().join("out");
     let report = env
@@ -823,9 +865,16 @@ pub async fn restore_bytes(env: &Env, id: &BlobId) -> Vec<u8> {
         .await
         .restore_image(id, "disk", out, &RestoreOptions::default(), &|_| {})
         .await
-        .unwrap();
-    assert!(report.errors.is_empty(), "{:?}", report.errors);
-    fs::read(out.join("disk.img")).unwrap()
+        .map_err(|e| e.to_string())?;
+    if !report.errors.is_empty() {
+        let all: Vec<&str> = report.errors.iter().map(|f| f.error.as_str()).collect();
+        return Err(all.join("; "));
+    }
+    Ok(fs::read(out.join("disk.img")).unwrap())
+}
+
+pub async fn restore_bytes(env: &Env, id: &BlobId) -> Vec<u8> {
+    restore_outcome(env, id).await.unwrap()
 }
 
 pub fn initial_disk(fills: &[Option<u8>], tail: u64) -> Vec<u8> {
