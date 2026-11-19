@@ -244,3 +244,160 @@ fn image_check_restore_level_has_no_false_mismatch() {
     assert!(text.contains("Hash mismatches   0"), "{text}");
     assert!(!text.contains("restore_mismatch"), "{text}");
 }
+
+#[cfg(target_os = "linux")]
+mod loop_device {
+    use super::*;
+    use std::ffi::OsStr;
+    use std::process::Command;
+
+    fn run(program: &str, args: &[&OsStr]) -> String {
+        let out = Command::new(program).args(args).output().unwrap();
+        assert!(
+            out.status.success(),
+            "{program} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    pub struct Loop {
+        pub dev: PathBuf,
+        mount: Option<PathBuf>,
+    }
+
+    impl Loop {
+        pub fn new(dir: &Path, content: &[u8]) -> Loop {
+            let backing = dir.join("loop.img");
+            fs::write(&backing, content).unwrap();
+            let dev = run(
+                "losetup",
+                &[OsStr::new("-f"), OsStr::new("--show"), backing.as_os_str()],
+            );
+            Loop {
+                dev: PathBuf::from(dev),
+                mount: None,
+            }
+        }
+
+        pub fn read(&self) -> Vec<u8> {
+            fs::read(&self.dev).unwrap()
+        }
+
+        pub fn mount_ext4(&mut self, at: &Path) {
+            run("mkfs.ext4", &[OsStr::new("-q"), self.dev.as_os_str()]);
+            fs::create_dir_all(at).unwrap();
+            run("mount", &[self.dev.as_os_str(), at.as_os_str()]);
+            self.mount = Some(at.to_owned());
+        }
+
+        pub fn unmount(&mut self) {
+            if let Some(at) = self.mount.take() {
+                run("umount", &[at.as_os_str()]);
+            }
+        }
+    }
+
+    impl Drop for Loop {
+        fn drop(&mut self) {
+            if let Some(at) = self.mount.take() {
+                let _ = Command::new("umount").arg(at).status();
+            }
+            let _ = Command::new("losetup").arg("-d").arg(&self.dev).status();
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn on_loop(len: usize) -> (Fx, loop_device::Loop) {
+    let fx = setup(0);
+    let dev = loop_device::Loop::new(fx._tmp.path(), &vec![0xFFu8; len]);
+    (fx, dev)
+}
+
+#[cfg(target_os = "linux")]
+fn to_loop(fx: &Fx, dev: &loop_device::Loop) -> assert_cmd::Command {
+    let mut cmd = lode(&fx.repo);
+    cmd.args(["restore", &fx.id, "--to-device"]).arg(&dev.dev);
+    cmd
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "needs root and loop devices"]
+fn image_device_root_restores_to_a_loop_device() {
+    let (fx, dev) = on_loop(8 * CHUNK);
+    to_loop(&fx, &dev).assert().success();
+    let written = dev.read();
+    assert_eq!(written[..IMAGE_LEN], fs::read(&fx.image).unwrap()[..]);
+    assert!(written[IMAGE_LEN..].iter().all(|&b| b == 0xFF));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "needs root and loop devices"]
+fn image_device_root_refuses_a_smaller_device() {
+    let (fx, dev) = on_loop(2 * CHUNK);
+    let assert = to_loop(&fx, &dev).assert().failure();
+    let stderr = stderr_of(&assert);
+    assert!(stderr.contains("holds"), "{stderr}");
+    assert_eq!(dev.read(), vec![0xFFu8; 2 * CHUNK]);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "needs root and loop devices"]
+fn image_device_root_refuses_a_mounted_device() {
+    let (fx, mut dev) = on_loop(8 * CHUNK);
+    dev.mount_ext4(&fx._tmp.path().join("mnt"));
+    let assert = to_loop(&fx, &dev).assert().failure();
+    let stderr = stderr_of(&assert);
+    assert!(
+        stderr.contains("mounted") || stderr.contains("in use"),
+        "{stderr}"
+    );
+    dev.unmount();
+    let fsck = std::process::Command::new("e2fsck")
+        .arg("-fn")
+        .arg(&dev.dev)
+        .output()
+        .unwrap();
+    assert!(
+        fsck.status.success(),
+        "the filesystem was damaged: {}",
+        String::from_utf8_lossy(&fsck.stdout)
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "needs root and loop devices"]
+fn image_device_root_backs_up_a_block_device() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    init_repo(&repo);
+    let mut content = vec![0u8; 3 * CHUNK];
+    content[CHUNK + 4096..CHUNK + 4096 + (100 << 10)].copy_from_slice(&pseudo_random(100 << 10));
+    let dev = loop_device::Loop::new(tmp.path(), &content);
+
+    let stdout = stdout_of(
+        lode(&repo)
+            .args(["backup", "--json", "--name", "dev", "--image"])
+            .arg(&dev.dev),
+    );
+    let id = stdout
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .find(|v| v["type"] == "backup_summary")
+        .expect("a backup_summary line")["snapshot_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let out = tmp.path().join("out");
+    lode(&repo)
+        .args(["restore", &id, "--target"])
+        .arg(&out)
+        .assert()
+        .success();
+    assert_eq!(fs::read(out.join("dev.img")).unwrap(), dev.read());
+}
