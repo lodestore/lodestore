@@ -97,7 +97,11 @@ impl ImageSource for FileSource {
             .filter(|&e| e <= self.size)
             .ok_or_else(|| Error::InvalidInput("the range is past the end of the image".into()))?;
         let Some(data) = &self.data else {
-            return Ok(vec![ImageExtent { len, zero: false }]);
+            return Ok(vec![ImageExtent {
+                len,
+                zero: false,
+                dirty: false,
+            }]);
         };
         let mut out = Vec::new();
         let mut pos = offset;
@@ -106,6 +110,7 @@ impl ImageSource for FileSource {
                 out.push(ImageExtent {
                     len: to - from,
                     zero,
+                    dirty: false,
                 });
             }
         };
@@ -379,7 +384,11 @@ mod tests {
             data: Some(vec![(4096, 4096)]),
             stamp: Stamp::Device(0),
         };
-        let run = |len, zero| ImageExtent { len, zero };
+        let run = |len, zero| ImageExtent {
+            len,
+            zero,
+            dirty: false,
+        };
         assert_eq!(
             source.extents(0, 16384).await.unwrap(),
             vec![run(4096, true), run(4096, false), run(8192, true)]

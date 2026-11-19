@@ -1032,3 +1032,133 @@ fn image_vectors_generate_v1() {
     let text = serde_json::to_string_pretty(&image_vectors()).unwrap();
     std::io::Write::write_all(&mut out, format!("{text}\n").as_bytes()).unwrap();
 }
+
+fn image_binding_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/v1/image-binding-vectors.json")
+}
+
+fn image_binding_vectors() -> Value {
+    const MIB: u64 = 1 << 20;
+    let key = SourceKey::image("disk").unwrap();
+    let repo = [0x11u8; 16];
+    let host: &[u8] = b"host-a";
+    let names = image::BitmapNames::new(&repo, host, &key);
+
+    let sources: Vec<Value> = [
+        (
+            "a full read without a bitmap",
+            image::ReadMode::Full,
+            None,
+            Some(image::FullReason::NoBitmap),
+        ),
+        (
+            "a full read that binds generation 2",
+            image::ReadMode::Full,
+            Some(names.binding(2)),
+            Some(image::FullReason::NoState),
+        ),
+        (
+            "an incremental read that binds generation 3",
+            image::ReadMode::Incremental,
+            Some(names.binding(3)),
+            None,
+        ),
+    ]
+    .into_iter()
+    .map(|(case, read_mode, binding, reason)| {
+        let meta = image::ImageMeta {
+            read_mode,
+            disk_size: 20 * MIB,
+        }
+        .to_meta_bound("disk", binding.as_ref(), reason);
+        assert_eq!(
+            image::BitmapBinding::from_meta(&meta, "disk").unwrap(),
+            binding
+        );
+        assert_eq!(image::FullReason::from_meta(&meta, "disk").unwrap(), reason);
+        let claimed = source::encode(&key, &meta).unwrap().unwrap();
+        json!({ "case": case, "meta": meta, "claimed": hex(&claimed.encode_to_vec()) })
+    })
+    .collect();
+
+    let accepted: Vec<Value> = [1, 2, 10, u64::MAX - 1]
+        .into_iter()
+        .map(|generation| {
+            let name = names.name(generation);
+            assert_eq!(names.parse(&name), Some(generation));
+            json!({ "name": name, "generation": generation })
+        })
+        .collect();
+    let prefix = names.name(3).trim_end_matches('3').to_owned();
+    let other = |repo: &[u8; 16], host: &[u8], key: &SourceKey| {
+        image::BitmapNames::new(repo, host, key).name(3)
+    };
+    let rejected: Vec<Value> = [
+        format!("{prefix}0"),
+        format!("{prefix}03"),
+        format!("{prefix}{}", u64::MAX),
+        format!("{prefix}{}", u128::from(u64::MAX) + 1),
+        format!("{prefix}+3"),
+        format!("{prefix}-3"),
+        prefix.clone(),
+        format!("{prefix}3 "),
+        format!("{prefix}3").to_ascii_uppercase(),
+        format!("{prefix}3").replacen("lode-", "", 1),
+        other(&[0x12; 16], host, &key),
+        other(&repo, b"host-b", &key),
+        other(&repo, host, &SourceKey::image("other").unwrap()),
+    ]
+    .into_iter()
+    .map(|input| {
+        assert_eq!(names.parse(&input), None);
+        json!({ "input": input })
+    })
+    .collect();
+
+    json!({
+        "meta_keys": {
+            "bitmap_name": image::disk_meta_key("disk", image::DISK_BITMAP_NAME),
+            "bitmap_gen": image::disk_meta_key("disk", image::DISK_BITMAP_GEN),
+            "full_reason": image::disk_meta_key("disk", image::DISK_FULL_REASON),
+        },
+        "full_reasons": image::FullReason::ALL.map(image::FullReason::as_str),
+        "sources": sources,
+        "bitmap_names": {
+            "repo_id": hex(&repo),
+            "host": String::from_utf8_lossy(host),
+            "key": key.as_str(),
+            "instance_id": hex(&image::instance_id(host, &key)),
+            "first": names.first(),
+            "accepted": accepted,
+            "rejected": rejected,
+        },
+    })
+}
+
+#[test]
+fn image_binding_vectors_match() {
+    let committed: Value =
+        serde_json::from_str(&fs::read_to_string(image_binding_path()).unwrap()).unwrap();
+    assert_eq!(image_binding_vectors(), committed);
+}
+
+#[test]
+#[ignore = "generates frozen fixtures; run once via LODE_GENERATE_FIXTURES=1 cargo nextest run -p lodestore-format --run-ignored only image_binding_vectors_generate_v1"]
+fn image_binding_vectors_generate_v1() {
+    if std::env::var_os("LODE_GENERATE_FIXTURES").is_none() {
+        eprintln!("skipped: set LODE_GENERATE_FIXTURES=1 to generate fixtures");
+        return;
+    }
+    let mut out = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(image_binding_path())
+        .unwrap_or_else(|e| {
+            panic!(
+                "{}: {e}; the v1 vectors are frozen",
+                image_binding_path().display()
+            )
+        });
+    let text = serde_json::to_string_pretty(&image_binding_vectors()).unwrap();
+    std::io::Write::write_all(&mut out, format!("{text}\n").as_bytes()).unwrap();
+}

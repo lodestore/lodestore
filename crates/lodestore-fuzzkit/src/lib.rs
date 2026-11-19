@@ -23,8 +23,8 @@ use lodestore_format::crypto::{
 use lodestore_format::error::Result;
 use lodestore_format::fs::restore::check_extents;
 use lodestore_format::image::{
-    IMAGE_CHUNK_SIZE, ImageMeta, SEGMENT_CHUNKS, merge_head, merge_segments, parse_layout,
-    segment_nodes,
+    BitmapBinding, BitmapNames, FullReason, IMAGE_CHUNK_SIZE, ImageMeta, ImageState,
+    SEGMENT_CHUNKS, merge_head, merge_segments, parse_layout, segment_nodes,
 };
 use lodestore_format::index::{Index, SupersedesTrust, open_shard};
 use lodestore_format::keys::{
@@ -325,12 +325,45 @@ pub fn image_layout(data: &[u8]) {
     if let Ok(claimed) = pb::Source::decode(data)
         && let Ok((key, meta)) = source::decode(Some(&claimed))
         && let Some(name) = source::label(&key, &meta)
-        && let Ok(parsed) = ImageMeta::from_meta(&meta, &name)
     {
+        let _ = BitmapBinding::from_meta(&meta, &name);
+        let _ = FullReason::from_meta(&meta, &name);
+        if let Ok(parsed) = ImageMeta::from_meta(&meta, &name) {
+            assert_eq!(
+                ImageMeta::from_meta(&parsed.to_meta(&name), &name).ok(),
+                Some(parsed),
+                "image meta must read back what it writes"
+            );
+        }
+    }
+}
+
+/// A state file is refused or one `encode` would have written, and a bitmap
+/// name is refused or the one `name` builds for its generation.
+pub fn image_state(data: &[u8]) {
+    let repo: RepoId = [0x11; 16];
+    let Ok(key) = SourceKey::image("disk") else {
+        return;
+    };
+    if let Ok(state) = ImageState::parse(data, &repo, b"host-a", &key) {
         assert_eq!(
-            ImageMeta::from_meta(&parsed.to_meta(&name), &name).ok(),
-            Some(parsed),
-            "image meta must read back what it writes"
+            ImageState::parse(
+                &state.encode(&repo, b"host-a", &key),
+                &repo,
+                b"host-a",
+                &key
+            )
+            .ok(),
+            Some(state),
+            "an encoded state must parse to what was encoded"
+        );
+    }
+    let names = BitmapNames::new(&repo, b"host-a", &key);
+    if let Some(generation) = names.parse(&String::from_utf8_lossy(data)) {
+        assert_eq!(
+            names.name(generation).as_bytes(),
+            data,
+            "a parsed bitmap name is the one built for its generation"
         );
     }
 }
@@ -428,6 +461,7 @@ pub const TARGETS: &[(&str, Target)] = &[
     ("provenance_open", provenance_open),
     ("source_decode", source_decode),
     ("image_layout", image_layout),
+    ("image_state", image_state),
     ("verify_shard", verify_shard),
     ("snapshot_resolves", snapshot_resolves),
     ("restore_plan", restore_plan),

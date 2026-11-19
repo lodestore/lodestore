@@ -203,7 +203,7 @@ impl SourceKey {
         self.kind == SourceType::Files
     }
 
-    fn segment(&self, n: usize) -> Option<String> {
+    pub(crate) fn segment(&self, n: usize) -> Option<String> {
         decode_segment(self.key.split('/').nth(n)?).ok()
     }
 }
