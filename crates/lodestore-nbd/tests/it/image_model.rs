@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::future::Future;
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -81,6 +81,10 @@ impl Env {
             store,
             repo_id,
         }
+    }
+
+    pub fn root(&self) -> &Path {
+        self.store.root()
     }
 
     pub async fn writer(&self) -> Writer<&LocalFsStore> {
@@ -156,6 +160,21 @@ impl Bitmaps {
             }
         }
         out
+    }
+
+    /// What the old contract does after a run: the one bitmap is cleared, so
+    /// every write between the end of the read and the clear is lost.
+    pub fn clear_current(&mut self) {
+        self.gens.entry(self.n).or_default().clear();
+    }
+
+    /// What a resize that recreates the bitmaps under the names they had
+    /// would do: the generation is not skipped, nothing is marked dirty.
+    pub fn recreate_under_same_names(&mut self, n: u64) {
+        self.gens.clear();
+        self.n = n;
+        self.ensure(n);
+        self.ensure(n + 1);
     }
 
     fn rotate(&mut self) {
@@ -485,6 +504,19 @@ pub struct RunSpec {
     pub time_back: bool,
 }
 
+impl RunSpec {
+    pub fn plain() -> Self {
+        RunSpec {
+            failure: Failure::None,
+            window: None,
+            export_bitmap: true,
+            late_next: false,
+            skip_rotation: false,
+            time_back: false,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct Cfg {
     pub segment_chunks: u64,
@@ -777,7 +809,7 @@ async fn full_read(
     hostname: &[u8],
     time: pb::Timestamp,
     segment_chunks: u64,
-) -> BlobId {
+) -> (BlobId, BlobId) {
     let mut source = ModelSource::plain(data.to_vec());
     let options = BackupOptions {
         time: Some(time),
@@ -795,7 +827,7 @@ async fn full_read(
         .backup_image("disk", &mut source, None, options, image, &|_| {})
         .await
         .unwrap();
-    done.outcome.root_tree
+    (done.outcome.snapshot_id, done.outcome.root_tree)
 }
 
 /// What a full read of the same state of the disk gives: same time, same
@@ -806,6 +838,18 @@ pub async fn reference_full_read(
     time: pb::Timestamp,
     segment_chunks: u64,
 ) -> BlobId {
+    reference_full_snapshot(env, data, time, segment_chunks)
+        .await
+        .1
+}
+
+/// The snapshot and the root tree of [`reference_full_read`].
+pub async fn reference_full_snapshot(
+    env: &Env,
+    data: &[u8],
+    time: pb::Timestamp,
+    segment_chunks: u64,
+) -> (BlobId, BlobId) {
     full_read(env, data, REFERENCE_HOST, time, segment_chunks).await
 }
 
@@ -815,7 +859,9 @@ pub async fn other_machine(env: &Env, cfg: &Cfg, w: &mut World) {
     full_read(env, &w.disk, HOST, time, cfg.segment_chunks).await;
 }
 
-pub async fn restore_bytes(env: &Env, id: &BlobId) -> Vec<u8> {
+/// The restored image, or why the restore failed: the error or the failures
+/// the report lists.
+pub async fn restore_outcome(env: &Env, id: &BlobId) -> Result<Vec<u8>, String> {
     let tmp = tempfile::tempdir().unwrap();
     let out: &Path = &tmp.path().join("out");
     let report = env
@@ -823,9 +869,92 @@ pub async fn restore_bytes(env: &Env, id: &BlobId) -> Vec<u8> {
         .await
         .restore_image(id, "disk", out, &RestoreOptions::default(), &|_| {})
         .await
-        .unwrap();
-    assert!(report.errors.is_empty(), "{:?}", report.errors);
-    fs::read(out.join("disk.img")).unwrap()
+        .map_err(|e| e.to_string())?;
+    if !report.errors.is_empty() {
+        let all: Vec<&str> = report.errors.iter().map(|f| f.error.as_str()).collect();
+        return Err(all.join("; "));
+    }
+    Ok(fs::read(out.join("disk.img")).unwrap())
+}
+
+pub async fn restore_bytes(env: &Env, id: &BlobId) -> Vec<u8> {
+    restore_outcome(env, id).await.unwrap()
+}
+
+/// The first run of 64 hex digits in a message: the id of the blob it names.
+fn blob_id_in(text: &str) -> Option<&str> {
+    let bytes = text.as_bytes();
+    let mut start = 0;
+    while start < bytes.len() {
+        let run = bytes[start..]
+            .iter()
+            .take_while(|b| b.is_ascii_hexdigit())
+            .count();
+        if run >= 64 {
+            return Some(&text[start..start + 64]);
+        }
+        start += run.max(1);
+    }
+    None
+}
+
+/// Two failed restores of the same tree fail for the same reason: the same
+/// kind of error and the same blob.
+pub fn same_restore_failure(a: &str, b: &str) -> bool {
+    let (id_a, id_b) = (blob_id_in(a), blob_id_in(b));
+    let mask = |text: &str, id: Option<&str>| match id {
+        Some(id) => text.replace(id, "<blob>"),
+        None => text.to_owned(),
+    };
+    id_a == id_b && mask(a, id_a) == mask(b, id_b)
+}
+
+fn pack_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            pack_files(&path, out);
+        } else if !path.file_name().unwrap().to_string_lossy().starts_with('.') {
+            out.push(path);
+        }
+    }
+}
+
+fn sorted_packs(env: &Env) -> Vec<PathBuf> {
+    let mut packs = Vec::new();
+    pack_files(&env.root().join("packs"), &mut packs);
+    packs.sort();
+    packs
+}
+
+/// Flips one byte of one pack file; false when the repository has no pack.
+pub fn corrupt_pack(env: &Env, pick: usize, offset: u64) -> bool {
+    let packs = sorted_packs(env);
+    if packs.is_empty() {
+        return false;
+    }
+    let path = &packs[pick % packs.len()];
+    let mut bytes = fs::read(path).unwrap();
+    let at = (offset % bytes.len() as u64) as usize;
+    bytes[at] ^= 0xff;
+    fs::write(path, bytes).unwrap();
+    true
+}
+
+/// Swaps the contents of two pack files; false when they are one file.
+pub fn swap_packs(env: &Env, a: usize, b: usize) -> bool {
+    let packs = sorted_packs(env);
+    if packs.is_empty() || a % packs.len() == b % packs.len() {
+        return false;
+    }
+    let (first, second) = (&packs[a % packs.len()], &packs[b % packs.len()]);
+    let (bytes_first, bytes_second) = (fs::read(first).unwrap(), fs::read(second).unwrap());
+    fs::write(first, bytes_second).unwrap();
+    fs::write(second, bytes_first).unwrap();
+    true
 }
 
 pub fn initial_disk(fills: &[Option<u8>], tail: u64) -> Vec<u8> {
