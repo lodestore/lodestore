@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::future::Future;
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -81,6 +81,10 @@ impl Env {
             store,
             repo_id,
         }
+    }
+
+    pub fn root(&self) -> &Path {
+        self.store.root()
     }
 
     pub async fn writer(&self) -> Writer<&LocalFsStore> {
@@ -875,6 +879,82 @@ pub async fn restore_outcome(env: &Env, id: &BlobId) -> Result<Vec<u8>, String> 
 
 pub async fn restore_bytes(env: &Env, id: &BlobId) -> Vec<u8> {
     restore_outcome(env, id).await.unwrap()
+}
+
+/// The first run of 64 hex digits in a message: the id of the blob it names.
+fn blob_id_in(text: &str) -> Option<&str> {
+    let bytes = text.as_bytes();
+    let mut start = 0;
+    while start < bytes.len() {
+        let run = bytes[start..]
+            .iter()
+            .take_while(|b| b.is_ascii_hexdigit())
+            .count();
+        if run >= 64 {
+            return Some(&text[start..start + 64]);
+        }
+        start += run.max(1);
+    }
+    None
+}
+
+/// Two failed restores of the same tree fail for the same reason: the same
+/// kind of error and the same blob.
+pub fn same_restore_failure(a: &str, b: &str) -> bool {
+    let (id_a, id_b) = (blob_id_in(a), blob_id_in(b));
+    let mask = |text: &str, id: Option<&str>| match id {
+        Some(id) => text.replace(id, "<blob>"),
+        None => text.to_owned(),
+    };
+    id_a == id_b && mask(a, id_a) == mask(b, id_b)
+}
+
+fn pack_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            pack_files(&path, out);
+        } else if !path.file_name().unwrap().to_string_lossy().starts_with('.') {
+            out.push(path);
+        }
+    }
+}
+
+fn sorted_packs(env: &Env) -> Vec<PathBuf> {
+    let mut packs = Vec::new();
+    pack_files(&env.root().join("packs"), &mut packs);
+    packs.sort();
+    packs
+}
+
+/// Flips one byte of one pack file; false when the repository has no pack.
+pub fn corrupt_pack(env: &Env, pick: usize, offset: u64) -> bool {
+    let packs = sorted_packs(env);
+    if packs.is_empty() {
+        return false;
+    }
+    let path = &packs[pick % packs.len()];
+    let mut bytes = fs::read(path).unwrap();
+    let at = (offset % bytes.len() as u64) as usize;
+    bytes[at] ^= 0xff;
+    fs::write(path, bytes).unwrap();
+    true
+}
+
+/// Swaps the contents of two pack files; false when they are one file.
+pub fn swap_packs(env: &Env, a: usize, b: usize) -> bool {
+    let packs = sorted_packs(env);
+    if packs.is_empty() || a % packs.len() == b % packs.len() {
+        return false;
+    }
+    let (first, second) = (&packs[a % packs.len()], &packs[b % packs.len()]);
+    let (bytes_first, bytes_second) = (fs::read(first).unwrap(), fs::read(second).unwrap());
+    fs::write(first, bytes_second).unwrap();
+    fs::write(second, bytes_first).unwrap();
+    true
 }
 
 pub fn initial_disk(fills: &[Option<u8>], tail: u64) -> Vec<u8> {
