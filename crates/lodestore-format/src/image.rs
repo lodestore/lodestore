@@ -536,6 +536,8 @@ pub struct InstanceSnapshot {
     pub parent: Option<BlobId>,
     pub disk_size: Option<u64>,
     pub binding: Option<BitmapBinding>,
+    /// The snapshot records a bitmap binding that does not parse; decide counts it as a fork.
+    pub binding_unreadable: bool,
 }
 
 /// The snapshots whose claim is `key` and whose manifest host is `hostname`,
@@ -564,6 +566,9 @@ pub fn instance_snapshots(
                 binding: disk
                     .as_deref()
                     .and_then(|d| BitmapBinding::from_meta(&meta, d).ok().flatten()),
+                binding_unreadable: disk
+                    .as_deref()
+                    .is_some_and(|d| BitmapBinding::from_meta(&meta, d).is_err()),
             })
         })
         .collect()
@@ -650,6 +655,7 @@ fn plan(input: &DecideInput<'_>) -> ReadPlan {
     }
     let forked = older.iter().any(|s| {
         s.binding.as_ref().is_some_and(|b| b.generation >= n)
+            || s.binding_unreadable
             || (newest.parent.is_some() && s.parent == newest.parent)
     });
     if forked {

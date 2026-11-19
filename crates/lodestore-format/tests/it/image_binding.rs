@@ -42,6 +42,7 @@ fn snapshot(
         parent: parent.map(id),
         disk_size: size,
         binding: generation.map(|g| names().binding(g)),
+        binding_unreadable: false,
     }
 }
 
@@ -393,7 +394,10 @@ fn instance_snapshots_pick_the_instance() {
         got,
         vec![
             snapshot(1, None, Some(SIZE), Some(2)),
-            snapshot(6, None, Some(SIZE), None),
+            InstanceSnapshot {
+                binding_unreadable: true,
+                ..snapshot(6, None, Some(SIZE), None)
+            },
             snapshot(7, Some(1), None, Some(4)),
             snapshot(8, Some(2), Some(SIZE), Some(5)),
         ]
@@ -591,6 +595,16 @@ fn decide_refuses_a_forked_generation() {
         c.instance.insert(1, snapshot(7, Some(9), None, None));
     });
     assert!(incremental(&unbound));
+    let unreadable = with(|c| {
+        c.instance.insert(
+            0,
+            InstanceSnapshot {
+                binding_unreadable: true,
+                ..snapshot(8, None, Some(SIZE), None)
+            },
+        );
+    });
+    assert_eq!(reason(&unreadable), FullReason::GenMismatch);
 }
 
 #[test]
@@ -787,6 +801,7 @@ fn build(raw: &Raw) -> Case {
             parent: parent_of(raw.newest_parent).map(id),
             disk_size: raw.newest_size.map(|i| SIZES[i]),
             binding,
+            binding_unreadable: false,
         });
     }
     let source = if raw.source_ok {
