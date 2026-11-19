@@ -173,11 +173,6 @@ impl<S: BlobStore> Writer<S> {
                     "an incremental image backup needs a source with dirty ranges".into(),
                 ));
             }
-            if image.bitmap.is_none() {
-                return Err(Error::InvalidInput(
-                    "an incremental image backup needs the bitmap that follows it".into(),
-                ));
-            }
         }
         let key = SourceKey::image(name)?;
         let started = options.time.unwrap_or_else(now);

@@ -2216,6 +2216,7 @@ dependencies = [
  "insta",
  "lodestore-agent",
  "lodestore-format",
+ "lodestore-nbd",
  "lodestore-policy",
  "lodestore-testkit",
  "reqwest",

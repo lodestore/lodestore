@@ -3,6 +3,7 @@
 mod cli;
 mod client;
 mod cmd;
+mod image_state;
 mod open;
 mod output;
 mod profile;

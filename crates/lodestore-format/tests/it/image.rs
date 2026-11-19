@@ -1624,7 +1624,7 @@ async fn image_incremental_requires_a_dirty_source() {
     assert!(blind.untouched());
 
     let mut source = DirtySource::new(data, Vec::new());
-    let err = incremental_with(
+    let done = incremental_with(
         &repo,
         parent.outcome.snapshot_id,
         table,
@@ -1633,9 +1633,9 @@ async fn image_incremental_requires_a_dirty_source() {
         None,
     )
     .await
-    .unwrap_err();
-    assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
-    assert!(source.untouched());
+    .unwrap();
+    let (_, meta) = meta_of(&repo, &done).await;
+    assert_eq!(BitmapBinding::from_meta(&meta, "disk").unwrap(), None);
 }
 
 async fn meta_of(repo: &Path, done: &ImageOutcome) -> (Vec<u8>, Meta) {

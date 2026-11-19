@@ -15,6 +15,7 @@ mod e2e_local;
 mod find_server_cli;
 mod gc_cli;
 mod gc_writer_marker;
+mod image_bitmap;
 mod image_cli;
 mod image_restore;
 mod keys;
