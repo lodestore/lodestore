@@ -1,11 +1,15 @@
 use std::fs;
+use std::io::Write as _;
 #[cfg(target_os = "linux")]
 use std::os::fd::OwnedFd;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use lodestore_format::Error;
 use lodestore_format::crypto::{BLOB_TYPE_DATA, BlobId, Entropy};
-use lodestore_format::fs::restore::check_extents;
+use lodestore_format::fs::filter::PathMatcher;
+use lodestore_format::fs::restore::{Overwrite, check_extents};
 #[cfg(target_os = "linux")]
 use lodestore_format::fs::walk::data_extents;
 use lodestore_format::image::{
@@ -16,7 +20,7 @@ use lodestore_format::image::{
 use lodestore_format::keys::KdfCost;
 use lodestore_format::pack::CODEC_RAW;
 use lodestore_format::pb;
-use lodestore_format::reader::{Reader, RestoreOptions};
+use lodestore_format::reader::{Reader, RestoreOptions, RestoreProgress};
 use lodestore_format::repo::{InitOptions, PendingInit, Repository};
 use lodestore_format::source::{self, Meta, SourceKey, SourceType};
 use lodestore_format::store::LocalFsStore;
@@ -447,7 +451,9 @@ async fn image_load_picks_the_named_disk_among_neighbours() {
         let chunks = vec![ChunkRef::Zero; size.div_ceil(C) as usize];
         segment_nodes(size, &chunks, SEGMENT_CHUNKS).unwrap()
     };
-    let disk = w.put_tree_raw(&encode_tree(holes(8 * MIB))).unwrap();
+    let mut disk_nodes = holes(8 * MIB);
+    disk_nodes[0].mode = 0o4600;
+    let disk = w.put_tree_raw(&encode_tree(disk_nodes)).unwrap();
     let mut broken = holes(4 * MIB);
     broken[0].name = b"x".to_vec();
     let other = w.put_tree_raw(&encode_tree(broken)).unwrap();
@@ -503,6 +509,206 @@ async fn image_load_picks_the_named_disk_among_neighbours() {
         load_image(&mut r, &id, "a/b").await,
         Err(Error::InvalidInput(_))
     ));
+
+    let mode_of = |dir: &str| {
+        fs::metadata(tmp.path().join(dir).join("disk.img"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777
+    };
+    r.restore_image(
+        &id,
+        "disk",
+        &tmp.path().join("owned"),
+        &RestoreOptions::default(),
+        &|_| {},
+    )
+    .await
+    .unwrap();
+    assert_eq!(mode_of("owned"), 0o4600);
+    let skip_owners = RestoreOptions {
+        skip_owners: true,
+        ..Default::default()
+    };
+    r.restore_image(
+        &id,
+        "disk",
+        &tmp.path().join("plain"),
+        &skip_owners,
+        &|_| {},
+    )
+    .await
+    .unwrap();
+    assert_eq!(mode_of("plain"), 0o600);
+}
+
+/// A data chunk, a hole of one chunk and a 1 MiB tail of data.
+async fn small_image(repo_dir: &Path) -> (BlobId, Vec<u8>) {
+    init_repo(repo_dir).await;
+    let mut data = random_bytes(C as usize, 11);
+    data.extend(vec![0u8; C as usize]);
+    data.extend(random_bytes(MIB as usize, 12));
+    let mut source = MemSource::new(data.clone(), vec![(C, C)]);
+    let done = writer(repo_dir)
+        .await
+        .backup_image(
+            "disk",
+            &mut source,
+            BackupOptions::default(),
+            ImageOptions::default(),
+            &|_| {},
+        )
+        .await
+        .unwrap();
+    (done.outcome.snapshot_id, data)
+}
+
+type Events = Arc<Mutex<Vec<RestoreProgress>>>;
+
+fn collector() -> (Events, impl Fn(&RestoreProgress)) {
+    let events = Events::default();
+    let sink = Arc::clone(&events);
+    (events, move |e: &RestoreProgress| {
+        sink.lock().unwrap().push(e.clone());
+    })
+}
+
+fn last_files(events: &Events) -> u64 {
+    events.lock().unwrap().last().unwrap().files_done
+}
+
+#[tokio::test]
+async fn image_restore_counts_files_and_honours_options() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_dir = tmp.path().join("repo");
+    fs::create_dir(&repo_dir).unwrap();
+    let (id, data) = small_image(&repo_dir).await;
+    let mut r = reader(&repo_dir).await;
+    let out = tmp.path().join("out");
+
+    let (events, collect) = collector();
+    let report = r
+        .restore_image(&id, "disk", &out, &RestoreOptions::default(), &collect)
+        .await
+        .unwrap();
+    assert_eq!((report.files, report.verified), (1, 0));
+    assert_eq!(fs::read(out.join("disk.img")).unwrap(), data);
+    let chunks: Vec<u64> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| e.files_done == 0)
+        .map(|e| e.bytes_done)
+        .collect();
+    assert_eq!(chunks, vec![C, C + MIB]);
+    assert_eq!(last_files(&events), 1);
+
+    let never = RestoreOptions {
+        overwrite: Overwrite::Never,
+        ..Default::default()
+    };
+    let (events, collect) = collector();
+    let report = r
+        .restore_image(&id, "disk", &out, &never, &collect)
+        .await
+        .unwrap();
+    assert_eq!((report.skipped, report.files), (1, 0));
+    assert_eq!(last_files(&events), 1);
+
+    let dry_never = RestoreOptions {
+        dry_run: true,
+        overwrite: Overwrite::Never,
+        ..Default::default()
+    };
+    let (events, collect) = collector();
+    let report = r
+        .restore_image(&id, "disk", &out, &dry_never, &collect)
+        .await
+        .unwrap();
+    assert_eq!((report.would_skip, report.would_write), (1, 0));
+    assert_eq!(last_files(&events), 1);
+
+    let dry = RestoreOptions {
+        dry_run: true,
+        ..Default::default()
+    };
+    let (events, collect) = collector();
+    let report = r
+        .restore_image(&id, "disk", &tmp.path().join("dry"), &dry, &collect)
+        .await
+        .unwrap();
+    assert_eq!((report.would_write, report.would_skip), (1, 0));
+    assert_eq!(last_files(&events), 1);
+
+    let verify = RestoreOptions {
+        verify: true,
+        ..Default::default()
+    };
+    let report = r
+        .restore_image(&id, "disk", &out, &verify, &|_| {})
+        .await
+        .unwrap();
+    assert_eq!((report.files, report.verified), (1, 1));
+
+    let with_path = RestoreOptions {
+        path: b"/disks".to_vec(),
+        ..Default::default()
+    };
+    let with_include = RestoreOptions {
+        include: Some(PathMatcher::new(["/disks/*"]).unwrap()),
+        ..Default::default()
+    };
+    for options in [with_path, with_include] {
+        let err = r.restore_image(&id, "disk", &out, &options, &|_| {}).await;
+        assert!(matches!(err, Err(Error::InvalidInput(_))), "{err:?}");
+    }
+}
+
+#[tokio::test]
+async fn image_restore_raw_fills_a_file_of_the_device_size() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_dir = tmp.path().join("repo");
+    fs::create_dir(&repo_dir).unwrap();
+    let (id, data) = small_image(&repo_dir).await;
+    let mut r = reader(&repo_dir).await;
+    let size = data.len() as u64;
+    assert_eq!(size, 2 * C + MIB);
+
+    for out_size in [size, size + 4096] {
+        let path = tmp.path().join(format!("dev-{out_size}"));
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(&vec![0xFF; out_size as usize]).unwrap();
+        let (events, collect) = collector();
+        let report = r
+            .restore_image_raw(&id, "disk", &file, out_size, &collect)
+            .await
+            .unwrap();
+        assert_eq!((report.files, report.bytes), (1, size));
+        let written = fs::read(&path).unwrap();
+        assert_eq!(written.len() as u64, out_size);
+        assert!(written[..size as usize] == data[..]);
+        assert!(written[size as usize..].iter().all(|&b| b == 0xFF));
+        assert_eq!(events.lock().unwrap().last().unwrap().bytes_done, C + MIB);
+    }
+
+    let short = fs::File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(tmp.path().join("short"))
+        .unwrap();
+    let err = r
+        .restore_image_raw(&id, "disk", &short, size - 1, &|_| {})
+        .await;
+    assert!(matches!(err, Err(Error::InvalidInput(_))), "{err:?}");
 }
 
 fn image_cases() -> impl Strategy<Value = (u64, Vec<ChunkRef>, u64)> {
