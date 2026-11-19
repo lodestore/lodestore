@@ -2086,7 +2086,7 @@
           {
             "name": "source_type",
             "in": "query",
-            "description": "Only snapshots of this source type: files, proxmox-vm, proxmox-ct, postgres, postgres-wal or mysql.",
+            "description": "Only snapshots of this source type: files, proxmox-vm, proxmox-ct, postgres, postgres-wal, mysql or image.",
             "required": false,
             "schema": {
               "type": "string"
@@ -5527,7 +5527,7 @@
           {
             "name": "source_type",
             "in": "query",
-            "description": "Only snapshots of this source type: files, proxmox-vm, proxmox-ct, postgres, postgres-wal or mysql.",
+            "description": "Only snapshots of this source type: files, proxmox-vm, proxmox-ct, postgres, postgres-wal, mysql or image.",
             "required": false,
             "schema": {
               "type": "string"
@@ -13889,7 +13889,7 @@
           },
           "source_type": {
             "type": "string",
-            "description": "What the snapshot backs up: `files`, `proxmox-vm`, `proxmox-ct`, `postgres`, `postgres-wal` or `mysql`."
+            "description": "What the snapshot backs up: `files`, `proxmox-vm`, `proxmox-ct`, `postgres`, `postgres-wal`, `mysql` or `image`."
           },
           "stats": {
             "$ref": "#/components/schemas/SnapshotStatsDto"
@@ -13972,7 +13972,7 @@
             "items": {
               "$ref": "#/components/schemas/SourceCount"
             },
-            "description": "Snapshot counts of the host by source type, in the order files, proxmox-vm, proxmox-ct, postgres, postgres-wal, mysql; only types the host has. Not narrowed by `source_type`."
+            "description": "Snapshot counts of the host by source type, in the order files, proxmox-vm, proxmox-ct, postgres, postgres-wal, mysql, image; only types the host has. Not narrowed by `source_type`."
           },
           "total": {
             "type": "integer",
