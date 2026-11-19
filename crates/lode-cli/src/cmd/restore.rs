@@ -63,8 +63,21 @@ async fn image_disk(
     reader: &Reader<Store>,
     entry: &SnapshotEntry,
 ) -> Result<Option<(String, source::Meta)>> {
-    let provenance = reader.provenance().await?;
     let claimed = source::decode(entry.snapshot.source.as_ref()).ok();
+    // An unreadable attestation must not block restoring by id; a false manifest claim still fails in load_image.
+    let provenance = match reader.provenance().await {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!(
+                "warning: could not read snapshot signatures ({e:#}); the manifest decides the restore form"
+            );
+            let Some((key, meta)) = claimed.filter(|(k, _)| k.kind() == SourceType::Image) else {
+                return Ok(None);
+            };
+            let name = source::label(&key, &meta).context("the manifest names no disk")?;
+            return Ok(Some((name, meta)));
+        }
+    };
     if provenance.signer(&entry.id).is_some() {
         let key = provenance.source_of(&entry.id);
         if key.kind() != SourceType::Image {

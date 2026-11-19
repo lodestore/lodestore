@@ -319,3 +319,35 @@ fn image_restore_path_gives_segments() {
     let joined: Vec<u8> = segments.iter().flat_map(|p| fs::read(p).unwrap()).collect();
     assert_eq!(joined, fs::read(&image).unwrap());
 }
+
+#[test]
+fn image_restore_by_id_survives_unreadable_signatures() {
+    use std::os::unix::fs::PermissionsExt;
+    let (tmp, repo, image) = setup();
+    let id = snapshot_of(&backup_image_json(&repo, &image, Some("disk")));
+    let locks = repo.join("locks");
+    fs::create_dir_all(&locks).unwrap();
+    fs::set_permissions(&locks, fs::Permissions::from_mode(0o000)).unwrap();
+    // shortcut: root ignores the mode bits, so there is nothing to test there.
+    if fs::read_dir(&locks).is_ok() {
+        fs::set_permissions(&locks, fs::Permissions::from_mode(0o755)).unwrap();
+        return;
+    }
+
+    let out = tmp.path().join("out");
+    let assert = lode(&repo)
+        .args(["restore", &id, "--target"])
+        .arg(&out)
+        .assert();
+    fs::set_permissions(&locks, fs::Permissions::from_mode(0o755)).unwrap();
+    let assert = assert.success();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains("could not read snapshot signatures"),
+        "{stderr}"
+    );
+    assert_eq!(
+        fs::read(out.join("disk.img")).unwrap(),
+        fs::read(&image).unwrap()
+    );
+}
