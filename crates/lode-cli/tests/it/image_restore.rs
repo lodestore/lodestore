@@ -209,3 +209,38 @@ fn image_to_device_in_an_unsigned_repo_needs_no_flag() {
     fx.to_device().assert().success();
     fx.assert_device_written();
 }
+
+#[test]
+fn image_restore_verify_passes_on_an_image() {
+    let fx = setup(8 * CHUNK);
+    let out = fx._tmp.path().join("out");
+    let stdout = stdout_of(
+        lode(&fx.repo)
+            .args(["restore", &fx.id, "--verify", "--json", "--target"])
+            .arg(&out),
+    );
+    let summary = stdout
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .find(|v| v["type"] == "restore_summary")
+        .expect("a restore_summary line");
+    assert_eq!(summary["files_verified"], 1);
+    assert_eq!(
+        fs::read(out.join("disk.img")).unwrap(),
+        fs::read(&fx.image).unwrap()
+    );
+}
+
+#[test]
+fn image_check_restore_level_has_no_false_mismatch() {
+    let fx = setup(8 * CHUNK);
+    let src = fx._tmp.path().join("src");
+    fs::create_dir(&src).unwrap();
+    fs::write(src.join("f"), pseudo_random(300 << 10)).unwrap();
+    lode(&fx.repo).arg("backup").arg(&src).assert().success();
+
+    let text = stdout_of(lode(&fx.repo).args(["check", "--level", "restore", "--files", "50"]));
+    assert!(text.contains("Result            Passed"), "{text}");
+    assert!(text.contains("Hash mismatches   0"), "{text}");
+    assert!(!text.contains("restore_mismatch"), "{text}");
+}
