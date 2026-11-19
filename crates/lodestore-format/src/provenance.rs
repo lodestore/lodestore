@@ -463,8 +463,7 @@ pub fn pick_latest_in(
                         now_ms,
                     )
                 };
-                let chosen = if id_form || provenance.names_host(host) || hosts.contains_key(host)
-                {
+                let chosen = if id_form || provenance.names_host(host) || hosts.contains_key(host) {
                     if !named.is_empty() {
                         warnings.push(LatestWarning::HostIdAlsoName {
                             host_id: clip(host),

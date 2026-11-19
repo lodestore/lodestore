@@ -9,8 +9,7 @@ use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 use super::restore::{
-    RestoreRequest, agent_declares_roots, enqueue_restore_checked,
-    require_roots_capability,
+    RestoreRequest, agent_declares_roots, enqueue_restore_checked, require_roots_capability,
 };
 use super::{
     ACTIVE_STATES, AGENT_UPDATE_COLUMNS, AGENT_UPDATE_FROM, ConflictPolicyDto, DOWNLOAD_COLUMNS,

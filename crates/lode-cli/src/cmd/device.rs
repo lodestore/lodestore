@@ -153,7 +153,12 @@ mod tests {
     #[test]
     fn mount_table_over_the_limit_is_refused() {
         let max = MAX_MOUNTINFO as usize;
-        assert_eq!(read_capped(&vec![b'a'; max][..], MAX_MOUNTINFO).unwrap().len(), max);
+        assert_eq!(
+            read_capped(&vec![b'a'; max][..], MAX_MOUNTINFO)
+                .unwrap()
+                .len(),
+            max
+        );
         assert!(read_capped(&vec![b'a'; max + 1][..], MAX_MOUNTINFO).is_err());
         assert_eq!(read_capped(&b"x"[..], 0).ok(), None);
         assert_eq!(read_capped(&b""[..], 0).unwrap(), b"");

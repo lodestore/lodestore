@@ -45,7 +45,9 @@ fn stamp(file: &mut File) -> Result<Stamp> {
     } else if kind.is_block_device() {
         Ok(Stamp::Device(file.seek(SeekFrom::End(0))?))
     } else {
-        Err(Error::InvalidInput("not a regular file or a block device".into()))
+        Err(Error::InvalidInput(
+            "not a regular file or a block device".into(),
+        ))
     }
 }
 
@@ -67,7 +69,8 @@ impl FileSource {
             e => e,
         })?;
         let flags = rustix::fs::fcntl_getfl(&file).map_err(|e| Error::Io(e.into()))?;
-        rustix::fs::fcntl_setfl(&file, flags - OFlags::NONBLOCK).map_err(|e| Error::Io(e.into()))?;
+        rustix::fs::fcntl_setfl(&file, flags - OFlags::NONBLOCK)
+            .map_err(|e| Error::Io(e.into()))?;
         let (size, data) = match stamp {
             Stamp::File { len, .. } => (len, data_extents(&OwnedFd::from(file.try_clone()?), len)),
             Stamp::Device(size) => (size, None),
