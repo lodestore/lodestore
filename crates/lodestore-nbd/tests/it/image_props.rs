@@ -529,6 +529,54 @@ async fn image_props_small_block_max_backs_up() {
 }
 
 #[tokio::test]
+/// A `g{N+1}` that is disabled records nothing, so a write made during the read is lost.
+async fn image_props_disabled_next_bitmap_loses_a_window_write() {
+    let (env, cfg, mut w) = rig(3).await;
+    let next = w.bitmaps.n + 1;
+    w.bitmaps.ensure(next);
+    w.bitmaps.disable(next);
+    first_run_with_a_window_write(&env, &cfg, &mut w).await;
+    w.write(&write_4k(2, 5));
+    let two = judge(&env, &cfg, &mut w, &RunSpec::plain()).await;
+    assert!(two.incremental(), "{:?}", two.out.plan);
+    assert_ne!(
+        two.root_tree(),
+        two.reference,
+        "the full-read comparison must catch the write a disabled g{{N+1}} missed"
+    );
+    assert!(!two.restore_matches, "the restore must show the lost write");
+}
+
+#[tokio::test]
+/// A disk reverted or replaced behind the same socket, its bitmaps kept, leaves
+/// bytes of the old disk in the increment.
+async fn image_props_replaced_or_reverted_disk_is_missed() {
+    for variant in ["revert", "replace"] {
+        let (env, cfg, mut w) = rig(3).await;
+        if variant == "revert" {
+            let old = w.disk.clone();
+            w.write(&write_4k(0, 3));
+            first_run_with_a_window_write(&env, &cfg, &mut w).await;
+            w.disk = old;
+        } else {
+            first_run_with_a_window_write(&env, &cfg, &mut w).await;
+            w.disk = initial_disk(&[Some(2); 3], 0);
+        }
+        let two = judge(&env, &cfg, &mut w, &RunSpec::plain()).await;
+        assert!(two.incremental(), "{variant}: {:?}", two.out.plan);
+        assert_ne!(
+            two.root_tree(),
+            two.reference,
+            "{variant}: the full-read comparison must catch a swapped disk"
+        );
+        assert!(
+            !two.restore_matches,
+            "{variant}: the restore must show the swapped disk"
+        );
+    }
+}
+
+#[tokio::test]
 /// The same sequence under the rotation of `g{N}` and `g{N+1}` keeps the write.
 async fn image_props_rotation_keeps_a_window_write() {
     let (env, cfg, mut w) = rig(3).await;

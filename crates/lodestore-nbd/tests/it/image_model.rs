@@ -119,6 +119,7 @@ pub struct Bitmaps {
     pub n: u64,
     granule: u64,
     gens: BTreeMap<u64, BTreeSet<u64>>,
+    disabled: BTreeSet<u64>,
 }
 
 impl Bitmaps {
@@ -127,11 +128,17 @@ impl Bitmaps {
             n: 1,
             granule,
             gens: BTreeMap::new(),
+            disabled: BTreeSet::new(),
         }
     }
 
     pub fn ensure(&mut self, generation: u64) {
         self.gens.entry(generation).or_default();
+    }
+
+    /// What `qemu-img bitmap --disable` leaves: the bitmap is still offered and records nothing.
+    pub fn disable(&mut self, generation: u64) {
+        self.disabled.insert(generation);
     }
 
     pub fn exists(&self, generation: u64) -> bool {
@@ -141,8 +148,10 @@ impl Bitmaps {
     fn mark(&mut self, offset: u64, len: u64) {
         let first = offset / self.granule;
         let last = (offset + len).div_ceil(self.granule);
-        for set in self.gens.values_mut() {
-            set.extend(first..last);
+        for (generation, set) in &mut self.gens {
+            if !self.disabled.contains(generation) {
+                set.extend(first..last);
+            }
         }
     }
 
