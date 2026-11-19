@@ -38,6 +38,7 @@ proxmox-ct/<cluster>/<container uuid>
 postgres/<system_identifier>/<database oid>
 postgres-wal/<system_identifier>
 mysql/<server uuid>/<schema>
+image/{name}
 ```
 
 A segment is UTF-8, percent-encoded: the bytes `A-Z a-z 0-9 - . _ ~` stay as they are, every other byte becomes `%XX` in upper case. A decoded segment is not empty and at most 255 bytes (`MAX_SEGMENT_LEN`); the whole key is at most 512 bytes (`MAX_KEY_LEN`). Only the canonical spelling parses, the one that equals the re-encoding of its own decoding, so two spellings never name two instances and the encoding is injective. A uuid is lower case, `8-4-4-4-12`. `system_identifier` is a decimal `u64` and an oid a decimal `u32`, neither zero nor with a leading zero. The `@` and `:` characters in a key are always percent-encoded.
@@ -49,6 +50,7 @@ Identity by type:
 - `proxmox-vm` and `proxmox-ct` are (cluster, canonical lower-case UUID). A guest is never told apart by its VMID, so a reused VMID or CTID is a new instance. The cluster segment is the corosync cluster name, or the node name on a node outside a cluster. A node that joins a cluster later gives its guests keys with the cluster name: they become new instances, as after a migration (below). A container has no UUID of its own, so the agent of the node generates one and stores it (below); a key built from the container id alone is refused.
 - `postgres` is (cluster `system_identifier`, database OID); a recreated database has a new OID. `postgres-wal` is the cluster alone.
 - `mysql` is (server UUID, schema).
+- `image` is the name given to `lode backup --image` with `--name`; without `--name` it is the file name of the source (`disk.raw`, `sdb`). The name is 1 to 200 bytes of UTF-8, has no `/`, no byte below 0x20 or 0x7F, and is not `.` or `..`. It is one segment of the key, so the rule also caps its percent-encoded length at 506 bytes (each byte outside `A-Z a-z 0-9 - . _ ~` counts as three), which keeps `image/{name}` within `MAX_KEY_LEN`: every name the rule accepts builds its key, and a longer one is refused before anything is read. The identity is the name and not the device, because the path of a device (`/dev/sdX`) changes between boots and between hosts, and one disk can be reached by several paths. The instance is (host, key), as for the other types, so two different disks backed up under one name on one host are one instance with one retention history and one `latest@image/{name}`. The server policy does not accept the type `image`: no agent runs such a backup, `lode` does.
 
 Metadata (`SourceMeta`, sorted by key, a key once) is at most 32 entries, keys `[a-z0-9_]{1,64}`, values at most 256 bytes. It is for display, such as the VMID, a name or a server version; it is never part of the identity.
 
@@ -76,7 +78,7 @@ The agent scans at start and every five minutes. A scan that fails leaves the pr
 
 **Container identity.** Proxmox gives a virtual machine a UUID but a container none. The agent generates a UUID for each container, keeps it in `/var/lib/lodestore/source-ids.json` (mode 0600) and writes nothing to the Proxmox configuration. The entry is dropped when the container is gone from a scan, so a reused VMID gets a new UUID, and so does a container that changes into a VM and back. A reinstalled node, a container migrated to another node and a reused VMID are therefore new instances, the same semantics as a guest that migrates. A container recreated with the same VMID between two scans, five minutes apart at most, is not told apart; the backup of containers will check the identity again when it exists. A VM whose SMBIOS UUID is zero, invalid or shared with another VM of the node (a copy restored without a new UUID) is not reported, because its key would not be unique.
 
-**A key is not bound to a host.** The key stays (host, key) for retention and alerts, and a clone, a PostgreSQL standby or a restored copy keeps being backed up under the key it has. `lode latest@<key>` refuses when the signed snapshots of the key come from more than one host, names the hosts with their newest snapshot and asks for `--host`; `--host` takes a host id, or a name that belongs to one host (a value in the form of a UUID is only ever a host id), and then chooses among the snapshots that host made. With one host nothing changes. The API already requires `host`. The Sources tab of a host notes an instance that another host reports too.
+**A key is not bound to a host.** The key stays (host, key) for retention and alerts, and a clone, a PostgreSQL standby or a restored copy keeps being backed up under the key it has. `lode latest@<key>` refuses when the signed snapshots of the key come from more than one host, names the hosts with their newest snapshot and asks for `--host`; `--host` takes a host id, or a name that belongs to one host (a value in the form of a UUID is only ever a host id), and then chooses among the snapshots that host made. A snapshot signed with the repository password has no host id, so its host name stands for the host. With one host nothing changes. The API already requires `host`. The Sources tab of a host notes an instance that another host reports too.
 
 **Expected instances.** For a policy of guests or databases the missing-backup alert expects the instances that its selector chooses from the fresh, complete list, together with every instance whose latest job failed. With no list (agent offline, scan failed, list older than 15 minutes) or with a list that was cut short, it also expects every instance that has snapshots, so that an unknown list never silences the alert. When a host has no known instance, one placeholder pair stands for the policy on that host, so a job that is refused still raises an alert. An instance that is no longer expected does not make its host healthy and does not set the last success of the fleet overview.
 
@@ -84,15 +86,41 @@ The agent scans at start and every five minutes. A scan that fails leaves the pr
 
 There are four new scopes, independent of each other and of the existing ones: `restore:guest`, `restore:guest-in-place`, `restore:db`, `restore:db-in-place`. `restore:host` and `restore:in-place` do not include them, and tokens issued before do not get them. An admin session gets them as it gets every scope, and the in-place variants need a step-up by the existing rule. Restoring a guest is root on the Proxmox node; the threat model describes the risk. No endpoint uses these scopes in phase 20.
 
-`RestoreSpec` gains `oneof target { GuestTarget guest = 8; DatabaseTarget database = 9; }`. The rule for compatibility: the server sends a guest or database target with an empty `destination` and `in_place = false`, so an agent released before targets existed fails on the existing check of the destination and creates nothing; agents from this release refuse any spec that sets `target` before they look at the destination. A files restore of a snapshot of another type is refused with 422 by the server.
+`RestoreSpec` gains `oneof target { GuestTarget guest = 8; DatabaseTarget database = 9; }`. The rule for compatibility: the server sends a guest or database target with an empty `destination` and `in_place = false`, so an agent released before targets existed fails on the existing check of the destination and creates nothing; agents from this release refuse any spec that sets `target` before they look at the destination. A files restore of a snapshot of another type is refused with 422 by the server, with one exception: a snapshot of type `image`.
+
+For an image, a selection of `/` restores the whole image as one sparse file `{name}.img`; any other selection restores the segments as ordinary files, as for a snapshot of files. `in_place` is refused with 422 for an image. A restore of the whole image with `overwrite_changed` needs `restore:in-place`, and a session needs the step-up, as any restore in place does; `skip_existing` and `stop_if_not_empty` need `restore:host` as before. This is defence in depth, not a boundary: `restore:host` with `overwrite_changed` can still replace a `NAME.img` in a restore folder by restoring a files snapshot that holds one, and the segments of `/disks/NAME` by restoring them again. There is no scope of its own: the restore uses the same planner, writes an ordinary sparse file and goes through the same scopes, so the risk is that of a file restore. The server does not write to block devices; that is `lode restore --to-device` only.
+
+The server hands the agent the plan of the image as one entry, and the head of that plan is bounded: the entry of an image with many holes lists its extents, and the server accepts at most 4 MiB of it (about 350 thousand extents). A fragmented image above that is refused before the job with 422 ("too many holes") and a pointer to `lode restore`, which has no such limit. This is a deliberate limit of the restore through the server.
 
 ### Disk images
 
-A disk image is a sparse file in the ordinary tree of a snapshot. It is split into segments of 256 GiB, and its chunks are fixed-size and aligned. A chunk of zeros is a hole, recorded in `sparse_extents`. There is no new object type and no `format_version` 2, so cleanup, `lode check`, find, the disaster-recovery path of `lode` and restore read an image as they read any file. The chunk size and the shape of the NBD export are provisional (below).
+A disk image is a sparse file in the ordinary tree of a snapshot. It is split into segments of 256 GiB, and its chunks are fixed-size and aligned. A chunk of zeros is a hole, recorded in `sparse_extents`. There is no new object type and no `format_version` 2, so cleanup, `lode check`, find, the disaster-recovery path of `lode` and restore read an image as they read any file.
+
+The layout is final from phase 22:
+
+- The segments are the files `/disks/{name}/000000`, `/disks/{name}/000001` and so on (six decimal digits, consecutive from `000000`) in the ordinary tree, and `Snapshot.paths` is `["/disks/{name}"]`.
+- A chunk is 4 MiB, which is also the blob limit of [ADR 0003](/docs/adr/0003-object-layout/), fixed and aligned to the start of the image. A segment holds at most 65 536 chunks (256 GiB). Every segment but the last is a whole number of chunks. The largest image is 64 segments, 16 TiB.
+- The canonical node of a segment lists the ids of the non-zero chunks only, in order, and its extents are always non-empty: `[{0, 0}]` for a segment that is all holes. A reader accepts only this form, so one image has one encoding.
+- The snapshot metadata says how to read it: `image_layout` (`1`), `chunk_size` and `read_mode` (`full`). Each disk has `disk_{h}_size`, the size of the image in bytes.
+- `image-vectors.json` freezes the layout; it is a new file, and `lodestore-format` fuzzes the decoder (`image_layout`).
+
+A reader that does not know the layout or the chunk size refuses the snapshot; it does not guess. It also refuses an image whose segments add up to another size than `disk_{h}_size`.
+
+A backup reads the source once, without a snapshot of its own, so an image is crash-consistent at best. After the last read `lode` checks the source again and fails without a snapshot when a regular file changed its size, modification time or change time, or a block device changed its size; it warns when the device is mounted or held by another device.
+
+#### Restoring to a block device
+
+`lode restore ID --to-device DEVICE` is the only way to write an image to a device. It works on Linux only, opens the device with `O_EXCL`, and refuses before the first write a device that is not a block device, is smaller than the image, is mounted (or has a mounted partition), is used as swap or is held by another device. Holes are written as zeros; bytes past the end of the image are left alone, and the data is flushed at the end. In a repository with signatures it refuses a snapshot that nothing signed, and one whose signatures cannot be read, unless `--accept-unverified` is given. A repository without a single signature has nothing to compare with, so it writes.
+
+The checks have one limit, accepted: the kernel does not tell a device that a process (for example a virtual machine) holds open without an exclusive lock from a free one. Stop such processes before the restore.
 
 ### Dirty bitmap binding
 
-A snapshot of a VM that is a base for an incremental one records in its metadata what binds a dirty bitmap to it: the bitmap name (it contains the repository id and the policy id, so a bitmap of another repository or policy is never reused), its generation, the id of the parent snapshot, the size of the disk, and the VM uuid and `vmgenid`. A mismatch of any of them means a full read, never a trusted bitmap. The key names are fixed by phase 22 together with the writer.
+A snapshot of a VM that is a base for an incremental one records in its metadata what binds a dirty bitmap to it: the bitmap name (it contains the repository id and the policy id, so a bitmap of another repository or policy is never reused), its generation, the id of the parent snapshot, the size of the disk, and the VM uuid and `vmgenid`. A mismatch of any of them means a full read, never a trusted bitmap. The key names are fixed by phase 22 together with the writer. The metadata of a disk is keyed `disk_{h}_...`, where `{h}` is the first 16 lower-case hex characters of the BLAKE3 hash (no key) of the bytes of the disk name; the name itself, up to 200 bytes, would not fit a metadata key (`[a-z0-9_]{1,64}`).
+
+Phase 22 writes `image_layout`, `chunk_size`, `read_mode` (`full`) and `disk_{h}_size`. Reserved for the phase of the incremental read (it writes them; phase 22 does not): `disk_{h}_bitmap_name`, `disk_{h}_bitmap_gen`, `disk_{h}_full_reason`, `vm_uuid` and `vmgenid` (phase 26), and the form of the bitmap name, `lode-{repo16}-{inst16}-g{N}`. The codes of `full_reason` are `no_bitmap`, `bitmap_missing`, `no_state`, `state_unreadable`, `no_parent`, `parent_not_newest`, `parent_unreadable`, `name_changed`, `gen_mismatch`, `size_changed` and `source_changed`.
+
+The rule: the decision between a full and an incremental read is made before the first read; the state of the bitmap is spent before the read and written only after the snapshot is confirmed. Nothing in this ADR or in the documentation says that the incremental read exists: it does not yet.
 
 ### WAL batches
 
@@ -100,21 +128,20 @@ A `postgres-wal` instance is keyed by the cluster. WAL batches have their own po
 
 ## Provisional and deferred
 
-Provisional, reversible until the first image is written:
-
-- The chunk size of 4 MiB and the shape of the NBD export are confirmed by a spike on a nested PVE 9.2 at the start of phase 22, before any image is written to the format. Phase 20 writes none.
+The chunk size of 4 MiB is no longer provisional: it is final with phase 22, the first phase that writes an image. The shape of the NBD export of PVE 9.2 (`nbdinfo --map`, `query-block`, speed) is a spike of phase 25; the format does not depend on its result.
 
 Deferred:
 
-- A `source_ref` column in `jobs_coalesce_idx`: phase 22. Until then the job columns of the source are filled only by tests. `JobSpec.source` already carries the selector of the policy, so the agent can check it against its own scan.
-- Series of the `lodestore_backup_*` metrics per instance with a source label, and the last snapshot of a host by source: phase 22. Today the series cover `files`, and the last snapshot of a host is the newest of any source (`shortcut`).
+- A `source_ref` column in `jobs_coalesce_idx`: phase 25, where the server first hands out jobs that are not `files`. Until then the job columns of the source are filled only by tests. `JobSpec.source` already carries the selector of the policy, so the agent can check it against its own scan.
+- Series of the `lodestore_backup_*` metrics per instance with a source label, and the last snapshot of a host by source: phase 25. Today the series cover `files`, and the last snapshot of a host is the newest of any source (`shortcut`).
 - "Replaced" as a state separate from "gone": a later phase.
 
 ## Consequences
 
 - `format_version` stays 1. The golden vectors that exist did not change; `source-vectors.json` is new.
 - A server of 0.2 does not read policies of `lodestore.io/v1alpha2`, the only version that has `spec.source`. A policy of `files` is exported in the old version and byte for byte as before.
-- An older `lode` counts a record whose source it cannot decode as unreadable, and reads a snapshot of an unknown type only by id.
+- An older `lode` counts a record whose source it cannot decode as unreadable, and reads a snapshot of an unknown type only by id. This holds for a snapshot of an image and for `lode` 0.2 and the builds of phases 20 and 21: such a `lode` reads the snapshot only by its id, restores the segments as files, and joining them in the order of their names with `cat` gives the image. The server policy does not accept the type `image`.
+- `image-vectors.json` is new; the other vectors did not change.
 - The key of an instance is not bound to the host that may claim it (see "A key is not bound to a host"). A compromised host that reports the key of an instance of another host can end up with signed snapshots under that key; `lode latest@<key>` then refuses and names both hosts, and does not choose the newer snapshot.
 - The key of an instance and the layout of an image cannot change under data already written; a change needs a new ADR.
 - A guest that migrates or fails over looks like a new instance, with a new retention history, until a later phase adds a way to say "the same guest". The old group is not deleted by this.

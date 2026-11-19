@@ -60,13 +60,34 @@ lode restore latest --target ./restored --verify
 ```
 
 - `lode ls` lists the files of a snapshot, or of one path with `latest:/etc`.
-- A snapshot of another source, such as a guest or a database, is not `latest`. The server API chooses `latest_verified_id` for a source inside one host only. Name a snapshot by its id, or take the newest of one instance with `latest@<source key>`, for example `lode ls latest@postgres/7123456789012345678/16384`. If the snapshots of that key come from more than one host, as with a clone or a standby, `lode` refuses and lists the hosts; add `--host` with a host id (or a name that belongs to one host) to choose among the snapshots that host made. `lode snapshots --source-type postgres` lists the snapshots of one type.
+- A snapshot of another source, such as a guest, a database or a disk image, is not `latest`. The server API chooses `latest_verified_id` for a source inside one host only. Name a snapshot by its id, or take the newest of one instance with `latest@<source key>`, for example `lode ls latest@postgres/7123456789012345678/16384`. If the snapshots of that key come from more than one host, as with a clone or a standby, `lode` refuses and lists the hosts; add `--host` with a host id (or a name that belongs to one host) to choose among the snapshots that host made. `lode snapshots --source-type postgres` lists the snapshots of one type.
 - `lode dump` writes one file to standard output.
 - `SNAPSHOT:PATH` restores only that path, directly into the target.
 - `--include` takes a path or a `.gitignore`-style pattern, anchored at `/`, and may be repeated.
 - `--dry-run` shows what would be restored and creates nothing, not even the target.
 - `--verify` reads every restored file back and compares it with the snapshot.
 - An existing file is replaced only if its content differs. `--overwrite always` or `--overwrite never` changes that.
+
+## Restore a disk image
+
+A snapshot made with `lode backup --image` ([Back up a disk image](/docs/recipes/disk-image-backup/)) comes back as one file:
+
+```sh
+lode snapshots --source-type image
+lode restore ID --target ./restored
+```
+
+The result is `./restored/NAME.img`, sparse where the file system allows. `latest@image/NAME` needs signatures, so in a repository where nothing is signed, name the snapshot by its id, as above.
+
+To write the image to a block device instead, on Linux and as root:
+
+```sh
+lode restore ID --to-device /dev/sdX
+```
+
+Stop every virtual machine and process that uses the device first: `lode` refuses a device that is mounted, in swap or held by another device, but it cannot see a process that has the device open without an exclusive lock. In a repository with signatures a snapshot that nothing signed is written only with `--accept-unverified`.
+
+A `lode` of 0.2 or earlier reads the snapshot only by its id and restores the segments as files. `lode restore ID:/disks/NAME --target ./segments` and then `cat ./segments/* > NAME.img` give the image.
 
 ## The password and where it is read from
 

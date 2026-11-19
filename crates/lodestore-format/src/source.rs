@@ -14,11 +14,13 @@
 //! postgres/<system_identifier>/<database oid>
 //! postgres-wal/<system_identifier>
 //! mysql/<server uuid>/<schema>
+//! image/<name>
 //! ```
 //!
 //! A uuid is the lower-case `8-4-4-4-12` form. `system_identifier` is a
 //! decimal `u64` and the oid a decimal `u32`, neither zero nor with a leading
-//! zero. A guest is told apart by its uuid and never by a VMID alone, so a
+//! zero. An image name is chosen by the user and is not a device identifier;
+//! the rules are those of [`crate::image::valid_image_name`]. A guest is told apart by its uuid and never by a VMID alone, so a
 //! reused VMID is another instance. The cluster segment is the corosync
 //! cluster name, or the node name on a node outside a cluster; a node that
 //! joins a cluster later gives its guests new keys.
@@ -59,16 +61,18 @@ pub enum SourceType {
     Postgres,
     PostgresWal,
     Mysql,
+    Image,
 }
 
 impl SourceType {
-    pub const ALL: [SourceType; 6] = [
+    pub const ALL: [SourceType; 7] = [
         SourceType::Files,
         SourceType::ProxmoxVm,
         SourceType::ProxmoxCt,
         SourceType::Postgres,
         SourceType::PostgresWal,
         SourceType::Mysql,
+        SourceType::Image,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -79,6 +83,7 @@ impl SourceType {
             SourceType::Postgres => "postgres",
             SourceType::PostgresWal => "postgres-wal",
             SourceType::Mysql => "mysql",
+            SourceType::Image => "image",
         }
     }
 
@@ -133,6 +138,10 @@ impl SourceKey {
         Self::build(SourceType::Mysql, &[server_uuid, schema])
     }
 
+    pub fn image(name: &str) -> Result<Self> {
+        Self::build(SourceType::Image, &[name])
+    }
+
     fn build(kind: SourceType, segments: &[&str]) -> Result<Self> {
         let mut key = kind.as_str().to_owned();
         for segment in segments {
@@ -167,6 +176,12 @@ impl SourceKey {
             }
             (SourceType::Mysql, [server, _]) if is_uuid(server) => {}
             (SourceType::Mysql, [_, _]) => return Err(bad("a server is identified by its uuid")),
+            (SourceType::Image, [name]) if crate::image::valid_image_name(name) => {}
+            (SourceType::Image, [_]) => {
+                return Err(bad(
+                    "an image name is 1 to 200 bytes without '/' or control characters, and not . or ..",
+                ));
+            }
             (SourceType::Files, _) => return Err(bad("the files key is empty")),
             _ => return Err(bad("wrong number of segments for the source type")),
         }
@@ -205,6 +220,13 @@ fn bad(message: &str) -> Error {
 
 fn is_unreserved(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~')
+}
+
+/// The length of `raw` once percent-encoded into a key segment.
+pub(crate) fn encoded_segment_len(raw: &str) -> usize {
+    raw.bytes()
+        .map(|b| if is_unreserved(b) { 1 } else { 3 })
+        .sum()
 }
 
 fn encode_segment(raw: &str, out: &mut String) {
@@ -349,6 +371,7 @@ pub fn label(key: &SourceKey, meta: &Meta) -> Option<String> {
         SourceType::ProxmoxCt => guest("CT"),
         SourceType::Postgres => Some(database(get("database")?.to_owned(), "PostgreSQL")),
         SourceType::Mysql => Some(database(key.segment(2)?, "MySQL")),
+        SourceType::Image => key.segment(1),
         SourceType::Files | SourceType::PostgresWal => None,
     }
 }

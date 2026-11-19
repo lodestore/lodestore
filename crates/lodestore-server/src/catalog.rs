@@ -1217,7 +1217,7 @@ pub struct SnapshotItem {
     pub unverified_reason: Option<String>,
     /// Who signed this snapshot's provenance: `server` (the server checked a backup job of the host named by its certificate) or `owner` (a `lode backup` run with the repository password). Null when nothing signed it; such a snapshot is never the latest, is not counted by retention and cannot be restored in place.
     pub verified_by: Option<String>,
-    /// What the snapshot backs up: `files`, `proxmox-vm`, `proxmox-ct`, `postgres`, `postgres-wal` or `mysql`.
+    /// What the snapshot backs up: `files`, `proxmox-vm`, `proxmox-ct`, `postgres`, `postgres-wal`, `mysql` or `image`.
     pub source_type: String,
     /// Human label of the source instance, taken from the signed source; null for `files`.
     pub source_label: Option<String>,
@@ -1236,7 +1236,7 @@ pub struct SnapshotPage {
     pub total: u64,
     pub page: u64,
     pub page_size: u64,
-    /// Snapshot counts of the host by source type, in the order files, proxmox-vm, proxmox-ct, postgres, postgres-wal, mysql; only types the host has. Not narrowed by `source_type`.
+    /// Snapshot counts of the host by source type, in the order files, proxmox-vm, proxmox-ct, postgres, postgres-wal, mysql, image; only types the host has. Not narrowed by `source_type`.
     pub source_counts: Vec<SourceCount>,
 }
 
@@ -1245,14 +1245,14 @@ pub struct SnapshotPage {
 pub struct PageQuery {
     /// One-based page number.
     pub page: Option<u64>,
-    /// Only snapshots of this source type: files, proxmox-vm, proxmox-ct, postgres, postgres-wal or mysql.
+    /// Only snapshots of this source type: files, proxmox-vm, proxmox-ct, postgres, postgres-wal, mysql or image.
     pub source_type: Option<String>,
 }
 
 pub(crate) fn parse_source_type(text: &str) -> Result<SourceType, ApiError> {
     SourceType::parse(text).map_err(|_| {
         ApiError::Validation(format!(
-            "Unknown source type \"{text}\". Use files, proxmox-vm, proxmox-ct, postgres, postgres-wal or mysql."
+            "Unknown source type \"{text}\". Use files, proxmox-vm, proxmox-ct, postgres, postgres-wal, mysql or image."
         ))
     })
 }

@@ -24,6 +24,7 @@ mod gc_purge_s3;
 mod gc_repack;
 mod gc_trust;
 mod golden;
+mod image;
 mod index_props;
 mod init_race;
 mod list_independence;

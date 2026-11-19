@@ -11,10 +11,15 @@ use lodestore_format::check::is_data_error;
 use lodestore_format::crypto::{BlobId, Entropy};
 use lodestore_format::fs;
 use lodestore_format::fs::filter::PathMatcher;
+use lodestore_format::fs::raw::FileSource;
 use lodestore_format::fs::walk::WalkOptions;
+use lodestore_format::image::{
+    IMAGE_NAME_RULE, ImageSource, ReadMode, SEGMENT_CHUNKS, valid_image_name,
+};
 use lodestore_format::index::hex32;
 use lodestore_format::locks::UNMARKED_WRITER_LIMIT;
 use lodestore_format::pb;
+use lodestore_format::provenance;
 use lodestore_format::reader::Reader;
 use lodestore_format::snapshot::{ParentTree, SnapshotEntry, find_parent};
 use lodestore_format::store::Store;
@@ -22,7 +27,7 @@ use lodestore_format::verify_snapshot::{
     check_snapshot_resolves, snapshot_index_refs, verify_shard,
 };
 use lodestore_format::writer::{
-    BackupOptions, BackupOutcome, BackupProgress, Deadline, Writer, canonical_roots,
+    BackupOptions, BackupOutcome, BackupProgress, Deadline, ImageOptions, Writer, canonical_roots,
 };
 use serde::Serialize;
 
@@ -54,6 +59,15 @@ struct SummaryJson {
     stats: StatsJson,
     errors_total: u64,
     warnings_total: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    image: Option<ImageJson>,
+}
+
+#[derive(Serialize)]
+struct ImageJson {
+    key: String,
+    size: u64,
+    read_mode: &'static str,
 }
 
 /// The first Ctrl+C asks the backup to wind down (open packs are uploaded and
@@ -91,6 +105,12 @@ pub async fn run(
 ) -> Result<u8> {
     if flags.stdin {
         return run_stdin(url, args, out, flags).await;
+    }
+    if flags.image.is_some() {
+        return run_image(url, args, out, flags).await;
+    }
+    if flags.name.is_some() {
+        return Err(UsageError("--name needs --stdin or --image".into()).into());
     }
     if args.writer_keys.is_some() && flags.parent.is_some() {
         return Err(UsageError(
@@ -195,9 +215,9 @@ async fn backup_paths(
     }
     let outcome = outcome?;
     if let Some(strict) = &mut strict {
-        check_and_sign(strict, &writer, &outcome, &hostname).await?;
+        check_and_sign(strict, &writer, &outcome, &hostname, None).await?;
     }
-    finish(out, outcome, parent_id)
+    finish(out, outcome, parent_id, None)
 }
 
 /// The snapshot `--parent` names; `latest` follows the same rules as restore.
@@ -388,9 +408,108 @@ async fn backup_stdin(
     }
     let outcome = outcome?;
     if let Some(strict) = &mut strict {
-        check_and_sign(strict, &writer, &outcome, &hostname).await?;
+        check_and_sign(strict, &writer, &outcome, &hostname, None).await?;
     }
-    finish(out, outcome, parent_id)
+    finish(out, outcome, parent_id, None)
+}
+
+async fn run_image(url: &str, args: &SecretArgs, out: Output, flags: BackupFlags) -> Result<u8> {
+    let path = flags.image.clone().unwrap_or_default();
+    if path.contains("://") {
+        return Err(UsageError("--image reads a file or a block device".into()).into());
+    }
+    let name = match &flags.name {
+        Some(name) => name.clone(),
+        None => std::path::Path::new(&path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_owned)
+            .ok_or_else(|| UsageError(format!("{path:?} has no usable file name; use --name")))?,
+    };
+    if !valid_image_name(&name) {
+        return Err(UsageError(format!("{name:?} is not an image name: {IMAGE_NAME_RULE}")).into());
+    }
+    if args.writer_keys.is_some() && flags.parent.is_some() {
+        return Err(UsageError(
+            "--parent cannot be used with --writer-keys: writer keys cannot read snapshots".into(),
+        )
+        .into());
+    }
+    let mut source =
+        FileSource::open(path.as_ref()).with_context(|| format!("cannot open {path}"))?;
+    super::device::warn_if_in_use(path.as_ref());
+    let size = source.size();
+    let hostname = flags
+        .host
+        .clone()
+        .map_or_else(fs::hostname, String::into_bytes);
+    let opened = open_for_write(url, args, &hostname, flags.no_gc_check).await?;
+    let deadline = unmarked_deadline(&opened.marker);
+    let mut writer = opened.writer;
+    let mut strict = opened.strict;
+    let segment_chunks = segment_chunks();
+    let throttle = Throttle::new();
+    let bar = if out.json { None } else { spinner() };
+    let progress = progress_sink(out, &throttle, bar.as_ref());
+    let result = writer
+        .backup_image(
+            &name,
+            &mut source,
+            BackupOptions {
+                hostname: Some(hostname.clone()),
+                tags: flags.tag,
+                cancel: cancel_on_ctrl_c(),
+                deadline,
+                ..Default::default()
+            },
+            ImageOptions { segment_chunks },
+            &progress,
+        )
+        .await;
+    if let Some(bar) = &bar {
+        bar.finish_and_clear();
+    }
+    let done = match result {
+        Ok(done) => done,
+        Err(e) => {
+            opened.marker.close().await;
+            return Err(e.into());
+        }
+    };
+    let signed = match &mut strict {
+        Some(strict) => {
+            check_and_sign(
+                strict,
+                &writer,
+                &done.outcome,
+                &hostname,
+                Some(done.source.clone()),
+            )
+            .await
+        }
+        None => Ok(()),
+    };
+    opened.marker.close().await;
+    signed?;
+    let image = ImageJson {
+        key: done.source.key.clone(),
+        size,
+        read_mode: ReadMode::Full.as_str(),
+    };
+    finish(out, done.outcome, None, Some(image))
+}
+
+#[cfg(debug_assertions)]
+fn segment_chunks() -> u64 {
+    std::env::var("LODE_TEST_IMAGE_SEGMENT_CHUNKS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(SEGMENT_CHUNKS)
+}
+
+#[cfg(not(debug_assertions))]
+fn segment_chunks() -> u64 {
+    SEGMENT_CHUNKS
 }
 
 /// Checks the snapshot the way the server does before it counts as verified,
@@ -400,11 +519,12 @@ async fn check_and_sign(
     writer: &Writer<Store>,
     outcome: &BackupOutcome,
     hostname: &[u8],
+    source: Option<pb::Source>,
 ) -> Result<()> {
     let short = hex32(&outcome.snapshot_id)[..8].to_string();
     let result = check_own_snapshot(strict, writer, outcome, &short).await;
     let signed = match result {
-        Ok(newly) => sign_as_owner(strict, writer, outcome, hostname, newly).await,
+        Ok(newly) => sign_as_owner(strict, writer, outcome, hostname, source, newly).await,
         Err(e) => Err(e),
     };
     if let Err(e) = strict.cache.save() {
@@ -469,22 +589,15 @@ async fn sign_as_owner(
     writer: &Writer<Store>,
     outcome: &BackupOutcome,
     hostname: &[u8],
+    source: Option<pb::Source>,
     newly: Vec<BlobId>,
 ) -> Result<()> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let record = pb::ProvenanceRecord {
-        snapshot_id: outcome.snapshot_id.to_vec(),
-        host_id: String::new(),
-        hostname: String::from_utf8_lossy(hostname).into_owned(),
-        job_id: String::new(),
-        verified_at: Some(pb::Timestamp {
-            seconds: i64::try_from(now.as_secs()).unwrap_or(i64::MAX),
-            nanos: now.subsec_nanos(),
-        }),
-        source: None,
-    };
+    let record = provenance::owner_record(
+        &outcome.snapshot_id,
+        hostname,
+        source,
+        std::time::SystemTime::now(),
+    );
     let mut entropy = Entropy::os();
     let sealed = seal_provenance(&strict.keys, &record, &mut entropy)?;
     put_attestation(
@@ -503,7 +616,12 @@ async fn sign_as_owner(
     Ok(())
 }
 
-fn finish(out: Output, outcome: BackupOutcome, parent_id: Option<String>) -> Result<u8> {
+fn finish(
+    out: Output,
+    outcome: BackupOutcome,
+    parent_id: Option<String>,
+    image: Option<ImageJson>,
+) -> Result<u8> {
     let id = hex32(&outcome.snapshot_id);
     let stats = &outcome.stats;
     if out.json {
@@ -516,18 +634,30 @@ fn finish(out: Output, outcome: BackupOutcome, parent_id: Option<String>) -> Res
                 stats: Some(stats).into(),
                 errors_total: outcome.errors_total,
                 warnings_total: outcome.warnings_total,
+                image,
             },
         );
     } else {
         println!("snapshot {id} saved");
-        println!(
-            "files: {} new, {} changed, {} unchanged; {} read, {} added to the repository",
-            stats.files_new,
-            stats.files_changed,
-            stats.files_unchanged,
-            HumanBytes(stats.bytes_read),
-            HumanBytes(stats.bytes_added)
-        );
+        if let Some(image) = &image {
+            println!(
+                "image {}: {}, {} read; {} read, {} added to the repository",
+                image.key,
+                HumanBytes(image.size),
+                image.read_mode,
+                HumanBytes(stats.bytes_read),
+                HumanBytes(stats.bytes_added)
+            );
+        } else {
+            println!(
+                "files: {} new, {} changed, {} unchanged; {} read, {} added to the repository",
+                stats.files_new,
+                stats.files_changed,
+                stats.files_unchanged,
+                HumanBytes(stats.bytes_read),
+                HumanBytes(stats.bytes_added)
+            );
+        }
         if outcome.incomplete {
             eprintln!(
                 "warning: {} errors; some files could not be read and the snapshot is incomplete",

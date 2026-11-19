@@ -8,6 +8,7 @@ export const sources = {
 		postgres: "PostgreSQL",
 		postgresWal: "PostgreSQL WAL",
 		mysql: "MySQL",
+		image: "Disk images",
 	},
 	noun: {
 		proxmoxVm: "virtual machines",

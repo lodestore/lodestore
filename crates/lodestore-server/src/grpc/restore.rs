@@ -2,6 +2,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::time::Duration;
 
 use lodestore_format::crypto::{BlobId, Key32};
+use lodestore_format::image::load_image;
 use lodestore_format::index::parse_hex32;
 use lodestore_format::pack::pack_object_key;
 use lodestore_format::pb;
@@ -22,9 +23,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::Status;
 
 use crate::catalog;
-use crate::grpc::registry::Registry;
+use crate::grpc::registry::{PlanSlot, Registry};
 use crate::grpc::{internal, internal_or_unavailable};
-use crate::jobs::restore::RestoreRecord;
+use crate::jobs::restore::{IMAGE_ENQUEUE, RestoreRecord};
 use crate::repos::checks::open_store;
 use crate::repos::db::server_access_checked;
 use crate::state::AppState;
@@ -34,10 +35,35 @@ pub const BATCH_LIMIT: usize = 1 << 20;
 pub const PACK_PART: usize = 1 << 20;
 pub const MAX_CHUNKS_PER_ITEM: usize = 4096;
 pub const MAX_PACKS_PER_ITEM: usize = 256;
+/// Half of the agent's plan message limit, which leaves room for the pack accesses sent with the entry.
+pub const MAX_IMAGE_ENTRY: usize = 4 << 20;
 const MAX_RANGE: u64 = 32 << 20;
 const MAX_REFRESH: usize = 4096;
 const ACCESS_COST: usize = 1024;
 const STREAM_DEPTH: usize = 4;
+
+/// The size of the entry head a plan sends: the node without its chunk ids and subtrees.
+pub(crate) fn image_entry_len(node: &pb::Node) -> usize {
+    let listed = |items: &[Vec<u8>], tag: u32| -> usize {
+        items
+            .iter()
+            .map(|item| {
+                prost::encoding::key_len(tag)
+                    + prost::encoding::encoded_len_varint(item.len() as u64)
+                    + item.len()
+            })
+            .sum()
+    };
+    node.encoded_len() - listed(&node.content, 12) - listed(&node.subtrees, 21)
+}
+
+/// `Err` carries the length of a head over `limit`.
+pub(crate) fn check_image_entry(node: &pb::Node, limit: usize) -> Result<(), usize> {
+    match image_entry_len(node) {
+        len if len > limit => Err(len),
+        _ => Ok(()),
+    }
+}
 
 fn denied() -> Status {
     Status::permission_denied("this job is not an active restore of this agent")
@@ -238,6 +264,34 @@ impl Planner {
         self.push(kind, &used).await
     }
 
+    async fn run_image(
+        mut self,
+        snapshot_id: BlobId,
+        disk_name: String,
+        _slot: PlanSlot,
+    ) -> Result<(), Status> {
+        // the layout and the merged node of a 16 TiB image hold hundreds of MB until the plan ends
+        let _permit = IMAGE_ENQUEUE.acquire().await.map_err(internal)?;
+        if self.tx.is_closed() {
+            return Err(Status::cancelled("the plan stream was closed"));
+        }
+        let image = load_image(&mut self.reader, &snapshot_id, &disk_name)
+            .await
+            .map_err(read_error)?;
+        let node = image.file_node().map_err(read_error)?;
+        if check_image_entry(&node, MAX_IMAGE_ENTRY).is_err() {
+            return Err(Status::failed_precondition(
+                "the disk image has too many holes for a restore plan",
+            ));
+        }
+        self.batch.totals = Some(RestoreTotals {
+            files: 1,
+            bytes: node.size,
+        });
+        self.entry(node).await?;
+        self.flush(true).await
+    }
+
     async fn run(mut self, snapshot_id: BlobId, selection: Selection) -> Result<(), Status> {
         let totals = self
             .reader
@@ -275,7 +329,16 @@ pub async fn restore_plan(
     agent_id: &str,
     job_id: &str,
 ) -> Result<ReceiverStream<Result<RestorePlanBatch, Status>>, Status> {
-    let record = authorize(state, agent_id, job_id).await?;
+    let mut record = authorize(state, agent_id, job_id).await?;
+    let image = match record.image.take() {
+        Some(name) => {
+            let slot = state.registry.claim_plan(job_id).ok_or_else(|| {
+                Status::aborted("a plan of this disk image is still running; try again")
+            })?;
+            Some((name, slot))
+        }
+        None => None,
+    };
     let selection = record
         .items()
         .ok_or_else(|| internal("the stored selection is not base64"))
@@ -301,7 +364,10 @@ pub async fn restore_plan(
         size: 0,
         sent: false,
     };
-    let task = tokio::spawn(planner.run(snapshot_id, selection));
+    let task = match image {
+        Some((name, slot)) => tokio::spawn(planner.run_image(snapshot_id, name, slot)),
+        None => tokio::spawn(planner.run(snapshot_id, selection)),
+    };
     let job_id = job_id.to_string();
     tokio::spawn(async move {
         let status = match task.await {
@@ -397,6 +463,34 @@ pub async fn read_pack_range(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_entry_len_counts_extents_not_ids() {
+        let extents = |count: u64| -> Vec<pb::Extent> {
+            (0..count)
+                .map(|i| pb::Extent {
+                    offset: (1 << 40) + i * 8192,
+                    length: 4096,
+                })
+                .collect()
+        };
+        let ids = |count: usize| vec![vec![7u8; 32]; count];
+        let fragmented = pb::Node {
+            sparse_extents: extents(400_000),
+            content: ids(1_000_000),
+            ..Default::default()
+        };
+        assert!(image_entry_len(&fragmented) > MAX_IMAGE_ENTRY);
+        assert!(check_image_entry(&fragmented, MAX_IMAGE_ENTRY).is_err());
+        let dense = pb::Node {
+            sparse_extents: extents(10),
+            content: ids(1_000_000),
+            ..Default::default()
+        };
+        assert!(image_entry_len(&dense) < 1024);
+        assert!(check_image_entry(&dense, MAX_IMAGE_ENTRY).is_ok());
+        assert!(check_image_entry(&dense, image_entry_len(&dense) - 1).is_err());
+    }
 
     #[test]
     fn walk_limit_fails_the_restore_plan() {

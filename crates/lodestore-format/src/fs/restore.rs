@@ -15,9 +15,10 @@ use rustix::io::Errno;
 use super::conv;
 use super::meta::{Target, apply_metadata};
 use super::walk::ExtentReader;
-use crate::chunker::Chunker;
+use crate::chunker::{Chunker, blob_id};
 use crate::crypto::Key32;
 use crate::error::{Error, Result};
+use crate::image::IMAGE_CHUNK_SIZE;
 use crate::pb;
 use crate::tree::validate_name;
 
@@ -88,6 +89,33 @@ fn chunks_match(source: impl std::io::Read, content: &[Vec<u8>], s: &RestoreSett
         }
     }
     ids.next().is_none()
+}
+
+/// Whether `source` cut into disk image chunks and hashed with the keyed id is
+/// exactly `content`; the keyed ids keep a wrong slicing from matching.
+fn fixed_chunks_match(mut source: impl std::io::Read, content: &[Vec<u8>], k_id: &Key32) -> bool {
+    let mut buf = vec![0u8; IMAGE_CHUNK_SIZE as usize];
+    let mut ids = content.iter();
+    loop {
+        let mut filled = 0;
+        while filled < buf.len() {
+            match source.read(&mut buf[filled..]) {
+                Ok(0) => break,
+                Ok(n) => filled += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => return false,
+            }
+        }
+        if filled == 0 {
+            return ids.next().is_none();
+        }
+        if ids
+            .next()
+            .is_none_or(|id| id.as_slice() != blob_id(k_id, &buf[..filled]))
+        {
+            return false;
+        }
+    }
 }
 
 /// What a level of the directory stack stands for.
@@ -696,26 +724,27 @@ impl Restorer {
         chunks_match(reader, &node.content, &self.settings).then_some(file)
     }
 
-    /// Reads the temporary file back and compares its chunk ids with the node's.
+    /// Reads the temporary file back and compares its chunk ids with the
+    /// node's, cut like a backup does or in the fixed slices of a disk image.
     fn verify(&self, dir: &OwnedFd, tmp: &str, node: &pb::Node, extents: &[(u64, u64)]) -> bool {
-        let Ok(fd) = openat(
-            dir,
-            tmp,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        ) else {
-            return false;
-        };
-        let file = File::from(fd);
-        if extents.is_empty() {
-            chunks_match(file, &node.content, &self.settings)
-        } else {
-            chunks_match(
-                ExtentReader::new(file, extents.to_vec()),
-                &node.content,
-                &self.settings,
+        let open = || -> Option<Box<dyn std::io::Read>> {
+            let fd = openat(
+                dir,
+                tmp,
+                OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
             )
-        }
+            .ok()?;
+            let file = File::from(fd);
+            Some(if extents.is_empty() {
+                Box::new(file)
+            } else {
+                Box::new(ExtentReader::new(file, extents.to_vec()))
+            })
+        };
+        // The second read only happens on the way to an error or for a disk image.
+        open().is_some_and(|r| chunks_match(r, &node.content, &self.settings))
+            || open().is_some_and(|r| fixed_chunks_match(r, &node.content, &self.settings.k_id))
     }
 
     /// Checks the length, verifies it if asked, applies owner, xattrs, mode
@@ -1115,6 +1144,91 @@ mod tests {
             restore_owners: false,
             keep_privileges: false,
         }
+    }
+
+    fn noise(len: usize, mut state: u64) -> Vec<u8> {
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state >> 24) as u8
+            })
+            .collect()
+    }
+
+    const CHUNK: usize = IMAGE_CHUNK_SIZE as usize;
+
+    /// A three-chunk image whose first chunk is a hole.
+    fn image_node(chunks: &[Vec<u8>]) -> pb::Node {
+        pb::Node {
+            name: b"disk.img".to_vec(),
+            size: 3 * IMAGE_CHUNK_SIZE,
+            sparse_extents: vec![pb::Extent {
+                offset: IMAGE_CHUNK_SIZE,
+                length: 2 * IMAGE_CHUNK_SIZE,
+            }],
+            content: chunks
+                .iter()
+                .map(|c| blob_id(&[0; 32], c).to_vec())
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    fn restore_with_verify(
+        tmp: &tempfile::TempDir,
+        node: &pb::Node,
+        written: &[Vec<u8>],
+    ) -> Result<Restorer> {
+        let mut restorer = Restorer::open(
+            tmp.path(),
+            RestoreSettings {
+                verify: true,
+                ..settings()
+            },
+        )?;
+        let mut sink = restorer.begin_file(node)?.unwrap();
+        for chunk in written {
+            sink.write(chunk)?;
+        }
+        restorer.finish_file(sink, node)?;
+        Ok(restorer)
+    }
+
+    #[test]
+    fn verify_accepts_fixed_image_chunks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let chunks = vec![noise(CHUNK, 1), noise(CHUNK, 2)];
+        let node = image_node(&chunks);
+        let restorer = restore_with_verify(&tmp, &node, &chunks).unwrap();
+        assert_eq!(restorer.stats().verified, 1);
+
+        let dense = noise(6 << 20, 3);
+        let ids: Vec<Vec<u8>> =
+            Chunker::new(dense.as_slice(), &zeroize::Zeroizing::new([0; 32]), 0)
+                .map(|c| c.unwrap().id.to_vec())
+                .collect();
+        let node = pb::Node {
+            name: b"dense".to_vec(),
+            size: dense.len() as u64,
+            content: ids,
+            ..Default::default()
+        };
+        let restorer = restore_with_verify(&tmp, &node, &[dense]).unwrap();
+        assert_eq!(restorer.stats().verified, 1);
+    }
+
+    #[test]
+    fn verify_rejects_a_flipped_byte_in_an_image() {
+        let tmp = tempfile::tempdir().unwrap();
+        let chunks = vec![noise(CHUNK, 1), noise(CHUNK, 2)];
+        let node = image_node(&chunks);
+        let mut flipped = chunks.clone();
+        flipped[1][12345] ^= 1;
+        let err = restore_with_verify(&tmp, &node, &flipped).err().unwrap();
+        assert!(matches!(err, Error::Corrupt { .. }), "{err}");
+        assert!(!tmp.path().join("disk.img").exists());
     }
 
     fn mode(path: &Path) -> u32 {

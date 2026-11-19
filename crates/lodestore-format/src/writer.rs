@@ -57,6 +57,9 @@ pub const INDEX_FLUSH_PACKS: usize = 8;
 // needs a content-list indirection and so a higher min_reader_version.
 const MAX_CONTENT_IDS: usize = (MAX_TREE_ULEN - (2 << 20)) / 34;
 
+mod image;
+pub use image::{ImageOptions, ImageOutcome};
+
 pub type IssueFn<'a> = Box<dyn Fn(&IssueEvent<'_>) + 'a>;
 pub type TreeSinkFn<'a> = Box<dyn FnMut(&BlobId, &[u8]) + 'a>;
 
@@ -768,6 +771,17 @@ impl<S: BlobStore> Writer<S> {
         root_tree: BlobId,
         paths: Vec<Vec<u8>>,
     ) -> Result<BlobId> {
+        self.commit_snapshot_raw_with(root_tree, paths, None).await
+    }
+
+    /// [`Writer::commit_snapshot_raw`] with the source the manifest claims.
+    #[cfg(feature = "test-hooks")]
+    pub async fn commit_snapshot_raw_with(
+        &mut self,
+        root_tree: BlobId,
+        paths: Vec<Vec<u8>>,
+        source: Option<pb::Source>,
+    ) -> Result<BlobId> {
         let mut records = Vec::new();
         for slot in 0..2 {
             let Some(builder) = self.raw[slot].take() else {
@@ -798,6 +812,7 @@ impl<S: BlobStore> Writer<S> {
             root_tree: root_tree.to_vec(),
             index_refs,
             program_version: format!("lodestore-format {}", env!("CARGO_PKG_VERSION")),
+            source,
             ..Default::default()
         };
         let (id, bytes) = seal_snapshot(

@@ -5,12 +5,17 @@ use indicatif::HumanBytes;
 use lodestore_format::Error;
 use lodestore_format::fs::filter::PathMatcher;
 use lodestore_format::fs::restore::Unapplied;
+use lodestore_format::image::ImageMeta;
+use lodestore_format::index::hex32;
 use lodestore_format::reader::{
-    Overwrite, RestoreFailure, RestoreOptions, RestoreProgress, parse_snapshot_path,
+    Overwrite, Reader, RestoreFailure, RestoreOptions, RestoreProgress, parse_snapshot_path,
 };
+use lodestore_format::snapshot::SnapshotEntry;
+use lodestore_format::source::{self, SourceType};
+use lodestore_format::store::Store;
 use serde::Serialize;
 
-use crate::cli::{RestoreFlags, SecretArgs};
+use crate::cli::{RestoreFlags, SecretArgs, UsageError};
 use crate::open::open_for_read;
 use crate::output::{JsonPath, Output, Throttle, spinner};
 
@@ -51,6 +56,74 @@ struct SummaryJson<'a> {
     errors: Vec<FailureJson<'a>>,
 }
 
+/// A disk image snapshot: the disk, its meta, and whether the repository vouches
+/// for it (signed, or nothing in the repository is signed).
+struct ImageDisk {
+    name: String,
+    meta: source::Meta,
+    trusted: bool,
+}
+
+/// Where a restore writes: a directory, or a block device.
+pub struct Destination<'a> {
+    pub target: Option<&'a Path>,
+    pub to_device: Option<&'a Path>,
+    pub accept_unverified: bool,
+}
+
+/// The disk of a snapshot that is a disk image, with its meta. A signed
+/// snapshot is an image only when its signed source says so; the manifest's
+/// claim decides only for an unsigned one.
+async fn image_disk(reader: &Reader<Store>, entry: &SnapshotEntry) -> Result<Option<ImageDisk>> {
+    let claimed = source::decode(entry.snapshot.source.as_ref()).ok();
+    // An unreadable attestation must not block restoring by id; a false manifest claim still fails in load_image.
+    let provenance = match reader.provenance().await {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!(
+                "warning: could not read snapshot signatures ({e:#}); the manifest decides the restore form"
+            );
+            let Some((key, meta)) = claimed.filter(|(k, _)| k.kind() == SourceType::Image) else {
+                return Ok(None);
+            };
+            let name = source::label(&key, &meta).context("the manifest names no disk")?;
+            return Ok(Some(ImageDisk {
+                name,
+                meta,
+                trusted: false,
+            }));
+        }
+    };
+    if provenance.signer(&entry.id).is_some() {
+        let key = provenance.source_of(&entry.id);
+        if key.kind() != SourceType::Image {
+            return Ok(None);
+        }
+        let name = source::label(&key, &source::Meta::new())
+            .context("the signed source of this snapshot names no disk")?;
+        return Ok(Some(ImageDisk {
+            name,
+            meta: claimed.map(|(_, m)| m).unwrap_or_default(),
+            trusted: true,
+        }));
+    }
+    let Some((key, meta)) = claimed.filter(|(k, _)| k.kind() == SourceType::Image) else {
+        return Ok(None);
+    };
+    if provenance.attested_any() {
+        eprintln!(
+            "warning: nothing signed snapshot {}; restoring it as the disk image its manifest names",
+            &hex32(&entry.id)[..8]
+        );
+    }
+    let name = source::label(&key, &meta).context("the manifest names no disk")?;
+    Ok(Some(ImageDisk {
+        name,
+        meta,
+        trusted: !provenance.attested_any(),
+    }))
+}
+
 fn overwrite_mode(name: &str) -> Overwrite {
     match name {
         "always" => Overwrite::Always,
@@ -65,9 +138,14 @@ pub async fn run(
     out: Output,
     snapshot: &str,
     host: Option<&str>,
-    target: &Path,
+    destination: Destination<'_>,
     flags: RestoreFlags,
 ) -> Result<u8> {
+    let Destination {
+        target,
+        to_device,
+        accept_unverified,
+    } = destination;
     let include = if flags.include.is_empty() {
         None
     } else {
@@ -95,6 +173,16 @@ pub async fn run(
         reader.allow_large_directories();
     }
     let (snapshot, path) = parse_snapshot_path(snapshot);
+    // clap skips `requires` when the required flag conflicts with a flag that is present.
+    if accept_unverified && to_device.is_none() {
+        return Err(UsageError("--accept-unverified needs --to-device".into()).into());
+    }
+    if to_device.is_some() && !path.is_empty() {
+        return Err(UsageError(
+            "--to-device restores a whole disk image snapshot; drop the :PATH".into(),
+        )
+        .into());
+    }
     let entry = super::resolve_spec(&reader, snapshot, host).await?;
     let throttle = Throttle::new();
     let bar = if out.json { None } else { spinner() };
@@ -120,21 +208,62 @@ pub async fn run(
             ));
         }
     };
-    let report = reader
-        .restore(
-            &entry.id,
-            target,
-            &RestoreOptions {
-                path: path.to_vec(),
-                overwrite: overwrite_mode(&flags.overwrite),
-                include,
-                verify: flags.verify,
-                dry_run: flags.dry_run,
-                skip_owners: false,
-            },
-            &progress,
-        )
-        .await;
+    let options = RestoreOptions {
+        path: path.to_vec(),
+        overwrite: overwrite_mode(&flags.overwrite),
+        include,
+        verify: flags.verify,
+        dry_run: flags.dry_run,
+        skip_owners: false,
+    };
+    let image = if path.is_empty() {
+        image_disk(&reader, &entry).await?
+    } else {
+        None
+    };
+    let mut image_name = None;
+    let report = match (image, to_device, target) {
+        (None, Some(_), _) => {
+            return Err(UsageError(
+                "--to-device restores a whole disk image snapshot; this snapshot is not one".into(),
+            )
+            .into());
+        }
+        (Some(disk), Some(device), _) => {
+            if !disk.trusted && !accept_unverified {
+                anyhow::bail!(
+                    "nothing signed snapshot {}; writing it to a device needs --accept-unverified",
+                    &hex32(&entry.id)[..8]
+                );
+            }
+            ImageMeta::from_meta(&disk.meta, &disk.name)
+                .context("cannot restore this disk image")?;
+            let (file, size) = super::device::open_device(device)?;
+            let report = reader
+                .restore_image_raw(&entry.id, &disk.name, &file, size, &progress)
+                .await;
+            if matches!(&report, Err(e) if !matches!(e, Error::InvalidInput(_))) {
+                eprintln!("error: the device may now hold a partial image");
+            }
+            image_name = Some(disk.name);
+            report
+        }
+        (Some(ImageDisk { name, meta, .. }), None, Some(target)) => {
+            if options.include.is_some() {
+                return Err(UsageError(
+                    "--include cannot be used with a disk image; name a path inside it with SNAPSHOT:PATH"
+                        .into(),
+                )
+                .into());
+            }
+            ImageMeta::from_meta(&meta, &name).context("cannot restore this disk image")?;
+            reader
+                .restore_image(&entry.id, &name, target, &options, &progress)
+                .await
+        }
+        (None, None, Some(target)) => reader.restore(&entry.id, target, &options, &progress).await,
+        (_, None, None) => unreachable!("clap requires --target without --to-device"),
+    };
     if let Some(bar) = &bar {
         bar.finish_and_clear();
     }
@@ -201,12 +330,18 @@ pub async fn run(
             "dry run: would restore {} files and leave {} alone, nothing was changed",
             report.would_write, report.would_skip
         );
+    } else if let (Some(name), Some(device)) = (&image_name, to_device) {
+        println!(
+            "restored image {name}.img ({}) to {}",
+            HumanBytes(report.bytes),
+            device.display()
+        );
     } else {
         let mut line = format!(
             "restored {} files ({} bytes) to {}",
             report.files,
             report.bytes,
-            target.display()
+            target.map_or_else(String::new, |t| t.display().to_string())
         );
         if report.skipped > 0 {
             line.push_str(&format!(", {} left as they were", report.skipped));

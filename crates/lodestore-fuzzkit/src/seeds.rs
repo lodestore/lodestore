@@ -51,6 +51,17 @@ fn hex_fields(text: &str, field: &str) -> Result<Vec<Vec<u8>>, String> {
         .collect()
 }
 
+fn string_fields(text: &str, field: &str) -> Result<Vec<String>, String> {
+    let needle = format!("\"{field}\": \"");
+    text.match_indices(&needle)
+        .map(|(at, _)| {
+            let rest = &text[at + needle.len()..];
+            let end = rest.find('"').ok_or("unterminated string")?;
+            Ok(rest[..end].to_owned())
+        })
+        .collect()
+}
+
 fn vectors(fixtures: &Path, name: &str) -> Result<String, String> {
     fs::read_to_string(fixtures.join(name)).map_err(|e| format!("{name}: {e}"))
 }
@@ -296,6 +307,18 @@ pub fn try_seeds(fixtures: &Path) -> Result<Seeds, String> {
         for claimed in hex_fields(encoded, field)? {
             out.push(("source_decode", claimed));
         }
+    }
+
+    let image = vectors(fixtures, "image-vectors.json")?;
+    for tree in hex_fields(&image, "tree")? {
+        out.push(("image_layout", tree));
+    }
+    for claimed in hex_fields(&image, "claimed")? {
+        out.push(("image_layout", claimed.clone()));
+        out.push(("source_decode", claimed));
+    }
+    for key in string_fields(&image, "key")? {
+        out.push(("source_decode", key.into_bytes()));
     }
 
     let mut reader = Reader::open(&store, repo.read_keys().duplicate(), repo.config())

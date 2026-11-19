@@ -28,10 +28,12 @@ use lodestore_proto::agent::v1::{
     RefreshPackAccessRequest, RestorePlanRequest, RestoreSpec, RestoreStats, ServerMessage,
     Versions,
 };
-use lodestore_server::catalog::ingest_snapshot;
+use lodestore_server::catalog::{ingest_snapshot, sync_repository};
 use lodestore_server::db::now_ms;
 use lodestore_server::grpc::dispatch::janitor_once;
-use lodestore_server::jobs::restore::{RestoreRequest, enqueue_restore};
+use lodestore_server::jobs::restore::{
+    IMAGE_ENQUEUE, IMAGE_ENQUEUE_LIMIT, RestoreRequest, enqueue_restore,
+};
 use lodestore_server::repos::db::{AccessKey, NewRepository, RepoLocation as DbLocation};
 use lodestore_testkit::minio::MinioServer;
 use prost::Message;
@@ -1336,4 +1338,76 @@ async fn restore_plan_enqueue_validates() {
         ));
         ts.stop().await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restore_plan_of_an_image_waits_for_a_permit_and_runs_once() {
+    let backend = backends().remove(0);
+    let ts = TestServer::start(&backend).await;
+    let api = ts.api().await;
+    let repo = ts.create_local_repository("main").await;
+    let host = enroll(&ts, &api, &repo, "host-a").await;
+    let file = ts.dir.path().join("disk.raw");
+    let mut data = vec![0u8; 3 << 22];
+    data[1 << 22..(1 << 22) + 4096].fill(0x5a);
+    std::fs::write(&file, data).unwrap();
+    let snapshot = crate::image_restore::write_image_snapshot(&ts, &file, "host-a").await;
+    sync_repository(ts.state(), &repo).await.unwrap();
+
+    let mut agent = Fake::connect(&ts, &host, &[CAP]).await;
+    let job = enqueue_restore(
+        ts.state(),
+        RestoreRequest {
+            snapshot_id: snapshot,
+            items: vec![b"/".to_vec()],
+            target_host_id: host.id.clone(),
+            destination: "/srv/out".to_string(),
+            in_place: false,
+            conflict: ConflictPolicy::StopIfNotEmpty,
+            restore_owners: false,
+            accept_unverified: false,
+        },
+        "admin",
+    )
+    .await
+    .expect("queue an image restore");
+    let (assigned, _) = agent.assigned().await;
+    assert_eq!(assigned, job);
+
+    let held = IMAGE_ENQUEUE
+        .acquire_many(IMAGE_ENQUEUE_LIMIT as u32)
+        .await
+        .unwrap();
+    let channel = channel(&ts, &host.paths).await;
+    let request = || RestorePlanRequest {
+        job_id: job.clone(),
+    };
+    let mut first = AgentClient::new(channel.clone())
+        .restore_plan(request())
+        .await
+        .expect("the first plan")
+        .into_inner();
+    for _ in 0..3 {
+        let status = AgentClient::new(channel.clone())
+            .restore_plan(request())
+            .await
+            .expect_err("a second plan of the job is refused");
+        assert_eq!(status.code(), Code::Aborted, "{status}");
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), first.message())
+            .await
+            .is_err(),
+        "the plan loads no layout while the permits are taken"
+    );
+
+    drop(held);
+    let mut last = false;
+    while let Some(batch) = first.message().await.expect("plan stream") {
+        last = batch.last;
+    }
+    assert!(last, "the plan ends once a permit is free");
+    let plan = read_plan(channel, &job).await;
+    assert_eq!(plan.totals, Some((1, 3 << 22)));
+    ts.stop().await;
 }

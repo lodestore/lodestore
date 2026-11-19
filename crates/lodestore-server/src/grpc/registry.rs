@@ -69,6 +69,7 @@ struct Inner {
     sessions: HashMap<String, Entry>,
     revoked: HashSet<String>,
     issued: HashMap<String, Issued>,
+    planning: HashSet<String>,
     replacements: HashMap<String, VecDeque<Instant>>,
     security: HashMap<String, SecurityEvents>,
     reject_logged: HashMap<String, Instant>,
@@ -103,6 +104,18 @@ pub struct SessionGuard {
 impl SessionGuard {
     pub fn take_rx(&mut self) -> mpsc::Receiver<ServerMessage> {
         self.rx.take().expect("the receiver is taken once")
+    }
+}
+
+/// Held while an image plan of `job_id` runs; another plan of the job is refused meanwhile.
+pub struct PlanSlot {
+    registry: Registry,
+    job_id: String,
+}
+
+impl Drop for PlanSlot {
+    fn drop(&mut self) {
+        self.registry.lock().planning.remove(&self.job_id);
     }
 }
 
@@ -286,6 +299,17 @@ impl Registry {
     pub fn supports(&self, agent_id: &str, cap: &str) -> bool {
         self.lock().sessions.get(agent_id).is_some_and(|e| {
             e.last_seen.elapsed() < ONLINE_WINDOW && e.capabilities.iter().any(|c| c == cap)
+        })
+    }
+
+    /// `None` while another image plan of the job holds the slot.
+    pub fn claim_plan(&self, job_id: &str) -> Option<PlanSlot> {
+        if !self.lock().planning.insert(job_id.to_string()) {
+            return None;
+        }
+        Some(PlanSlot {
+            registry: self.clone(),
+            job_id: job_id.to_string(),
         })
     }
 

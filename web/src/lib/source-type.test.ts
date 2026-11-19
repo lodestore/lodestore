@@ -26,6 +26,11 @@ describe("source types", () => {
 		expect(sourceTypeLabel("proxmox-vm")).toBe(copy.sources.type.proxmoxVm);
 	});
 
+	it("labels images but does not offer them as a policy source", () => {
+		expect(sourceTypeLabel("image")).toBe(copy.sources.type.image);
+		expect(parseSourceType("image")).toBeUndefined();
+	});
+
 	it("parses only known types", () => {
 		expect(parseSourceType("proxmox-vm")).toBe("proxmox-vm");
 		expect(parseSourceType("oracle")).toBeUndefined();
