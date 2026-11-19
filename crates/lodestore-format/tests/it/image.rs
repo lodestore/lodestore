@@ -482,6 +482,10 @@ async fn image_load_picks_the_named_disk_among_neighbours() {
     assert_eq!(loaded.layout.size, 8 * MIB);
     assert_eq!(loaded.layout.chunk_table(), vec![ChunkRef::Zero; 2]);
     assert_eq!(loaded.file_name(), b"disk.img");
+    assert_eq!(
+        loaded.head().unwrap(),
+        merge_head(&loaded.layout, b"disk.img")
+    );
     assert!(matches!(
         load_image(&mut r, &id, "other").await,
         Err(Error::Corrupt { .. })
@@ -865,6 +869,13 @@ fn image_meta_round_trips_and_rejects() {
     assert!(
         newer.contains("layout 2 is newer than this build reads"),
         "{newer}"
+    );
+    let malformed = ImageMeta::from_meta(&with("image_layout", "x"), "disk")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        malformed.contains("missing or malformed") && !malformed.contains("newer"),
+        "{malformed}"
     );
     assert!(ImageMeta::from_meta(&good, "other").is_err());
 

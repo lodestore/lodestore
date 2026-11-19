@@ -6,6 +6,7 @@ use crate::gc_support;
 
 use std::collections::BTreeSet;
 use std::ops::Range;
+use std::time::{Duration, UNIX_EPOCH};
 
 use adv_support::attacker_keys;
 use bytes::Bytes;
@@ -22,7 +23,7 @@ use lodestore_format::locks::new_lock_id;
 use lodestore_format::pb;
 use lodestore_format::provenance::{
     FUTURE_TOLERANCE_MS, LatestMode, LatestScope, LatestWarning, ProvenanceSet, Signer,
-    pick_latest, pick_latest_in,
+    owner_record, pick_latest, pick_latest_in,
 };
 use lodestore_format::reader::Reader;
 use lodestore_format::snapshot::SnapshotEntry;
@@ -1358,4 +1359,23 @@ proptest! {
             }
         }
     }
+}
+
+#[test]
+fn provenance_owner_record_signs_as_the_owner() {
+    let at = UNIX_EPOCH + Duration::new(5, 7);
+    assert_eq!(
+        owner_record(&id(1), b"h", None, at),
+        pb::ProvenanceRecord {
+            snapshot_id: id(1).to_vec(),
+            host_id: String::new(),
+            hostname: "h".into(),
+            job_id: String::new(),
+            verified_at: Some(pb::Timestamp {
+                seconds: 5,
+                nanos: 7
+            }),
+            source: None,
+        }
+    );
 }

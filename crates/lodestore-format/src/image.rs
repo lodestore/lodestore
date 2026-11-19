@@ -165,7 +165,7 @@ impl ImageMeta {
         let get = |key: &str| meta.get(key).map(String::as_str);
         match get(META_LAYOUT) {
             Some(LAYOUT_VERSION) => {}
-            Some(v) if decimal(v).is_some_and(|n| n > 1) => {
+            Some(v) if matches!(decimal(v), Some(2..)) => {
                 return Err(bad(format!(
                     "disk image layout {v} is newer than this build reads"
                 )));
@@ -384,7 +384,7 @@ impl ImageLayout {
         for (index, segment) in self.segments.iter().enumerate() {
             let base = (index as u64).saturating_mul(per_segment);
             let mut ids = segment.content.iter();
-            for e in segment.sparse_extents.iter().filter(|e| e.length > 0) {
+            for e in &segment.sparse_extents {
                 let first = base.saturating_add(e.offset / IMAGE_CHUNK_SIZE);
                 for k in 0..e.length.div_ceil(IMAGE_CHUNK_SIZE) {
                     let Some(id) = ids
@@ -527,4 +527,29 @@ pub async fn load_image<S: BlobStore>(
         name: disk_name.as_bytes().to_vec(),
         layout,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_shape_accepts_the_bounds_and_refuses_past_them() {
+        assert_eq!(
+            check_shape(MAX_IMAGE_SIZE, SEGMENT_CHUNKS).ok(),
+            Some(MAX_IMAGE_SIZE / IMAGE_CHUNK_SIZE)
+        );
+        assert!(matches!(
+            check_shape(MAX_IMAGE_SIZE + 1, SEGMENT_CHUNKS),
+            Err(Error::InvalidInput(_))
+        ));
+        assert_eq!(
+            check_shape(MAX_SEGMENTS as u64 * IMAGE_CHUNK_SIZE, 1).ok(),
+            Some(MAX_SEGMENTS as u64)
+        );
+        assert!(matches!(
+            check_shape((MAX_SEGMENTS as u64 + 1) * IMAGE_CHUNK_SIZE, 1),
+            Err(Error::InvalidInput(_))
+        ));
+    }
 }
