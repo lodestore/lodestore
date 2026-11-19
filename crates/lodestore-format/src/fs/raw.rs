@@ -56,7 +56,9 @@ impl FileSource {
         // NONBLOCK so that a FIFO at `path` fails the type check instead of hanging the open.
         let fd = rustix::fs::open(
             path,
-            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK,
+            OFlags::RDONLY
+                .union(OFlags::CLOEXEC)
+                .union(OFlags::NONBLOCK),
             Mode::empty(),
         )
         .map_err(|e| Error::Io(e.into()))?;
@@ -155,7 +157,10 @@ pub fn open_block_device(path: &Path) -> Result<(File, u64)> {
     // NONBLOCK so that a FIFO at `path` fails the type check instead of hanging the open.
     let fd = rustix::fs::open(
         path,
-        OFlags::WRONLY | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        OFlags::WRONLY
+            .union(OFlags::EXCL)
+            .union(OFlags::CLOEXEC)
+            .union(OFlags::NONBLOCK),
         Mode::empty(),
     )
     .map_err(|e| Error::Io(e.into()))?;
@@ -354,11 +359,34 @@ mod tests {
         }
         let read = source.read(IMAGE_CHUNK_SIZE + 8, 4).await.unwrap();
         assert_eq!(read, b"data");
-        assert!(source.read(3 * IMAGE_CHUNK_SIZE - 2, 4).await.is_err());
+        assert!(matches!(
+            source.read(3 * IMAGE_CHUNK_SIZE - 2, 4).await,
+            Err(Error::InvalidInput(_))
+        ));
 
         assert!(matches!(
             FileSource::open(dir.path()),
             Err(Error::InvalidInput(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn file_source_extents_have_no_empty_runs() {
+        let (_dir, file) = filled(16384);
+        let mut source = FileSource {
+            file,
+            size: 16384,
+            data: Some(vec![(4096, 4096)]),
+            stamp: Stamp::Device(0),
+        };
+        let run = |len, zero| ImageExtent { len, zero };
+        assert_eq!(
+            source.extents(0, 16384).await.unwrap(),
+            vec![run(4096, true), run(4096, false), run(8192, true)]
+        );
+        assert_eq!(
+            source.extents(4096, 8192).await.unwrap(),
+            vec![run(4096, false), run(4096, true)]
+        );
     }
 }
