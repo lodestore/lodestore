@@ -455,6 +455,7 @@ async fn run_image(url: &str, args: &SecretArgs, out: Output, flags: BackupFlags
         .backup_image(
             &name,
             &mut source,
+            None,
             BackupOptions {
                 hostname: Some(hostname.clone()),
                 tags: flags.tag,
@@ -462,7 +463,10 @@ async fn run_image(url: &str, args: &SecretArgs, out: Output, flags: BackupFlags
                 deadline,
                 ..Default::default()
             },
-            ImageOptions { segment_chunks },
+            ImageOptions {
+                segment_chunks,
+                ..Default::default()
+            },
             &progress,
         )
         .await;
