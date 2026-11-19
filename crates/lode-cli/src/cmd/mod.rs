@@ -2,6 +2,7 @@ mod apply;
 mod backup;
 mod backup_agent;
 mod check;
+mod device;
 mod dump;
 mod find;
 mod gc;
@@ -119,6 +120,8 @@ pub fn run(cli: Cli) -> Result<u8> {
                 snapshot,
                 host,
                 target,
+                to_device,
+                accept_unverified,
                 flags,
             } => {
                 restore::run(
@@ -127,7 +130,11 @@ pub fn run(cli: Cli) -> Result<u8> {
                     out,
                     &snapshot,
                     host.as_deref(),
-                    &target,
+                    restore::Destination {
+                        target: target.as_deref(),
+                        to_device: to_device.as_deref(),
+                        accept_unverified,
+                    },
                     flags,
                 )
                 .await
