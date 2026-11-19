@@ -12,9 +12,11 @@
 //! segments agree. Everything below is read from a bucket and is untrusted.
 
 use std::fmt::Write as _;
+use std::future::Future;
+use std::pin::Pin;
 
-use crate::crypto::BlobId;
 use crate::crypto::RepoId;
+use crate::crypto::{BLOB_TYPE_DATA, BlobId};
 use crate::error::{Error, Result};
 use crate::fs::restore::check_extents;
 use crate::pb;
@@ -119,6 +121,32 @@ pub trait ImageSource {
     fn finish(&mut self) -> Result<()> {
         Ok(())
     }
+}
+
+/// Where the bytes of a parent chunk come from. In `lode` this is a
+/// [`Reader`], whose `read_blob` checks the keyed id of what it returns.
+pub trait ParentChunks: Send {
+    fn chunk<'a>(
+        &'a mut self,
+        id: &'a BlobId,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>>> + Send + 'a>>;
+}
+
+impl<S: BlobStore> ParentChunks for Reader<S> {
+    fn chunk<'a>(
+        &'a mut self,
+        id: &'a BlobId,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>>> + Send + 'a>> {
+        Box::pin(self.read_blob(id, BLOB_TYPE_DATA))
+    }
+}
+
+/// The snapshot an incremental image run builds on. `table` comes from the
+/// parent's own tree, never from a cache.
+pub struct ImageParent<'a> {
+    pub snapshot_id: BlobId,
+    pub table: Vec<ChunkRef>,
+    pub chunks: &'a mut dyn ParentChunks,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

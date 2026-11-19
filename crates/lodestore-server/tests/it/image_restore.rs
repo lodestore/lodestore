@@ -85,8 +85,12 @@ pub(crate) async fn write_image_snapshot(ts: &TestServer, file: &Path, hostname:
         .backup_image(
             "disk",
             &mut source,
+            None,
             options,
-            ImageOptions { segment_chunks: 2 },
+            ImageOptions {
+                segment_chunks: 2,
+                ..Default::default()
+            },
             &|_| {},
         )
         .await
