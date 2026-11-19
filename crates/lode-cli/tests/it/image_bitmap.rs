@@ -383,3 +383,244 @@ fn image_bitmap_incremental_after_a_full_read() {
     assert_eq!(export.reads_outside_dirty(), 0);
     assert_eq!(env.restored(&third), export.data());
 }
+
+#[test]
+fn image_bitmap_wrong_name_is_refused() {
+    let env = setup();
+    let export = &env.export;
+    for g in [1, 2] {
+        export.add_bitmap(&env.bitmap(g));
+    }
+    export.export_bitmaps(&[&env.bitmap(1), &env.bitmap(2)]);
+    env.run_bitmap(1);
+    let state = env.state_bytes();
+    let connections = export.connections();
+    let prefix = env.names.name(0).strip_suffix('0').unwrap().to_owned();
+
+    let other = |host: &str, image: &str| names_of(&env.repo, host, image).name(1);
+    let parts: Vec<String> = env.bitmap(1).split('-').map(str::to_owned).collect();
+    let foreign_repo = format!("lode-{}-{}-g1", "0".repeat(16), parts[2]);
+    let cases = [
+        foreign_repo,
+        other("another-host", EXPORT),
+        other(HOST, "another-image"),
+        env.bitmap(0),
+        "garbage".to_owned(),
+    ];
+    for name in &cases {
+        let assert = env
+            .backup(&export.uri(), &["--bitmap", name])
+            .assert()
+            .code(2);
+        let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+        assert!(stderr.contains(&prefix), "{name}: {stderr}");
+    }
+    assert_eq!(export.connections(), connections);
+    assert_eq!(env.state_bytes(), state);
+}
+
+#[test]
+fn image_bitmap_flag_rules() {
+    let env = setup();
+    let export = &env.export;
+    let file = env._tmp.path().join("file.raw");
+    fs::write(&file, vec![1u8; 4096]).unwrap();
+    let name = env.bitmap(1);
+    lode(&env.repo)
+        .args(["backup", "--image"])
+        .arg(&file)
+        .args(["--bitmap", &name])
+        .assert()
+        .code(2);
+    env.backup(
+        &export.uri(),
+        &["--bitmap", &name, "--writer-keys", "/nonexistent/keys"],
+    )
+    .assert()
+    .code(2);
+    assert_eq!(export.connections(), 0);
+
+    let nameless = format!("nbd+unix:///?socket={}", export.socket.display());
+    env.backup(&nameless, &[]).assert().code(2);
+    assert_eq!(export.connections(), 0);
+
+    export.add_bitmap(&name);
+    export.export_bitmaps(&[&name]);
+    let summary = env.run(&["--bitmap", &name]);
+    assert_eq!(summary["image"]["key"], "image/disk");
+}
+
+#[test]
+fn image_bitmap_changed_export_needs_a_name() {
+    let env = setup();
+    let a = &env.export;
+    let b = TestExport::start(disk());
+    for g in [1, 2] {
+        a.add_bitmap(&env.bitmap(g));
+    }
+    a.export_bitmaps(&[&env.bitmap(1), &env.bitmap(2)]);
+    env.run_bitmap(1);
+    let state = env.state_bytes();
+    assert_eq!(state.len(), 1);
+
+    let assert = env
+        .backup(&b.uri(), &["--bitmap", &env.bitmap(2)])
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("--name"), "{stderr}");
+    assert_eq!(env.state_bytes(), state);
+    assert_eq!(b.connections(), 0);
+
+    a.add_bitmap(&env.bitmap(3));
+    a.export_bitmaps(&[&env.bitmap(2), &env.bitmap(3)]);
+    let again = env.run_bitmap(2);
+    assert_eq!(read_mode(&again), ("incremental", None));
+}
+
+#[test]
+fn image_bitmap_state_is_consumed_before_the_export_is_opened() {
+    let env = setup();
+    let export = &env.export;
+    export.watch_state(&env.cache());
+    for g in [1, 2, 3] {
+        export.add_bitmap(&env.bitmap(g));
+    }
+    export.export_bitmaps(&[&env.bitmap(1), &env.bitmap(2)]);
+    env.run_bitmap(1);
+    assert_eq!(env.state_bytes().len(), 1);
+    export.export_bitmaps(&[&env.bitmap(2), &env.bitmap(3)]);
+    let second = env.run_bitmap(2);
+    assert_eq!(read_mode(&second), ("incremental", None));
+    assert_eq!(env.state_bytes().len(), 1);
+    assert_eq!(export.state_files_seen(), vec![0, 0]);
+
+    let missing = format!("nbd+unix:///{EXPORT}?socket=/tmp/lode-no-such-dir/s");
+    env.backup(&missing, &["--name", EXPORT, "--bitmap", &env.bitmap(3)])
+        .assert()
+        .failure();
+    assert!(env.state_bytes().is_empty());
+    assert_eq!(export.connections(), 2);
+}
+
+#[test]
+fn image_bitmap_second_run_of_an_instance_is_refused() {
+    let env = setup();
+    let export = &env.export;
+    for g in [1, 2] {
+        export.add_bitmap(&env.bitmap(g));
+    }
+    export.export_bitmaps(&[&env.bitmap(1), &env.bitmap(2)]);
+    env.run_bitmap(1);
+    let state = env.state_bytes();
+    let connections = export.connections();
+
+    let held = fs::File::open(env.lock_file()).unwrap();
+    held.try_lock().unwrap();
+    let assert = env
+        .backup(&export.uri(), &["--bitmap", &env.bitmap(2)])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("another backup"), "{stderr}");
+    assert_eq!(env.state_bytes(), state);
+    assert_eq!(export.connections(), connections);
+}
+
+#[test]
+fn image_bitmap_next_bitmap_not_exported_records_nothing() {
+    let env = setup();
+    let export = &env.export;
+    for g in [1, 2, 3, 4] {
+        export.add_bitmap(&env.bitmap(g));
+    }
+    export.export_bitmaps(&[&env.bitmap(1), &env.bitmap(2)]);
+    env.run_bitmap(1);
+
+    export.export_bitmaps(&[&env.bitmap(2)]);
+    let name = env.bitmap(2);
+    let output = env
+        .backup(&export.uri(), &["--bitmap", &name])
+        .assert()
+        .success();
+    let stderr = String::from_utf8(output.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("note:") && stderr.contains(&env.bitmap(3)),
+        "{stderr}"
+    );
+    let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
+    let summary: Value = stdout
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .find(|v| v["type"] == "backup_summary")
+        .unwrap();
+    assert_eq!(read_mode(&summary), ("incremental", None));
+    assert_eq!(summary["image"]["next_bitmap"], env.bitmap(3));
+    assert_eq!(summary["image"]["bitmap_to_create"], env.bitmap(4));
+    assert!(env.state_bytes().is_empty());
+
+    export.export_bitmaps(&[&env.bitmap(3), &env.bitmap(4)]);
+    let next = env.run_bitmap(3);
+    assert_eq!(read_mode(&next), ("full", Some("no_state")));
+    assert_eq!(next["image"]["next_bitmap"], env.bitmap(4));
+    assert_eq!(env.state_bytes().len(), 1);
+}
+
+#[test]
+fn image_bitmap_missing_context_restarts_the_chain() {
+    let env = setup();
+    let export = &env.export;
+    for g in [4, 5] {
+        export.add_bitmap(&env.bitmap(g));
+    }
+    export.export_bitmaps(&[&env.bitmap(4), &env.bitmap(5)]);
+    let chain = env.run_bitmap(4);
+    assert_eq!(chain["image"]["next_bitmap"], env.bitmap(5));
+    assert_eq!(env.state_bytes().len(), 1);
+
+    export.export_bitmaps(&[]);
+    let lost = env.run_bitmap(5);
+    assert_eq!(read_mode(&lost), ("full", Some("bitmap_missing")));
+    assert!(env.state_bytes().is_empty());
+    assert_eq!(lost["image"]["next_bitmap"], env.bitmap(6));
+    assert_eq!(lost["image"]["bitmap_to_create"], env.bitmap(7));
+
+    for g in [6, 7, 8] {
+        export.add_bitmap(&env.bitmap(g));
+    }
+    export.export_bitmaps(&[&env.bitmap(6), &env.bitmap(7)]);
+    let restart = env.run_bitmap(6);
+    assert_eq!(read_mode(&restart), ("full", Some("no_state")));
+    export.export_bitmaps(&[&env.bitmap(7), &env.bitmap(8)]);
+    let again = env.run_bitmap(7);
+    assert_eq!(read_mode(&again), ("incremental", None));
+    assert_eq!(env.restored(&again), export.data());
+}
+
+#[test]
+fn image_bitmap_aborted_run_forces_a_full_read() {
+    let env = setup();
+    let export = &env.export;
+    for g in [1, 2] {
+        export.add_bitmap(&env.bitmap(g));
+    }
+    export.export_bitmaps(&[&env.bitmap(1), &env.bitmap(2)]);
+    env.run_bitmap(1);
+    assert_eq!(env.state_bytes().len(), 1);
+
+    export.write(2 * CHUNK as u64 + 8192, &[0x5A; 4096]);
+    export.write(6 * CHUNK as u64 + 8192, &[0xC3; 4096]);
+    export.add_bitmap(&env.bitmap(3));
+    export.export_bitmaps(&[&env.bitmap(2), &env.bitmap(3)]);
+    export.fail_reads_after(Some(1));
+    let name = env.bitmap(2);
+    env.backup(&export.uri(), &["--bitmap", &name])
+        .assert()
+        .failure();
+    assert!(env.state_bytes().is_empty());
+
+    export.fail_reads_after(None);
+    let third = env.run_bitmap(2);
+    assert_eq!(read_mode(&third), ("full", Some("no_state")));
+    assert_eq!(env.restored(&third), export.data());
+}
