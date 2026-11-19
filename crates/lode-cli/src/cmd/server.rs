@@ -876,7 +876,7 @@ async fn snapshots(client: &Client, out: Output, command: ServerSnapshotsCommand
     if let Some(text) = &source_type {
         SourceType::parse(text).map_err(|_| {
             UsageError(format!(
-                "{text:?} is not a source type. Use files, proxmox-vm, proxmox-ct, postgres, postgres-wal or mysql."
+                "{text:?} is not a source type. Use files, proxmox-vm, proxmox-ct, postgres, postgres-wal, mysql or image."
             ))
         })?;
     }

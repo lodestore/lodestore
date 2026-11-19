@@ -5,6 +5,7 @@
 //! the order of a verified repository.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::attest::{AttestedSet, open_provenance};
 use crate::crypto::BlobId;
@@ -34,6 +35,27 @@ fn signer_of(record: &pb::ProvenanceRecord) -> Signer {
         Signer::Owner
     } else {
         Signer::Server
+    }
+}
+
+/// The record the password holder signs a snapshot with: no host and no job.
+pub fn owner_record(
+    snapshot_id: &BlobId,
+    hostname: &[u8],
+    source: Option<pb::Source>,
+    at: SystemTime,
+) -> pb::ProvenanceRecord {
+    let at = at.duration_since(UNIX_EPOCH).unwrap_or_default();
+    pb::ProvenanceRecord {
+        snapshot_id: snapshot_id.to_vec(),
+        host_id: String::new(),
+        hostname: String::from_utf8_lossy(hostname).into_owned(),
+        job_id: String::new(),
+        verified_at: Some(pb::Timestamp {
+            seconds: i64::try_from(at.as_secs()).unwrap_or(i64::MAX),
+            nanos: at.subsec_nanos(),
+        }),
+        source,
     }
 }
 

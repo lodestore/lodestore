@@ -83,7 +83,11 @@ pub enum Command {
     },
     /// Back up files and directories into the repository
     Backup {
-        #[arg(required_unless_present = "stdin", value_name = "PATHS")]
+        #[arg(
+            required_unless_present_any = ["stdin", "image"],
+            conflicts_with = "image",
+            value_name = "PATHS"
+        )]
         paths: Vec<PathBuf>,
         #[command(flatten)]
         flags: BackupFlags,
@@ -91,7 +95,7 @@ pub enum Command {
     /// List snapshots, oldest first
     Snapshots {
         /// Only snapshots of this signed source type: files, proxmox-vm,
-        /// proxmox-ct, postgres, postgres-wal or mysql
+        /// proxmox-ct, postgres, postgres-wal, mysql or image
         #[arg(long, value_name = "TYPE")]
         source_type: Option<String>,
     },
@@ -330,7 +334,7 @@ pub enum ServerSnapshotsCommand {
         /// Stop after this many snapshots
         #[arg(long, value_name = "N")]
         limit: Option<usize>,
-        /// Only snapshots of this source type: files, proxmox-vm, proxmox-ct, postgres, postgres-wal or mysql.
+        /// Only snapshots of this source type: files, proxmox-vm, proxmox-ct, postgres, postgres-wal, mysql or image.
         #[arg(long, value_name = "TYPE")]
         source_type: Option<String>,
         /// Only snapshots of this source instance (a canonical source key).
@@ -529,9 +533,22 @@ pub struct BackupFlags {
     #[arg(long, requires = "name", conflicts_with = "paths")]
     pub stdin: bool,
 
-    /// With --stdin: the file name the data is stored under (`/<NAME>` in the
-    /// snapshot, which is tagged `stdin=<NAME>`)
-    #[arg(long, value_name = "NAME", requires = "stdin")]
+    /// Back up a disk image: a regular file or a block device, read whole;
+    /// zero chunks are stored as holes
+    #[arg(
+        long,
+        value_name = "SOURCE",
+        conflicts_with_all = [
+            "stdin", "parent", "force_rescan", "exclude", "exclude_file",
+            "one_file_system", "exclude_caches"
+        ]
+    )]
+    pub image: Option<String>,
+
+    /// With --stdin or --image: the name of the stream or the disk image
+    /// (default for --image: the file name of SOURCE). A stream is stored as
+    /// `/<NAME>` in a snapshot tagged `stdin=<NAME>`
+    #[arg(long, value_name = "NAME")]
     pub name: Option<String>,
 
     /// With --stdin: add the tag `policy=<NAME>` to the snapshot

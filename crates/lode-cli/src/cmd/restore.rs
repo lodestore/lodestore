@@ -5,12 +5,15 @@ use indicatif::HumanBytes;
 use lodestore_format::Error;
 use lodestore_format::fs::filter::PathMatcher;
 use lodestore_format::fs::restore::Unapplied;
+use lodestore_format::image::ImageMeta;
 use lodestore_format::reader::{
     Overwrite, RestoreFailure, RestoreOptions, RestoreProgress, parse_snapshot_path,
 };
+use lodestore_format::snapshot::SnapshotEntry;
+use lodestore_format::source::{self, SourceType};
 use serde::Serialize;
 
-use crate::cli::{RestoreFlags, SecretArgs};
+use crate::cli::{RestoreFlags, SecretArgs, UsageError};
 use crate::open::open_for_read;
 use crate::output::{JsonPath, Output, Throttle, spinner};
 
@@ -49,6 +52,15 @@ struct SummaryJson<'a> {
     dry_run: bool,
     unapplied: Vec<UnappliedJson<'a>>,
     errors: Vec<FailureJson<'a>>,
+}
+
+/// The disk of a snapshot the manifest claims as a disk image, with its meta.
+fn image_disk(entry: &SnapshotEntry) -> Option<(String, source::Meta)> {
+    let (key, meta) = source::decode(entry.snapshot.source.as_ref()).ok()?;
+    if key.kind() != SourceType::Image {
+        return None;
+    }
+    Some((source::label(&key, &meta)?, meta))
 }
 
 fn overwrite_mode(name: &str) -> Overwrite {
@@ -120,21 +132,35 @@ pub async fn run(
             ));
         }
     };
-    let report = reader
-        .restore(
-            &entry.id,
-            target,
-            &RestoreOptions {
-                path: path.to_vec(),
-                overwrite: overwrite_mode(&flags.overwrite),
-                include,
-                verify: flags.verify,
-                dry_run: flags.dry_run,
-                skip_owners: false,
-            },
-            &progress,
-        )
-        .await;
+    let options = RestoreOptions {
+        path: path.to_vec(),
+        overwrite: overwrite_mode(&flags.overwrite),
+        include,
+        verify: flags.verify,
+        dry_run: flags.dry_run,
+        skip_owners: false,
+    };
+    let image = if path.is_empty() {
+        image_disk(&entry)
+    } else {
+        None
+    };
+    let report = match image {
+        Some((name, meta)) => {
+            if options.include.is_some() {
+                return Err(UsageError(
+                    "--include cannot be used with a disk image; name a path inside it with SNAPSHOT:PATH"
+                        .into(),
+                )
+                .into());
+            }
+            ImageMeta::from_meta(&meta, &name).context("cannot restore this disk image")?;
+            reader
+                .restore_image(&entry.id, &name, target, &options, &progress)
+                .await
+        }
+        None => reader.restore(&entry.id, target, &options, &progress).await,
+    };
     if let Some(bar) = &bar {
         bar.finish_and_clear();
     }
