@@ -17,7 +17,7 @@ use lodestore_format::index::{hex32, parse_hex32};
 use lodestore_format::keys::ReadKeys;
 use lodestore_format::pb;
 use lodestore_format::provenance::{ProvenanceSet, Signer};
-use lodestore_format::source;
+use lodestore_format::source::{self, SourceKey, SourceType};
 use lodestore_format::store::BlobStore;
 use sqlx::Row;
 use tokio::sync::Mutex;
@@ -257,10 +257,29 @@ pub async fn reconcile_provenance<S: BlobStore>(
                 marked += usize::try_from(done.rows_affected()).unwrap_or(0);
             }
             Signer::Owner => {
-                if !source::decode(record.source.as_ref()).is_ok_and(|(key, _)| key.is_files()) {
+                let Ok((key, meta)) = source::decode(record.source.as_ref()) else {
+                    continue;
+                };
+                let job: Option<String> = row.try_get("job_id")?;
+                if key.kind() == SourceType::Image {
+                    if job.is_none()
+                        && mark_owner_image(
+                            state,
+                            &id,
+                            repository_id,
+                            at,
+                            &key,
+                            source::label(&key, &meta),
+                        )
+                        .await?
+                    {
+                        marked += 1;
+                    }
                     continue;
                 }
-                let job: Option<String> = row.try_get("job_id")?;
+                if !key.is_files() {
+                    continue;
+                }
                 let claim: Option<String> = row.try_get("agent_id_claim")?;
                 let host: Option<String> = row.try_get("host_id")?;
                 // the job check never confirms a row whose claim is not its host, and a mark would put it in that job's pool
@@ -305,6 +324,32 @@ pub async fn mark_owner_signed(
     .bind(at_ms)
     .bind(snapshot_id)
     .bind(repository_id)
+    .execute(&state.db.pool)
+    .await?;
+    Ok(done.rows_affected() == 1)
+}
+
+// job_id IS NULL: an agent never runs an image backup, so a job-linked row cannot be an image
+pub async fn mark_owner_image(
+    state: &AppState,
+    snapshot_id: &str,
+    repository_id: &str,
+    at_ms: i64,
+    key: &SourceKey,
+    label: Option<String>,
+) -> anyhow::Result<bool> {
+    let done = sqlx::query(
+        "UPDATE snapshots SET verified_at = $1, verified_by = 'owner', \
+         source_type = $4, source_ref = $5, source_label = $6 \
+         WHERE id = $2 AND repository_id = $3 AND verified_at IS NULL \
+         AND source_ref = '' AND job_id IS NULL",
+    )
+    .bind(at_ms)
+    .bind(snapshot_id)
+    .bind(repository_id)
+    .bind(key.kind().as_str())
+    .bind(key.as_str())
+    .bind(label)
     .execute(&state.db.pool)
     .await?;
     Ok(done.rows_affected() == 1)

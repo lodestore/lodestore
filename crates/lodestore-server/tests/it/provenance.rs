@@ -12,11 +12,13 @@ use lodestore_format::attest::{
     ATTEST_PREFIX, put_attestation, read_attestations, seal_provenance,
 };
 use lodestore_format::crypto::{BlobId, Entropy};
+use lodestore_format::image::{ImageMeta, ReadMode};
 use lodestore_format::index::{hex32, parse_hex32};
 use lodestore_format::keys::ReadKeys;
 use lodestore_format::pb;
-use lodestore_format::provenance::{ProvenanceSet, Signer};
+use lodestore_format::provenance::{ProvenanceSet, Signer, owner_record};
 use lodestore_format::repo::Repository;
+use lodestore_format::source::{self, SourceKey};
 use lodestore_format::store::{BlobStore, LocalFsStore};
 use lodestore_format::writer::{BackupOptions, Writer};
 use lodestore_server::catalog::retention::run_for_pair;
@@ -604,6 +606,94 @@ async fn owner_sign(c: &Catalog, snapshot: &str, seconds: i64, nanos: u32) {
     )
     .await
     .unwrap();
+}
+
+async fn owner_sign_source(
+    c: &Catalog,
+    snapshot: &str,
+    source: Option<pb::Source>,
+    seconds: u64,
+    nanos: u32,
+) {
+    let store = store(&c.ts);
+    let repo = Repository::open(&store, PASSWORD).await.unwrap();
+    let at = UNIX_EPOCH + Duration::new(seconds, nanos);
+    let record = owner_record(&parse_hex32(snapshot).unwrap(), b"owner", source, at);
+    let mut entropy = Entropy::os();
+    let sealed = seal_provenance(repo.read_keys(), &record, &mut entropy).unwrap();
+    put_attestation(
+        &store,
+        repo.read_keys(),
+        &[],
+        &[],
+        vec![sealed],
+        &mut entropy,
+    )
+    .await
+    .unwrap();
+}
+
+fn now_secs_u64() -> u64 {
+    now_secs().unsigned_abs()
+}
+
+fn image_source(name: &str) -> pb::Source {
+    let meta = ImageMeta {
+        read_mode: ReadMode::Full,
+        disk_size: 8 << 20,
+    }
+    .to_meta(name);
+    source::encode(&SourceKey::image(name).unwrap(), &meta)
+        .unwrap()
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn owner_signature_verifies_image_rows_with_their_source() {
+    for backend in backends() {
+        let c = Catalog::new(&backend).await;
+        let snapshot = c.write("image", None).await;
+        ingest_snapshot(c.ts.state(), &c.repo, &snapshot, None)
+            .await
+            .unwrap();
+        owner_sign_source(&c, &snapshot, Some(image_source("disk")), now_secs_u64(), 0).await;
+
+        sync_repository(c.ts.state(), &c.repo).await.unwrap();
+
+        let (at, by) = verified_columns(&c.ts, &snapshot).await;
+        assert!(at.is_some(), "[{}]", backend.name());
+        assert_eq!(by.as_deref(), Some("owner"));
+        assert_eq!(
+            catalog_source(&c, &snapshot).await,
+            (
+                "image".to_string(),
+                "image/disk".to_string(),
+                Some("disk".to_string())
+            )
+        );
+        c.ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn owner_image_signature_skips_a_row_linked_to_a_job() {
+    for backend in backends() {
+        let c = Catalog::new(&backend).await;
+        let snapshot = c.linked("image", None).await;
+        owner_sign_source(&c, &snapshot, Some(image_source("disk")), now_secs_u64(), 0).await;
+
+        sync_repository(c.ts.state(), &c.repo).await.unwrap();
+
+        assert_eq!(
+            verified_columns(&c.ts, &snapshot).await,
+            (None, None),
+            "[{}]",
+            backend.name()
+        );
+        let (kind, source_ref, _) = catalog_source(&c, &snapshot).await;
+        assert_eq!((kind.as_str(), source_ref.as_str()), ("files", ""));
+        c.ts.stop().await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

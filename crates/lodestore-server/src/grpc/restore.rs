@@ -2,6 +2,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::time::Duration;
 
 use lodestore_format::crypto::{BlobId, Key32};
+use lodestore_format::image::load_image;
 use lodestore_format::index::parse_hex32;
 use lodestore_format::pack::pack_object_key;
 use lodestore_format::pb;
@@ -238,6 +239,19 @@ impl Planner {
         self.push(kind, &used).await
     }
 
+    async fn run_image(mut self, snapshot_id: BlobId, disk_name: String) -> Result<(), Status> {
+        let image = load_image(&mut self.reader, &snapshot_id, &disk_name)
+            .await
+            .map_err(read_error)?;
+        let node = image.file_node().map_err(read_error)?;
+        self.batch.totals = Some(RestoreTotals {
+            files: 1,
+            bytes: node.size,
+        });
+        self.entry(node).await?;
+        self.flush(true).await
+    }
+
     async fn run(mut self, snapshot_id: BlobId, selection: Selection) -> Result<(), Status> {
         let totals = self
             .reader
@@ -275,7 +289,7 @@ pub async fn restore_plan(
     agent_id: &str,
     job_id: &str,
 ) -> Result<ReceiverStream<Result<RestorePlanBatch, Status>>, Status> {
-    let record = authorize(state, agent_id, job_id).await?;
+    let mut record = authorize(state, agent_id, job_id).await?;
     let selection = record
         .items()
         .ok_or_else(|| internal("the stored selection is not base64"))
@@ -301,7 +315,10 @@ pub async fn restore_plan(
         size: 0,
         sent: false,
     };
-    let task = tokio::spawn(planner.run(snapshot_id, selection));
+    let task = match record.image.take() {
+        Some(name) => tokio::spawn(planner.run_image(snapshot_id, name)),
+        None => tokio::spawn(planner.run(snapshot_id, selection)),
+    };
     let job_id = job_id.to_string();
     tokio::spawn(async move {
         let status = match task.await {

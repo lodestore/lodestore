@@ -1,5 +1,10 @@
+use lodestore_format::crypto::BlobId;
+use lodestore_format::image::{ImageMeta, load_image};
 use lodestore_format::index::parse_hex32;
+use lodestore_format::reader::Reader;
 use lodestore_format::selection::Selection;
+use lodestore_format::source::{self, Meta, SourceKey, SourceType};
+use lodestore_format::store::Store;
 use lodestore_proto::agent::v1::{ConflictPolicy, RestoreSpec};
 use prost::Message;
 use serde::{Deserialize, Serialize};
@@ -37,6 +42,9 @@ pub struct RestoreRecord {
     pub conflict: String,
     pub restore_owners: bool,
     pub started_by: String,
+    /// The disk to restore whole as `NAME.img`; absent for a restore of files.
+    #[serde(default)]
+    pub image: Option<String>,
 }
 
 impl RestoreRecord {
@@ -203,7 +211,10 @@ pub async fn enqueue_restore(
         .await?
         .ok_or_else(|| ApiError::NotFound("The snapshot was not found.".into()))?;
     let source_type: String = snapshot.try_get("source_type")?;
-    if source_type != "files" {
+    let mut image = None;
+    if source_type == "image" && req.items == [b"/".to_vec()] {
+        image = Some(signed_image(state, &req.snapshot_id).await?);
+    } else if source_type != "files" && source_type != "image" {
         return Err(ApiError::Validation(format!(
             "This snapshot is a {source_type} backup and cannot be restored as files."
         )));
@@ -248,7 +259,11 @@ pub async fn enqueue_restore(
     let mut source = reader(state, &source_repository_id)
         .await
         .map_err(read_error)?;
-    require_items_exist(&mut source, &snapshot_id, &req.items).await?;
+    match &image {
+        Some((key, name)) => check_image(&mut source, &snapshot_id, key, name).await?,
+        None => require_items_exist(&mut source, &snapshot_id, &req.items).await?,
+    }
+    let image = image.map(|(_, name)| name);
 
     let record = RestoreRecord {
         snapshot_id: req.snapshot_id.clone(),
@@ -265,6 +280,7 @@ pub async fn enqueue_restore(
         conflict: conflict_name(req.conflict).to_string(),
         restore_owners: req.restore_owners,
         started_by: started_by.to_string(),
+        image,
     };
     let spec = RestoreSpec {
         snapshot_id: req.snapshot_id,
@@ -289,4 +305,47 @@ pub async fn enqueue_restore(
     .execute(&state.db.pool)
     .await?;
     Ok(id)
+}
+
+/// The key the catalog row was signed with, and the disk it names.
+async fn signed_image(
+    state: &AppState,
+    snapshot_id: &str,
+) -> Result<(SourceKey, String), ApiError> {
+    let row = sqlx::query("SELECT source_ref FROM snapshots WHERE id = $1")
+        .bind(snapshot_id)
+        .fetch_one(&state.db.pool)
+        .await?;
+    let key = SourceKey::parse(&row.try_get::<String, _>("source_ref")?)
+        .ok()
+        .filter(|key| key.kind() == SourceType::Image);
+    let name = key
+        .as_ref()
+        .and_then(|key| source::label(key, &Meta::new()));
+    match (key, name) {
+        (Some(key), Some(name)) => Ok((key, name)),
+        _ => Err(invalid("The snapshot does not name a disk image.")),
+    }
+}
+
+/// Refuses an image the planner would not read, before the agent gets a job.
+async fn check_image(
+    reader: &mut Reader<Store>,
+    snapshot: &BlobId,
+    key: &SourceKey,
+    name: &str,
+) -> Result<(), ApiError> {
+    let manifest = reader.snapshot(snapshot).await.map_err(read_error)?;
+    let (claimed, meta) = source::decode(manifest.source.as_ref())
+        .map_err(|error| ApiError::Validation(error.to_string()))?;
+    if claimed.as_str() != key.as_str() {
+        return Err(invalid(
+            "The snapshot manifest does not match its signature.",
+        ));
+    }
+    ImageMeta::from_meta(&meta, name).map_err(|error| ApiError::Validation(error.to_string()))?;
+    load_image(reader, snapshot, name)
+        .await
+        .map_err(read_error)?;
+    Ok(())
 }
