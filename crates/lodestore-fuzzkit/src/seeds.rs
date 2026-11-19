@@ -5,11 +5,13 @@ use std::fs;
 use std::path::Path;
 
 use lodestore_format::crypto::{BLOB_TYPE_TREE, BlobId};
+use lodestore_format::image::ImageState;
 use lodestore_format::index::open_shard;
 use lodestore_format::pack::{ENTRY_LEN, PACK_MAGIC, PACK_PREFIX_LEN, read_pack_header};
 use lodestore_format::pb::{Node, NodeType};
 use lodestore_format::reader::Reader;
 use lodestore_format::repo::Repository;
+use lodestore_format::source::SourceKey;
 use lodestore_format::store::LocalFsStore;
 use lodestore_format::tree::decode_tree;
 use lodestore_proto::agent::v1::plan_item::Kind;
@@ -319,6 +321,37 @@ pub fn try_seeds(fixtures: &Path) -> Result<Seeds, String> {
     }
     for key in string_fields(&image, "key")? {
         out.push(("source_decode", key.into_bytes()));
+    }
+
+    let binding = vectors(fixtures, "image-binding-vectors.json")?;
+    for claimed in hex_fields(&binding, "claimed")? {
+        out.push(("image_layout", claimed));
+    }
+    for field in ["name", "input"] {
+        for text in string_fields(&binding, field)? {
+            out.push(("image_state", text.into_bytes()));
+        }
+    }
+    if let Ok(key) = SourceKey::image("disk") {
+        let state = ImageState {
+            parent: [0x22; 32],
+            bitmap_gen: 3,
+            disk_size: 20 << 20,
+            source: [0x33; 32],
+        };
+        let good = state.encode(&[0x11; 16], b"host-a", &key);
+        let text = String::from_utf8_lossy(&good).into_owned();
+        out.push(("image_state", good));
+        out.push((
+            "image_state",
+            text.replace("\"version\":1", "\"version\":2").into_bytes(),
+        ));
+        out.push((
+            "image_state",
+            text.replace("\"bitmap_gen\":3", "\"bitmap_gen\":0")
+                .into_bytes(),
+        ));
+        out.push(("image_state", text.replace("host", "hosts").into_bytes()));
     }
 
     let mut reader = Reader::open(&store, repo.read_keys().duplicate(), repo.config())

@@ -1,0 +1,124 @@
+{
+  "bitmap_names": {
+    "accepted": [
+      {
+        "generation": 1,
+        "name": "lode-1111111111111111-aa261eefefee8053-g1"
+      },
+      {
+        "generation": 2,
+        "name": "lode-1111111111111111-aa261eefefee8053-g2"
+      },
+      {
+        "generation": 10,
+        "name": "lode-1111111111111111-aa261eefefee8053-g10"
+      },
+      {
+        "generation": 18446744073709551614,
+        "name": "lode-1111111111111111-aa261eefefee8053-g18446744073709551614"
+      }
+    ],
+    "first": "lode-1111111111111111-aa261eefefee8053-g1",
+    "host": "host-a",
+    "instance_id": "aa261eefefee8053065e1e6a3d4969fede1227d15359059cd2cd3ad246b1be4e",
+    "key": "image/disk",
+    "rejected": [
+      {
+        "input": "lode-1111111111111111-aa261eefefee8053-g0"
+      },
+      {
+        "input": "lode-1111111111111111-aa261eefefee8053-g03"
+      },
+      {
+        "input": "lode-1111111111111111-aa261eefefee8053-g18446744073709551615"
+      },
+      {
+        "input": "lode-1111111111111111-aa261eefefee8053-g18446744073709551616"
+      },
+      {
+        "input": "lode-1111111111111111-aa261eefefee8053-g+3"
+      },
+      {
+        "input": "lode-1111111111111111-aa261eefefee8053-g-3"
+      },
+      {
+        "input": "lode-1111111111111111-aa261eefefee8053-g"
+      },
+      {
+        "input": "lode-1111111111111111-aa261eefefee8053-g3 "
+      },
+      {
+        "input": "LODE-1111111111111111-AA261EEFEFEE8053-G3"
+      },
+      {
+        "input": "1111111111111111-aa261eefefee8053-g3"
+      },
+      {
+        "input": "lode-1212121212121212-aa261eefefee8053-g3"
+      },
+      {
+        "input": "lode-1111111111111111-bdcb90c141def14e-g3"
+      },
+      {
+        "input": "lode-1111111111111111-0a1fa0190cb48271-g3"
+      }
+    ],
+    "repo_id": "11111111111111111111111111111111"
+  },
+  "full_reasons": [
+    "no_bitmap",
+    "bitmap_missing",
+    "no_state",
+    "state_unreadable",
+    "no_parent",
+    "parent_not_newest",
+    "parent_unreadable",
+    "name_changed",
+    "gen_mismatch",
+    "size_changed",
+    "source_changed"
+  ],
+  "meta_keys": {
+    "bitmap_gen": "disk_bc6e5e3dd8310c37_bitmap_gen",
+    "bitmap_name": "disk_bc6e5e3dd8310c37_bitmap_name",
+    "full_reason": "disk_bc6e5e3dd8310c37_full_reason"
+  },
+  "sources": [
+    {
+      "case": "a full read without a bitmap",
+      "claimed": "0a0a696d6167652f6469736b12150a0a6368756e6b5f73697a65120734313934333034122e0a216469736b5f626336653565336464383331306333375f66756c6c5f726561736f6e12096e6f5f6269746d617012260a1a6469736b5f626336653565336464383331306333375f73697a651208323039373135323012110a0c696d6167655f6c61796f757412013112110a09726561645f6d6f6465120466756c6c",
+      "meta": {
+        "chunk_size": "4194304",
+        "disk_bc6e5e3dd8310c37_full_reason": "no_bitmap",
+        "disk_bc6e5e3dd8310c37_size": "20971520",
+        "image_layout": "1",
+        "read_mode": "full"
+      }
+    },
+    {
+      "case": "a full read that binds generation 2",
+      "claimed": "0a0a696d6167652f6469736b12150a0a6368756e6b5f73697a6512073431393433303412250a206469736b5f626336653565336464383331306333375f6269746d61705f67656e120132124e0a216469736b5f626336653565336464383331306333375f6269746d61705f6e616d6512296c6f64652d313131313131313131313131313131312d616132363165656665666565383035332d6732122d0a216469736b5f626336653565336464383331306333375f66756c6c5f726561736f6e12086e6f5f737461746512260a1a6469736b5f626336653565336464383331306333375f73697a651208323039373135323012110a0c696d6167655f6c61796f757412013112110a09726561645f6d6f6465120466756c6c",
+      "meta": {
+        "chunk_size": "4194304",
+        "disk_bc6e5e3dd8310c37_bitmap_gen": "2",
+        "disk_bc6e5e3dd8310c37_bitmap_name": "lode-1111111111111111-aa261eefefee8053-g2",
+        "disk_bc6e5e3dd8310c37_full_reason": "no_state",
+        "disk_bc6e5e3dd8310c37_size": "20971520",
+        "image_layout": "1",
+        "read_mode": "full"
+      }
+    },
+    {
+      "case": "an incremental read that binds generation 3",
+      "claimed": "0a0a696d6167652f6469736b12150a0a6368756e6b5f73697a6512073431393433303412250a206469736b5f626336653565336464383331306333375f6269746d61705f67656e120133124e0a216469736b5f626336653565336464383331306333375f6269746d61705f6e616d6512296c6f64652d313131313131313131313131313131312d616132363165656665666565383035332d673312260a1a6469736b5f626336653565336464383331306333375f73697a651208323039373135323012110a0c696d6167655f6c61796f757412013112180a09726561645f6d6f6465120b696e6372656d656e74616c",
+      "meta": {
+        "chunk_size": "4194304",
+        "disk_bc6e5e3dd8310c37_bitmap_gen": "3",
+        "disk_bc6e5e3dd8310c37_bitmap_name": "lode-1111111111111111-aa261eefefee8053-g3",
+        "disk_bc6e5e3dd8310c37_size": "20971520",
+        "image_layout": "1",
+        "read_mode": "incremental"
+      }
+    }
+  ]
+}
