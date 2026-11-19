@@ -294,7 +294,17 @@ fn clip(text: &str) -> String {
 
 type Hosts = BTreeMap<String, ((i64, BlobId), String)>;
 
-/// Each `host_id` of `entries` with the hostname of its newest record.
+/// The host a record stands for: its `host_id`, or for an owner record,
+/// which has none, its hostname.
+fn host_key(record: &pb::ProvenanceRecord) -> &str {
+    if record.host_id.is_empty() {
+        &record.hostname
+    } else {
+        &record.host_id
+    }
+}
+
+/// Each host of `entries` ([`host_key`]) with the hostname of its newest record.
 fn hosts_of(provenance: &ProvenanceSet, entries: &[&SnapshotEntry]) -> Hosts {
     let mut hosts = Hosts::new();
     for e in entries {
@@ -304,7 +314,7 @@ fn hosts_of(provenance: &ProvenanceSet, entries: &[&SnapshotEntry]) -> Hosts {
         let order = provenance.stored_order(e);
         let newest = (order, record.hostname.clone());
         hosts
-            .entry(record.host_id.clone())
+            .entry(host_key(record).to_owned())
             .and_modify(|seen| *seen = seen.clone().max(newest.clone()))
             .or_insert(newest);
     }
@@ -425,7 +435,7 @@ pub fn pick_latest_in(
             .iter()
             .filter(|e| provenance.contains(&e.id) && scope.admits(&provenance.source_of(&e.id)))
             .collect();
-        let host_of = |e: &SnapshotEntry| provenance.get(&e.id).map(|r| r.host_id.as_str());
+        let host_of = |e: &SnapshotEntry| provenance.get(&e.id).map(host_key);
         match scope {
             LatestScope::Files => {}
             LatestScope::Instance(source) => {
@@ -444,8 +454,8 @@ pub fn pick_latest_in(
                 let named: BTreeSet<&str> = admitted
                     .iter()
                     .filter_map(|e| provenance.get(&e.id))
-                    .filter(|r| r.hostname == *host && r.host_id != *host)
-                    .map(|r| r.host_id.as_str())
+                    .filter(|r| r.hostname == *host && host_key(r) != host)
+                    .map(host_key)
                     .collect();
                 let others = || {
                     host_list(
@@ -453,7 +463,8 @@ pub fn pick_latest_in(
                         now_ms,
                     )
                 };
-                let chosen = if id_form || provenance.names_host(host) {
+                let chosen = if id_form || provenance.names_host(host) || hosts.contains_key(host)
+                {
                     if !named.is_empty() {
                         warnings.push(LatestWarning::HostIdAlsoName {
                             host_id: clip(host),

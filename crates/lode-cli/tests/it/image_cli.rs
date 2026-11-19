@@ -351,3 +351,54 @@ fn image_restore_by_id_survives_unreadable_signatures() {
         fs::read(&image).unwrap()
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn image_latest_refuses_owner_snapshots_of_two_hostnames() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    init_repo(&repo);
+    upgrade(&repo).await;
+    let image = tmp.path().join("disk.raw");
+    let mut images = Vec::new();
+    for (host, fill) in [("alpha", 1), ("beta", 2)] {
+        small_image(&image, fill);
+        lode(&repo)
+            .args(["backup", "--image"])
+            .arg(&image)
+            .args(["--name", "sda", "--host", host])
+            .assert()
+            .success();
+        images.push(fs::read(&image).unwrap());
+    }
+
+    let device = tmp.path().join("device");
+    fs::write(&device, vec![0u8; 4 * CHUNK]).unwrap();
+    let to_device = lode(&repo)
+        .env("LODE_TEST_DEVICE_IS_FILE", "1")
+        .args(["restore", "latest@image/sda", "--to-device"])
+        .arg(&device)
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&to_device.get_output().stderr).into_owned();
+    assert!(stderr.contains("more than one host"), "{stderr}");
+    assert!(fs::read(&device).unwrap().iter().all(|&b| b == 0));
+
+    let out = tmp.path().join("out");
+    let plain = lode(&repo)
+        .args(["restore", "latest@image/sda", "--target"])
+        .arg(&out)
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&plain.get_output().stderr).into_owned();
+    assert!(stderr.contains("more than one host"), "{stderr}");
+
+    for (host, want) in [("alpha", &images[0]), ("beta", &images[1])] {
+        let out = tmp.path().join(format!("out-{host}"));
+        lode(&repo)
+            .args(["restore", "latest@image/sda", "--host", host, "--target"])
+            .arg(&out)
+            .assert()
+            .success();
+        assert_eq!(&fs::read(out.join("sda.img")).unwrap(), want, "{host}");
+    }
+}
