@@ -3,12 +3,14 @@
 pub mod client;
 pub mod limits;
 pub mod server;
+pub mod source;
 pub mod uri;
 pub mod wire;
 
 pub use client::{BlockSize, BlockStatus, Client, Descriptor};
 pub use limits::Limits;
 pub use server::{Export, MemExport, serve};
+pub use source::NbdSource;
 pub use uri::{NbdUri, is_nbd_uri};
 
 #[derive(Debug, thiserror::Error)]
