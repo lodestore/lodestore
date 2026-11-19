@@ -2325,6 +2325,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lodestore-nbd"
+version = "0.2.0"
+dependencies = [
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "lodestore-policy"
 version = "0.2.0"
 dependencies = [
