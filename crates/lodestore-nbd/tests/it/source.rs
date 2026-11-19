@@ -263,29 +263,25 @@ async fn nbd_source_survives_hostile_status() {
     })
     .await;
 
-    // unknown flag bits mean nothing
+    // a flag bit the context does not define is an error, in either context
     let mut export = ScriptedExport::new(
         M,
         &["b0"],
-        |_, len| vec![d(u64::from(len), !STATE_ZERO)],
-        |_, _, len| {
-            vec![
-                d(4096, !STATE_DIRTY),
-                d(4096, STATE_DIRTY | 0xff00),
-                d(u64::from(len) - 8192, !STATE_DIRTY),
-            ]
-        },
+        |_, len| vec![d(u64::from(len), STATE_ZERO | 4)],
+        |_, _, len| vec![d(u64::from(len), STATE_DIRTY)],
     );
     with_source(&mut export, &["b0"], Limits::default(), async |s| {
-        let got = s.extents(0, 16 * K).await.unwrap();
-        assert_eq!(
-            got,
-            vec![
-                e(4096, false, false),
-                e(4096, false, true),
-                e(8 * K, false, false)
-            ]
-        );
+        assert!(s.extents(0, 16 * K).await.is_err());
+    })
+    .await;
+    let mut export = ScriptedExport::new(
+        M,
+        &["b0"],
+        |_, len| full(len),
+        |_, _, len| vec![d(u64::from(len), STATE_DIRTY | 0xff00)],
+    );
+    with_source(&mut export, &["b0"], Limits::default(), async |s| {
+        assert!(s.extents(0, 16 * K).await.is_err());
     })
     .await;
 

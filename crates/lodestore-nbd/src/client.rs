@@ -6,8 +6,9 @@ use crate::wire::{
     INFO_EXPORT, NBDMAGIC, OPT_GO, OPT_REPLY_MAGIC, OPT_SET_META_CONTEXT, OPT_STRUCTURED_REPLY,
     REP_ACK, REP_ERROR_BIT, REP_INFO, REP_META_CONTEXT, REPLY_BLOCK_STATUS, REPLY_ERROR_BIT,
     REPLY_ERROR_OFFSET, REPLY_FLAG_DONE, REPLY_NONE, REPLY_OFFSET_DATA, REPLY_OFFSET_HOLE,
-    SIMPLE_REPLY_MAGIC, STRUCTURED_REPLY_MAGIC, Take, option_request, read_exact,
-    read_exact_bounded, read_u16, read_u32, read_u64, request, to_usize, within,
+    SIMPLE_REPLY_MAGIC, STATE_DIRTY, STATE_HOLE, STATE_ZERO, STRUCTURED_REPLY_MAGIC, Take,
+    option_request, read_exact, read_exact_bounded, read_u16, read_u32, read_u64, request,
+    to_usize, within,
 };
 use crate::{Error, Limits, NbdUri, Result};
 
@@ -583,6 +584,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
                     if !known || seen.iter().any(|(i, _)| *i == id) {
                         return protocol("a status chunk for an unknown or repeated context");
                     }
+                    let defined = if id == self.alloc_id {
+                        STATE_HOLE | STATE_ZERO
+                    } else {
+                        STATE_DIRTY
+                    };
                     let mut descriptors = Vec::with_capacity((n - 4) / 8);
                     while !t.is_empty() {
                         let (Some(dlen), Some(dflags)) = (t.u32(), t.u32()) else {
@@ -590,6 +596,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
                         };
                         if dlen == 0 {
                             return protocol("an empty status descriptor");
+                        }
+                        if dflags & !defined != 0 {
+                            return protocol("a status descriptor with flags its context lacks");
                         }
                         descriptors.push(Descriptor {
                             len: dlen,

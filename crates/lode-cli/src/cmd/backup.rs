@@ -668,6 +668,7 @@ impl ImageRun {
         let parent = match (table, self.reader.as_mut()) {
             (Some((snapshot_id, table)), Some(reader)) => Some(ImageParent {
                 snapshot_id,
+                disk_size: size,
                 table,
                 chunks: reader,
             }),

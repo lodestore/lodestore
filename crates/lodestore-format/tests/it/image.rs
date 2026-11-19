@@ -1274,12 +1274,14 @@ async fn incremental_with(
     source: &mut DirtySource,
     bitmap: Option<BitmapBinding>,
 ) -> Result<ImageOutcome, Error> {
+    let disk_size = source.size();
     let mut w = writer(repo).await;
     w.backup_image(
         "disk",
         source,
         Some(ImageParent {
             snapshot_id: parent,
+            disk_size,
             table,
             chunks,
         }),
@@ -1590,6 +1592,41 @@ async fn image_incremental_rejects_a_mismatched_table() {
         .unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
         assert!(source.untouched());
+    }
+
+    // Same chunk count, shorter last chunk, nothing dirty: the parent's size
+    // refuses it before any read, and a caller that lies about that size is
+    // stopped by the index length of the reused chunk.
+    let before = snapshot_count(&repo).await;
+    let short = C + C / 2;
+    for disk_size in [2 * C, short] {
+        let mut cut = DirtySource::new(data[..short as usize].to_vec(), Vec::new());
+        let mut r = reader(&repo).await;
+        let err = writer(&repo)
+            .await
+            .backup_image(
+                "disk",
+                &mut cut,
+                Some(ImageParent {
+                    snapshot_id: parent.outcome.snapshot_id,
+                    disk_size,
+                    table: table.clone(),
+                    chunks: &mut r,
+                }),
+                fixed_time(),
+                image_options(Some(binding(3)), None),
+                &|_| {},
+            )
+            .await
+            .unwrap_err();
+        if disk_size == short {
+            assert!(matches!(err, Error::Corrupt { .. }), "{err:?}");
+        } else {
+            assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
+            assert!(cut.untouched());
+        }
+        assert_eq!(cut.read_calls, 0);
+        assert_eq!(snapshot_count(&repo).await, before);
     }
 }
 

@@ -163,7 +163,7 @@ impl<S: BlobStore> Writer<S> {
         let size = source.size();
         let chunk_count = check_shape(size, image.segment_chunks)?;
         if let Some(p) = &parent {
-            if u64::try_from(p.table.len()).ok() != Some(chunk_count) {
+            if p.disk_size != size || u64::try_from(p.table.len()).ok() != Some(chunk_count) {
                 return Err(Error::InvalidInput(
                     "the parent chunk table does not match the size of the image".into(),
                 ));
@@ -327,18 +327,23 @@ async fn read_chunks<S: BlobStore, I: ImageSource>(
                 store_chunk(run, &data).await?
             }
             ChunkPlan::Reuse(id) => {
-                let shard = run
-                    .w
-                    .index
-                    .get(&id, BLOB_TYPE_DATA)
-                    .map(|loc| loc.shard)
-                    .ok_or_else(|| {
-                        Error::InvalidInput(format!(
-                            "chunk {index} of the parent snapshot is not in the index; \
-                             the next backup reads the image in full"
-                        ))
-                    })?;
-                run.refs.insert(shard);
+                let loc = run.w.index.get(&id, BLOB_TYPE_DATA).ok_or_else(|| {
+                    Error::InvalidInput(format!(
+                        "chunk {index} of the parent snapshot is not in the index; \
+                         the next backup reads the image in full"
+                    ))
+                })?;
+                if usize::try_from(loc.ulen).ok() != Some(want) {
+                    return Err(Error::corrupt(
+                        "image",
+                        format!(
+                            "chunk {index} of the parent snapshot has {} bytes in the index, \
+                             expected {want}",
+                            loc.ulen
+                        ),
+                    ));
+                }
+                run.refs.insert(loc.shard);
                 ChunkRef::Data(id)
             }
             ChunkPlan::Merge { base, ranges } => {
