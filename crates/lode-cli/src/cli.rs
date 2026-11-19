@@ -141,8 +141,21 @@ pub enum Command {
         #[arg(long, value_name = "HOST")]
         host: Option<String>,
         /// Directory to restore into; files land at <DIR>/<original absolute path>
-        #[arg(long, required = true, value_name = "DIR")]
-        target: PathBuf,
+        #[arg(long, required_unless_present = "to_device", value_name = "DIR")]
+        target: Option<PathBuf>,
+        /// Write a disk image snapshot to this block device (Linux only); holes
+        /// are written as zeros. Stop every VM or process that uses the device
+        /// first: the check refuses a device that is mounted, in swap or held,
+        /// and cannot see a user that did not open it exclusively
+        #[arg(
+            long,
+            value_name = "DEVICE",
+            conflicts_with_all = ["target", "include", "dry_run", "verify", "overwrite"]
+        )]
+        to_device: Option<PathBuf>,
+        /// In a repository with signatures, write a snapshot that nothing signed
+        #[arg(long, requires = "to_device")]
+        accept_unverified: bool,
         #[command(flatten)]
         flags: RestoreFlags,
     },

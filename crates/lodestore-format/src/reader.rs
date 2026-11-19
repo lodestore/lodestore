@@ -5,6 +5,7 @@
 //! and plaintext against its keyed hash before it is used.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
@@ -18,6 +19,7 @@ use crate::config;
 use crate::crypto::{BLOB_TYPE_DATA, BLOB_TYPE_TREE, BlobId, Key32, RepoId, open_frame};
 use crate::error::{Error, Result};
 use crate::fs::filter::PathMatcher;
+use crate::fs::raw::RawSink;
 use crate::fs::restore::{RestoreSettings, Restorer, check_extents};
 use crate::image::load_image;
 use crate::index::{
@@ -1151,7 +1153,7 @@ impl<S: BlobStore> Reader<S> {
                 restorer.create_other(&node)?;
                 continue;
             }
-            match self.restore_file(&mut restorer, &node).await {
+            match self.restore_file(&mut restorer, &node, &|_| {}).await {
                 Ok(()) => {}
                 // One bad file does not stop the others.
                 Err(e @ (Error::Corrupt { .. } | Error::Crypto)) => {
@@ -1207,7 +1209,14 @@ impl<S: BlobStore> Reader<S> {
         };
         self.walk.reset();
         let mut restorer = Restorer::open(target, settings)?;
-        match self.restore_file(&mut restorer, &node).await {
+        let on_chunk = |done: u64| {
+            progress(&RestoreProgress {
+                files_done: 0,
+                bytes_done: done,
+                current: node.name.clone(),
+            });
+        };
+        match self.restore_file(&mut restorer, &node, &on_chunk).await {
             Ok(()) => {}
             Err(e @ (Error::Corrupt { .. } | Error::Crypto)) => {
                 restorer.record_failure(&node.name, e.to_string());
@@ -1233,15 +1242,28 @@ impl<S: BlobStore> Reader<S> {
         })
     }
 
-    /// Writes one regular file (or links it to an earlier member of its
-    /// hardlink group). A failure leaves no file under the final name.
-    async fn restore_file(&mut self, restorer: &mut Restorer, node: &pb::Node) -> Result<()> {
-        if restorer.link_if_seen(node)? {
-            return Ok(());
+    /// Writes the disk `disk_name` of an image snapshot into an open block
+    /// device (or file) of `out_size` bytes: data where it was, zeros in the
+    /// holes, nothing past the image. An error after the first write leaves
+    /// the device partly written.
+    pub async fn restore_image_raw(
+        &mut self,
+        snapshot_id: &BlobId,
+        disk_name: &str,
+        out: &File,
+        out_size: u64,
+        progress: &dyn Fn(&RestoreProgress),
+    ) -> Result<RestoreReport> {
+        let image = load_image(self, snapshot_id, disk_name).await?;
+        let node = image.file_node()?;
+        if node.size > out_size {
+            return Err(Error::InvalidInput(format!(
+                "the device holds {out_size} bytes; the image needs {}",
+                node.size
+            )));
         }
-        let Some(mut sink) = restorer.begin_file(node)? else {
-            return Ok(());
-        };
+        let mut sink = RawSink::new(out, &node)?;
+        let mut done = 0u64;
         for raw in &node.content {
             let id: BlobId = raw
                 .as_slice()
@@ -1249,6 +1271,46 @@ impl<S: BlobStore> Reader<S> {
                 .map_err(|_| Error::corrupt("tree", "content id must be 32 bytes"))?;
             let data = self.read_blob(&id, BLOB_TYPE_DATA).await?;
             sink.write(&data)?;
+            done += data.len() as u64;
+            progress(&RestoreProgress {
+                files_done: 0,
+                bytes_done: done,
+                current: node.name.clone(),
+            });
+        }
+        let bytes = sink.finish(true)?;
+        Ok(RestoreReport {
+            files: 1,
+            bytes,
+            ..Default::default()
+        })
+    }
+
+    /// Writes one regular file (or links it to an earlier member of its
+    /// hardlink group). A failure leaves no file under the final name.
+    /// `on_chunk` gets the bytes written so far after each chunk.
+    async fn restore_file(
+        &mut self,
+        restorer: &mut Restorer,
+        node: &pb::Node,
+        on_chunk: &dyn Fn(u64),
+    ) -> Result<()> {
+        if restorer.link_if_seen(node)? {
+            return Ok(());
+        }
+        let Some(mut sink) = restorer.begin_file(node)? else {
+            return Ok(());
+        };
+        let mut done = 0u64;
+        for raw in &node.content {
+            let id: BlobId = raw
+                .as_slice()
+                .try_into()
+                .map_err(|_| Error::corrupt("tree", "content id must be 32 bytes"))?;
+            let data = self.read_blob(&id, BLOB_TYPE_DATA).await?;
+            sink.write(&data)?;
+            done += data.len() as u64;
+            on_chunk(done);
         }
         restorer.finish_file(sink, node)
     }
