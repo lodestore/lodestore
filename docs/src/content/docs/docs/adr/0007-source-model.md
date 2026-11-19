@@ -106,7 +106,7 @@ The layout is final from phase 22:
 
 A reader that does not know the layout or the chunk size refuses the snapshot; it does not guess. It also refuses an image whose segments add up to another size than `disk_{h}_size`.
 
-An incremental backup reuses the chunks of its parent snapshot where the dirty bitmap says nothing changed, and merges a chunk that is only partly dirty with the bytes of the parent, which are checked by their id before they are used (see "Dirty bitmap binding"). A backup reads the source once, without a snapshot of its own, so an image is crash-consistent at best. After the last read `lode` checks the source again and fails without a snapshot when a regular file changed its size, modification time or change time, or a block device changed its size; it warns when the device is mounted or held by another device.
+An incremental backup reuses the chunks of its parent snapshot where the dirty bitmap says nothing changed, and merges a chunk that is only partly dirty with the bytes of the parent, which are read and checked by their id before they are used (see "Dirty bitmap binding"). The tree of the parent is checked the same way. A reused chunk is not read: the increment refers to it by its index entry, after checking that the entry has the length of the chunk, as a files backup refers to a chunk it has seen before, so damage under a reused chunk is inherited by the increment and found by `lode check` or a restore. A backup reads the source once, without a snapshot of its own, so an image is crash-consistent at best. After the last read `lode` checks the source again and fails without a snapshot when a regular file changed its size, modification time or change time, or a block device changed its size; it warns when the device is mounted or held by another device.
 
 #### Restoring to a block device
 
@@ -136,14 +136,16 @@ The name is `lode-{repo16}-{inst16}-g{N}`. `{repo16}` and `{inst16}` are the fir
 
 The contract between `lode` and whatever manages the bitmaps of the disk is a rotation, and it is the only one that `lode` supports.
 
-- A run is given `g{N}`, the bitmap that has collected the changes since the parent snapshot, and the export must also offer `g{N+1}`. The script creates `g{N+1}` before the read and exports both.
+- A run is given `g{N}`, the bitmap that has collected the changes since the parent snapshot, and the export must also offer `g{N+1}`. The script creates `g{N+1}` as an enabled bitmap before the read and exports both.
 - `lode` reads `g{N}`. The snapshot it writes is bound to `g{N+1}`, which has been collecting changes since before the read began.
-- `g{N}` is deleted only after the snapshot is confirmed. A run that failed leaves everything as it was and is repeated with the same `N`.
+- `g{N}` is deleted only after the snapshot is confirmed. A run that failed leaves the bitmaps as they were and is repeated with the same `N`. It has already consumed the state, so the repeated run is a full read (`no_state`) that binds `g{N+1}` again.
 - A bitmap name is never reused and the generation only grows. Nothing resets a bitmap: a bitmap that is recreated gets a new generation.
+- Nothing else merges into `g{N}` or clears it.
+- The disk behind the socket is not replaced, or reverted to an older state, while a chain is open. Another disk takes another `--name`; a reverted disk starts a new generation.
 
 The binding is written only when the export confirmed `g{N+1}` before the first read; a bitmap that appeared later may have missed writes made during the read. When it was not confirmed, the run is still incremental, because its parent and `g{N}` are what they claim to be, and it records no binding, so the next run reads the image in full.
 
-Over NBD `lode` can check only that `g{N}` and `g{N+1}` exist. qemu does not report an identity or a generation of a bitmap, so a bitmap that was recreated under the same name, or reset, cannot be seen. Protection against that is the contract above.
+Over NBD `lode` can check only that `g{N}` and `g{N+1}` exist. qemu does not report an identity or a generation of a bitmap, so a bitmap that was recreated under the same name, or reset, a disabled `g{N+1}`, a `g{N}` that other tooling merged into or cleared, and a disk replaced or reverted behind the same socket cannot be seen. Protection against that is the contract above.
 
 #### The decision
 

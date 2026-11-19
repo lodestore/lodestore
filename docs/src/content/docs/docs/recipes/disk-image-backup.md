@@ -44,11 +44,12 @@ The rules that make this safe:
 
 - A bitmap name is never reused and the generation only grows. A bitmap that you recreate gets the next generation, not its old name.
 - `g{N}` is deleted only after a successful backup.
-- `g{N+1}` must exist before the read starts and be exported with `g{N}`. If it was not exported, the run is still incremental, but it records no binding and prints a note, and the next backup reads the image in full.
-- Use one socket path for one disk. The path is part of the identity of the source, and another path is a changed source (`source_changed`).
+- `g{N+1}` must exist before the read starts, be enabled (as `qemu-img bitmap --add` creates it) and be exported with `g{N}`. If it was not exported, the run is still incremental, but it records no binding and prints a note, and the next backup reads the image in full.
+- Nothing else merges into `g{N}` or clears it.
+- Use one socket path for one disk. The path is part of the identity of the source, and another path is a changed source (`source_changed`). Do not replace the disk behind the path, or revert it to an older state, while a chain is open: give another disk its own `--name`, and after a revert start a new generation as after a lost bitmap.
 - After a resize, or when a bitmap was lost, remove all `lode-...` bitmaps of the disk and continue with the next generation: `lode` prints it. The test does exactly this, and it does not depend on what qemu does with a bitmap on resize. The next backup is a full read (`gen_mismatch`) and the one after it is incremental again.
 
-`lode` cannot check more than that `g{N}` and `g{N+1}` exist. It cannot see a bitmap that was recreated under the same name or reset by something else, and an increment made from such a bitmap misses writes. Keep to the rules.
+`lode` cannot check more than that `g{N}` and `g{N+1}` exist. It cannot see a bitmap that was recreated under the same name or reset by something else, a disabled `g{N+1}`, a `g{N}` that other tooling merged into or cleared, or a disk that was replaced or reverted behind the same socket path, and an increment made after any of these misses writes. Keep to the rules.
 
 ### The commands
 
@@ -68,20 +69,23 @@ The summary names the next bitmaps: `image.next_bitmap` (`CUR`, `g1`) is the one
 qemu-img bitmap --add --granularity 65536 disk.qcow2 "$CUR"
 ```
 
-Before each later backup, create `NEXT`, export both bitmaps, back up and stop the export. Then delete `CUR` and take the two names from the summary again:
+Before each later backup, create `NEXT`, export both bitmaps, back up and stop the export. Then, only if the backup succeeded, delete `CUR` and take the two names from the summary again:
 
 ```sh
 qemu-img bitmap --add --granularity 65536 disk.qcow2 "$NEXT"
 qemu-nbd -r -f qcow2 -B "$CUR" -B "$NEXT" -k "$SOCK" -t disk.qcow2 &
 NBD=$!
 lode backup --image "nbd+unix:///?socket=$SOCK" --name db-disk --bitmap "$CUR" --json
+STATUS=$?
 kill "$NBD"
-qemu-img bitmap --remove disk.qcow2 "$CUR"
+if [ "$STATUS" -eq 0 ]; then
+  qemu-img bitmap --remove disk.qcow2 "$CUR"
+fi
 ```
 
 The first backup with a bitmap is a full read (`no_state`), because the first backup bound no bitmap; it binds `NEXT`, and from the next backup on the reads are incremental. The granularity is the size of the blocks the bitmap tracks. The test ran 512 B, 64 KiB, 4 MiB and 16 MiB, and the result was the same as a full read each time.
 
-A backup that fails writes no snapshot. Delete nothing and repeat it with the same `CUR`; a script should delete `CUR` only when `lode` exited with 0.
+A backup that fails writes no snapshot. Delete nothing and repeat it with the same `CUR`; a script should delete `CUR` only when `lode` exited with 0. The failed run has used up the record on this machine, so the repeat is a full read (`no_state`) and binds `NEXT` again. The same holds for any backup of the export without `--bitmap`, one with `--writer-keys` included: the next `--bitmap` backup after it reads in full.
 
 ### What the output says
 
