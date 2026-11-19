@@ -93,6 +93,10 @@ jobs:
       - name: Run the compromised-agent suite
         shell: bash
         run: cargo nextest run --workspace --profile adversarial --no-fail-fast
+      - name: Install qemu-utils
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends qemu-utils
+      - name: Run the qemu-nbd image tests
+        run: qemu-nbd --version && cargo nextest run -p lode-cli --profile ci --run-ignored only --no-fail-fast -E 'test(/^image_qemu::/)'
 
   web:
     runs-on: ubuntu-latest
