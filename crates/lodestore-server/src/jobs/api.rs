@@ -9,7 +9,8 @@ use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 use super::restore::{
-    RestoreRequest, agent_declares_roots, enqueue_restore, require_roots_capability,
+    RestoreRequest, agent_declares_roots, enqueue_restore, replaces_a_disk_image,
+    require_roots_capability,
 };
 use super::{
     ACTIVE_STATES, AGENT_UPDATE_COLUMNS, AGENT_UPDATE_FROM, ConflictPolicyDto, DOWNLOAD_COLUMNS,
@@ -864,11 +865,12 @@ fn downloads_refused() -> ApiError {
 const RESTORE_HOST_PURPOSE: &str = "restore into a folder on the host";
 const RESTORE_IN_PLACE_PURPOSE: &str = "restore in place";
 const RESTORE_OWNERS_PURPOSE: &str = "restore file owners, setuid/setgid bits or file capabilities";
+const RESTORE_IMAGE_OVERWRITE_PURPOSE: &str = "replace an existing disk image file";
 
 #[derive(Deserialize, ToSchema)]
 pub struct RestoreBody {
     pub snapshot_id: String,
-    /// Selected paths as base64url bytes without padding.
+    /// Selected paths as base64url bytes without padding. For a disk image snapshot, `/` restores the whole image as one file NAME.img; replacing an existing file (`overwrite_changed`) needs `restore:in-place`; a disk image cannot be restored in place.
     pub items: Vec<String>,
     pub target_host_id: String,
     /// Absolute path of the folder to restore into; `/` with `in_place`.
@@ -897,9 +899,9 @@ pub struct RestoreCreated {
     responses(
         (status = 201, description = "The restore job is queued", body = RestoreCreated),
         (status = 400, description = "`restore_destination_root`: a restore into a new folder names `/`; `restore_in_place_not_empty`: a restore in place with `stop_if_not_empty`; `restore_unverified_in_place`: nothing signed the snapshot, so it cannot be restored in place; `restore_unverified_not_confirmed`: nothing signed the snapshot and `accept_unverified` is not set; `restore_outside_roots`: the new folder is outside the folders the agent restores into; `restore_in_place_disabled`: the agent does not allow restores in place; `restore_agent_outdated`: a token cannot restore to an agent that does not check restore folders", body = ErrorBody),
-        (status = 403, description = "The token lacks `restore:host` for a new folder, or `restore:in-place` for a restore in place or with `restore_owners`; or `step_up_required`: a session restores in place, with `restore_owners`, or to an agent that does not check restore folders, and the password was not entered in the last 15 minutes", body = ErrorBody),
+        (status = 403, description = "The token lacks `restore:host` for a new folder, or `restore:in-place` for a restore in place, with `restore_owners`, or to replace an existing disk image file; or `step_up_required`: a session restores in place, with `restore_owners`, replaces a disk image file, or restores to an agent that does not check restore folders, and the password was not entered in the last 15 minutes", body = ErrorBody),
         (status = 404, description = "Unknown snapshot or host, or a selected path is missing", body = ErrorBody),
-        (status = 422, description = "The selection, destination or host is not valid, or the snapshot is not a files backup", body = ErrorBody),
+        (status = 422, description = "The selection, destination or host is not valid; the snapshot is neither a files backup nor a disk image restored whole (select `/`); a disk image cannot be restored in place; or the disk image has too many holes to restore through the server", body = ErrorBody),
         (status = 502, description = "The repository storage is unavailable", body = ErrorBody),
     )
 )]
@@ -908,18 +910,21 @@ pub async fn create_restore(
     auth: Scoped<RestoreWrite>,
     Json(body): Json<RestoreBody>,
 ) -> Result<(StatusCode, Json<RestoreCreated>), ApiError> {
-    if let Principal::Session(user) = auth.principal()
-        && (body.in_place
-            || body.restore_owners
-            || !agent_declares_roots(&state, &body.target_host_id).await?)
-    {
-        require_recent_password(user)?;
-    }
     let items = body
         .items
         .iter()
         .map(|item| decode_b64(item))
         .collect::<Result<Vec<_>, _>>()?;
+    let replaces =
+        replaces_a_disk_image(&state, &body.snapshot_id, &items, body.conflict.to_proto()).await?;
+    if let Principal::Session(user) = auth.principal()
+        && (body.in_place
+            || replaces
+            || body.restore_owners
+            || !agent_declares_roots(&state, &body.target_host_id).await?)
+    {
+        require_recent_password(user)?;
+    }
     if body.in_place {
         auth.require_also(Scope::RestoreInPlace, RESTORE_IN_PLACE_PURPOSE)?;
     } else {
@@ -927,6 +932,9 @@ pub async fn create_restore(
     }
     if body.restore_owners {
         auth.require_also(Scope::RestoreInPlace, RESTORE_OWNERS_PURPOSE)?;
+    }
+    if replaces {
+        auth.require_also(Scope::RestoreInPlace, RESTORE_IMAGE_OVERWRITE_PURPOSE)?;
     }
     if matches!(auth.principal(), Principal::Token { .. }) {
         require_roots_capability(&state, &body.target_host_id).await?;

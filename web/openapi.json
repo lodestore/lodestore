@@ -5626,7 +5626,7 @@
             }
           },
           "403": {
-            "description": "The token lacks `restore:host` for a new folder, or `restore:in-place` for a restore in place or with `restore_owners`; or `step_up_required`: a session restores in place, with `restore_owners`, or to an agent that does not check restore folders, and the password was not entered in the last 15 minutes",
+            "description": "The token lacks `restore:host` for a new folder, or `restore:in-place` for a restore in place, with `restore_owners`, or to replace an existing disk image file; or `step_up_required`: a session restores in place, with `restore_owners`, replaces a disk image file, or restores to an agent that does not check restore folders, and the password was not entered in the last 15 minutes",
             "content": {
               "application/json": {
                 "schema": {
@@ -5646,7 +5646,7 @@
             }
           },
           "422": {
-            "description": "The selection, destination or host is not valid, or the snapshot is not a files backup",
+            "description": "The selection, destination or host is not valid; the snapshot is neither a files backup nor a disk image restored whole (select `/`); a disk image cannot be restored in place; or the disk image has too many holes to restore through the server",
             "content": {
               "application/json": {
                 "schema": {
@@ -12636,7 +12636,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Selected paths as base64url bytes without padding."
+            "description": "Selected paths as base64url bytes without padding. For a disk image snapshot, `/` restores the whole image as one file NAME.img; replacing an existing file (`overwrite_changed`) needs `restore:in-place`; a disk image cannot be restored in place."
           },
           "restore_owners": {
             "type": "boolean",

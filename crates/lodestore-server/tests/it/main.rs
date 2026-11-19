@@ -58,6 +58,7 @@ mod gc_chaos;
 mod gc_cycle;
 mod gc_s3;
 mod gc_schedule;
+mod image_restore;
 mod install;
 mod install_verify;
 mod jobs_api;
