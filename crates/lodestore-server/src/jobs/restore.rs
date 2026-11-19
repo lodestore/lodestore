@@ -9,14 +9,18 @@ use lodestore_proto::agent::v1::{ConflictPolicy, RestoreSpec};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
+use tokio::sync::Semaphore;
 
 use crate::browse::tree::{read_error, reader, require_items_exist};
 use crate::db::now_ms;
 use crate::error::ApiError;
 use crate::grpc::registry::CAP_RESTORE_ROOTS;
+use crate::grpc::restore::{MAX_IMAGE_ENTRY, check_image_entry};
 use crate::state::AppState;
 
 pub const MAX_ITEMS: usize = 10_000;
+pub const IMAGE_ENQUEUE_LIMIT: usize = 2;
+static IMAGE_ENQUEUE: Semaphore = Semaphore::const_new(IMAGE_ENQUEUE_LIMIT);
 
 #[derive(Debug, Clone)]
 pub struct RestoreRequest {
@@ -344,8 +348,19 @@ async fn check_image(
         ));
     }
     ImageMeta::from_meta(&meta, name).map_err(|error| ApiError::Validation(error.to_string()))?;
-    load_image(reader, snapshot, name)
+    // the layout of a 16 TiB image holds hundreds of MB of ids while it is checked
+    let _permit = IMAGE_ENQUEUE
+        .acquire()
+        .await
+        .map_err(|error| ApiError::Internal(error.into()))?;
+    let image = load_image(reader, snapshot, name)
         .await
         .map_err(read_error)?;
-    Ok(())
+    let head = image.head().map_err(read_error)?;
+    check_image_entry(&head, MAX_IMAGE_ENTRY).map_err(|_| {
+        invalid(
+            "This disk image has too many holes to restore through the server; \
+             restore it with lode restore.",
+        )
+    })
 }

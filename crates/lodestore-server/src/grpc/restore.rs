@@ -35,10 +35,35 @@ pub const BATCH_LIMIT: usize = 1 << 20;
 pub const PACK_PART: usize = 1 << 20;
 pub const MAX_CHUNKS_PER_ITEM: usize = 4096;
 pub const MAX_PACKS_PER_ITEM: usize = 256;
+/// Half of the agent's plan message limit, which leaves room for the pack accesses sent with the entry.
+pub const MAX_IMAGE_ENTRY: usize = 4 << 20;
 const MAX_RANGE: u64 = 32 << 20;
 const MAX_REFRESH: usize = 4096;
 const ACCESS_COST: usize = 1024;
 const STREAM_DEPTH: usize = 4;
+
+/// The size of the entry head a plan sends: the node without its chunk ids and subtrees.
+pub(crate) fn image_entry_len(node: &pb::Node) -> usize {
+    let listed = |items: &[Vec<u8>], tag: u32| -> usize {
+        items
+            .iter()
+            .map(|item| {
+                prost::encoding::key_len(tag)
+                    + prost::encoding::encoded_len_varint(item.len() as u64)
+                    + item.len()
+            })
+            .sum()
+    };
+    node.encoded_len() - listed(&node.content, 12) - listed(&node.subtrees, 21)
+}
+
+/// `Err` carries the length of a head over `limit`.
+pub(crate) fn check_image_entry(node: &pb::Node, limit: usize) -> Result<(), usize> {
+    match image_entry_len(node) {
+        len if len > limit => Err(len),
+        _ => Ok(()),
+    }
+}
 
 fn denied() -> Status {
     Status::permission_denied("this job is not an active restore of this agent")
@@ -244,6 +269,11 @@ impl Planner {
             .await
             .map_err(read_error)?;
         let node = image.file_node().map_err(read_error)?;
+        if check_image_entry(&node, MAX_IMAGE_ENTRY).is_err() {
+            return Err(Status::failed_precondition(
+                "the disk image has too many holes for a restore plan",
+            ));
+        }
         self.batch.totals = Some(RestoreTotals {
             files: 1,
             bytes: node.size,
@@ -414,6 +444,34 @@ pub async fn read_pack_range(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_entry_len_counts_extents_not_ids() {
+        let extents = |count: u64| -> Vec<pb::Extent> {
+            (0..count)
+                .map(|i| pb::Extent {
+                    offset: (1 << 40) + i * 8192,
+                    length: 4096,
+                })
+                .collect()
+        };
+        let ids = |count: usize| vec![vec![7u8; 32]; count];
+        let fragmented = pb::Node {
+            sparse_extents: extents(400_000),
+            content: ids(1_000_000),
+            ..Default::default()
+        };
+        assert!(image_entry_len(&fragmented) > MAX_IMAGE_ENTRY);
+        assert!(check_image_entry(&fragmented, MAX_IMAGE_ENTRY).is_err());
+        let dense = pb::Node {
+            sparse_extents: extents(10),
+            content: ids(1_000_000),
+            ..Default::default()
+        };
+        assert!(image_entry_len(&dense) < 1024);
+        assert!(check_image_entry(&dense, MAX_IMAGE_ENTRY).is_ok());
+        assert!(check_image_entry(&dense, image_entry_len(&dense) - 1).is_err());
+    }
 
     #[test]
     fn walk_limit_fails_the_restore_plan() {
