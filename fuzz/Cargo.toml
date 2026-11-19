@@ -178,3 +178,17 @@ path = "fuzz_targets/snapshot_open.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "nbd_client"
+path = "fuzz_targets/nbd_client.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nbd_server"
+path = "fuzz_targets/nbd_server.rs"
+test = false
+doc = false
+bench = false

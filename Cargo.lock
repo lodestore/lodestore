@@ -2317,6 +2317,7 @@ dependencies = [
  "lodestore-agent",
  "lodestore-format",
  "lodestore-fuzzkit",
+ "lodestore-nbd",
  "lodestore-proto",
  "prost",
  "rand_chacha 0.10.0",
