@@ -447,6 +447,61 @@ async fn repos_no_secrets_in_responses() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn repos_refuse_unknown_location_options() {
+    let ts = TestServer::start(&Backend::Sqlite).await;
+    let api = ts.api().await;
+    let keys = json!({ "access_key_id": "AKID", "secret_access_key": "KEYSECRET" });
+    let cases = [
+        (
+            "azblob",
+            json!({ "container": "c", "account_name": "acct", "account_key": "a2V5", "sas_key": "SECRET" }),
+            "sas_key",
+        ),
+        ("gcs", json!({ "bucket": "b", "Token": "SECRET" }), "Token"),
+        (
+            "s3",
+            json!({ "bucket": "b", "secret_access_key": "SECRET" }),
+            "secret_access_key",
+        ),
+        (
+            "sftp",
+            json!({ "endpoint": "h", "user": "u", "key": "k", "host_key": "h", "password": "SECRET" }),
+            "password",
+        ),
+        (
+            "local",
+            json!({ "path": "/srv/repo", "Path": "/x" }),
+            "Path",
+        ),
+    ];
+    for (backend, options, unknown) in cases {
+        let draft = json!({
+            "name": "unknown",
+            "location": { "backend": backend, "options": options },
+            "server_credentials": keys,
+            "agent_credentials": keys,
+            "accept_weaker_guarantee": true,
+        });
+        let connect = json!({ "draft": draft, "password": PASSWORD, "recovery_key": null });
+        for (path, request) in [
+            ("/api/v1/repositories/check", &draft),
+            ("/api/v1/repositories/wizard", &draft),
+            ("/api/v1/repositories/connect", &connect),
+        ] {
+            let response = api.post(path, request).await;
+            assert_eq!(response.status(), 422, "{backend} {path}");
+            let message = body(response).await["message"].as_str().unwrap().to_owned();
+            assert!(
+                message.contains(&format!("`{unknown}`")),
+                "{backend} {path}: {message}"
+            );
+            assert!(!message.contains("SECRET"), "{message}");
+        }
+    }
+    ts.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn migration_0037_carries_the_current_level_as_accepted() {
     let cases = [
         ("loc", "local", "unchecked", "host_can_overwrite_or_delete"),

@@ -33,15 +33,91 @@ pub struct RepoLocation {
     pub options: BTreeMap<String, String>,
 }
 
-/// The options a store reads that hold a secret (a key, a token or a
-/// signature), by backend. S3 keys never travel in the options.
-pub fn secret_option_names(backend: &str) -> &'static [&'static str] {
-    match backend {
-        "azblob" => &["account_key", "sas_token", "encryption_key"],
-        "gcs" => &["credential", "token"],
-        "sftp" => &["key"],
-        _ => &[],
-    }
+/// Whether an option holds a secret (a key, a token or a signature).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Plain,
+    Secret,
+}
+use Kind::{Plain, Secret};
+
+/// Every option a new location of each backend may carry, matched exactly.
+/// S3 keys never travel in the options.
+const OPTIONS: &[(&str, &[(&str, Kind)])] = &[
+    (
+        "s3",
+        &[
+            ("bucket", Plain),
+            ("endpoint", Plain),
+            ("region", Plain),
+            ("path_style", Plain),
+            ("prefix", Plain),
+            ("provider", Plain),
+        ],
+    ),
+    ("local", &[("path", Plain)]),
+    (
+        "azblob",
+        &[
+            ("container", Plain),
+            ("root", Plain),
+            ("endpoint", Plain),
+            ("account_name", Plain),
+            ("account_key", Secret),
+            ("sas_token", Secret),
+            ("encryption_key", Secret),
+            ("encryption_key_sha256", Plain),
+            ("encryption_algorithm", Plain),
+        ],
+    ),
+    (
+        "gcs",
+        &[
+            ("bucket", Plain),
+            ("root", Plain),
+            ("endpoint", Plain),
+            ("credential", Secret),
+            ("token", Secret),
+            ("credential_path", Plain),
+            ("skip_signature", Plain),
+            ("allow_anonymous", Plain),
+            ("disable_vm_metadata", Plain),
+            ("disable_config_load", Plain),
+        ],
+    ),
+    (
+        "sftp",
+        &[
+            ("endpoint", Plain),
+            ("user", Plain),
+            ("key", Secret),
+            ("host_key", Plain),
+            ("root", Plain),
+            ("publish", Plain),
+        ],
+    ),
+];
+
+fn backend_options(backend: &str) -> &'static [(&'static str, Kind)] {
+    OPTIONS
+        .iter()
+        .find(|(b, _)| *b == backend)
+        .map_or(&[], |(_, o)| o)
+}
+
+/// Whether a store of `backend` may read `key`; checked in debug builds on
+/// every read so the table cannot fall behind the stores.
+pub(super) fn is_known_option(backend: &str, key: &str) -> bool {
+    backend_options(backend).iter().any(|(k, _)| *k == key)
+}
+
+/// The options that hold a secret, by backend: they are sealed on their own.
+pub fn secret_option_names(backend: &str) -> Vec<&'static str> {
+    backend_options(backend)
+        .iter()
+        .filter(|(_, kind)| *kind == Secret)
+        .map(|(k, _)| *k)
+        .collect()
 }
 
 fn is_secret_option(key: &str) -> bool {
@@ -139,6 +215,11 @@ impl RepoLocation {
     }
 
     fn opt(&self, key: &str) -> Option<&str> {
+        debug_assert!(
+            backend_options(&self.backend).is_empty() || is_known_option(&self.backend, key),
+            "{} reads `{key}`, which is not in its option table",
+            self.backend
+        );
         self.options
             .get(key)
             .map(String::as_str)
@@ -202,6 +283,29 @@ impl RepoLocation {
             other => {
                 return Err(Error::InvalidInput(format!("unknown backend {other:?}")));
             }
+        }
+        Ok(())
+    }
+
+    /// [`Self::validate`] for a location being added: every option must be one
+    /// Lodestore supports for the backend, spelled exactly. A stored location
+    /// is opened without this check, so an older one keeps working.
+    pub fn validate_new(&self) -> Result<()> {
+        self.validate()?;
+        if let Some(unknown) = self
+            .options
+            .keys()
+            .find(|k| !is_known_option(&self.backend, k))
+        {
+            let known: Vec<&str> = backend_options(&self.backend)
+                .iter()
+                .map(|(k, _)| *k)
+                .collect();
+            return Err(Error::InvalidInput(format!(
+                "{} location does not support the option `{unknown}`; supported options: {}",
+                self.backend,
+                known.join(", ")
+            )));
         }
         Ok(())
     }
@@ -499,6 +603,134 @@ mod tests {
             for name in secret_option_names(backend) {
                 assert!(is_secret_option(name), "{backend}: {name}");
             }
+        }
+    }
+
+    #[test]
+    fn secret_option_names_come_from_the_table() {
+        assert_eq!(
+            secret_option_names("azblob"),
+            ["account_key", "sas_token", "encryption_key"]
+        );
+        assert_eq!(secret_option_names("gcs"), ["credential", "token"]);
+        assert_eq!(secret_option_names("sftp"), ["key"]);
+        for backend in ["s3", "local", "nosuch"] {
+            assert!(secret_option_names(backend).is_empty(), "{backend}");
+        }
+        for (backend, options) in OPTIONS {
+            for (name, _) in *options {
+                assert_eq!(name.to_ascii_lowercase(), *name, "{backend}");
+            }
+        }
+    }
+
+    #[test]
+    fn validate_new_takes_every_supported_option() {
+        let full = [
+            RepoLocation::new(
+                "s3",
+                [
+                    ("bucket", "b"),
+                    ("endpoint", "http://127.0.0.1:9000"),
+                    ("region", "r"),
+                    ("path_style", "true"),
+                    ("prefix", "p"),
+                    ("provider", "b2"),
+                ],
+            ),
+            RepoLocation::new("local", [("path", "/srv/repo")]),
+            RepoLocation::new(
+                "azblob",
+                [
+                    ("container", "c"),
+                    ("root", "r"),
+                    ("endpoint", "http://127.0.0.1:1"),
+                    ("account_name", "a"),
+                    ("account_key", "a2V5"),
+                    ("sas_token", "sv=1"),
+                    ("encryption_key", "k"),
+                    ("encryption_key_sha256", "h"),
+                    ("encryption_algorithm", "AES256"),
+                ],
+            ),
+            RepoLocation::new(
+                "gcs",
+                [
+                    ("bucket", "b"),
+                    ("root", "r"),
+                    ("endpoint", "http://127.0.0.1:1"),
+                    ("credential", "c2E="),
+                    ("token", "t"),
+                    ("credential_path", "/etc/sa.json"),
+                    ("skip_signature", "true"),
+                    ("allow_anonymous", "true"),
+                    ("disable_vm_metadata", "true"),
+                    ("disable_config_load", "true"),
+                ],
+            ),
+            RepoLocation::new(
+                "sftp",
+                [
+                    ("endpoint", "h:22"),
+                    ("user", "u"),
+                    ("key", "k"),
+                    ("host_key", "ssh-ed25519 AAAA"),
+                    ("root", "/srv"),
+                    ("publish", "direct"),
+                ],
+            ),
+        ];
+        assert_eq!(full.len(), OPTIONS.len());
+        for loc in full {
+            loc.validate_new().unwrap();
+            assert_eq!(
+                loc.options.len(),
+                backend_options(&loc.backend).len(),
+                "{}",
+                loc.backend
+            );
+        }
+    }
+
+    #[test]
+    fn validate_new_refuses_aliases_and_other_spellings() {
+        let cases = [
+            ("azblob", "sas_key"),
+            ("azblob", "azure_storage_sas_token"),
+            ("azblob", "azure_storage_account_key"),
+            ("azblob", "access_key"),
+            ("azblob", "master_key"),
+            ("azblob", "Account_Key"),
+            ("azblob", "SAS_TOKEN"),
+            ("gcs", "Token"),
+            ("gcs", "google_service_account_key"),
+            ("gcs", "service_account"),
+            ("gcs", "Credential"),
+            ("s3", "secret_access_key"),
+            ("s3", "Bucket"),
+            ("sftp", "password"),
+            ("sftp", "Key"),
+            ("local", "Path"),
+        ];
+        for (backend, name) in cases {
+            let required: &[(&str, &str)] = match backend {
+                "azblob" => &[("container", "c")],
+                "gcs" | "s3" => &[("bucket", "b")],
+                "sftp" => &[
+                    ("endpoint", "h"),
+                    ("user", "u"),
+                    ("key", "k"),
+                    ("host_key", "h"),
+                ],
+                _ => &[("path", "/srv/repo")],
+            };
+            let mut options = required.to_vec();
+            options.push((name, "SECRETVALUE"));
+            let loc = RepoLocation::new(backend, options);
+            loc.validate().unwrap();
+            let err = loc.validate_new().unwrap_err().to_string();
+            assert!(err.contains(&format!("`{name}`")), "{err}");
+            assert!(!err.contains("SECRETVALUE"), "{err}");
         }
     }
 

@@ -99,7 +99,7 @@ pub fn open_parts(
 
 pub fn open_draft(draft: &RepositoryDraft) -> Result<Opened, ApiError> {
     let location = format_location(&draft.location);
-    location.validate().map_err(invalid)?;
+    location.validate_new().map_err(invalid)?;
     let (server_creds, agent_creds) = if location.backend == "s3" {
         match (&draft.server_credentials, &draft.agent_credentials) {
             (Some(s), Some(a)) => (Some(s.clone().into()), Some(a.clone().into())),

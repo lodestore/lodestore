@@ -431,7 +431,10 @@ pub fn check_listing(prefix: &str, dir: &str, raw: &[RawEntry]) -> std::result::
 
 impl SftpStore {
     pub fn open(options: &BTreeMap<String, String>) -> Result<Self> {
-        let opt = |k: &str| options.get(k).map(String::as_str).filter(|v| !v.is_empty());
+        let opt = |k: &str| {
+            debug_assert!(super::location::is_known_option("sftp", k), "{k}");
+            options.get(k).map(String::as_str).filter(|v| !v.is_empty())
+        };
         let need = |k: &str| {
             opt(k)
                 .ok_or_else(|| Error::InvalidInput(format!("sftp location needs the `{k}` option")))

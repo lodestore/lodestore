@@ -12,11 +12,12 @@ The web wizard creates S3 and local-folder repositories. Azure Blob Storage, Goo
 |---------|----------|----------------|
 | S3 and compatible (AWS, MinIO, Ceph) | `bucket`, `endpoint`, `region`, `path_style`, `prefix` | the server key and the agent key |
 | S3 on Backblaze B2 | the S3 options and `provider = b2` | the server key and the agent key |
-| Azure Blob Storage | `container`, `root`, `endpoint`, `account_name` | `sas_token`, or `account_key` (with `account_name`); `encryption_key` for a customer-provided key |
-| Google Cloud Storage | `bucket`, `root`, `endpoint` | `credential` (the service account key as JSON), or `token` (an OAuth access token) |
+| Azure Blob Storage | `container`, `root`, `endpoint`, `account_name`, `encryption_key_sha256`, `encryption_algorithm` | `sas_token`, or `account_key` (with `account_name`); `encryption_key` for a customer-provided key |
+| Google Cloud Storage | `bucket`, `root`, `endpoint`, `credential_path`, `skip_signature`, `allow_anonymous`, `disable_vm_metadata`, `disable_config_load` | `credential` (the service account key as JSON), or `token` (an OAuth access token) |
 | SFTP | `endpoint` (`host:port`), `user`, `host_key`, `root`, `publish` | `key` (the private key) |
 | Local folder | `path` (absolute) | none |
 
+- **Only these options** are accepted, spelled exactly as in the table. A new repository with any other option, including another spelling (`Token`) or an alias that the storage library would also read (`sas_key`, `azure_storage_account_key`), is refused with a message that names the option. A repository that is already stored opens as before.
 - **Secrets** are sealed in the server database on their own and never appear in an API response. On the command line they come from `LODE_*` environment variables; see [Repository location](/docs/reference/cli/#repository-location).
 - **Backblaze B2** is connected only with `provider = b2`. A location whose endpoint is `backblazeb2.com` or a subdomain of it without that option is refused, because B2 does not apply `If-None-Match` and a delete there hides the file instead of removing it. With the option Lodestore writes without `If-None-Match`, and the cleanup does not remove objects that are only hidden. A snapshot hidden by anyone but the server stops cleanup until it is brought back or removed, so a host cannot make cleanup delete its data (see [Cleanup](/docs/guides/gc/#sftp-and-backblaze-b2)).
 - **Azure Blob Storage and Google Cloud Storage** take the `root` as a folder inside the container or bucket, and it is part of the address: `azblob://<container>/<root>`, `gcs://<bucket>/<root>`. An agent never reads Google credentials from its own host (the environment, well-known files or VM metadata) and never reads `credential_path` from a file; it signs with what the server sent. A Google Cloud Storage draft without `credential` (or `token`, `skip_signature` or `allow_anonymous`) is refused with `422`.

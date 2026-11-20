@@ -196,6 +196,7 @@ fn remote_location(url: &str) -> Result<RepoLocation> {
         "sftp" => sftp_options(&mut location)?,
         _ => {}
     }
+    location.validate_new()?;
     Ok(location)
 }
 
@@ -206,6 +207,10 @@ pub fn open_store(url: &str) -> Result<Store> {
         return location
             .open(None)
             .with_context(|| format!("cannot open repository {}", location.display()));
+    }
+    if url.starts_with("s3:") && url.contains(['?', '#', '@']) {
+        // Refused by the parser; the URL is not echoed: it may carry a secret.
+        return open_url(url).context("cannot open repository");
     }
     open_url(url).with_context(|| format!("cannot open repository {url}"))
 }
