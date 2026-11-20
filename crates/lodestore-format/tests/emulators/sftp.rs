@@ -54,7 +54,7 @@ fn messages(log: &str) -> Vec<&str> {
 /// No request that could replace, hide or remove an object, and no refusal
 /// beyond the extension advertisement every session starts with.
 fn assert_no_destructive_requests(ops: &[&str]) {
-    const STARTUP_REFUSALS: [&str; 3] = ["posix-rename", "lsetstat", "copy-data"];
+    const STARTUP_REFUSALS: [&str; 4] = ["posix-rename", "lsetstat", "copy-data", "hardlink"];
     for op in ops {
         if let Some(rest) = op.strip_prefix("Refusing denylisted ") {
             assert!(
@@ -381,4 +381,161 @@ async fn sftp_agent_cannot_overwrite_a_probe_object() {
     let wide = store(&sshd, SshUser::Wide);
     let report = probe(&server, AgentProbe::Store(&wide)).await;
     assert_ne!(report.agent_key, AgentKeyState::Verified, "{report:?}");
+}
+
+#[tokio::test]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn sftp_direct_mode_publishes_without_hardlink() {
+    let sshd = SshdServer::start().await;
+    let direct = [("publish", "direct")];
+    let server = location(&sshd, SshUser::Srv, &sshd.host_key(), &[]);
+    let agent = location(&sshd, SshUser::NoLink, &sshd.host_key(), &direct);
+    assert!(!agent.publishes_atomically());
+    assert!(server.publishes_atomically());
+
+    super::init_repo(&server).await;
+    let mark = sshd.log().len();
+    let src = tempfile::tempdir().unwrap();
+    super::make_tree(src.path(), 3);
+    let outcome = super::backup(&agent, src.path()).await;
+    let log = sshd.log();
+    let ops = messages(tail_after(&log, mark));
+    super::restore_and_compare(&server, &outcome, src.path()).await;
+
+    assert!(!ops.iter().any(|m| m.starts_with("hardlink")), "{ops:?}");
+    let writes: Vec<&&str> = ops
+        .iter()
+        .filter(|m| m.starts_with("open ") && m.contains("WRITE"))
+        .collect();
+    assert!(!writes.is_empty(), "{ops:?}");
+    for line in writes {
+        assert!(line.contains("CREATE") && line.contains("EXCL"), "{line}");
+        assert!(
+            !line.contains("TRUNC") && !line.contains("/data/tmp/"),
+            "{line}"
+        );
+    }
+    assert_no_destructive_requests(&ops);
+    for (mode, path) in modes(&sshd) {
+        assert_eq!(mode, "444", "{path}");
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn sftp_hardlink_mode_on_a_server_refusing_hardlink_fails() {
+    let sshd = SshdServer::start().await;
+    let server = store(&sshd, SshUser::Srv);
+    server.ensure_prefixes(&["packs"]).await.unwrap();
+    let nolink = store(&sshd, SshUser::NoLink);
+    let mark = sshd.log().len();
+    let err = nolink
+        .put_if_absent("packs/00/obj", Bytes::from_static(b"x"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, BlobError::Backend { temporary: false, message } if message.contains("publish = direct")),
+        "{err:?}"
+    );
+    assert_eq!(server.object_size("packs/00/obj").await.unwrap(), None);
+    let log = sshd.log();
+    let ops = messages(tail_after(&log, mark));
+    assert!(
+        !ops.iter()
+            .any(|m| m.starts_with("open ") && m.contains("WRITE")),
+        "{ops:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn sftp_hardlink_mode_without_the_extension_fails() {
+    let sshd = SshdServer::start().await;
+    let Store::Sftp(inner) = store(&sshd, SshUser::Srv) else {
+        panic!("not an SFTP store");
+    };
+    inner.pretend_missing_extension("hardlink@openssh.com");
+    let server = Store::Sftp(inner);
+    let err = server
+        .put_if_absent("keys/obj", Bytes::from_static(b"x"))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("publish = direct"), "{err}");
+}
+
+#[tokio::test]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn sftp_changed_host_key_is_a_hard_error() {
+    let sshd = SshdServer::start().await;
+    let pinned = sshd.host_key();
+    let before = location(&sshd, SshUser::Srv, &pinned, &[]);
+    before.ensure_prefixes(&["packs"]).await.unwrap();
+
+    sshd.rotate_host_key();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let after = location(&sshd, SshUser::Srv, &pinned, &[]);
+    for _ in 0..2 {
+        let err = after.get("config").await.unwrap_err();
+        let BlobError::HostKeyMismatch { pinned, offered } = &err else {
+            panic!("{err:?}");
+        };
+        assert!(pinned.starts_with("SHA256:") && offered.starts_with("SHA256:"));
+        assert_ne!(pinned, offered);
+        assert!(!err.to_string().contains("ssh-ed25519"));
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn sftp_wrong_pinned_key_never_authenticates() {
+    let sshd = SshdServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("other");
+    assert!(
+        Command::new("ssh-keygen")
+            .args(["-q", "-N", "", "-t", "ed25519", "-f"])
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let other = std::fs::read_to_string(dir.path().join("other.pub")).unwrap();
+    let mark = sshd.log().len();
+    let wrong = location(&sshd, SshUser::Srv, &other, &[]);
+    let err = wrong.get("config").await.unwrap_err();
+    assert!(matches!(err, BlobError::HostKeyMismatch { .. }), "{err:?}");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let log = sshd.log();
+    assert!(
+        !tail_after(&log, mark).contains("Accepted publickey"),
+        "{log}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn sftp_ecdsa_key_authenticates() {
+    let sshd = SshdServer::start().await;
+    let server = store(&sshd, SshUser::Srv);
+    server.ensure_prefixes(&["packs"]).await.unwrap();
+    let key = sshd.private_key(SshUser::AgentEcdsa);
+    let endpoint = sshd.endpoint();
+    let host_key = sshd.host_key();
+    let ecdsa = RepoLocation::new(
+        "sftp",
+        [
+            ("endpoint", endpoint.as_str()),
+            ("user", "agent"),
+            ("key", key.as_str()),
+            ("host_key", host_key.as_str()),
+            ("root", sshd.root()),
+        ],
+    )
+    .open(None)
+    .unwrap();
+    ecdsa
+        .put_if_absent("packs/05/ecdsa", Bytes::from_static(b"ok"))
+        .await
+        .unwrap();
+    assert_eq!(&server.get("packs/05/ecdsa").await.unwrap()[..], b"ok");
 }
