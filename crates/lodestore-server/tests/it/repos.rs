@@ -9,6 +9,7 @@ use lodestore_format::repo::Repository;
 use lodestore_format::store::{BlobStore, LocalFsStore};
 use lodestore_server::repos::db::server_access;
 use serde_json::{Value, json};
+use sqlx::Row;
 
 const PASSWORD: &str = "correct horse battery";
 
@@ -441,6 +442,92 @@ async fn repos_no_secrets_in_responses() {
             )
             .await;
         assert_eq!(upper.status(), 422);
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn migration_0037_carries_the_current_level_as_accepted() {
+    let cases = [
+        ("loc", "local", "unchecked", "host_can_overwrite_or_delete"),
+        ("ver", "s3", "verified", "create_only_enforced"),
+        ("ovr", "s3", "can_overwrite", "host_can_overwrite_or_delete"),
+        ("unc", "s3", "unchecked", "unchecked"),
+    ];
+    for backend in backends() {
+        let mut ts = TestServer::start(&backend).await;
+        let pool = ts.state().db.pool.clone();
+        let name = backend.name();
+        for (repo, kind, state, _) in cases {
+            ts.create_local_repository(repo).await;
+            sqlx::query(
+                "UPDATE repositories SET backend = $1, agent_key_state = $2 WHERE name = $3",
+            )
+            .bind(kind)
+            .bind(state)
+            .bind(repo)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        for statement in [
+            "ALTER TABLE repositories DROP COLUMN guarantee_level",
+            "ALTER TABLE repositories DROP COLUMN guarantee_accepted",
+            "ALTER TABLE repositories DROP COLUMN guarantee_notes_json",
+            "ALTER TABLE repositories DROP COLUMN guarantee_checked_at",
+            "DELETE FROM _sqlx_migrations WHERE version = 37",
+        ] {
+            sqlx::query(statement).execute(&pool).await.unwrap();
+        }
+
+        ts.restart().await;
+        let pool = ts.state().db.pool.clone();
+
+        for (repo, _, _, accepted) in cases {
+            let row = sqlx::query(
+                "SELECT guarantee_level, guarantee_accepted, guarantee_notes_json, \
+                 guarantee_checked_at FROM repositories WHERE name = $1",
+            )
+            .bind(repo)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                row.try_get::<String, _>("guarantee_accepted").unwrap(),
+                accepted,
+                "[{name}] {repo}"
+            );
+            assert_eq!(
+                row.try_get::<String, _>("guarantee_level").unwrap(),
+                "unchecked",
+                "[{name}] {repo}"
+            );
+            assert_eq!(
+                row.try_get::<String, _>("guarantee_notes_json").unwrap(),
+                "[]",
+                "[{name}] {repo}"
+            );
+            assert_eq!(
+                row.try_get::<Option<i64>, _>("guarantee_checked_at")
+                    .unwrap(),
+                None,
+                "[{name}] {repo}"
+            );
+        }
+        let verified = sqlx::query(
+            "SELECT guarantee_level, guarantee_accepted FROM repositories WHERE name = 'ver'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            verified.try_get::<String, _>("guarantee_level").unwrap(),
+            "unchecked"
+        );
+        assert_eq!(
+            verified.try_get::<String, _>("guarantee_accepted").unwrap(),
+            "create_only_enforced"
+        );
         ts.stop().await;
     }
 }
