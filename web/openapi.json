@@ -4312,6 +4312,7 @@
           "Repositories"
         ],
         "summary": "Check a repository again",
+        "description": "Measures the storage again with the stored keys and stores the measured level. The accepted level rises when a higher level is measured and stays put otherwise; a check that could not measure anything changes neither level.",
         "operationId": "recheck",
         "parameters": [
           {
@@ -5449,6 +5450,65 @@
             "bearer": [
               "snapshots:delete"
             ]
+          }
+        ]
+      }
+    },
+    "/api/v1/repositories/{id}/guarantee/accept": {
+      "post": {
+        "tags": [
+          "Repositories"
+        ],
+        "summary": "Accept the measured level",
+        "description": "Makes the level the last check measured the accepted one.",
+        "operationId": "accept_guarantee",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Repository id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The measured level is now the accepted one",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GuaranteeState"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown repository",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "No level was measured, so there is nothing to accept",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
           }
         ]
       }
@@ -10235,6 +10295,30 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          }
+        }
+      },
+      "GuaranteeState": {
+        "type": "object",
+        "required": [
+          "guarantee_level",
+          "guarantee_accepted"
+        ],
+        "properties": {
+          "guarantee_accepted": {
+            "type": "string",
+            "description": "The level the user accepted; it rises on its own only when a check measures a higher one."
+          },
+          "guarantee_checked_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "guarantee_level": {
+            "type": "string",
+            "description": "The level the last check measured."
           }
         }
       },

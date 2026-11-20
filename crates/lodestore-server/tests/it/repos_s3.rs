@@ -1148,3 +1148,351 @@ async fn repos_recheck_updates_state() {
     })
     .await;
 }
+
+fn delete_not_implemented() -> FaultPlan {
+    FaultPlan::none().with(FaultRule {
+        method: "DELETE",
+        key_prefix: String::new(),
+        action: FaultAction::NotImplemented,
+        times: u32::MAX,
+    })
+}
+
+async fn point_at(ts: &TestServer, id: &str, endpoint: &str) {
+    let pool = ts.state().db.pool.clone();
+    let row = sqlx::query("SELECT location_json FROM repositories WHERE id = $1")
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let mut options: Value =
+        serde_json::from_str(&sqlx::Row::get::<String, _>(&row, "location_json")).unwrap();
+    options["endpoint"] = json!(endpoint);
+    sqlx::query("UPDATE repositories SET location_json = $1 WHERE id = $2")
+        .bind(options.to_string())
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+async fn detail(http: &Http, id: &str) -> Value {
+    body(http.get(&format!("/api/v1/repositories/{id}")).await).await
+}
+
+async fn recheck(http: &Http, id: &str) -> Value {
+    let response = http
+        .post(&format!("/api/v1/repositories/{id}/check"), &json!({}))
+        .await;
+    assert_eq!(response.status(), 200);
+    body(response).await
+}
+
+fn bucket_path() -> String {
+    format!("lode/{BUCKET}")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn recheck_raises_and_keeps_accepted() {
+    each_backend(|backend| async move {
+        let minio = MinioServer::start().await;
+        minio.create_versioned_bucket(BUCKET).await;
+        let server = minio.root_credentials();
+        let agent = agent_user(&minio, BUCKET).await;
+        let ts = TestServer::start(&backend).await;
+        let http = Http::login(&ts).await;
+        let created = create_s3(&http, &s3_draft(&minio, BUCKET, "cloud", &server, &agent)).await;
+        let id = created["id"].as_str().unwrap();
+        assert_eq!(created["guarantee_level"], "overwrite_keeps_old_version");
+
+        minio
+            .mc(&["version", "suspend", &bucket_path()])
+            .await
+            .expect("mc version suspend");
+        let lowered = recheck(&http, id).await;
+        assert_eq!(lowered["guarantee_level"], "host_can_overwrite_or_delete");
+        let shown = detail(&http, id).await;
+        assert_eq!(shown["guarantee_level"], "host_can_overwrite_or_delete");
+        assert_eq!(
+            shown["guarantee_accepted"],
+            "overwrite_keeps_old_version",
+            "[{}]",
+            backend.name()
+        );
+
+        minio
+            .mc(&["version", "enable", &bucket_path()])
+            .await
+            .expect("mc version enable");
+        recheck(&http, id).await;
+        let shown = detail(&http, id).await;
+        assert_eq!(shown["guarantee_level"], "overwrite_keeps_old_version");
+        assert_eq!(shown["guarantee_accepted"], "overwrite_keeps_old_version");
+        ts.stop().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn recheck_inconclusive_keeps_the_level() {
+    each_backend(|backend| async move {
+        let minio = MinioServer::start().await;
+        minio.create_versioned_bucket(BUCKET).await;
+        let server = minio.root_credentials();
+        let agent = agent_user(&minio, BUCKET).await;
+        let ts = TestServer::start(&backend).await;
+        let http = Http::login(&ts).await;
+        let created = create_s3(&http, &s3_draft(&minio, BUCKET, "cloud", &server, &agent)).await;
+        let id = created["id"].as_str().unwrap();
+        let before = detail(&http, id).await;
+
+        let proxy = FaultProxy::start(minio.endpoint(), delete_not_implemented()).await;
+        point_at(&ts, id, &proxy.endpoint()).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let result = recheck(&http, id).await;
+        assert_eq!(result["guarantee_level"], "unchecked", "{result}");
+
+        let after = detail(&http, id).await;
+        assert_eq!(after["guarantee_level"], "overwrite_keeps_old_version");
+        assert_eq!(after["guarantee_accepted"], "overwrite_keeps_old_version");
+        assert_eq!(
+            after["guarantee_checked_at"],
+            before["guarantee_checked_at"]
+        );
+        assert_eq!(after["guarantee_notes"], before["guarantee_notes"]);
+        assert!(
+            after["checked_at"].as_i64() > before["checked_at"].as_i64(),
+            "[{}]",
+            backend.name()
+        );
+        ts.stop().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn recheck_from_unchecked_does_not_accept_host_can() {
+    each_backend(|backend| async move {
+        let minio = MinioServer::start().await;
+        minio.create_bucket(BUCKET).await;
+        let server = minio.root_credentials();
+        let agent = agent_user(&minio, BUCKET).await;
+        let proxy = FaultProxy::start(minio.endpoint(), delete_not_implemented()).await;
+        let ts = TestServer::start(&backend).await;
+        let http = Http::login(&ts).await;
+        let mut draft = s3_draft(&minio, BUCKET, "cloud", &server, &agent);
+        draft["location"]["options"]["endpoint"] = json!(proxy.endpoint());
+        let created = create_s3(&http, &draft).await;
+        let id = created["id"].as_str().unwrap();
+        assert_eq!(created["guarantee_accepted"], "unchecked");
+
+        point_at(&ts, id, minio.endpoint()).await;
+        let result = recheck(&http, id).await;
+        assert_eq!(result["guarantee_level"], "host_can_overwrite_or_delete");
+        let shown = detail(&http, id).await;
+        assert_eq!(shown["guarantee_level"], "host_can_overwrite_or_delete");
+        assert_eq!(
+            shown["guarantee_accepted"],
+            "unchecked",
+            "[{}]",
+            backend.name()
+        );
+        ts.stop().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn replace_key_runs_the_full_probe() {
+    each_backend(|backend| async move {
+        let minio = MinioServer::start().await;
+        minio.create_versioned_bucket(BUCKET).await;
+        let server = minio.root_credentials();
+        let agent = agent_user(&minio, BUCKET).await;
+        let ts = TestServer::start(&backend).await;
+        let http = Http::login(&ts).await;
+        let created = create_s3(&http, &s3_draft(&minio, BUCKET, "cloud", &server, &agent)).await;
+        let id = created["id"].as_str().unwrap();
+        assert_eq!(created["guarantee_accepted"], "overwrite_keeps_old_version");
+        minio
+            .mc(&[
+                "ilm",
+                "rule",
+                "add",
+                &bucket_path(),
+                "--noncurrent-expire-days",
+                "1",
+            ])
+            .await
+            .expect("mc ilm rule add");
+
+        let fresh = agent_user(&minio, BUCKET).await;
+        let replaced = http
+            .put(
+                &format!("/api/v1/repositories/{id}/agent-key"),
+                &creds(&fresh),
+            )
+            .await;
+        assert_eq!(replaced.status(), 200, "[{}]", backend.name());
+
+        let shown = detail(&http, id).await;
+        assert_eq!(
+            shown["guarantee_level"],
+            "host_can_overwrite_or_delete",
+            "[{}] {shown}",
+            backend.name()
+        );
+        assert!(notes(&shown).contains(&"lifecycle_deletes"), "{shown}");
+        assert_eq!(shown["guarantee_accepted"], "overwrite_keeps_old_version");
+        ts.stop().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn replace_key_inconclusive_probe_stores_unchecked() {
+    each_backend(|backend| async move {
+        let minio = MinioServer::start().await;
+        minio.create_versioned_bucket(BUCKET).await;
+        let server = minio.root_credentials();
+        let agent = agent_user(&minio, BUCKET).await;
+        let ts = TestServer::start(&backend).await;
+        let http = Http::login(&ts).await;
+        let created = create_s3(&http, &s3_draft(&minio, BUCKET, "cloud", &server, &agent)).await;
+        let id = created["id"].as_str().unwrap();
+        assert_eq!(created["guarantee_accepted"], "overwrite_keeps_old_version");
+
+        let proxy = FaultProxy::start(minio.endpoint(), delete_not_implemented()).await;
+        point_at(&ts, id, &proxy.endpoint()).await;
+        let fresh = agent_user(&minio, BUCKET).await;
+        let replaced = http
+            .put(
+                &format!("/api/v1/repositories/{id}/agent-key"),
+                &creds(&fresh),
+            )
+            .await;
+        assert_eq!(replaced.status(), 200, "[{}]", backend.name());
+
+        let shown = detail(&http, id).await;
+        assert_eq!(shown["guarantee_level"], "unchecked", "{shown}");
+        assert!(notes(&shown).is_empty(), "{shown}");
+        assert_eq!(shown["guarantee_accepted"], "overwrite_keeps_old_version");
+        ts.stop().await;
+    })
+    .await;
+}
+
+async fn lowered_repository(minio: &MinioServer, http: &Http) -> String {
+    let server = minio.root_credentials();
+    let agent = agent_user(minio, BUCKET).await;
+    let created = create_s3(http, &s3_draft(minio, BUCKET, "cloud", &server, &agent)).await;
+    let id = created["id"].as_str().unwrap().to_string();
+    minio
+        .mc(&["version", "suspend", &bucket_path()])
+        .await
+        .expect("mc version suspend");
+    recheck(http, &id).await;
+    let shown = detail(http, &id).await;
+    assert_eq!(shown["guarantee_level"], "host_can_overwrite_or_delete");
+    assert_eq!(shown["guarantee_accepted"], "overwrite_keeps_old_version");
+    id
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn guarantee_accept_sets_accepted() {
+    each_backend(|backend| async move {
+        let minio = MinioServer::start().await;
+        minio.create_versioned_bucket(BUCKET).await;
+        let ts = TestServer::start(&backend).await;
+        let http = Http::login(&ts).await;
+        let id = lowered_repository(&minio, &http).await;
+
+        let accepted = http
+            .post(
+                &format!("/api/v1/repositories/{id}/guarantee/accept"),
+                &json!({}),
+            )
+            .await;
+        assert_eq!(accepted.status(), 200, "[{}]", backend.name());
+        let accepted = body(accepted).await;
+        assert_eq!(accepted["guarantee_level"], "host_can_overwrite_or_delete");
+        assert_eq!(
+            accepted["guarantee_accepted"],
+            "host_can_overwrite_or_delete"
+        );
+        assert!(accepted["guarantee_checked_at"].is_i64());
+        let shown = detail(&http, &id).await;
+        assert_eq!(shown["guarantee_accepted"], "host_can_overwrite_or_delete");
+        ts.stop().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn guarantee_accept_unchecked_is_conflict() {
+    each_backend(|backend| async move {
+        let minio = MinioServer::start().await;
+        minio.create_bucket(BUCKET).await;
+        let server = minio.root_credentials();
+        let agent = agent_user(&minio, BUCKET).await;
+        let proxy = FaultProxy::start(minio.endpoint(), delete_not_implemented()).await;
+        let ts = TestServer::start(&backend).await;
+        let http = Http::login(&ts).await;
+        let mut draft = s3_draft(&minio, BUCKET, "cloud", &server, &agent);
+        draft["location"]["options"]["endpoint"] = json!(proxy.endpoint());
+        let created = create_s3(&http, &draft).await;
+        let id = created["id"].as_str().unwrap();
+        assert_eq!(created["guarantee_level"], "unchecked");
+
+        let refused = http
+            .post(
+                &format!("/api/v1/repositories/{id}/guarantee/accept"),
+                &json!({}),
+            )
+            .await;
+        assert_eq!(refused.status(), 409, "[{}]", backend.name());
+        let unknown = http
+            .post(
+                "/api/v1/repositories/no-such-repository/guarantee/accept",
+                &json!({}),
+            )
+            .await;
+        assert_eq!(unknown.status(), 404);
+        ts.stop().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn guarantee_accept_needs_session_and_csrf() {
+    each_backend(|backend| async move {
+        let minio = MinioServer::start().await;
+        minio.create_versioned_bucket(BUCKET).await;
+        let ts = TestServer::start(&backend).await;
+        let http = Http::login(&ts).await;
+        let id = lowered_repository(&minio, &http).await;
+        let url = format!("{}/api/v1/repositories/{id}/guarantee/accept", http.base);
+
+        let no_session = http
+            .client
+            .post(&url)
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(no_session.status(), 401, "[{}]", backend.name());
+        let no_csrf = http
+            .client
+            .post(&url)
+            .header("cookie", &http.cookie)
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(no_csrf.status(), 403);
+        let shown = detail(&http, &id).await;
+        assert_eq!(shown["guarantee_accepted"], "overwrite_keeps_old_version");
+        ts.stop().await;
+    })
+    .await;
+}
