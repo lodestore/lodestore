@@ -1,8 +1,12 @@
 use bytes::Bytes;
 
-use super::{BlobDelete, BlobError, BlobStore, Store};
+use super::{BlobDelete, BlobError, BlobPurge, BlobStore, PurgeOutcome, Store};
 
-const PROBE_PREFIX: &str = "packs/probe-";
+/// The key prefixes of the repository layout an agent may write under. A probe
+/// object under any of them must stay invisible to every reader.
+pub const PROBE_PREFIXES: [&str; 3] = ["packs/probe-", "index/probe-", "snapshots/probe-"];
+const PROBE_PREFIX: &str = PROBE_PREFIXES[0];
+const MAX_PROBE_VERSIONS: usize = 8;
 const PROBE_BODY: &[u8] = b"lodestore capability probe";
 const OVERWRITE_BODY: &[u8] = b"lodestore capability probe, overwritten";
 pub const SKIPPED_NOTE: &str = "skipped because the write check failed";
@@ -63,11 +67,142 @@ pub enum AgentKeyState {
     Unchecked,
 }
 
+/// What a probe measured about the storage's protection of backups, never what
+/// a capability flag promises.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuaranteeLevel {
+    CreateOnlyEnforced,
+    OverwriteKeepsOldVersion,
+    HostCanOverwriteOrDelete,
+    Unchecked,
+}
+
+impl GuaranteeLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GuaranteeLevel::CreateOnlyEnforced => "create_only_enforced",
+            GuaranteeLevel::OverwriteKeepsOldVersion => "overwrite_keeps_old_version",
+            GuaranteeLevel::HostCanOverwriteOrDelete => "host_can_overwrite_or_delete",
+            GuaranteeLevel::Unchecked => "unchecked",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        [
+            GuaranteeLevel::CreateOnlyEnforced,
+            GuaranteeLevel::OverwriteKeepsOldVersion,
+            GuaranteeLevel::HostCanOverwriteOrDelete,
+            GuaranteeLevel::Unchecked,
+        ]
+        .into_iter()
+        .find(|l| l.as_str() == s)
+    }
+
+    /// Higher is stronger; `Unchecked` is not on the scale.
+    pub fn rank(self) -> Option<u8> {
+        match self {
+            GuaranteeLevel::HostCanOverwriteOrDelete => Some(0),
+            GuaranteeLevel::OverwriteKeepsOldVersion => Some(1),
+            GuaranteeLevel::CreateOnlyEnforced => Some(2),
+            GuaranteeLevel::Unchecked => None,
+        }
+    }
+}
+
+/// Why a level is not the strongest one. The codes are shared by the server,
+/// the CLI and the web UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Weakness {
+    AgentCanDelete,
+    AgentCanOverwrite,
+    AgentCanDeleteVersions,
+    NotEnforceable,
+    NoAtomicPublish,
+    HeldHandleRewrite,
+    AgentCanWriteServerFiles,
+    NoDurableFsync,
+    SharedCredentials,
+    LifecycleDeletes,
+    LifecycleUnverified,
+}
+
+const WEAKNESSES: [Weakness; 11] = [
+    Weakness::AgentCanDelete,
+    Weakness::AgentCanOverwrite,
+    Weakness::AgentCanDeleteVersions,
+    Weakness::NotEnforceable,
+    Weakness::NoAtomicPublish,
+    Weakness::HeldHandleRewrite,
+    Weakness::AgentCanWriteServerFiles,
+    Weakness::NoDurableFsync,
+    Weakness::SharedCredentials,
+    Weakness::LifecycleDeletes,
+    Weakness::LifecycleUnverified,
+];
+
+impl Weakness {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Weakness::AgentCanDelete => "agent_can_delete",
+            Weakness::AgentCanOverwrite => "agent_can_overwrite",
+            Weakness::AgentCanDeleteVersions => "agent_can_delete_versions",
+            Weakness::NotEnforceable => "not_enforceable",
+            Weakness::NoAtomicPublish => "no_atomic_publish",
+            Weakness::HeldHandleRewrite => "held_handle_rewrite",
+            Weakness::AgentCanWriteServerFiles => "agent_can_write_server_files",
+            Weakness::NoDurableFsync => "no_durable_fsync",
+            Weakness::SharedCredentials => "shared_credentials",
+            Weakness::LifecycleDeletes => "lifecycle_deletes",
+            Weakness::LifecycleUnverified => "lifecycle_unverified",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        WEAKNESSES.into_iter().find(|w| w.as_str() == s)
+    }
+
+    pub fn message(self) -> &'static str {
+        match self {
+            Weakness::AgentCanDelete => "A host can delete backups.",
+            Weakness::AgentCanOverwrite => {
+                "A host can replace backups, and the storage keeps no earlier version."
+            }
+            Weakness::AgentCanDeleteVersions => {
+                "A host can delete the earlier versions the storage keeps."
+            }
+            Weakness::NotEnforceable => {
+                "Every host that writes to this folder can change or delete its backups."
+            }
+            Weakness::NoAtomicPublish => {
+                "An interrupted upload stays in the storage as a broken file."
+            }
+            Weakness::HeldHandleRewrite => {
+                "A host can keep a file open after publishing it and change it later."
+            }
+            Weakness::AgentCanWriteServerFiles => "A host can change files the server wrote.",
+            Weakness::NoDurableFsync => {
+                "The server does not confirm that uploads reached its disk."
+            }
+            Weakness::SharedCredentials => {
+                "Hosts use the server's own credentials for this storage, so they can do anything the server can."
+            }
+            Weakness::LifecycleDeletes => {
+                "A lifecycle rule on the bucket deletes objects or their earlier versions."
+            }
+            Weakness::LifecycleUnverified => {
+                "The bucket's lifecycle rules could not be read; check that none deletes objects or earlier versions."
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProbeReport {
     pub existing_repository: bool,
     pub checks: [Check; 5],
     pub agent_key: AgentKeyState,
+    pub guarantee: GuaranteeLevel,
+    pub weaknesses: Vec<Weakness>,
 }
 
 impl ProbeReport {
@@ -81,6 +216,44 @@ impl ProbeReport {
                 detail: None,
             }),
             agent_key: AgentKeyState::Unchecked,
+            guarantee: GuaranteeLevel::Unchecked,
+            weaknesses: Vec::new(),
+        }
+    }
+
+    fn add_weakness(&mut self, w: Weakness) {
+        if !self.weaknesses.contains(&w) {
+            self.weaknesses.push(w);
+        }
+    }
+
+    /// Lowers the level to `HostCanOverwriteOrDelete` and records why. An
+    /// unchecked report stays as it is.
+    pub fn cap_guarantee(&mut self, w: Weakness) {
+        if self.guarantee == GuaranteeLevel::Unchecked {
+            return;
+        }
+        self.add_weakness(w);
+        self.guarantee = GuaranteeLevel::HostCanOverwriteOrDelete;
+    }
+
+    /// Records a reason without changing the level. An unchecked report stays
+    /// as it is.
+    pub fn note(&mut self, w: Weakness) {
+        if self.guarantee != GuaranteeLevel::Unchecked {
+            self.add_weakness(w);
+        }
+    }
+
+    /// The one rule for a bucket whose lifecycle rules could not be read: a
+    /// level that rests on earlier versions can no longer be trusted, the
+    /// others only carry the note.
+    pub fn lifecycle_unverified(&mut self) {
+        match self.guarantee {
+            GuaranteeLevel::OverwriteKeepsOldVersion => {
+                self.cap_guarantee(Weakness::LifecycleUnverified);
+            }
+            _ => self.note(Weakness::LifecycleUnverified),
         }
     }
 
@@ -166,14 +339,23 @@ impl Default for ProbeKeys {
     }
 }
 
-/// Removes the throwaway objects with the server credentials and returns the
-/// ones it could not remove. A key that was never written is not a failure.
+pub fn is_probe_key(key: &str) -> bool {
+    PROBE_PREFIXES.iter().any(|p| key.starts_with(p))
+}
+
+/// Removes the throwaway objects with the server credentials, every version
+/// of them, and returns the ones it could not remove. A key that was never
+/// written is not a failure.
 pub async fn remove_probe_objects(server: &Store, keys: &ProbeKeys) -> Vec<(String, BlobError)> {
     let mut failed = Vec::new();
     for k in [&keys.server, &keys.agent] {
-        match server.delete(k).await {
-            Ok(()) | Err(BlobError::NotFound) => {}
-            Err(e) => failed.push((k.clone(), e)),
+        match server.purge(k).await {
+            PurgeOutcome::Purged { .. } | PurgeOutcome::NotFound => {}
+            PurgeOutcome::Retained { .. } => failed.push((
+                k.clone(),
+                BlobError::backend("a probe object version is retained by the store"),
+            )),
+            PurgeOutcome::Failed(e) => failed.push((k.clone(), e)),
         }
     }
     failed
@@ -262,72 +444,231 @@ pub async fn probe_keep(server: &Store, agent: AgentProbe<'_>, keys: &ProbeKeys)
             CheckStatus::Neutral,
             Some(SKIPPED_NOTE.into()),
         ),
-        AgentProbe::Store(agent) => probe_agent(&mut report, agent, &agent_key, body).await,
+        AgentProbe::Store(agent) => probe_agent(&mut report, server, agent, &agent_key, body).await,
+    }
+    if wrote && matches!(agent, AgentProbe::NotEnforceable) {
+        report.guarantee = GuaranteeLevel::HostCanOverwriteOrDelete;
+        report.add_weakness(Weakness::NotEnforceable);
     }
 
     report
 }
 
+/// What the probe learned from one agent object.
+enum KeyVerdict {
+    Unwritable(BlobError),
+    Inconclusive(BlobError),
+    Verified,
+    CanDelete,
+    CanOverwrite {
+        level: GuaranteeLevel,
+        weakness: Option<Weakness>,
+    },
+}
+
 /// Writes, tries to overwrite and tries to delete a throwaway object with the
 /// agent's credentials. Only a refusal reported as access denied counts as
-/// "cannot": any other error leaves the verdict inconclusive.
-async fn probe_agent(report: &mut ProbeReport, agent: &Store, key: &str, body: Bytes) {
-    if let Err(e) = agent.put_if_absent(key, body).await {
-        report.set_blob_error(
+/// "cannot": any other error leaves the verdict inconclusive. The level comes
+/// from these measurements alone, never from what the backend claims to support.
+async fn probe_agent(
+    report: &mut ProbeReport,
+    server: &Store,
+    agent: &Store,
+    key: &str,
+    body: Bytes,
+) {
+    match probe_agent_key(server, agent, key, body).await {
+        KeyVerdict::Unwritable(e) => report.set_blob_error(
             CheckId::AgentDelete,
             CheckStatus::Fail,
             "agent key cannot write: ",
             &e,
-        );
-        return;
-    }
-    let overwrite = Bytes::from_static(OVERWRITE_BODY);
-    let can_overwrite = match agent.overwrite_for_probe(key, overwrite).await {
-        Ok(()) => true,
-        Err(BlobError::Denied { .. } | BlobError::AlreadyExists) => false,
-        Err(e) => {
-            report.set_blob_error(
-                CheckId::AgentDelete,
-                CheckStatus::Neutral,
-                "inconclusive: ",
-                &e,
-            );
-            return;
-        }
-    };
-    match agent.delete(key).await {
-        Ok(()) => {
+        ),
+        KeyVerdict::Inconclusive(e) => report.set_blob_error(
+            CheckId::AgentDelete,
+            CheckStatus::Neutral,
+            "inconclusive: ",
+            &e,
+        ),
+        KeyVerdict::CanDelete => {
             report.agent_key = AgentKeyState::CanDelete;
+            report.guarantee = GuaranteeLevel::HostCanOverwriteOrDelete;
+            report.add_weakness(Weakness::AgentCanDelete);
             report.set(
                 CheckId::AgentDelete,
                 CheckStatus::Warn,
                 Some("the agent key can delete objects".into()),
             );
         }
-        Err(BlobError::Denied { .. }) if can_overwrite => {
+        KeyVerdict::CanOverwrite { level, weakness } => {
             report.agent_key = AgentKeyState::CanOverwrite;
-            report.set(
-                CheckId::AgentDelete,
-                CheckStatus::Warn,
-                Some("the agent key cannot delete but can overwrite existing objects".into()),
-            );
+            report.guarantee = level;
+            if let Some(w) = weakness {
+                report.add_weakness(w);
+            }
+            let note = if level == GuaranteeLevel::OverwriteKeepsOldVersion {
+                "the agent key cannot delete but can overwrite existing objects; the storage keeps the earlier version"
+            } else {
+                "the agent key cannot delete but can overwrite existing objects"
+            };
+            report.set(CheckId::AgentDelete, CheckStatus::Warn, Some(note.into()));
         }
-        Err(BlobError::Denied { .. }) => {
+        KeyVerdict::Verified => {
             report.agent_key = AgentKeyState::Verified;
+            report.guarantee = GuaranteeLevel::CreateOnlyEnforced;
             report.set(CheckId::AgentDelete, CheckStatus::Pass, None);
         }
-        Err(e) => report.set_blob_error(
-            CheckId::AgentDelete,
-            CheckStatus::Neutral,
-            "inconclusive: ",
-            &e,
-        ),
+    }
+}
+
+async fn probe_agent_key(server: &Store, agent: &Store, key: &str, body: Bytes) -> KeyVerdict {
+    if let Err(e) = agent.put_if_absent(key, body).await {
+        return KeyVerdict::Unwritable(e);
+    }
+    let overwrite = Bytes::from_static(OVERWRITE_BODY);
+    let can_overwrite = match agent.overwrite_for_probe(key, overwrite).await {
+        Ok(()) => true,
+        Err(BlobError::Denied { .. } | BlobError::AlreadyExists) => false,
+        Err(e) => return KeyVerdict::Inconclusive(e),
+    };
+    match agent.delete(key).await {
+        Ok(()) => KeyVerdict::CanDelete,
+        Err(BlobError::Denied { .. }) if can_overwrite => overwritten(server, agent, key).await,
+        Err(BlobError::Denied { .. }) => KeyVerdict::Verified,
+        Err(e) => KeyVerdict::Inconclusive(e),
+    }
+}
+
+/// The agent replaced the object and could not delete it. The storage keeps
+/// the original only if the server sees an earlier version holding the
+/// original bytes and the agent cannot delete that version.
+async fn overwritten(server: &Store, agent: &Store, key: &str) -> KeyVerdict {
+    let replaced = KeyVerdict::CanOverwrite {
+        level: GuaranteeLevel::HostCanOverwriteOrDelete,
+        weakness: Some(Weakness::AgentCanOverwrite),
+    };
+    let versions = match server.versions_for_probe(key).await {
+        Ok(Some(v)) if v.len() >= 2 => v,
+        Ok(_) => return replaced,
+        Err(e) => return KeyVerdict::Inconclusive(e),
+    };
+    let mut original = None;
+    for (id, _) in versions.iter().take(MAX_PROBE_VERSIONS) {
+        match server.read_version_for_probe(key, id).await {
+            Ok(bytes) if bytes[..] == *PROBE_BODY => {
+                original = Some(id);
+                break;
+            }
+            Ok(_) => {}
+            Err(e) => return KeyVerdict::Inconclusive(e),
+        }
+    }
+    let Some(original) = original else {
+        return replaced;
+    };
+    match agent.delete_version_for_probe(key, original).await {
+        Err(BlobError::Denied { .. }) => KeyVerdict::CanOverwrite {
+            level: GuaranteeLevel::OverwriteKeepsOldVersion,
+            weakness: None,
+        },
+        Ok(()) => KeyVerdict::CanOverwrite {
+            level: GuaranteeLevel::HostCanOverwriteOrDelete,
+            weakness: Some(Weakness::AgentCanDeleteVersions),
+        },
+        Err(e) => KeyVerdict::Inconclusive(e),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn report_at(level: GuaranteeLevel) -> ProbeReport {
+        let mut r = ProbeReport::new(false);
+        r.guarantee = level;
+        r
+    }
+
+    #[test]
+    fn guarantee_and_weakness_names_round_trip() {
+        for l in [
+            GuaranteeLevel::CreateOnlyEnforced,
+            GuaranteeLevel::OverwriteKeepsOldVersion,
+            GuaranteeLevel::HostCanOverwriteOrDelete,
+            GuaranteeLevel::Unchecked,
+        ] {
+            assert_eq!(GuaranteeLevel::parse(l.as_str()), Some(l));
+        }
+        for w in WEAKNESSES {
+            assert_eq!(Weakness::parse(w.as_str()), Some(w));
+            assert!(w.message().ends_with('.'));
+        }
+        assert_eq!(GuaranteeLevel::parse("nope"), None);
+        assert_eq!(Weakness::parse("nope"), None);
+    }
+
+    #[test]
+    fn guarantee_rank_orders_the_levels() {
+        let rank = |l: GuaranteeLevel| l.rank();
+        assert!(
+            rank(GuaranteeLevel::HostCanOverwriteOrDelete)
+                < rank(GuaranteeLevel::OverwriteKeepsOldVersion)
+        );
+        assert!(
+            rank(GuaranteeLevel::OverwriteKeepsOldVersion)
+                < rank(GuaranteeLevel::CreateOnlyEnforced)
+        );
+        assert_eq!(rank(GuaranteeLevel::Unchecked), None);
+    }
+
+    #[test]
+    fn weakness_cap_lowers_and_note_keeps_the_level() {
+        let mut r = report_at(GuaranteeLevel::CreateOnlyEnforced);
+        r.note(Weakness::NoDurableFsync);
+        assert_eq!(r.guarantee, GuaranteeLevel::CreateOnlyEnforced);
+        r.cap_guarantee(Weakness::NoAtomicPublish);
+        r.cap_guarantee(Weakness::NoAtomicPublish);
+        assert_eq!(r.guarantee, GuaranteeLevel::HostCanOverwriteOrDelete);
+        assert_eq!(
+            r.weaknesses,
+            [Weakness::NoDurableFsync, Weakness::NoAtomicPublish]
+        );
+
+        let mut u = report_at(GuaranteeLevel::Unchecked);
+        u.cap_guarantee(Weakness::AgentCanDelete);
+        u.note(Weakness::NoAtomicPublish);
+        assert_eq!(u, report_at(GuaranteeLevel::Unchecked));
+    }
+
+    #[test]
+    fn lifecycle_unverified_follows_the_single_rule() {
+        let mut r = report_at(GuaranteeLevel::OverwriteKeepsOldVersion);
+        r.lifecycle_unverified();
+        assert_eq!(r.guarantee, GuaranteeLevel::HostCanOverwriteOrDelete);
+        assert_eq!(r.weaknesses, [Weakness::LifecycleUnverified]);
+
+        let mut r = report_at(GuaranteeLevel::CreateOnlyEnforced);
+        r.lifecycle_unverified();
+        assert_eq!(r.guarantee, GuaranteeLevel::CreateOnlyEnforced);
+        assert_eq!(r.weaknesses, [Weakness::LifecycleUnverified]);
+
+        let mut r = report_at(GuaranteeLevel::HostCanOverwriteOrDelete);
+        r.lifecycle_unverified();
+        assert_eq!(r.guarantee, GuaranteeLevel::HostCanOverwriteOrDelete);
+        assert_eq!(r.weaknesses, [Weakness::LifecycleUnverified]);
+
+        let mut r = report_at(GuaranteeLevel::Unchecked);
+        r.lifecycle_unverified();
+        assert_eq!(r, report_at(GuaranteeLevel::Unchecked));
+    }
+
+    #[test]
+    fn probe_keys_are_probe_names() {
+        let keys = ProbeKeys::default();
+        assert!(is_probe_key(&keys.server) && is_probe_key(&keys.agent));
+        assert!(!is_probe_key("packs/ab/cd"));
+        assert!(!is_probe_key("config"));
+    }
 
     #[test]
     fn messages_are_short_and_free_of_backend_text() {

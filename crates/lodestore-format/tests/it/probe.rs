@@ -7,8 +7,8 @@ use lodestore_format::keys::KdfCost;
 use lodestore_format::repo::{InitOptions, PendingInit, Repository};
 use lodestore_format::store::policy::{agent_iam_policy_json, agent_minio_policy_json};
 use lodestore_format::store::probe::{
-    AgentKeyState, AgentProbe, CHECK_ORDER, CheckId, CheckStatus, ProbeKeys, ProbeReport, probe,
-    probe_keep, remove_probe_objects,
+    AgentKeyState, AgentProbe, CHECK_ORDER, CheckId, CheckStatus, GuaranteeLevel, ProbeKeys,
+    ProbeReport, probe, probe_keep, remove_probe_objects,
 };
 use lodestore_format::store::{
     BlobDelete, BlobError, BlobStore, OpendalStore, RepoLocation, StaticCredentials, Store,
@@ -375,6 +375,61 @@ async fn probe_s3_delete_refused_for_other_reasons_is_inconclusive() {
     assert!(delete.error.as_deref().unwrap().starts_with("inconclusive"));
     assert_eq!(report.agent_key_state(), AgentKeyState::Unchecked);
     assert!(!report.blocking());
+}
+
+fn store_via(endpoint: &str, key: &str, secret: &str, provider: Option<&str>) -> Store {
+    let mut options = vec![("endpoint", endpoint), ("bucket", BUCKET)];
+    if let Some(p) = provider {
+        options.push(("provider", p));
+    }
+    RepoLocation::new("s3", options)
+        .open(Some(StaticCredentials {
+            access_key_id: key.to_owned(),
+            secret_access_key: secret.to_owned(),
+        }))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn probe_b2_preset_versioned_bucket_keeps_old_version() {
+    let minio = MinioServer::start().await;
+    minio.create_versioned_bucket(BUCKET).await;
+    let (root_key, root_secret) = minio.root_credentials();
+    let (key, secret) = minio
+        .create_user_with_policy(BUCKET, &agent_minio_policy_json(BUCKET, ""))
+        .await;
+    let proxy = FaultProxy::start(minio.endpoint(), FaultPlan::none()).await;
+    let endpoint = proxy.endpoint();
+    let server = store_via(&endpoint, &root_key, &root_secret, Some("b2"));
+    let agent = store_via(&endpoint, &key, &secret, Some("b2"));
+    assert!(!server.sweeps_delete_markers());
+
+    let report = probe(&server, AgentProbe::Store(&agent)).await;
+    assert_eq!(
+        report.guarantee,
+        GuaranteeLevel::OverwriteKeepsOldVersion,
+        "{report:?}"
+    );
+    assert_eq!(report.agent_key_state(), AgentKeyState::CanOverwrite);
+    assert!(report.weaknesses.is_empty(), "{:?}", report.weaknesses);
+    let conditional = report.check(CheckId::ConditionalWrite);
+    assert_eq!(conditional.status, CheckStatus::Warn);
+    assert_eq!(conditional.error.as_deref(), Some("unsupported"));
+
+    let puts: Vec<_> = proxy
+        .requests()
+        .into_iter()
+        .filter(|r| r.method == "PUT")
+        .collect();
+    assert!(!puts.is_empty());
+    for put in puts {
+        assert!(
+            put.headers
+                .iter()
+                .all(|(k, _)| !k.eq_ignore_ascii_case("if-none-match")),
+            "{put:?}"
+        );
+    }
 }
 
 #[test]

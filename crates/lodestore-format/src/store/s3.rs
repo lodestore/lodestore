@@ -81,10 +81,21 @@ impl fmt::Debug for StaticCredentials {
     }
 }
 
+/// Which S3-compatible service the bucket lives on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum S3Provider {
+    Default,
+    B2,
+}
+
 /// Repository in an S3 bucket, path-style addressing. Every write carries
-/// `If-None-Match: *`; there is no unconditional write and no delete.
+/// `If-None-Match: *` except on the B2 preset, which first checks that the
+/// object is absent because B2 does not apply that header; there is no
+/// delete on the write path.
 pub struct S3Store {
     pub(super) op: Operator,
+    conditional: bool,
+    sweeps_delete_markers: bool,
 }
 
 impl fmt::Debug for S3Store {
@@ -173,6 +184,7 @@ pub struct S3Options {
     pub prefix: String,
     pub region: String,
     pub virtual_host_style: bool,
+    pub provider: S3Provider,
 }
 
 /// The timeout sits inside the retry, so a timed-out attempt is retried.
@@ -266,6 +278,7 @@ impl S3Store {
                 prefix: url.prefix,
                 region: region_from_env(),
                 virtual_host_style: false,
+                provider: S3Provider::Default,
             },
             creds,
         )
@@ -298,7 +311,23 @@ impl S3Store {
         }
         let op = Operator::new(builder)
             .map_err(|e| Error::InvalidInput(format!("cannot configure the s3 backend: {e}")))?;
-        Ok(S3Store { op: layered(op) })
+        let b2 = opts.provider == S3Provider::B2;
+        Ok(S3Store {
+            op: layered(op),
+            conditional: !b2,
+            sweeps_delete_markers: !b2,
+        })
+    }
+
+    pub fn conditional_write_supported(&self) -> bool {
+        self.conditional
+    }
+
+    /// Whether a delete marker left by a host may be swept by the server's
+    /// garbage collection. On B2 the host's hide marker is the only trace of
+    /// a delete, so it must not be turned into a removal.
+    pub fn sweeps_delete_markers(&self) -> bool {
+        self.sweeps_delete_markers
     }
 }
 
@@ -333,6 +362,16 @@ impl S3Store {
 impl BlobStore for S3Store {
     async fn put_if_absent(&self, key: &str, data: Bytes) -> std::result::Result<(), BlobError> {
         check_key(key)?;
+        if !self.conditional {
+            // A write-only key may not stat; its write goes through and on B2 a repeat only adds a version of the same bytes.
+            match self.op.stat(key).await {
+                Ok(_) => return Err(BlobError::AlreadyExists),
+                Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::PermissionDenied) => {
+                }
+                Err(e) => return Err(map_err(e)),
+            }
+            return self.op.write(key, data).await.map(|_| ()).map_err(map_err);
+        }
         match self.op.write_with(key, data).if_not_exists(true).await {
             Ok(_) => Ok(()),
             Err(e) if e.kind() == ErrorKind::ConditionNotMatch => Err(BlobError::AlreadyExists),

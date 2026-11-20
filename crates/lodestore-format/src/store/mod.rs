@@ -19,7 +19,7 @@ pub use local::LocalFsStore;
 pub use location::RepoLocation;
 pub use opendal::OpendalStore;
 pub use purge::{BlobPurge, PurgeOutcome, RetainedVersion};
-pub use s3::{S3Options, S3Store, S3Url, StaticCredentials};
+pub use s3::{S3Options, S3Provider, S3Store, S3Url, StaticCredentials};
 
 #[derive(Debug, thiserror::Error)]
 pub enum BlobError {
@@ -279,8 +279,18 @@ pub enum Store {
 impl Store {
     pub fn conditional_write_supported(&self) -> bool {
         match self {
-            Store::Local(_) | Store::S3(_) => true,
+            Store::Local(_) => true,
+            Store::S3(s) => s.conditional_write_supported(),
             Store::Opendal(s) => s.conditional_write_supported(),
+        }
+    }
+
+    /// Whether a delete marker may be swept as a removal. False on B2, where a
+    /// host's hide marker is the only trace of its delete.
+    pub fn sweeps_delete_markers(&self) -> bool {
+        match self {
+            Store::S3(s) => s.sweeps_delete_markers(),
+            Store::Local(_) | Store::Opendal(_) => true,
         }
     }
 
@@ -309,11 +319,59 @@ impl Store {
         }
     }
 
+    fn probe_op(&self, key: &str) -> std::result::Result<Option<&::opendal::Operator>, BlobError> {
+        if !probe::is_probe_key(key) {
+            return Err(BlobError::backend(format!("{key:?} is not a probe object")));
+        }
+        Ok(match self {
+            Store::Local(_) => None,
+            Store::S3(s) => Some(&s.op),
+            Store::Opendal(s) => Some(&s.op),
+        })
+    }
+
+    /// The versions of a probe object as (id, size); `None` when the store
+    /// keeps no versions.
+    async fn versions_for_probe(
+        &self,
+        key: &str,
+    ) -> std::result::Result<Option<Vec<(String, u64)>>, BlobError> {
+        match self.probe_op(key)? {
+            Some(op) => purge::versions_op(op, key).await,
+            None => Ok(None),
+        }
+    }
+
+    async fn read_version_for_probe(
+        &self,
+        key: &str,
+        version: &str,
+    ) -> std::result::Result<Bytes, BlobError> {
+        match self.probe_op(key)? {
+            Some(op) => purge::read_version_op(op, key, version).await,
+            None => Err(BlobError::backend("not supported on a local folder")),
+        }
+    }
+
+    async fn delete_version_for_probe(
+        &self,
+        key: &str,
+        version: &str,
+    ) -> std::result::Result<(), BlobError> {
+        match self.probe_op(key)? {
+            Some(op) => purge::delete_version_op(op, key, version).await,
+            None => Err(BlobError::backend("not supported on a local folder")),
+        }
+    }
+
     async fn overwrite_for_probe(
         &self,
         key: &str,
         data: Bytes,
     ) -> std::result::Result<(), BlobError> {
+        if !probe::is_probe_key(key) {
+            return Err(BlobError::backend(format!("{key:?} is not a probe object")));
+        }
         match self {
             Store::Local(_) => Err(BlobError::backend("not supported on a local folder")),
             Store::S3(s) => s.overwrite_for_probe(key, data).await,

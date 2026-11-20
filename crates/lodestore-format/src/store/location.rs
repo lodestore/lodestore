@@ -1,11 +1,30 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use super::s3::{DEFAULT_REGION, S3Options, S3Store, StaticCredentials};
+use super::s3::{DEFAULT_REGION, S3Options, S3Provider, S3Store, StaticCredentials};
 use super::{LocalFsStore, OpendalStore, Store};
 use crate::error::{Error, Result};
 
 const EXPERIMENTAL: [&str; 4] = ["azblob", "gcs", "sftp", "webdav"];
+
+fn with_root(base: String, root: &str) -> String {
+    let root = root.trim_matches('/');
+    if root.is_empty() {
+        base
+    } else {
+        format!("{base}/{root}")
+    }
+}
+
+/// Compares the host, not a substring: `backblazeb2.com.evil.example` is not B2.
+fn is_b2_endpoint(endpoint: &str) -> bool {
+    let rest = endpoint.split_once("://").map_or(endpoint, |(_, r)| r);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    let host = authority.split(':').next().unwrap_or(authority);
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    host == "backblazeb2.com" || host.ends_with(".backblazeb2.com")
+}
 
 /// Where a repository lives: a backend name plus that backend's options.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +76,13 @@ impl RepoLocation {
                         "`path_style` must be `true` or `false`".into(),
                     ));
                 }
+                if self.s3_provider()? == S3Provider::Default
+                    && self.opt("endpoint").is_some_and(is_b2_endpoint)
+                {
+                    return Err(Error::InvalidInput(
+                        "Backblaze B2 needs the option provider = b2: B2 does not apply If-None-Match, and a delete there hides the file instead of removing it".into(),
+                    ));
+                }
             }
             "local" => {
                 if !PathBuf::from(self.require("path")?).is_absolute() {
@@ -93,9 +119,19 @@ impl RepoLocation {
                 }
             }
             "local" => get("path").to_owned(),
-            "azblob" => format!("azblob://{}", get("container")),
-            "gcs" => format!("gcs://{}", get("bucket")),
+            "azblob" => with_root(format!("azblob://{}", get("container")), get("root")),
+            "gcs" => with_root(format!("gcs://{}", get("bucket")), get("root")),
             other => format!("{other}://{}", get("endpoint")),
+        }
+    }
+
+    fn s3_provider(&self) -> Result<S3Provider> {
+        match self.opt("provider") {
+            None => Ok(S3Provider::Default),
+            Some("b2") => Ok(S3Provider::B2),
+            Some(other) => Err(Error::InvalidInput(format!(
+                "unknown S3 provider {other:?}; the only value is `b2`"
+            ))),
         }
     }
 
@@ -111,6 +147,7 @@ impl RepoLocation {
             region: self.opt("region").unwrap_or(DEFAULT_REGION).to_owned(),
             virtual_host_style,
             endpoint,
+            provider: self.s3_provider().unwrap_or(S3Provider::Default),
         }
     }
 
@@ -191,6 +228,56 @@ mod tests {
             );
             assert!(loc.open(None).is_err());
         }
+    }
+
+    #[test]
+    fn location_backblaze_endpoint_needs_the_b2_provider() {
+        let s3 = |endpoint: &str, provider: Option<&str>| {
+            let mut o = vec![("bucket", "b"), ("endpoint", endpoint)];
+            if let Some(p) = provider {
+                o.push(("provider", p));
+            }
+            RepoLocation::new("s3", o)
+        };
+        let err = s3("https://s3.us-west-004.backblazeb2.com", None)
+            .validate()
+            .unwrap_err();
+        assert!(err.to_string().contains("provider = b2"), "{err}");
+        assert!(
+            s3("https://BackblazeB2.com:443/x", None)
+                .validate()
+                .is_err()
+        );
+        s3("https://s3.us-west-004.backblazeb2.com", Some("b2"))
+            .validate()
+            .unwrap();
+        s3("https://backblazeb2.com.evil.example", None)
+            .validate()
+            .unwrap();
+        s3("https://notbackblazeb2.com", None).validate().unwrap();
+        assert!(s3("http://127.0.0.1:9000", Some("gcs")).validate().is_err());
+        let b2 = s3("http://127.0.0.1:9000", Some("b2"));
+        assert_eq!(b2.s3_options().provider, S3Provider::B2);
+        assert_eq!(
+            s3("http://127.0.0.1:9000", None).s3_options().provider,
+            S3Provider::Default
+        );
+    }
+
+    #[test]
+    fn location_display_keeps_the_root() {
+        let loc = RepoLocation::new("azblob", [("container", "c"), ("root", "r/x")]);
+        assert_eq!(loc.display(), "azblob://c/r/x");
+        let loc = RepoLocation::new("gcs", [("bucket", "b"), ("root", "/r/")]);
+        assert_eq!(loc.display(), "gcs://b/r");
+        assert_eq!(
+            RepoLocation::new("azblob", [("container", "c")]).display(),
+            "azblob://c"
+        );
+        assert_eq!(
+            RepoLocation::new("gcs", [("bucket", "b")]).display(),
+            "gcs://b"
+        );
     }
 
     #[test]
