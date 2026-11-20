@@ -3,8 +3,8 @@ use std::fmt::Display;
 use std::time::Duration;
 
 use lodestore_format::store::probe::{
-    AgentKeyState, AgentProbe, CHECK_ORDER, Check, CheckId, CheckStatus, ProbeKeys, ProbeReport,
-    SKIPPED_NOTE, probe_keep, remove_probe_objects,
+    AgentKeyState, AgentProbe, CHECK_ORDER, Check, CheckId, CheckStatus, GuaranteeLevel, ProbeKeys,
+    ProbeReport, SKIPPED_NOTE, probe_keep, remove_probe_objects,
 };
 use lodestore_format::store::{RepoLocation, StaticCredentials, Store};
 
@@ -147,6 +147,8 @@ pub(crate) fn timed_out_report() -> ProbeReport {
             detail: None,
         }),
         agent_key: AgentKeyState::Unchecked,
+        guarantee: GuaranteeLevel::Unchecked,
+        weaknesses: Vec::new(),
     }
 }
 

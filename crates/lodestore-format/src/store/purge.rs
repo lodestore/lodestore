@@ -104,6 +104,49 @@ fn versioned(op: &Operator) -> bool {
     cap.list_with_versions && cap.list_with_deleted && cap.delete_with_version
 }
 
+/// The stored versions of `key` as (version id, size), as the backend lists
+/// them; `None` when the store keeps no versions.
+pub(super) async fn versions_op(
+    op: &Operator,
+    key: &str,
+) -> Result<Option<Vec<(String, u64)>>, BlobError> {
+    check_key(key)?;
+    if !versioned(op) {
+        return Ok(None);
+    }
+    let entries = op.list_with(key).versions(true).await.map_err(map_err)?;
+    Ok(Some(
+        entries
+            .iter()
+            .filter(|e| e.path().trim_start_matches('/') == key)
+            .filter(|e| !e.metadata().is_deleted())
+            .filter_map(|e| {
+                let meta = e.metadata();
+                Some((meta.version()?.to_owned(), meta.content_length()))
+            })
+            .collect(),
+    ))
+}
+
+pub(super) async fn read_version_op(
+    op: &Operator,
+    key: &str,
+    version: &str,
+) -> Result<bytes::Bytes, BlobError> {
+    check_key(key)?;
+    let buf = op.read_with(key).version(version).await.map_err(map_err)?;
+    Ok(buf.to_bytes())
+}
+
+pub(super) async fn delete_version_op(
+    op: &Operator,
+    key: &str,
+    version: &str,
+) -> Result<(), BlobError> {
+    check_key(key)?;
+    op.delete_with(key).version(version).await.map_err(map_err)
+}
+
 pub(super) async fn purge_op(op: &Operator, key: &str) -> PurgeOutcome {
     if let Err(e) = check_key(key) {
         return PurgeOutcome::Failed(e);

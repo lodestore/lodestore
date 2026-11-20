@@ -12,6 +12,7 @@ use lodestore_format::keys::{MasterKey, ReadKeys};
 use lodestore_format::pb;
 use lodestore_format::snapshot::{MAX_SNAPSHOT_SIZE, open_snapshot, snapshot_object_key};
 use lodestore_format::source::{self, Meta, SourceKey, SourceType};
+use lodestore_format::store::probe::is_probe_key;
 use lodestore_format::store::{BlobDelete, BlobError, BlobStore, Store, read_bounded};
 use lodestore_format::{Error as FormatError, Result as FormatResult};
 use serde::{Deserialize, Serialize};
@@ -999,6 +1000,9 @@ async fn rebuild(state: &AppState, repository_id: &str) -> anyhow::Result<SyncRe
     let mut candidates = Vec::new();
     let mut exact_times = Vec::new();
     for entry in listed {
+        if is_probe_key(&entry.key) {
+            continue;
+        }
         match entry
             .key
             .strip_prefix(SNAPSHOT_PREFIX)

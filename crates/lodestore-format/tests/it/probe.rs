@@ -7,8 +7,8 @@ use lodestore_format::keys::KdfCost;
 use lodestore_format::repo::{InitOptions, PendingInit, Repository};
 use lodestore_format::store::policy::{agent_iam_policy_json, agent_minio_policy_json};
 use lodestore_format::store::probe::{
-    AgentKeyState, AgentProbe, CHECK_ORDER, CheckId, CheckStatus, ProbeKeys, ProbeReport, probe,
-    probe_keep, remove_probe_objects,
+    AgentKeyState, AgentProbe, CHECK_ORDER, CheckId, CheckStatus, GuaranteeLevel, ProbeKeys,
+    ProbeReport, Weakness, probe, probe_keep, remove_probe_objects,
 };
 use lodestore_format::store::{
     BlobDelete, BlobError, BlobStore, OpendalStore, RepoLocation, StaticCredentials, Store,
@@ -66,6 +66,8 @@ async fn probe_s3_minio_agent_can_overwrite() {
     assert!(!report.existing_repository);
     assert!(!report.blocking());
     assert_eq!(report.agent_key_state(), AgentKeyState::CanOverwrite);
+    assert_eq!(report.guarantee, GuaranteeLevel::HostCanOverwriteOrDelete);
+    assert_eq!(report.weaknesses, [Weakness::AgentCanOverwrite]);
     let note = report.check(CheckId::AgentDelete).error.as_deref().unwrap();
     assert!(note.contains("overwrite"), "{note}");
 
@@ -106,6 +108,8 @@ async fn probe_s3_root_as_agent_can_delete() {
     assert_order(&report);
     assert_eq!(report.check(CheckId::AgentDelete).status, CheckStatus::Warn);
     assert_eq!(report.agent_key_state(), AgentKeyState::CanDelete);
+    assert_eq!(report.guarantee, GuaranteeLevel::HostCanOverwriteOrDelete);
+    assert_eq!(report.weaknesses, [Weakness::AgentCanDelete]);
     assert!(!report.blocking());
 }
 
@@ -154,6 +158,7 @@ async fn probe_s3_bad_server_key_skips_agent() {
         );
     }
     assert_eq!(report.agent_key_state(), AgentKeyState::Unchecked);
+    assert_eq!(report.guarantee, GuaranteeLevel::Unchecked);
     assert!(report.blocking());
     let leftover = root.list("packs/probe-").await.unwrap();
     assert!(leftover.is_empty(), "{leftover:?}");
@@ -177,6 +182,8 @@ async fn probe_local_folder() {
     assert!(!report.existing_repository);
     assert!(!report.blocking());
     assert_eq!(report.agent_key_state(), AgentKeyState::Unchecked);
+    assert_eq!(report.guarantee, GuaranteeLevel::HostCanOverwriteOrDelete);
+    assert_eq!(report.weaknesses, [Weakness::NotEnforceable]);
 }
 
 #[tokio::test]
@@ -355,6 +362,8 @@ async fn probe_s3_enforcing_provider_agent_verified() {
     let report = probe(&root, AgentProbe::Store(&agent)).await;
     assert_eq!(statuses(&report), [Pass, Pass, Pass, Pass, Neutral]);
     assert_eq!(report.agent_key_state(), AgentKeyState::Verified);
+    assert_eq!(report.guarantee, GuaranteeLevel::CreateOnlyEnforced);
+    assert!(report.weaknesses.is_empty());
 }
 
 #[tokio::test]
@@ -374,7 +383,263 @@ async fn probe_s3_delete_refused_for_other_reasons_is_inconclusive() {
     assert_eq!(delete.status, CheckStatus::Neutral);
     assert!(delete.error.as_deref().unwrap().starts_with("inconclusive"));
     assert_eq!(report.agent_key_state(), AgentKeyState::Unchecked);
+    assert_eq!(report.guarantee, GuaranteeLevel::Unchecked);
     assert!(!report.blocking());
+}
+
+fn store_via(endpoint: &str, key: &str, secret: &str, provider: Option<&str>) -> Store {
+    let mut options = vec![("endpoint", endpoint), ("bucket", BUCKET)];
+    if let Some(p) = provider {
+        options.push(("provider", p));
+    }
+    RepoLocation::new("s3", options)
+        .open(Some(StaticCredentials {
+            access_key_id: key.to_owned(),
+            secret_access_key: secret.to_owned(),
+        }))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn probe_b2_preset_versioned_bucket_keeps_old_version() {
+    let minio = MinioServer::start().await;
+    minio.create_versioned_bucket(BUCKET).await;
+    let (root_key, root_secret) = minio.root_credentials();
+    let (key, secret) = minio
+        .create_user_with_policy(BUCKET, &agent_minio_policy_json(BUCKET, ""))
+        .await;
+    let proxy = FaultProxy::start(minio.endpoint(), FaultPlan::none()).await;
+    let endpoint = proxy.endpoint();
+    let server = store_via(&endpoint, &root_key, &root_secret, Some("b2"));
+    let agent = store_via(&endpoint, &key, &secret, Some("b2"));
+    assert!(!server.sweeps_delete_markers());
+
+    let report = probe(&server, AgentProbe::Store(&agent)).await;
+    assert_eq!(
+        report.guarantee,
+        GuaranteeLevel::OverwriteKeepsOldVersion,
+        "{report:?}"
+    );
+    assert_eq!(report.agent_key_state(), AgentKeyState::CanOverwrite);
+    assert!(report.weaknesses.is_empty(), "{:?}", report.weaknesses);
+    let conditional = report.check(CheckId::ConditionalWrite);
+    assert_eq!(conditional.status, CheckStatus::Warn);
+    assert_eq!(conditional.error.as_deref(), Some("unsupported"));
+
+    let puts: Vec<_> = proxy
+        .requests()
+        .into_iter()
+        .filter(|r| r.method == "PUT")
+        .collect();
+    assert!(!puts.is_empty());
+    for put in puts {
+        assert!(
+            put.headers
+                .iter()
+                .all(|(k, _)| !k.eq_ignore_ascii_case("if-none-match")),
+            "{put:?}"
+        );
+    }
+}
+
+async fn versioned_minio_with_user(policy: Option<String>) -> (MinioServer, Store, Store) {
+    let minio = MinioServer::start().await;
+    minio.create_versioned_bucket(BUCKET).await;
+    let (root_key, root_secret) = minio.root_credentials();
+    let root = s3_store(&minio, &root_key, &root_secret);
+    let policy = policy.unwrap_or_else(|| agent_minio_policy_json(BUCKET, ""));
+    let (key, secret) = minio.create_user_with_policy(BUCKET, &policy).await;
+    let agent = s3_store(&minio, &key, &secret);
+    (minio, root, agent)
+}
+
+fn policy_with_extra_statement(action: &str, resource: &str) -> String {
+    let mut policy: serde_json::Value =
+        serde_json::from_str(&agent_minio_policy_json(BUCKET, "")).unwrap();
+    policy["Statement"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "Effect": "Allow",
+            "Action": [action],
+            "Resource": [format!("arn:aws:s3:::{BUCKET}/{resource}")],
+        }));
+    policy.to_string()
+}
+
+#[tokio::test]
+async fn probe_s3_versioned_write_only_keeps_old_version() {
+    let (_minio, root, agent) = versioned_minio_with_user(None).await;
+    let report = probe(&root, AgentProbe::Store(&agent)).await;
+    assert_eq!(
+        report.guarantee,
+        GuaranteeLevel::OverwriteKeepsOldVersion,
+        "{report:?}"
+    );
+    assert_eq!(report.agent_key_state(), AgentKeyState::CanOverwrite);
+    assert!(report.weaknesses.is_empty());
+    assert_eq!(
+        report.check(CheckId::ConditionalWrite).status,
+        CheckStatus::Pass
+    );
+}
+
+#[tokio::test]
+async fn probe_s3_versioned_agent_that_deletes_versions_is_host_can() {
+    let minio = MinioServer::start().await;
+    minio.create_versioned_bucket(BUCKET).await;
+    let (key, secret) = minio.root_credentials();
+    let root = s3_store(&minio, &key, &secret);
+    // MinIO authorises a version delete as a plain delete, so a key that may
+    // delete versions but not objects cannot be built there; the proxy refuses
+    // the first delete on each layout prefix, the one that adds a marker.
+    let refuse_marker = |key_prefix: &str| FaultRule {
+        method: "DELETE",
+        key_prefix: key_prefix.to_owned(),
+        action: FaultAction::DenyUnconditional,
+        times: 1,
+    };
+    let plan = ["packs/", "index/", "snapshots/"]
+        .into_iter()
+        .fold(FaultPlan::none(), |p, k| p.with(refuse_marker(k)));
+    let proxy = FaultProxy::start(minio.endpoint(), plan).await;
+    let agent = store_via(&proxy.endpoint(), &key, &secret, None);
+    let report = probe(&root, AgentProbe::Store(&agent)).await;
+    assert_eq!(
+        report.guarantee,
+        GuaranteeLevel::HostCanOverwriteOrDelete,
+        "{report:?}"
+    );
+    assert_eq!(report.weaknesses, [Weakness::AgentCanDeleteVersions]);
+}
+
+#[tokio::test]
+async fn probe_s3_suspended_versioning_is_host_can() {
+    let (minio, root, agent) = versioned_minio_with_user(None).await;
+    minio
+        .mc(&["version", "suspend", &format!("lode/{BUCKET}")])
+        .await
+        .unwrap();
+    let report = probe(&root, AgentProbe::Store(&agent)).await;
+    assert_eq!(
+        report.guarantee,
+        GuaranteeLevel::HostCanOverwriteOrDelete,
+        "{report:?}"
+    );
+    assert_eq!(report.weaknesses, [Weakness::AgentCanOverwrite]);
+}
+
+#[tokio::test]
+async fn probe_agent_checks_every_layout_prefix() {
+    let (minio, root) = minio_with_bucket().await;
+    let policy = policy_with_extra_statement("s3:DeleteObject", "index/*");
+    let (key, secret) = minio.create_user_with_policy(BUCKET, &policy).await;
+    let agent = s3_store(&minio, &key, &secret);
+
+    let report = probe(&root, AgentProbe::Store(&agent)).await;
+    assert_eq!(report.agent_key_state(), AgentKeyState::CanDelete);
+    assert_eq!(
+        report.guarantee,
+        GuaranteeLevel::HostCanOverwriteOrDelete,
+        "{report:?}"
+    );
+    assert_eq!(report.weaknesses, [Weakness::AgentCanDelete]);
+}
+
+#[tokio::test]
+async fn probe_s3_deleting_agent_on_a_versioned_bucket_is_host_can() {
+    let (minio, root) = {
+        let minio = MinioServer::start().await;
+        minio.create_versioned_bucket(BUCKET).await;
+        let (key, secret) = minio.root_credentials();
+        let root = s3_store(&minio, &key, &secret);
+        (minio, root)
+    };
+    let (key, secret) = minio.root_credentials();
+    let agent = s3_store(&minio, &key, &secret);
+    let report = probe(&root, AgentProbe::Store(&agent)).await;
+    assert_eq!(
+        report.guarantee,
+        GuaranteeLevel::HostCanOverwriteOrDelete,
+        "{report:?}"
+    );
+    assert_eq!(report.weaknesses, [Weakness::AgentCanDelete]);
+}
+
+#[tokio::test]
+async fn probe_leaves_no_versions_behind_on_a_versioned_bucket() {
+    let (minio, root, write_only) = versioned_minio_with_user(None).await;
+    let (key, secret) = minio.root_credentials();
+    let deleting = s3_store(&minio, &key, &secret);
+    for agent in [&write_only, &deleting] {
+        let report = probe(&root, AgentProbe::Store(agent)).await;
+        assert!(!report.blocking());
+        let left = minio
+            .mc(&[
+                "ls",
+                "--versions",
+                "--recursive",
+                "--json",
+                &format!("lode/{BUCKET}"),
+            ])
+            .await
+            .unwrap();
+        assert!(left.trim().is_empty(), "{left}");
+    }
+}
+
+#[tokio::test]
+async fn probe_names_are_ignored_by_readers() {
+    use lodestore_format::check::structure::check_structure;
+    use lodestore_format::snapshot::list_snapshots;
+    use lodestore_format::store::probe::PROBE_PREFIXES;
+
+    let fx = crate::gc_support::Fx::new().await;
+    let outcome = fx.backup("a", &[("one", 1, 200 << 10)]).await;
+    let packs_before = fx.packs().await.len();
+    for prefix in PROBE_PREFIXES {
+        fx.store
+            .put_if_absent(&format!("{prefix}x"), Bytes::from_static(b"junk"))
+            .await
+            .unwrap();
+    }
+
+    let listed = list_snapshots(&fx.store, fx.repo.read_keys())
+        .await
+        .unwrap();
+    assert_eq!(listed.entries.len(), 1);
+    assert_eq!(listed.entries[0].id, outcome.snapshot_id);
+    assert!(listed.skipped.is_empty(), "{:?}", listed.skipped);
+
+    fx.assert_all_restore().await;
+
+    let report = check_structure(
+        &fx.store,
+        fx.repo.read_keys(),
+        fx.repo.config(),
+        &|_, _, _| {},
+    )
+    .await
+    .unwrap();
+    assert!(report.findings.is_empty(), "{:?}", report.findings);
+    assert!(report.notes.is_empty(), "{:?}", report.notes);
+
+    let rebuilt = rebuild_index(&fx.store, fx.repo.read_keys(), &|_, _| {})
+        .await
+        .unwrap();
+    assert_eq!(rebuilt.packs_scanned, 0);
+    assert!(
+        rebuilt.packs_skipped.is_empty(),
+        "{:?}",
+        rebuilt.packs_skipped
+    );
+    assert_eq!(fx.packs().await.len(), packs_before + 1);
+
+    let survey = fx.survey(50).await;
+    assert!(survey.ignored.is_empty(), "{:?}", survey.ignored);
+    assert!(survey.quarantined.is_empty());
+    assert_eq!(survey.snapshots, [outcome.snapshot_id]);
+    assert!(!format!("{:?}", survey.plan).contains("probe-"));
 }
 
 #[test]
