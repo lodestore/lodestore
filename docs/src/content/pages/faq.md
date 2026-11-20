@@ -58,7 +58,7 @@ Open an issue or a pull request on GitHub. Every commit is signed off under the 
 
 ### Which storage can I use?
 
-S3-compatible object storage, such as AWS S3, MinIO or Ceph, or a local or network folder. Only S3-compatible storage gives the agent a separate key without delete rights and offers Object Lock, which is why a folder is meant for trying Lodestore. See [Why S3-compatible storage](/docs/quickstart/#why-s3-compatible-storage).
+S3-compatible object storage, such as AWS S3, MinIO or Ceph, or a local or network folder. From the next release also Azure Blob Storage, Google Cloud Storage, SFTP and Backblaze B2 (as an S3 preset). Only S3-compatible storage gives the agent a separate key without delete rights and offers Object Lock, which is why a folder is meant for trying Lodestore; for every repository Lodestore measures what a host can do to its backups and asks you to accept a weaker result. See [Storage backends and guarantee levels](/docs/reference/storage/) and [Why S3-compatible storage](/docs/quickstart/#why-s3-compatible-storage).
 
 ### Should I use SQLite or PostgreSQL for the catalog?
 
@@ -74,4 +74,4 @@ The server has two ports. Port 8080 serves the web interface and the API over pl
 
 ### What does Lodestore not do yet?
 
-Not yet: agents for Windows and macOS, backup of Proxmox VMs and containers, a Kubernetes operator, native database backup (today, dump the database in a pre-backup hook), roles for teams (RBAC) and single sign-on, and storage such as SFTP and WebDAV. The [roadmap](/roadmap/) lists what is next and what is later.
+Not yet: agents for Windows and macOS, backup of Proxmox VMs and containers, a Kubernetes operator, native database backup (today, dump the database in a pre-backup hook), roles for teams (RBAC) and single sign-on, and storage such as WebDAV. The [roadmap](/roadmap/) lists what is next and what is later.
