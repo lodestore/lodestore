@@ -10,7 +10,7 @@ use lodestore_format::store::{RepoLocation, StaticCredentials, Store};
 
 use crate::error::ApiError;
 use crate::repos::db::AccessKey;
-use crate::repos::object_lock;
+use crate::repos::object_lock::{self, LifecycleVerdict};
 use crate::repos::{CheckDto, CheckResult, LocationDto, RepositoryDraft};
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -191,6 +191,18 @@ pub async fn run_storage_probe(opened: &Opened) -> ProbeReport {
     report
 }
 
+/// A lifecycle rule that removes objects caps the level; rules that cannot be
+/// read follow the one D-17 rule; a read that did not happen leaves the level
+/// unmeasured instead of lowering it.
+pub(crate) fn apply_lifecycle(report: &mut ProbeReport, verdict: LifecycleVerdict) {
+    match verdict {
+        LifecycleVerdict::NoRules => {}
+        LifecycleVerdict::Deletes => report.cap_guarantee(Weakness::LifecycleDeletes),
+        LifecycleVerdict::Unverified => report.lifecycle_unverified(),
+        LifecycleVerdict::Inconclusive => report.guarantee = GuaranteeLevel::Unchecked,
+    }
+}
+
 pub async fn run_probe(opened: &Opened) -> ProbeReport {
     let mut report = run_storage_probe(opened).await;
     if report.check(CheckId::Write).status == CheckStatus::Fail {
@@ -203,6 +215,14 @@ pub async fn run_probe(opened: &Opened) -> ProbeReport {
         _ => (CheckStatus::Neutral, Some("not_applicable".to_string())),
     };
     report.set_object_lock(status, error);
+    if let Some(creds) = opened
+        .server_creds
+        .as_ref()
+        .filter(|_| opened.location.backend == "s3")
+    {
+        let verdict = object_lock::lifecycle_check(&opened.location, creds).await;
+        apply_lifecycle(&mut report, verdict);
+    }
     if !matches!(opened.location.backend.as_str(), "s3" | "local") {
         report.cap_guarantee(Weakness::SharedCredentials);
     }
@@ -280,4 +300,55 @@ pub fn consent_message(result: &CheckResult, verb: &str) -> String {
          accept_weaker_guarantee to {verb} the repository anyway.",
         reasons.join(" ")
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(level: GuaranteeLevel) -> ProbeReport {
+        ProbeReport {
+            guarantee: level,
+            ..timed_out_report()
+        }
+    }
+
+    #[test]
+    fn apply_lifecycle_follows_the_table() {
+        use GuaranteeLevel::*;
+        use LifecycleVerdict::*;
+        let case = |level, verdict| {
+            let mut report = at(level);
+            apply_lifecycle(&mut report, verdict);
+            (report.guarantee, report.weaknesses)
+        };
+        let deletes = vec![Weakness::LifecycleDeletes];
+        let unverified = vec![Weakness::LifecycleUnverified];
+        for level in [
+            CreateOnlyEnforced,
+            OverwriteKeepsOldVersion,
+            HostCanOverwriteOrDelete,
+        ] {
+            assert_eq!(case(level, NoRules), (level, vec![]));
+            assert_eq!(
+                case(level, Deletes),
+                (HostCanOverwriteOrDelete, deletes.clone())
+            );
+            assert_eq!(case(level, Inconclusive), (Unchecked, vec![]));
+        }
+        assert_eq!(
+            case(OverwriteKeepsOldVersion, Unverified),
+            (HostCanOverwriteOrDelete, unverified.clone())
+        );
+        assert_eq!(
+            case(CreateOnlyEnforced, Unverified),
+            (CreateOnlyEnforced, unverified.clone())
+        );
+        assert_eq!(
+            case(HostCanOverwriteOrDelete, Unverified),
+            (HostCanOverwriteOrDelete, unverified)
+        );
+        assert_eq!(case(Unchecked, Unverified), (Unchecked, vec![]));
+        assert_eq!(case(Unchecked, Deletes), (Unchecked, vec![]));
+    }
 }

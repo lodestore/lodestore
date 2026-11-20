@@ -14,13 +14,13 @@ use lodestore_testkit::sshd::{SshUser, SshdServer};
 use serde_json::{Value, json};
 use sqlx::Row;
 
-const PASSWORD: &str = "correct horse battery";
+pub(crate) const PASSWORD: &str = "correct horse battery";
 
 async fn body(response: reqwest::Response) -> Value {
     response.json().await.expect("a JSON body")
 }
 
-fn sftp_draft(sshd: &SshdServer, name: &str) -> Value {
+pub(crate) fn sftp_draft(sshd: &SshdServer, name: &str) -> Value {
     json!({
         "name": name,
         "location": { "backend": "sftp", "options": {
@@ -64,7 +64,7 @@ fn azure_draft(az: &AzuriteServer, container: &str) -> Value {
     })
 }
 
-async fn create(api: &Api, draft: &Value) -> String {
+pub(crate) async fn create(api: &Api, draft: &Value) -> String {
     let started = api.post("/api/v1/repositories/wizard", draft).await;
     assert_eq!(started.status(), 201, "{}", body(started).await);
     let started = body(started).await;
@@ -106,7 +106,7 @@ fn check_row<'a>(result: &'a Value, id: &str) -> &'a Value {
         .unwrap()
 }
 
-fn make_tree(root: &Path) {
+pub(crate) fn make_tree(root: &Path) {
     std::fs::create_dir_all(root.join("sub")).unwrap();
     std::fs::write(root.join("big.bin"), vec![7u8; 3 << 20]).unwrap();
     std::fs::write(root.join("sub/small.txt"), b"hello agent material").unwrap();

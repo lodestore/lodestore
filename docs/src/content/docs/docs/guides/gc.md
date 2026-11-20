@@ -83,6 +83,11 @@ On a bucket with versioning or Object Lock a plain delete only adds a delete mar
 - The delete marker of an object is kept until its last real version is gone, otherwise the object would show up in listings again.
 - Removing a delete marker by hand brings the object back, but the data it pointed to may have been deleted by then.
 
+## SFTP and Backblaze B2
+
+- **SFTP.** An upload that was cut off leaves its temporary file in `tmp/` of the repository. A real cleanup cycle (never a dry run) removes the files there that are older than the pause and older than 24 hours, after it has deleted the marked packs. The age is the modification time the SFTP server gives the file, so the margin of a day keeps a running upload safe even when that server's clock is off. The server's SFTP user needs the right to delete files in `tmp/`; if the storage refuses, the cycle fails and names the file. The number of files removed is in the cycle log.
+- **Backblaze B2** (`provider = b2`). A key that may write can hide an object by writing a delete marker, and cleanup cannot tell such a marker from the server's own. Cleanup therefore never removes objects that are only hidden: it leaves them and their versions in the bucket, and the cycle log says so. Packs the server itself decides to delete are still removed with all their versions.
+
 ## Backups that run outside the server
 
 `lode backup` writes into the repository directly, with no server involved, so it follows the same protocol:
