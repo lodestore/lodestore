@@ -1,14 +1,27 @@
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 
 use bytes::Bytes;
 use lodestore_format::crypto::BlobId;
 use lodestore_format::index::{open_shard, parse_hex32};
 use lodestore_format::pack::pack_object_key;
 use lodestore_format::repo::Repository;
+use lodestore_format::store::probe::{
+    AgentKeyState, AgentProbe, CheckId, GuaranteeLevel, ProbeReport, probe,
+};
 use lodestore_format::store::sftp::Tear;
-use lodestore_format::store::{BlobDelete, BlobError, BlobPurge, BlobStore, RepoLocation, Store};
+use lodestore_format::store::{
+    BlobDelete, BlobError, BlobPurge, BlobStore, LocalFsStore, RepoLocation, Store,
+};
+use lodestore_format::writer::{BackupOptions, BackupOutcome, Writer};
 use lodestore_testkit::sshd::{SshUser, SshdServer};
+use proptest::prelude::*;
+use proptest::test_runner::TestRunner;
+use rand_chacha::ChaCha20Rng;
+use rand_chacha::rand_core::{Rng, SeedableRng};
 
 const REPO: &str = "/srv/repo/data";
 
@@ -546,12 +559,16 @@ async fn sftp_ecdsa_key_authenticates() {
     assert_eq!(&server.get("packs/05/ecdsa").await.unwrap()[..], b"ok");
 }
 
-fn direct_agent(sshd: &SshdServer, plan: impl IntoIterator<Item = Option<Tear>>) -> Store {
+fn direct_agent(
+    sshd: &SshdServer,
+    root: &str,
+    plan: impl IntoIterator<Item = Option<Tear>>,
+) -> Store {
     let Store::Sftp(inner) = location(
         sshd,
         SshUser::NoLink,
         &sshd.host_key(),
-        &[("publish", "direct")],
+        &[("publish", "direct"), ("root", root)],
     ) else {
         panic!("not an SFTP store");
     };
@@ -596,13 +613,18 @@ async fn assert_indexed_packs_whole(store: &Store) -> BTreeMap<String, u64> {
         let id = key.rsplit('/').next().and_then(parse_hex32).unwrap();
         assert_eq!(blake3::hash(&stored).as_bytes(), &id, "{key}");
     }
+    for key in listed.keys() {
+        let stored = store.get(key).await.unwrap();
+        let id = key.rsplit('/').next().and_then(parse_hex32).unwrap();
+        assert_ne!(blake3::hash(&stored).as_bytes(), &id, "{key} is torn");
+    }
     listed
 }
 
 async fn torn_pack_is_resealed_and_restores(tear: Tear) -> BTreeMap<String, u64> {
     let sshd = SshdServer::start().await;
     let server = store(&sshd, SshUser::Srv);
-    let agent = direct_agent(&sshd, [Some(tear)]);
+    let agent = direct_agent(&sshd, sshd.root(), [Some(tear)]);
     super::init_repo(&server).await;
 
     let src = tempfile::tempdir().unwrap();
@@ -612,11 +634,6 @@ async fn torn_pack_is_resealed_and_restores(tear: Tear) -> BTreeMap<String, u64>
 
     let leftovers = assert_indexed_packs_whole(&server).await;
     assert_eq!(leftovers.len(), 1, "{leftovers:?}");
-    for key in leftovers.keys() {
-        let stored = server.get(key).await.unwrap();
-        let id = key.rsplit('/').next().and_then(parse_hex32).unwrap();
-        assert_ne!(blake3::hash(&stored).as_bytes(), &id, "{key} is torn");
-    }
     leftovers
 }
 
@@ -672,4 +689,215 @@ async fn sftp_stale_tmp_lists_only_old_entries() {
     assert_eq!(server.stale_tmp(2_000_000_000_000).await.unwrap(), both);
     assert_eq!(server.stale_tmp(1_000_000_000_000).await.unwrap(), [old]);
     assert!(server.stale_tmp(999_999_999_999).await.unwrap().is_empty());
+}
+
+fn sftp_of(store: Store) -> lodestore_format::store::SftpStore {
+    let Store::Sftp(inner) = store else {
+        panic!("not an SFTP store");
+    };
+    inner
+}
+
+#[tokio::test]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn sftp_held_handle_rewrites_a_published_file() {
+    let sshd = SshdServer::start().await;
+    let server = store(&sshd, SshUser::Srv);
+    server.ensure_prefixes(&["packs"]).await.unwrap();
+    let agent = sftp_of(store(&sshd, SshUser::Agent));
+
+    assert!(agent.rewrite_held_handle("packs/probe-held").await.unwrap());
+    let seen = server.get("packs/probe-held").await.unwrap();
+    assert!(
+        seen.starts_with(b"lodestore capability probe")
+            && seen.ends_with(b", changed through a handle held open"),
+        "{seen:?}"
+    );
+    assert!(matches!(
+        agent.rewrite_held_handle("packs/ab/real").await,
+        Err(BlobError::Backend { .. })
+    ));
+}
+
+#[tokio::test]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn sftp_agent_cannot_open_server_files_for_write() {
+    let sshd = SshdServer::start().await;
+    let server = store(&sshd, SshUser::Srv);
+    server.ensure_prefixes(&["index"]).await.unwrap();
+    server
+        .put_if_absent("index/probe-theirs", Bytes::from_static(b"server"))
+        .await
+        .unwrap();
+    let agent = sftp_of(store(&sshd, SshUser::Agent));
+    assert!(!agent.open_for_write("index/probe-theirs").await.unwrap());
+
+    exec(
+        &sshd,
+        &["chmod", "0666", &format!("{REPO}/index/probe-theirs")],
+    );
+    assert!(agent.open_for_write("index/probe-theirs").await.unwrap());
+    assert_eq!(
+        &server.get("index/probe-theirs").await.unwrap()[..],
+        b"server"
+    );
+}
+
+fn weaknesses(report: &ProbeReport) -> Vec<&'static str> {
+    report.weaknesses.iter().map(|w| w.as_str()).collect()
+}
+
+#[tokio::test]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn sftp_probe_levels_match_the_user_restrictions() {
+    let sshd = SshdServer::start().await;
+    let server = store(&sshd, SshUser::Srv);
+    server
+        .ensure_prefixes(&["packs", "index", "snapshots"])
+        .await
+        .unwrap();
+
+    let agent = store(&sshd, SshUser::Agent);
+    let report = probe(&server, AgentProbe::Store(&agent)).await;
+    assert_eq!(report.agent_key, AgentKeyState::Verified, "{report:?}");
+    assert_eq!(report.guarantee, GuaranteeLevel::HostCanOverwriteOrDelete);
+    assert_eq!(weaknesses(&report), ["held_handle_rewrite"], "{report:?}");
+    let detail = report.check(CheckId::AgentDelete).detail.clone().unwrap();
+    assert!(
+        detail.contains("held handle: a published file was changed"),
+        "{detail}"
+    );
+
+    for user in [SshUser::Wide, SshUser::Srv] {
+        let loose = store(&sshd, user);
+        let report = probe(&server, AgentProbe::Store(&loose)).await;
+        assert_eq!(report.guarantee, GuaranteeLevel::HostCanOverwriteOrDelete);
+        let seen = weaknesses(&report);
+        assert!(seen.contains(&"agent_can_delete"), "{user:?} {seen:?}");
+        assert!(seen.contains(&"held_handle_rewrite"), "{user:?} {seen:?}");
+    }
+
+    let nolink = location(
+        &sshd,
+        SshUser::NoLink,
+        &sshd.host_key(),
+        &[("publish", "direct")],
+    );
+    let report = probe(&server, AgentProbe::Store(&nolink)).await;
+    assert_eq!(report.guarantee, GuaranteeLevel::HostCanOverwriteOrDelete);
+    let seen = weaknesses(&report);
+    assert!(seen.contains(&"no_atomic_publish"), "{seen:?}");
+    assert!(seen.contains(&"held_handle_rewrite"), "{seen:?}");
+    assert!(!seen.contains(&"agent_can_delete"), "{seen:?}");
+
+    let no_fsync = sftp_of(store(&sshd, SshUser::Agent));
+    no_fsync.pretend_missing_extension("fsync@openssh.com");
+    let report = probe(&server, AgentProbe::Store(&Store::Sftp(no_fsync))).await;
+    assert_eq!(report.guarantee, GuaranteeLevel::HostCanOverwriteOrDelete);
+    assert!(
+        weaknesses(&report).contains(&"no_durable_fsync"),
+        "{report:?}"
+    );
+
+    let leftovers: Vec<String> = server
+        .list("")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|e| e.key)
+        .filter(|k| k.contains("probe-"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+fn tear_strategy() -> impl Strategy<Value = Tear> {
+    prop_oneof![(0usize..40_000).prop_map(Tear::Short), Just(Tear::Hole)]
+}
+
+/// Tears in runs of at most three, each run ended by an upload that goes
+/// through: no pack is torn more often than the writer seals it again.
+fn plan_strategy() -> impl Strategy<Value = Vec<Option<Tear>>> {
+    prop::collection::vec(prop::collection::vec(tear_strategy(), 0..=3), 0..4).prop_map(|runs| {
+        runs.into_iter()
+            .flat_map(|run| run.into_iter().map(Some).chain(std::iter::once(None)))
+            .collect()
+    })
+}
+
+async fn small_pack_backup(store: &Store, src: &Path) -> BackupOutcome {
+    let repo = Repository::open(store, b"pw").await.unwrap();
+    let keys = repo.read_keys().write_keys(repo.config_hash());
+    let mut writer = Writer::new(store, keys, repo.config()).await.unwrap();
+    let options = BackupOptions {
+        pack_target_size: 48 << 10,
+        index_flush_packs: 2,
+        ..Default::default()
+    };
+    let outcome = writer
+        .backup(&[src.to_path_buf()], options, &|_| {})
+        .await
+        .unwrap();
+    assert!(!outcome.incomplete);
+    outcome
+}
+
+async fn torn_direct_matches_local(
+    sshd: &SshdServer,
+    case: usize,
+    files: Vec<(usize, u8)>,
+    plan: Vec<Option<Tear>>,
+) -> usize {
+    let planned = plan.iter().flatten().count();
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    std::fs::create_dir(&src).unwrap();
+    for (i, (len, seed)) in files.iter().enumerate() {
+        let mut bytes = vec![0u8; *len];
+        ChaCha20Rng::from_seed([*seed; 32]).fill_bytes(&mut bytes);
+        std::fs::write(src.join(format!("f{i}.bin")), bytes).unwrap();
+    }
+
+    let root = format!("{}/case{case}", sshd.root());
+    let server = location(sshd, SshUser::Srv, &sshd.host_key(), &[("root", &root)]);
+    let agent = direct_agent(sshd, &root, plan);
+    server.ensure_prefixes(&[]).await.unwrap();
+    super::init_repo(&server).await;
+    let outcome = small_pack_backup(&agent, &src).await;
+    super::restore_and_compare(&server, &outcome, &src).await;
+    let torn = assert_indexed_packs_whole(&server).await.len();
+    assert!(torn <= planned, "{torn} torn packs, {planned} planned");
+
+    let local = Store::Local(LocalFsStore::new(tmp.path().join("local")));
+    super::init_repo(&local).await;
+    let local_outcome = small_pack_backup(&local, &src).await;
+    super::restore_and_compare(&local, &local_outcome, &src).await;
+    torn
+}
+
+#[test]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+fn sftp_direct_torn_backups_match_local_fs() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let sshd = rt.block_on(SshdServer::start());
+    let case = AtomicUsize::new(0);
+    let torn_total = AtomicUsize::new(0);
+    let started = Instant::now();
+    let mut runner = TestRunner::new(ProptestConfig::with_cases(6));
+    let files = prop::collection::vec((1usize..80_000, any::<u8>()), 1..4);
+    let result = runner.run(&(files, plan_strategy()), |(files, plan)| {
+        let n = case.fetch_add(1, Ordering::SeqCst);
+        let torn = rt.block_on(torn_direct_matches_local(&sshd, n, files, plan));
+        torn_total.fetch_add(torn, Ordering::SeqCst);
+        Ok(())
+    });
+    let torn = torn_total.load(Ordering::SeqCst);
+    eprintln!(
+        "torn direct backups: {torn} torn packs in {:?}",
+        started.elapsed()
+    );
+    result.unwrap();
+    assert!(torn > 0, "no case tore a pack");
 }

@@ -33,6 +33,8 @@ const DIR_MODE: u32 = 0o2775;
 const MAX_LIST_DEPTH: usize = 6;
 const TMP_DIR: &str = "tmp";
 const SFTP_SUBSYSTEM: &str = "sftp";
+const HELD_FIRST: &[u8] = b"lodestore capability probe";
+const HELD_LATER: &[u8] = b", changed through a handle held open";
 
 const HOST_KEY_ALGORITHMS: &[Algorithm] = &[
     Algorithm::Ed25519,
@@ -203,7 +205,8 @@ type BeforeHardlink = Arc<dyn Fn(&str) + Send + Sync>;
 #[cfg(feature = "test-hooks")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tear {
-    /// Hand the server this many bytes, then break the connection.
+    /// Hand the server this many bytes (at most all but the last), then break
+    /// the connection.
     Short(usize),
     /// Write the second half of the object before the first, then break the
     /// connection: the file has its full length and zeros at the front.
@@ -703,7 +706,10 @@ impl SftpStore {
             )
             .await?;
         match tear {
-            Tear::Short(len) => file.write_all(&data[..len.min(data.len())]).await?,
+            Tear::Short(len) => {
+                let cut = len.min(data.len().saturating_sub(1));
+                file.write_all(&data[..cut]).await?;
+            }
             Tear::Hole => {
                 let half = data.len() / 2;
                 file.seek(SeekFrom::Start(half as u64)).await?;
@@ -990,6 +996,108 @@ impl SftpStore {
             }
         })
         .await
+    }
+
+    /// Publishes a probe object and, with the write handle still open, writes
+    /// more into it: whether the file the server then reads has changed. Mode
+    /// 0444 and a deny-list do not reach a handle that is already open, so on
+    /// OpenSSH this is `true`. Probe objects only.
+    pub(super) async fn rewrite_held_handle_for_probe(
+        &self,
+        key: &str,
+    ) -> std::result::Result<bool, BlobError> {
+        check_key(key)?;
+        if !super::probe::is_probe_key(key) {
+            return Err(BlobError::backend(format!("{key:?} is not a probe object")));
+        }
+        let target = self.path(key);
+        let tmp = match self.inner.publish {
+            Publish::Hardlink => Some(self.tmp_path()?),
+            Publish::Direct => None,
+        };
+        let conn = self.conn().await?;
+        let held = async {
+            let attrs = FileAttributes {
+                permissions: Some(FILE_MODE),
+                ..FileAttributes::empty()
+            };
+            let mut file = conn
+                .sftp
+                .open_with_flags_and_attributes(
+                    tmp.as_deref().unwrap_or(&target),
+                    OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::WRITE,
+                    attrs,
+                )
+                .await?;
+            file.write_all(HELD_FIRST).await?;
+            file.flush().await?;
+            if let Some(tmp) = &tmp
+                && !conn.sftp.hardlink(tmp, &target).await?
+            {
+                return Ok(None);
+            }
+            file.write_all(HELD_LATER).await?;
+            file.flush().await?;
+            file.shutdown().await?;
+            let mut seen = Vec::new();
+            conn.sftp
+                .open(&target)
+                .await?
+                .read_to_end(&mut seen)
+                .await?;
+            Ok::<_, SftpFail>(Some(seen.ends_with(HELD_LATER)))
+        };
+        match held.await {
+            Ok(Some(changed)) => Ok(changed),
+            Ok(None) => Err(BlobError::backend(
+                "this SFTP server does not offer hardlink@openssh.com",
+            )),
+            Err(fail) => {
+                if fail.transport {
+                    self.reset(&conn).await;
+                }
+                Err(fail.into_blob())
+            }
+        }
+    }
+
+    /// Opens an object for writing without truncating or writing: whether the
+    /// server lets this user write to it. Probe objects only.
+    pub(super) async fn open_for_write_for_probe(
+        &self,
+        key: &str,
+    ) -> std::result::Result<bool, BlobError> {
+        check_key(key)?;
+        if !super::probe::is_probe_key(key) {
+            return Err(BlobError::backend(format!("{key:?} is not a probe object")));
+        }
+        let path = self.path(key);
+        self.run(|conn| {
+            let path = path.clone();
+            async move {
+                match conn.sftp.open_with_flags(path, OpenFlags::WRITE).await {
+                    Ok(mut file) => {
+                        file.shutdown().await?;
+                        Ok(true)
+                    }
+                    Err(SftpError::Status(s)) if s.status_code == StatusCode::PermissionDenied => {
+                        Ok(false)
+                    }
+                    Err(e) => Err(e.into()),
+                }
+            }
+        })
+        .await
+    }
+
+    #[cfg(feature = "test-hooks")]
+    pub async fn rewrite_held_handle(&self, key: &str) -> std::result::Result<bool, BlobError> {
+        self.rewrite_held_handle_for_probe(key).await
+    }
+
+    #[cfg(feature = "test-hooks")]
+    pub async fn open_for_write(&self, key: &str) -> std::result::Result<bool, BlobError> {
+        self.open_for_write_for_probe(key).await
     }
 
     async fn read_raw(conn: &Conn, dir: &str) -> std::result::Result<Vec<RawEntry>, SftpFail> {
