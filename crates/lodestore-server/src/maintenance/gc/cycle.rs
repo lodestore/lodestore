@@ -1113,8 +1113,10 @@ async fn refuse_foreign_hidden_snapshots(
 
 /// Removes the leftovers of interrupted uploads from an SFTP store's `tmp/`.
 /// Their times come from the SFTP server's clock, not ours, so only entries
-/// older than the pause and than a day go: a live upload is never that old,
-/// and a wrong clock on the other side cannot make it look so.
+/// older than the pause and than a day go: a live upload is never that old.
+/// Only an SFTP clock behind ours by more than both makes a live upload look
+/// old; that upload is then removed and its backup fails, while published
+/// files are never touched.
 async fn sweep_stale_tmp(
     state: &AppState,
     cycle_id: &str,
