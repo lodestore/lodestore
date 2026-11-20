@@ -450,6 +450,27 @@ mod tests {
         azblob(&[]).validate().unwrap();
     }
 
+    #[tokio::test]
+    async fn azblob_transport_error_does_not_leak_sas_token() {
+        use crate::store::BlobStore;
+        let loc = RepoLocation::new(
+            "azblob",
+            [
+                ("container", "c"),
+                ("endpoint", "http://127.0.0.1:1"),
+                ("sas_token", "sv=1&sig=SECRETSIG"),
+            ],
+        );
+        let store = loc.open(None).unwrap();
+        let err = store
+            .put_if_absent("k", bytes::Bytes::from_static(b"x"))
+            .await
+            .unwrap_err();
+        for text in [err.to_string(), format!("{err:?}")] {
+            assert!(!text.contains("SECRETSIG"), "{text}");
+        }
+    }
+
     #[test]
     fn location_local_opens() {
         let loc = RepoLocation::new("local", [("path", "/tmp/lode-repo")]);

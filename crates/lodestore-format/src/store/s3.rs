@@ -111,14 +111,34 @@ fn region_from_env() -> String {
         .unwrap_or_else(|| DEFAULT_REGION.to_owned())
 }
 
+/// Drops every URL query string from `text`: SAS tokens, S3 presigned
+/// parameters and GCS signatures travel there, and a transport error carries
+/// the full request URL.
+pub(super) fn redact_query_strings(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find('?') {
+        out.push_str(&rest[..=i]);
+        let tail = &rest[i + 1..];
+        let end = tail
+            .find(|c: char| c.is_whitespace() || matches!(c, ',' | '}' | '"' | '\'' | '>' | ')'))
+            .unwrap_or(tail.len());
+        if end > 0 {
+            out.push_str("<redacted>");
+        }
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
 pub(super) fn map_err(e: opendal::Error) -> BlobError {
+    let message = redact_query_strings(&e.to_string());
     match e.kind() {
         ErrorKind::NotFound => BlobError::NotFound,
-        ErrorKind::PermissionDenied => BlobError::Denied {
-            message: e.to_string(),
-        },
+        ErrorKind::PermissionDenied => BlobError::Denied { message },
         _ => BlobError::Backend {
-            message: e.to_string(),
+            message,
             temporary: e.is_temporary(),
         },
     }
@@ -422,6 +442,29 @@ impl BlobPurge for S3Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redacts_signed_query_strings() {
+        for (secret, text) in [
+            (
+                "SECRETSIG",
+                "context: { url: http://h/c/k?sv=1&sig=SECRETSIG, called: x }",
+            ),
+            (
+                "SECRETSIG",
+                "url: https://b.s3.amazonaws.com/k?X-Amz-Credential=a&X-Amz-Signature=SECRETSIG&X-Amz-Security-Token=SECRETSIG",
+            ),
+            (
+                "SECRETSIG",
+                "GET \"https://storage.googleapis.com/b/o?X-Goog-Signature=SECRETSIG\" failed",
+            ),
+        ] {
+            let out = redact_query_strings(text);
+            assert!(!out.contains(secret), "{out}");
+        }
+        assert_eq!(redact_query_strings("what? no"), "what? no");
+        assert_eq!(redact_query_strings("plain"), "plain");
+    }
 
     #[test]
     fn store_s3_url_parsing() {
