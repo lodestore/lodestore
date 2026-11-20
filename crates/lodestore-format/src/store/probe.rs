@@ -1,6 +1,6 @@
 use bytes::Bytes;
 
-use super::{BlobDelete, BlobError, BlobPurge, BlobStore, PurgeOutcome, Store};
+use super::{BlobDelete, BlobError, BlobPurge, BlobStore, PurgeOutcome, SftpStore, Store};
 
 /// The key prefixes of the repository layout an agent may write under. A probe
 /// object under any of them must stay invisible to every reader.
@@ -337,6 +337,8 @@ fn message(e: &BlobError) -> &'static str {
 pub struct ProbeKeys {
     server: String,
     agent: [String; 3],
+    held: String,
+    foreign: String,
 }
 
 impl Default for ProbeKeys {
@@ -344,6 +346,8 @@ impl Default for ProbeKeys {
         ProbeKeys {
             server: probe_key(PROBE_PREFIX),
             agent: PROBE_PREFIXES.map(probe_key),
+            held: probe_key(PROBE_PREFIX),
+            foreign: probe_key(PROBE_PREFIXES[1]),
         }
     }
 }
@@ -357,7 +361,10 @@ pub fn is_probe_key(key: &str) -> bool {
 /// written is not a failure.
 pub async fn remove_probe_objects(server: &Store, keys: &ProbeKeys) -> Vec<(String, BlobError)> {
     let mut failed = Vec::new();
-    for k in std::iter::once(&keys.server).chain(&keys.agent) {
+    let all = [&keys.server, &keys.held, &keys.foreign]
+        .into_iter()
+        .chain(&keys.agent);
+    for k in all {
         match server.purge(k).await {
             PurgeOutcome::Purged { .. } | PurgeOutcome::NotFound => {}
             PurgeOutcome::Retained { .. } => failed.push((
@@ -453,8 +460,13 @@ pub async fn probe_keep(server: &Store, agent: AgentProbe<'_>, keys: &ProbeKeys)
             Some(SKIPPED_NOTE.into()),
         ),
         AgentProbe::Store(agent) => {
-            probe_agent(&mut report, server, agent, &keys.agent, body).await
+            probe_agent(&mut report, server, agent, &keys.agent, body.clone()).await
         }
+    }
+    if let AgentProbe::Store(Store::Sftp(sftp)) = agent
+        && wrote
+    {
+        probe_sftp(&mut report, server, sftp, keys, body).await;
     }
     if wrote && matches!(agent, AgentProbe::NotEnforceable) {
         report.guarantee = GuaranteeLevel::HostCanOverwriteOrDelete;
@@ -467,6 +479,67 @@ pub async fn probe_keep(server: &Store, agent: AgentProbe<'_>, keys: &ProbeKeys)
     report.apply_publish_mode(agent_publishes_atomically);
 
     report
+}
+
+/// The steps only an SFTP agent needs. Whether the agent can rewrite a file it
+/// published through a handle it kept open is not measured to decide the level:
+/// the server cannot revoke that handle, so the level never exceeds
+/// `HostCanOverwriteOrDelete`, and the outcome only goes into the check's
+/// detail. A step that cannot be run leaves the level unchecked.
+async fn probe_sftp(
+    report: &mut ProbeReport,
+    server: &Store,
+    agent: &SftpStore,
+    keys: &ProbeKeys,
+    body: Bytes,
+) {
+    if report.guarantee == GuaranteeLevel::Unchecked {
+        return;
+    }
+    let mut evidence = Vec::new();
+
+    evidence.push(
+        match agent.rewrite_held_handle_for_probe(&keys.held).await {
+            Ok(true) => "held handle: a published file was changed through it".to_owned(),
+            Ok(false) => "held handle: a published file was not changed through it".to_owned(),
+            Err(e) => format!("held handle: not exercised ({e})"),
+        },
+    );
+    report.cap_guarantee(Weakness::HeldHandleRewrite);
+
+    let server_file = match server.put_if_absent(&keys.foreign, body).await {
+        Ok(()) => agent.open_for_write_for_probe(&keys.foreign).await,
+        Err(e) => Err(e),
+    };
+    match server_file {
+        Ok(true) => {
+            evidence.push("server files: the agent opened a file of the server for writing".into());
+            report.cap_guarantee(Weakness::AgentCanWriteServerFiles);
+        }
+        Ok(false) => evidence.push("server files: the agent may not write them".into()),
+        Err(e) => {
+            evidence.push(format!("server files: not exercised ({e})"));
+            report.guarantee = GuaranteeLevel::Unchecked;
+        }
+    }
+
+    match agent.durable_fsync().await {
+        Ok(true) => {}
+        Ok(false) => {
+            evidence.push("fsync: the server does not offer fsync@openssh.com".into());
+            report.cap_guarantee(Weakness::NoDurableFsync);
+        }
+        Err(e) => {
+            evidence.push(format!("fsync: not exercised ({e})"));
+            report.guarantee = GuaranteeLevel::Unchecked;
+        }
+    }
+
+    let i = CHECK_ORDER
+        .iter()
+        .position(|c| *c == CheckId::AgentDelete)
+        .expect("every id is in CHECK_ORDER");
+    report.checks[i].detail = Some(evidence.join("; "));
 }
 
 /// What the probe learned from one agent object.
