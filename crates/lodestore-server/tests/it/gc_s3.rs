@@ -455,6 +455,57 @@ async fn gc_s3_b2_preset_keeps_objects_hidden_by_someone_else() {
         let hider = operator_as(&cloud.minio, &cloud.server_key.0, &cloud.server_key.1);
         hider.delete(&manifest).await.unwrap();
         assert!(!cloud.listing().await.contains_key(&manifest));
+        sync_repository(ts.state(), repo).await.unwrap();
+
+        let id = real_cycle(ts, repo).await;
+        assert_eq!(finish(ts, &id, three_days_on()).await, GcState::Failed);
+        let error = failure(ts, &id).await.unwrap_or_default();
+        assert!(
+            error.contains(&manifest) && error.contains("someone other than the server"),
+            "{error}"
+        );
+        assert_eq!(
+            gone(&before, &cloud.listing().await),
+            vec![manifest.clone()]
+        );
+
+        let versions = cloud.minio.object_versions_all(BUCKET, &manifest).await;
+        assert!(
+            versions.iter().any(|(_, marker)| !marker),
+            "the hidden manifest was purged: {versions:?}"
+        );
+        for (version, marker) in &versions {
+            if *marker {
+                cloud
+                    .minio
+                    .delete_version(BUCKET, &manifest, version)
+                    .await
+                    .unwrap();
+            }
+        }
+        cloud.assert_restores(&a).await;
+        cloud.assert_restores(&b).await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_s3_b2_preset_frees_what_the_server_forgot() {
+    on_each_backend(Bucket::VersionedB2, async |cloud, ts, repo| {
+        let a = cloud.backup("a", 11).await;
+        let b = cloud.backup("b", 12).await;
+        sync_repository(ts.state(), repo).await.unwrap();
+        let forgotten =
+            lodestore_server::catalog::retention::forget_snapshot(ts.state(), repo, &a.id)
+                .await
+                .unwrap();
+        assert!(
+            matches!(
+                forgotten,
+                lodestore_server::catalog::retention::ForgetOutcome::Deleted
+            ),
+            "{forgotten:?}"
+        );
 
         let id = real_cycle(ts, repo).await;
         assert_eq!(
@@ -463,12 +514,8 @@ async fn gc_s3_b2_preset_keeps_objects_hidden_by_someone_else() {
             "{:?}",
             failure(ts, &id).await
         );
-
-        let versions = cloud.minio.object_versions_all(BUCKET, &manifest).await;
-        assert!(
-            versions.iter().any(|(_, marker)| !marker),
-            "the hidden manifest was purged: {versions:?}"
-        );
+        let done = report(ts, repo, &id).await;
+        assert!(done["bytes_freed"].as_u64().unwrap() > 0, "{done}");
         cloud.assert_restores(&b).await;
     })
     .await;

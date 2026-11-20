@@ -51,7 +51,8 @@ const PROGRESS_PERIOD: Duration = Duration::from_secs(1);
 const CLOCK_TOLERANCE_MS: i64 = 5 * 60 * 1000;
 const TMP_MIN_AGE_MS: i64 = 24 * 60 * 60 * 1000;
 const INDEX_PREFIX: &str = "index/";
-const SWEPT_PREFIXES: [&str; 4] = [PACKS_PREFIX, INDEX_PREFIX, "snapshots/", LOCKS_PREFIX];
+const SNAPSHOTS_PREFIX: &str = "snapshots/";
+const SWEPT_PREFIXES: [&str; 4] = [PACKS_PREFIX, INDEX_PREFIX, SNAPSHOTS_PREFIX, LOCKS_PREFIX];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepOutcome {
@@ -520,6 +521,7 @@ async fn mark_and_repack(
         event(state, &cycle.id, "warning", "quarantined", &error).await;
         bail!(error);
     }
+    refuse_foreign_hidden_snapshots(state, cycle, &source).await?;
 
     let started = cycle.started_at.unwrap_or(now_ms);
     let report = build_report(cycle, &surveyed, now_ms, now_ms - started, None);
@@ -1046,6 +1048,67 @@ async fn sweep_hidden(
     )
     .await;
     Ok(SweepOutcome::default())
+}
+
+/// Fails the cycle before it plans a delete when, on a store whose hide
+/// markers are not swept, a snapshot manifest is hidden that the server never
+/// forgot. The survey reads only current versions, so it would take such a
+/// snapshot for forgotten and delete the packs that only it still uses. The
+/// check runs after the survey has listed the snapshots: a manifest hidden
+/// before that listing leaves a marker that is seen here.
+async fn refuse_foreign_hidden_snapshots(
+    state: &AppState,
+    cycle: &CycleRow,
+    source: &OpenRepository,
+) -> anyhow::Result<()> {
+    if source.store.sweeps_delete_markers() {
+        return Ok(());
+    }
+    let hidden = source
+        .store
+        .deleted_keys(SNAPSHOTS_PREFIX, i64::MAX)
+        .await
+        .context("listing hidden snapshots")?;
+    if hidden.is_empty() {
+        return Ok(());
+    }
+    let forgotten: HashSet<String> =
+        sqlx::query("SELECT id FROM forgotten_snapshots WHERE repository_id = $1")
+            .bind(&cycle.repository_id)
+            .fetch_all(&state.db.pool)
+            .await?
+            .iter()
+            .map(|row| row.try_get("id"))
+            .collect::<Result<_, _>>()?;
+    let foreign: Vec<&String> = hidden
+        .iter()
+        .filter(|key| {
+            key.strip_prefix(SNAPSHOTS_PREFIX)
+                .is_none_or(|id| !forgotten.contains(id))
+        })
+        .collect();
+    let Some(first) = foreign.first() else {
+        return Ok(());
+    };
+    let message = format!(
+        "The snapshot {}{} hidden by someone other than the server. Cleanup would delete the data that only \
+         hidden snapshots still use, so nothing was deleted. Remove the delete marker to bring the snapshot \
+         back, or remove the object with all its versions to forget it, then run cleanup again.",
+        first,
+        match foreign.len() - 1 {
+            0 => " is".to_string(),
+            more => format!(" and {more} more are"),
+        },
+    );
+    event(
+        state,
+        &cycle.id,
+        "error",
+        "foreign_hidden_snapshot",
+        &message,
+    )
+    .await;
+    bail!(message)
 }
 
 /// Removes the leftovers of interrupted uploads from an SFTP store's `tmp/`.
