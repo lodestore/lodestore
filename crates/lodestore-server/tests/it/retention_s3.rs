@@ -97,7 +97,6 @@ impl Cloud {
                     backend: "s3".to_string(),
                     options: self.options.clone(),
                 },
-                experimental: false,
                 format_repo_id: self.format_repo_id,
                 config_hash: self.config_hash,
                 master: self.master.clone(),
