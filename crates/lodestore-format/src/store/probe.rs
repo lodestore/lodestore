@@ -245,6 +245,15 @@ impl ProbeReport {
         }
     }
 
+    /// The level never exceeds what the store the agent writes through
+    /// guarantees about publishing: a store that can leave a torn object under
+    /// the final name is capped.
+    fn apply_publish_mode(&mut self, publishes_atomically: bool) {
+        if !publishes_atomically {
+            self.cap_guarantee(Weakness::NoAtomicPublish);
+        }
+    }
+
     /// The one rule for a bucket whose lifecycle rules could not be read: a
     /// level that rests on earlier versions can no longer be trusted, the
     /// others only carry the note.
@@ -307,10 +316,10 @@ pub enum AgentProbe<'a> {
     Store(&'a Store),
 }
 
-fn probe_key() -> String {
+fn probe_key(prefix: &str) -> String {
     let mut rnd = [0u8; 8];
     getrandom::fill(&mut rnd).expect("os randomness");
-    format!("{PROBE_PREFIX}{}", data_encoding::HEXLOWER.encode(&rnd))
+    format!("{prefix}{}", data_encoding::HEXLOWER.encode(&rnd))
 }
 
 fn message(e: &BlobError) -> &'static str {
@@ -327,14 +336,14 @@ fn message(e: &BlobError) -> &'static str {
 /// The names of the throwaway objects one probe run may leave behind.
 pub struct ProbeKeys {
     server: String,
-    agent: String,
+    agent: [String; 3],
 }
 
 impl Default for ProbeKeys {
     fn default() -> Self {
         ProbeKeys {
-            server: probe_key(),
-            agent: probe_key(),
+            server: probe_key(PROBE_PREFIX),
+            agent: PROBE_PREFIXES.map(probe_key),
         }
     }
 }
@@ -348,7 +357,7 @@ pub fn is_probe_key(key: &str) -> bool {
 /// written is not a failure.
 pub async fn remove_probe_objects(server: &Store, keys: &ProbeKeys) -> Vec<(String, BlobError)> {
     let mut failed = Vec::new();
-    for k in [&keys.server, &keys.agent] {
+    for k in std::iter::once(&keys.server).chain(&keys.agent) {
         match server.purge(k).await {
             PurgeOutcome::Purged { .. } | PurgeOutcome::NotFound => {}
             PurgeOutcome::Retained { .. } => failed.push((
@@ -376,7 +385,6 @@ pub async fn probe(server: &Store, agent: AgentProbe<'_>) -> ProbeReport {
 pub async fn probe_keep(server: &Store, agent: AgentProbe<'_>, keys: &ProbeKeys) -> ProbeReport {
     let mut report = ProbeReport::new(server.get_range("config", 0..1).await.is_ok());
     let key = keys.server.clone();
-    let agent_key = keys.agent.clone();
     let body = Bytes::from_static(PROBE_BODY);
 
     let wrote = match server.put_if_absent(&key, body.clone()).await {
@@ -444,12 +452,19 @@ pub async fn probe_keep(server: &Store, agent: AgentProbe<'_>, keys: &ProbeKeys)
             CheckStatus::Neutral,
             Some(SKIPPED_NOTE.into()),
         ),
-        AgentProbe::Store(agent) => probe_agent(&mut report, server, agent, &agent_key, body).await,
+        AgentProbe::Store(agent) => {
+            probe_agent(&mut report, server, agent, &keys.agent, body).await
+        }
     }
     if wrote && matches!(agent, AgentProbe::NotEnforceable) {
         report.guarantee = GuaranteeLevel::HostCanOverwriteOrDelete;
         report.add_weakness(Weakness::NotEnforceable);
     }
+    let agent_publishes_atomically = match agent {
+        AgentProbe::Store(agent) => agent.publishes_atomically(),
+        AgentProbe::NotEnforceable => server.publishes_atomically(),
+    };
+    report.apply_publish_mode(agent_publishes_atomically);
 
     report
 }
@@ -470,54 +485,74 @@ enum KeyVerdict {
 /// agent's credentials. Only a refusal reported as access denied counts as
 /// "cannot": any other error leaves the verdict inconclusive. The level comes
 /// from these measurements alone, never from what the backend claims to support.
+/// It is taken on every layout prefix and the worst outcome wins: a delete on
+/// any prefix is a delete, an inconclusive answer on any prefix leaves the
+/// level unchecked, and a level that rests on kept versions is the lowest one.
 async fn probe_agent(
     report: &mut ProbeReport,
     server: &Store,
     agent: &Store,
-    key: &str,
+    keys: &[String],
     body: Bytes,
 ) {
-    match probe_agent_key(server, agent, key, body).await {
-        KeyVerdict::Unwritable(e) => report.set_blob_error(
+    let mut can_delete = false;
+    let mut inconclusive = None;
+    let mut overwrote: Option<(GuaranteeLevel, Option<Weakness>)> = None;
+    for key in keys {
+        match probe_agent_key(server, agent, key, body.clone()).await {
+            KeyVerdict::Unwritable(e) => {
+                report.set_blob_error(
+                    CheckId::AgentDelete,
+                    CheckStatus::Fail,
+                    "agent key cannot write: ",
+                    &e,
+                );
+                return;
+            }
+            KeyVerdict::Inconclusive(e) => {
+                inconclusive.get_or_insert(e);
+            }
+            KeyVerdict::Verified => {}
+            KeyVerdict::CanDelete => can_delete = true,
+            KeyVerdict::CanOverwrite { level, weakness } => {
+                if overwrote.is_none_or(|(have, _)| level.rank() < have.rank()) {
+                    overwrote = Some((level, weakness));
+                }
+            }
+        }
+    }
+    if can_delete {
+        report.agent_key = AgentKeyState::CanDelete;
+        report.guarantee = GuaranteeLevel::HostCanOverwriteOrDelete;
+        report.add_weakness(Weakness::AgentCanDelete);
+        report.set(
             CheckId::AgentDelete,
-            CheckStatus::Fail,
-            "agent key cannot write: ",
-            &e,
-        ),
-        KeyVerdict::Inconclusive(e) => report.set_blob_error(
+            CheckStatus::Warn,
+            Some("the agent key can delete objects".into()),
+        );
+    } else if let Some(e) = inconclusive {
+        report.set_blob_error(
             CheckId::AgentDelete,
             CheckStatus::Neutral,
             "inconclusive: ",
             &e,
-        ),
-        KeyVerdict::CanDelete => {
-            report.agent_key = AgentKeyState::CanDelete;
-            report.guarantee = GuaranteeLevel::HostCanOverwriteOrDelete;
-            report.add_weakness(Weakness::AgentCanDelete);
-            report.set(
-                CheckId::AgentDelete,
-                CheckStatus::Warn,
-                Some("the agent key can delete objects".into()),
-            );
+        );
+    } else if let Some((level, weakness)) = overwrote {
+        report.agent_key = AgentKeyState::CanOverwrite;
+        report.guarantee = level;
+        if let Some(w) = weakness {
+            report.add_weakness(w);
         }
-        KeyVerdict::CanOverwrite { level, weakness } => {
-            report.agent_key = AgentKeyState::CanOverwrite;
-            report.guarantee = level;
-            if let Some(w) = weakness {
-                report.add_weakness(w);
-            }
-            let note = if level == GuaranteeLevel::OverwriteKeepsOldVersion {
-                "the agent key cannot delete but can overwrite existing objects; the storage keeps the earlier version"
-            } else {
-                "the agent key cannot delete but can overwrite existing objects"
-            };
-            report.set(CheckId::AgentDelete, CheckStatus::Warn, Some(note.into()));
-        }
-        KeyVerdict::Verified => {
-            report.agent_key = AgentKeyState::Verified;
-            report.guarantee = GuaranteeLevel::CreateOnlyEnforced;
-            report.set(CheckId::AgentDelete, CheckStatus::Pass, None);
-        }
+        let note = if level == GuaranteeLevel::OverwriteKeepsOldVersion {
+            "the agent key cannot delete but can overwrite existing objects; the storage keeps the earlier version"
+        } else {
+            "the agent key cannot delete but can overwrite existing objects"
+        };
+        report.set(CheckId::AgentDelete, CheckStatus::Warn, Some(note.into()));
+    } else {
+        report.agent_key = AgentKeyState::Verified;
+        report.guarantee = GuaranteeLevel::CreateOnlyEnforced;
+        report.set(CheckId::AgentDelete, CheckStatus::Pass, None);
     }
 }
 
@@ -663,9 +698,27 @@ mod tests {
     }
 
     #[test]
+    fn non_atomic_publish_caps_the_level() {
+        let mut r = report_at(GuaranteeLevel::CreateOnlyEnforced);
+        r.apply_publish_mode(true);
+        assert_eq!(r, report_at(GuaranteeLevel::CreateOnlyEnforced));
+        r.apply_publish_mode(false);
+        assert_eq!(r.guarantee, GuaranteeLevel::HostCanOverwriteOrDelete);
+        assert_eq!(r.weaknesses, [Weakness::NoAtomicPublish]);
+
+        let mut u = report_at(GuaranteeLevel::Unchecked);
+        u.apply_publish_mode(false);
+        assert_eq!(u, report_at(GuaranteeLevel::Unchecked));
+    }
+
+    #[test]
     fn probe_keys_are_probe_names() {
         let keys = ProbeKeys::default();
-        assert!(is_probe_key(&keys.server) && is_probe_key(&keys.agent));
+        assert!(is_probe_key(&keys.server));
+        assert!(keys.agent.iter().all(|k| is_probe_key(k)));
+        for (key, prefix) in keys.agent.iter().zip(PROBE_PREFIXES) {
+            assert!(key.starts_with(prefix));
+        }
         assert!(!is_probe_key("packs/ab/cd"));
         assert!(!is_probe_key("config"));
     }

@@ -256,8 +256,9 @@ impl MinioServer {
         }
     }
 
-    /// Runs `mc` against this server; the error carries stdout and stderr.
-    async fn mc(&self, args: &[&str]) -> Result<String, String> {
+    /// Runs `mc` against this server, whose alias is `lode`; the error carries
+    /// stdout and stderr. For tests that change versioning or lifecycle rules.
+    pub async fn mc(&self, args: &[&str]) -> Result<String, String> {
         let out = tokio::process::Command::new(&self.mc)
             .arg("--config-dir")
             .arg(self.mc_config.path())
