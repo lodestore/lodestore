@@ -7,6 +7,7 @@ use lodestore_format::config::config_hash;
 use lodestore_format::crypto::Entropy;
 use lodestore_format::keys::{MasterKey, RecoveryKey};
 use lodestore_format::repo::{InitOptions, PendingInit, Repository};
+use lodestore_format::store::BlobStore;
 use lodestore_format::store::policy::{agent_iam_policy_json, agent_minio_commands};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
@@ -260,6 +261,11 @@ async fn commit_wizard(
     let hash = config_hash(pending.config_bytes());
 
     let mut entropy = Entropy::os();
+    opened
+        .server
+        .ensure_prefixes(&[])
+        .await
+        .map_err(|e| storage_error(e.into()))?;
     pending
         .commit(&opened.server, password.as_bytes(), &mut entropy)
         .await

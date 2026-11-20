@@ -15,6 +15,7 @@ use crate::repos::{CheckDto, CheckResult, LocationDto, RepositoryDraft};
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(10);
+const HOST_KEY_CHANGED: &str = "host key changed";
 
 pub(crate) fn invalid(e: impl Display) -> ApiError {
     ApiError::Validation(e.to_string())
@@ -44,7 +45,6 @@ pub fn secret_option_names(backend: &str) -> &'static [&'static str] {
         "azblob" => &["account_key", "sas_token"],
         "gcs" => &["credential"],
         "sftp" => &["key"],
-        "webdav" => &["password", "token"],
         _ => &[],
     }
 }
@@ -89,7 +89,13 @@ pub fn open_parts(
             .map(|k| open_store(&location, Some(k)))
             .transpose()
             .map_err(invalid)?,
-        _ => Some(open_store(&location, None).map_err(invalid)?),
+        _ => {
+            let for_agent = location.for_agent();
+            if let Some(problem) = location.agent_credentials_problem() {
+                return Err(invalid(problem));
+            }
+            Some(open_store(&for_agent, None).map_err(invalid)?)
+        }
     };
     Ok(Opened {
         location,
@@ -102,13 +108,6 @@ pub fn open_parts(
 
 pub fn open_draft(draft: &RepositoryDraft) -> Result<Opened, ApiError> {
     let location = format_location(&draft.location);
-    if location.is_experimental() {
-        return Err(ApiError::Validation(format!(
-            "The {} backend is not available in this version. Use S3-compatible storage or a \
-             local folder.",
-            location.backend
-        )));
-    }
     location.validate().map_err(invalid)?;
     let (server_creds, agent_creds) = if location.backend == "s3" {
         match (&draft.server_credentials, &draft.agent_credentials) {
@@ -161,7 +160,7 @@ pub async fn run_storage_probe(opened: &Opened) -> ProbeReport {
             None => probe_keep(&opened.server, AgentProbe::NotEnforceable, &keys).await,
         }
     };
-    let report = match tokio::time::timeout(PROBE_TIMEOUT, probing).await {
+    let mut report = match tokio::time::timeout(PROBE_TIMEOUT, probing).await {
         Ok(report) => report,
         Err(_) => {
             tracing::warn!("storage checks timed out after {PROBE_TIMEOUT:?}");
@@ -176,8 +175,11 @@ pub async fn run_storage_probe(opened: &Opened) -> ProbeReport {
         }
         Err(_) => tracing::warn!("removing the probe objects timed out after {CLEANUP_TIMEOUT:?}"),
     }
-    for check in &report.checks {
-        if let Some(detail) = &check.detail {
+    for check in &mut report.checks {
+        if let Some(detail) = check.detail.clone() {
+            if detail.contains(HOST_KEY_CHANGED) {
+                check.error = Some(detail.clone());
+            }
             tracing::warn!(
                 check = check.id.as_str(),
                 status = ?check.status,
@@ -201,6 +203,9 @@ pub async fn run_probe(opened: &Opened) -> ProbeReport {
         _ => (CheckStatus::Neutral, Some("not_applicable".to_string())),
     };
     report.set_object_lock(status, error);
+    if !matches!(opened.location.backend.as_str(), "s3" | "local") {
+        report.cap_guarantee(Weakness::SharedCredentials);
+    }
     report
 }
 

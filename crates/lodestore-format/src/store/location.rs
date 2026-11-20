@@ -6,8 +6,6 @@ use super::sftp::Publish;
 use super::{LocalFsStore, OpendalStore, SftpStore, Store};
 use crate::error::{Error, Result};
 
-const EXPERIMENTAL: [&str; 4] = ["azblob", "gcs", "sftp", "webdav"];
-
 fn with_root(base: String, root: &str) -> String {
     let root = root.trim_matches('/');
     if root.is_empty() {
@@ -45,8 +43,56 @@ impl RepoLocation {
         }
     }
 
-    pub fn is_experimental(&self) -> bool {
-        EXPERIMENTAL.contains(&self.backend.as_str())
+    /// The location an agent opens. A GCS store never takes credentials from the
+    /// agent host's environment, well-known files or VM metadata, and never
+    /// reads `credential_path` from the host's disk: it signs with what the
+    /// server sent, or not at all. Other backends are unchanged.
+    pub fn for_agent(&self) -> RepoLocation {
+        let mut agent = self.clone();
+        if agent.backend == "gcs" {
+            agent.options.remove("credential_path");
+            for flag in ["disable_vm_metadata", "disable_config_load"] {
+                agent.options.insert(flag.to_owned(), "true".to_owned());
+            }
+        }
+        agent
+    }
+
+    /// Why an agent could not authenticate to this store with the options it
+    /// would receive from [`Self::for_agent`], or `None`.
+    pub fn agent_credentials_problem(&self) -> Option<&'static str> {
+        if self.backend != "gcs" {
+            return None;
+        }
+        let anonymous = |k: &str| self.opt(k) == Some("true");
+        let signs = self.opt("credential").is_some()
+            || self.opt("token").is_some()
+            || anonymous("skip_signature")
+            || anonymous("allow_anonymous");
+        if signs {
+            None
+        } else if self.options.contains_key("credential_path") {
+            Some(
+                "agents cannot read credential_path; put the service account key into the credential option",
+            )
+        } else {
+            Some(
+                "agents cannot use the credentials of their host; put the service account key into the credential option",
+            )
+        }
+    }
+
+    fn require_static_azure_credentials(&self) -> Result<()> {
+        if self.opt("sas_token").is_some()
+            || (self.opt("account_key").is_some() && self.opt("account_name").is_some())
+        {
+            Ok(())
+        } else {
+            Err(Error::InvalidInput(
+                "azblob needs static credentials: sas_token, or account_key together with account_name"
+                    .into(),
+            ))
+        }
     }
 
     fn opt(&self, key: &str) -> Option<&str> {
@@ -99,8 +145,14 @@ impl RepoLocation {
                 self.require("bucket")?;
             }
             "sftp" => {
-                for option in ["endpoint", "user", "key", "host_key"] {
+                for option in ["endpoint", "user", "key"] {
                     self.require(option)?;
+                }
+                if self.opt("host_key").is_none() {
+                    return Err(Error::InvalidInput(
+                        "Enter the SFTP server's host key: one line of `ssh-keyscan -p <port> <host>` output"
+                            .into(),
+                    ));
                 }
                 Publish::parse(self.opt("publish"))?;
             }
@@ -167,6 +219,10 @@ impl RepoLocation {
                 self.require("path")?,
             )))),
             "sftp" => Ok(Store::Sftp(SftpStore::open(&self.options)?)),
+            "azblob" => {
+                self.require_static_azure_credentials()?;
+                Ok(Store::Opendal(OpendalStore::open("azblob", &self.options)?))
+            }
             other => Ok(Store::Opendal(OpendalStore::open(other, &self.options)?)),
         }
     }
@@ -327,15 +383,71 @@ mod tests {
         );
         direct.validate().unwrap();
         assert_eq!(direct.display(), "sftp://u@h");
+        let unpinned = RepoLocation::new("sftp", [("endpoint", "h"), ("user", "u"), ("key", "k")]);
+        let err = unpinned.validate().unwrap_err();
+        assert!(err.to_string().contains("ssh-keyscan"), "{err}");
     }
 
     #[test]
-    fn location_experimental_flag() {
-        for b in ["azblob", "gcs", "sftp", "webdav"] {
-            assert!(RepoLocation::new(b, []).is_experimental());
+    fn for_agent_closes_gcs_to_ambient_credentials() {
+        let gcs = RepoLocation::new(
+            "gcs",
+            [
+                ("bucket", "b"),
+                ("credential_path", "/etc/sa.json"),
+                ("credential", "c2E="),
+                ("skip_signature", "true"),
+            ],
+        );
+        let agent = gcs.for_agent();
+        assert!(!agent.options.contains_key("credential_path"));
+        assert_eq!(agent.opt("disable_vm_metadata"), Some("true"));
+        assert_eq!(agent.opt("disable_config_load"), Some("true"));
+        assert_eq!(agent.opt("credential"), Some("c2E="));
+        assert_eq!(agent.opt("skip_signature"), Some("true"));
+        assert_eq!(gcs.agent_credentials_problem(), None);
+        assert_eq!(gcs.opt("credential_path"), Some("/etc/sa.json"));
+
+        let path_only = RepoLocation::new("gcs", [("bucket", "b"), ("credential_path", "/x")]);
+        let problem = path_only.agent_credentials_problem().unwrap();
+        assert!(problem.contains("credential_path"), "{problem}");
+        let none = RepoLocation::new("gcs", [("bucket", "b")]);
+        assert!(none.agent_credentials_problem().is_some());
+    }
+
+    #[test]
+    fn for_agent_leaves_other_backends_alone() {
+        for loc in [
+            RepoLocation::new("s3", [("bucket", "b")]),
+            RepoLocation::new("local", [("path", "/p")]),
+            RepoLocation::new("azblob", [("container", "c"), ("account_key", "k")]),
+            RepoLocation::new("sftp", [("endpoint", "h"), ("host_key", "k")]),
+        ] {
+            assert_eq!(loc.for_agent(), loc);
+            assert_eq!(loc.agent_credentials_problem(), None);
         }
-        assert!(!RepoLocation::new("s3", []).is_experimental());
-        assert!(!RepoLocation::new("local", []).is_experimental());
+    }
+
+    #[test]
+    fn azblob_open_needs_static_credentials() {
+        let azblob = |extra: &[(&'static str, &'static str)]| {
+            let mut options = vec![("container", "c"), ("endpoint", "http://127.0.0.1:1")];
+            options.extend_from_slice(extra);
+            RepoLocation::new("azblob", options)
+        };
+        for loc in [
+            azblob(&[]),
+            azblob(&[("account_name", "a")]),
+            azblob(&[("account_key", "a2V5")]),
+        ] {
+            let err = loc.open(None).err().unwrap();
+            assert!(err.to_string().contains("static credentials"), "{err}");
+        }
+        azblob(&[("account_name", "a"), ("account_key", "a2V5")])
+            .open(None)
+            .unwrap();
+        azblob(&[("sas_token", "sv=1&sig=x")]).open(None).unwrap();
+        azblob(&[]).validate().unwrap();
     }
 
     #[test]

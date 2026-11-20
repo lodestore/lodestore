@@ -90,7 +90,7 @@ fn agent_json(key: &AccessKey) -> anyhow::Result<Zeroizing<Vec<u8>>> {
 }
 
 /// What the wizard knows beyond the plain registration: option values that
-/// are secrets (experimental backends) and the capability probe outcome.
+/// are secrets (Azure Blob, GCS, SFTP) and the capability probe outcome.
 #[derive(Default)]
 pub struct RepoExtras {
     pub secret_options: BTreeMap<String, String>,
@@ -198,12 +198,16 @@ pub async fn get_repository(state: &AppState, id: &str) -> anyhow::Result<Option
     .transpose()
 }
 
+/// What an agent needs to write: the writer keys and the location as
+/// [`lodestore_format::store::RepoLocation::for_agent`] shapes it. Backends
+/// other than S3 and a local folder get the server's sealed options too, since
+/// the agent has no credentials of its own there yet.
 pub async fn writer_material(
     state: &AppState,
     repository_id: &str,
 ) -> anyhow::Result<WriterMaterial> {
     let row = sqlx::query(
-        "SELECT backend, location_json, experimental, format_repo_id, config_hash, \
+        "SELECT backend, location_json, format_repo_id, config_hash, \
          master_secret_id, server_creds_secret_id, agent_creds_secret_id, open_error \
          FROM repositories WHERE id = $1",
     )
@@ -218,7 +222,7 @@ pub async fn writer_material(
     let backend: String = row.try_get("backend")?;
     let mut options: BTreeMap<String, String> =
         serde_json::from_str(&row.try_get::<String, _>("location_json")?)?;
-    if row.try_get::<i64, _>("experimental")? != 0
+    if !matches!(backend.as_str(), "s3" | "local")
         && let Some(id) = row.try_get::<Option<String>, _>("server_creds_secret_id")?
     {
         let sealed: SealedAccess = serde_json::from_slice(&state.sealer.get_secret(&id).await?)?;
@@ -251,9 +255,13 @@ pub async fn writer_material(
         )?),
         None => None,
     };
+    let for_agent = lodestore_format::store::RepoLocation { backend, options }.for_agent();
     Ok(WriterMaterial {
         writer_keys_text,
-        location: RepoLocation { backend, options },
+        location: RepoLocation {
+            backend: for_agent.backend,
+            options: for_agent.options,
+        },
         agent_creds,
     })
 }
@@ -264,7 +272,6 @@ pub struct RepoFull {
     pub name: String,
     pub backend: String,
     pub options: BTreeMap<String, String>,
-    pub experimental: bool,
     pub agent_key_state: String,
     pub checks_json: Option<String>,
     pub checked_at: Option<i64>,
@@ -281,7 +288,6 @@ fn full_row(r: &sqlx::any::AnyRow) -> anyhow::Result<RepoFull> {
         name: r.try_get("name")?,
         backend: r.try_get("backend")?,
         options: serde_json::from_str(&r.try_get::<String, _>("location_json")?)?,
-        experimental: r.try_get::<i64, _>("experimental")? != 0,
         agent_key_state: r.try_get("agent_key_state")?,
         checks_json: r.try_get("checks_json")?,
         checked_at: r.try_get("checked_at")?,
@@ -295,7 +301,7 @@ fn full_row(r: &sqlx::any::AnyRow) -> anyhow::Result<RepoFull> {
 
 pub async fn list_repositories(state: &AppState) -> anyhow::Result<Vec<RepoFull>> {
     sqlx::query(
-        "SELECT id, name, backend, location_json, experimental, agent_key_state, checks_json, \
+        "SELECT id, name, backend, location_json, agent_key_state, checks_json, \
          checked_at, guarantee_level, guarantee_accepted, guarantee_notes_json, \
          guarantee_checked_at, open_error FROM repositories ORDER BY created_at, id",
     )
@@ -308,7 +314,7 @@ pub async fn list_repositories(state: &AppState) -> anyhow::Result<Vec<RepoFull>
 
 pub async fn find_repository(state: &AppState, id: &str) -> anyhow::Result<Option<RepoFull>> {
     sqlx::query(
-        "SELECT id, name, backend, location_json, experimental, agent_key_state, checks_json, \
+        "SELECT id, name, backend, location_json, agent_key_state, checks_json, \
          checked_at, guarantee_level, guarantee_accepted, guarantee_notes_json, \
          guarantee_checked_at, open_error FROM repositories WHERE id = $1",
     )
