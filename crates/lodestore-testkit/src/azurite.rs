@@ -73,6 +73,9 @@ fn install() -> std::path::PathBuf {
         installed(&staging.path().join("node_modules/azurite/package.json")),
         "npm ci did not install azurite {AZURITE_VERSION}"
     );
+    if installed(&marker) {
+        return target;
+    }
     let _ = std::fs::remove_dir_all(&target);
     if std::fs::rename(staging.path(), &target).is_err() {
         assert!(
