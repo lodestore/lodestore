@@ -355,10 +355,11 @@ impl Store {
     async fn read_version_for_probe(
         &self,
         key: &str,
+        size: u64,
         version: &str,
     ) -> std::result::Result<Bytes, BlobError> {
         match self.probe_op(key)? {
-            Some(op) => purge::read_version_op(op, key, version).await,
+            Some(op) => purge::read_version_op(op, key, version, size).await,
             None => Err(BlobError::backend("not supported on a local folder")),
         }
     }
