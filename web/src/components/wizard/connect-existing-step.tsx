@@ -2,7 +2,7 @@ import { CircleAlert, Info } from "lucide-react";
 import { useState } from "react";
 import { ApiError } from "@/api/fetcher";
 import { connectRepository } from "@/api/gen/endpoints";
-import type { RepositorySummary } from "@/api/gen/model";
+import type { CheckResult, RepositorySummary } from "@/api/gen/model";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -19,10 +19,12 @@ type Method = "password" | "recovery_key";
 export function ConnectExistingStep({
 	draft,
 	onBack,
+	onWeaker,
 	onConnected,
 }: {
 	draft: Draft;
 	onBack: () => void;
+	onWeaker: (check: CheckResult) => void;
 	onConnected: (repository: RepositorySummary) => void;
 }) {
 	const [method, setMethod] = useState<Method>("password");
@@ -50,6 +52,14 @@ export function ConnectExistingStep({
 			onConnected(repository);
 		} catch (cause) {
 			setPending(false);
+			if (
+				cause instanceof ApiError &&
+				cause.code === "weaker_guarantee" &&
+				cause.check
+			) {
+				onWeaker(cause.check);
+				return;
+			}
 			if (cause instanceof ApiError && cause.status === 422) {
 				setError(copy.existingRepo.error);
 				return;

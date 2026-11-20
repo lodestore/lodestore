@@ -1,12 +1,19 @@
 import { keepPreviousData } from "@tanstack/react-query";
-import { CircleAlert, Info } from "lucide-react";
+import { CircleAlert, Info, TriangleAlert } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useAgentPolicy } from "@/api/gen/endpoints";
+import type { CheckResult } from "@/api/gen/model";
 import { CapabilityChecklist } from "@/components/capability-checklist";
+import {
+	GuaranteeNotes,
+	levelName,
+	UNCHECKED_LEVEL,
+} from "@/components/guarantee-notes";
 import { PolicyPanel } from "@/components/policy-panel";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
 	Field,
 	FieldDescription,
@@ -25,6 +32,7 @@ import {
 	checkRows,
 	type Draft,
 	type KeyPair,
+	needsConsent,
 	runningRows,
 } from "./draft";
 import { KeyCard } from "./key-card";
@@ -268,6 +276,65 @@ function PolicyColumn({ draft }: { draft: Draft }) {
 	);
 }
 
+function GuaranteeBlock({
+	result,
+	accepted,
+	onAccepted,
+	onCheckAgain,
+	disabled,
+}: {
+	result: CheckResult;
+	accepted: boolean;
+	onAccepted: (accepted: boolean) => void;
+	onCheckAgain: () => void;
+	disabled: boolean;
+}) {
+	const level = result.guarantee_level;
+	if (!needsConsent(result)) {
+		return (
+			<div className="flex flex-col gap-1 text-sm">
+				<p>{copy.guarantee.levelLine(levelName(level))}</p>
+				<GuaranteeNotes codes={result.guarantee_notes} />
+			</div>
+		);
+	}
+	const unchecked = level === UNCHECKED_LEVEL;
+	return (
+		<Alert className="text-warning">
+			<TriangleAlert aria-hidden />
+			<AlertTitle>
+				{unchecked ? copy.guarantee.uncheckedTitle : copy.guarantee.weakTitle}
+			</AlertTitle>
+			<AlertDescription className="flex flex-col gap-4">
+				{unchecked && <p>{copy.guarantee.uncheckedBody}</p>}
+				<GuaranteeNotes codes={result.guarantee_notes} />
+				{unchecked && (
+					<div>
+						<Button
+							type="button"
+							variant="outline"
+							disabled={disabled}
+							onClick={onCheckAgain}
+						>
+							{copy.guarantee.checkAgain}
+						</Button>
+					</div>
+				)}
+				<Field orientation="horizontal">
+					<Checkbox
+						id="accept-weaker-guarantee"
+						checked={accepted}
+						onCheckedChange={(next) => onAccepted(next === true)}
+					/>
+					<FieldLabel htmlFor="accept-weaker-guarantee">
+						{copy.guarantee.consentLabel}
+					</FieldLabel>
+				</Field>
+			</AlertDescription>
+		</Alert>
+	);
+}
+
 export function AccessStep({
 	draft,
 	onChange,
@@ -286,6 +353,8 @@ export function AccessStep({
 	const running = check.phase === "running";
 	const fresh = check.phase === "done" && !check.stale;
 	const blocked = fresh && check.result.blocking;
+	const needsAccept =
+		fresh && needsConsent(check.result) && !draft.acceptWeakerGuarantee;
 	const existing = check.phase === "done" && check.result.existing_repository;
 
 	return (
@@ -305,7 +374,7 @@ export function AccessStep({
 						)}
 						<Button
 							type="button"
-							disabled={blocked}
+							disabled={blocked || needsAccept}
 							aria-describedby={blocked ? "continue-blocked" : undefined}
 							onClick={onContinue}
 						>
@@ -376,6 +445,17 @@ export function AccessStep({
 							)}
 						</CardContent>
 					</Card>
+				)}
+				{fresh && check.phase === "done" && (
+					<GuaranteeBlock
+						result={check.result}
+						accepted={draft.acceptWeakerGuarantee}
+						onAccepted={(acceptWeakerGuarantee) =>
+							onChange({ acceptWeakerGuarantee })
+						}
+						onCheckAgain={onCheck}
+						disabled={running}
+					/>
 				)}
 			</section>
 		</StepCard>
