@@ -92,6 +92,10 @@ impl<S: BlobStore> BlobStore for Hostile<S> {
     async fn ensure_prefixes(&self, prefixes: &[&str]) -> Result<(), BlobError> {
         self.inner.ensure_prefixes(prefixes).await
     }
+
+    fn publishes_atomically(&self) -> bool {
+        self.inner.publishes_atomically()
+    }
 }
 
 impl<S: BlobDelete> BlobDelete for Hostile<S> {

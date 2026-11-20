@@ -152,6 +152,10 @@ mod tests {
         async fn list(&self, _prefix: &str) -> Result<Vec<ListEntry>, BlobError> {
             Ok(Vec::new())
         }
+
+        fn publishes_atomically(&self) -> bool {
+            true
+        }
     }
 
     struct Stat;

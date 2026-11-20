@@ -262,6 +262,10 @@ impl BlobStore for LocalFsStore {
         }
         Ok(())
     }
+
+    fn publishes_atomically(&self) -> bool {
+        true
+    }
 }
 
 impl BlobDelete for LocalFsStore {

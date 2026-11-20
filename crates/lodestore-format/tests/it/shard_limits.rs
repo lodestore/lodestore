@@ -53,6 +53,10 @@ impl BlobStore for RangeLog {
     async fn list(&self, prefix: &str) -> Result<Vec<ListEntry>, BlobError> {
         self.inner.list(prefix).await
     }
+
+    fn publishes_atomically(&self) -> bool {
+        true
+    }
 }
 
 /// A well-formed shard of honest records whose entry tables make the sealed
@@ -279,6 +283,10 @@ impl BlobStore for IndexProbe {
     async fn list(&self, prefix: &str) -> Result<Vec<ListEntry>, BlobError> {
         self.inner.list(prefix).await
     }
+
+    fn publishes_atomically(&self) -> bool {
+        true
+    }
 }
 
 #[tokio::test]
@@ -452,6 +460,10 @@ impl BlobStore for Inflated {
         }
         Ok(out)
     }
+
+    fn publishes_atomically(&self) -> bool {
+        true
+    }
 }
 
 /// A repository whose only shard is a signed legacy one above
@@ -540,6 +552,10 @@ impl BlobStore for Zeros {
 
     async fn list(&self, _: &str) -> Result<Vec<ListEntry>, BlobError> {
         Ok(Vec::new())
+    }
+
+    fn publishes_atomically(&self) -> bool {
+        true
     }
 }
 
@@ -655,6 +671,10 @@ impl BlobStore for AttestBlip {
 
     async fn list(&self, prefix: &str) -> Result<Vec<ListEntry>, BlobError> {
         self.inner.list(prefix).await
+    }
+
+    fn publishes_atomically(&self) -> bool {
+        true
     }
 }
 

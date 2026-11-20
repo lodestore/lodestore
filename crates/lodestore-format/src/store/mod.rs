@@ -119,10 +119,9 @@ pub trait BlobStore: Send + Sync {
     /// Whether an object becomes visible only once it is complete. A store
     /// that can leave a torn object under the final name (a direct SFTP write)
     /// returns `false`, and then an existing name is trusted only after its
-    /// bytes are compared.
-    fn publishes_atomically(&self) -> bool {
-        true
-    }
+    /// bytes are compared. No default: a wrapper that forgot to forward the
+    /// answer would trust a torn object on size alone.
+    fn publishes_atomically(&self) -> bool;
 }
 
 /// Deletion, kept apart from [`BlobStore`] so that code which only needs to
@@ -356,9 +355,10 @@ impl Store {
         &self,
         key: &str,
         version: &str,
+        size: u64,
     ) -> std::result::Result<Bytes, BlobError> {
         match self.probe_op(key)? {
-            Some(op) => purge::read_version_op(op, key, version).await,
+            Some(op) => purge::read_version_op(op, key, version, size).await,
             None => Err(BlobError::backend("not supported on a local folder")),
         }
     }
@@ -536,6 +536,10 @@ mod tests {
         async fn list(&self, _: &str) -> std::result::Result<Vec<ListEntry>, BlobError> {
             Ok(Vec::new())
         }
+
+        fn publishes_atomically(&self) -> bool {
+            true
+        }
     }
 
     /// Answers an empty range without asking the store, as `get_range_op` does.
@@ -556,6 +560,10 @@ mod tests {
         }
         async fn list(&self, p: &str) -> std::result::Result<Vec<ListEntry>, BlobError> {
             self.0.list(p).await
+        }
+
+        fn publishes_atomically(&self) -> bool {
+            true
         }
     }
 

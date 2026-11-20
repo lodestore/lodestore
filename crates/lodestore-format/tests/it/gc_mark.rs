@@ -439,6 +439,10 @@ impl BlobStore for FailingSnapshotRead<'_> {
     async fn list(&self, prefix: &str) -> Result<Vec<ListEntry>, BlobError> {
         self.0.list(prefix).await
     }
+
+    fn publishes_atomically(&self) -> bool {
+        true
+    }
 }
 
 #[tokio::test]
@@ -488,6 +492,10 @@ impl BlobStore for MisSizedSnapshotRead<'_> {
 
     async fn list(&self, prefix: &str) -> Result<Vec<ListEntry>, BlobError> {
         self.0.list(prefix).await
+    }
+
+    fn publishes_atomically(&self) -> bool {
+        true
     }
 }
 

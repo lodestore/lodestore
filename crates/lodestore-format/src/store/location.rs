@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt;
 use std::path::PathBuf;
 
 use super::s3::{DEFAULT_REGION, S3Options, S3Provider, S3Store, StaticCredentials};
@@ -26,10 +27,41 @@ fn is_b2_endpoint(endpoint: &str) -> bool {
 }
 
 /// Where a repository lives: a backend name plus that backend's options.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct RepoLocation {
     pub backend: String,
     pub options: BTreeMap<String, String>,
+}
+
+fn is_secret_option(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    [
+        "key",
+        "secret",
+        "token",
+        "password",
+        "passphrase",
+        "credential",
+    ]
+    .iter()
+    .any(|m| key.contains(m))
+}
+
+impl fmt::Debug for RepoLocation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let options: BTreeMap<&str, &str> = self
+            .options
+            .iter()
+            .map(|(k, v)| {
+                let shown = if is_secret_option(k) { "<redacted>" } else { v };
+                (k.as_str(), shown)
+            })
+            .collect();
+        f.debug_struct("RepoLocation")
+            .field("backend", &self.backend)
+            .field("options", &options)
+            .finish()
+    }
 }
 
 impl RepoLocation {
@@ -448,6 +480,48 @@ mod tests {
             .unwrap();
         azblob(&[("sas_token", "sv=1&sig=x")]).open(None).unwrap();
         azblob(&[]).validate().unwrap();
+    }
+
+    #[tokio::test]
+    async fn azblob_transport_error_does_not_leak_sas_token() {
+        use crate::store::BlobStore;
+        let loc = RepoLocation::new(
+            "azblob",
+            [
+                ("container", "c"),
+                ("endpoint", "http://127.0.0.1:1"),
+                ("sas_token", "sv=1&sig=SECRETSIG"),
+            ],
+        );
+        let store = loc.open(None).unwrap();
+        let err = store
+            .put_if_absent("k", bytes::Bytes::from_static(b"x"))
+            .await
+            .unwrap_err();
+        for text in [err.to_string(), format!("{err:?}")] {
+            assert!(!text.contains("SECRETSIG"), "{text}");
+        }
+    }
+
+    #[test]
+    fn debug_redacts_secret_options() {
+        let loc = RepoLocation::new(
+            "sftp",
+            [
+                ("host", "h.example"),
+                ("private_key", "-----BEGIN KEY-----"),
+                ("account_key", "KEYVAL"),
+                ("sas_token", "sv=1&sig=SECRETSIG"),
+            ],
+        );
+        let shown = format!("{loc:?}");
+        for secret in ["BEGIN KEY", "KEYVAL", "SECRETSIG"] {
+            assert!(!shown.contains(secret), "{shown}");
+        }
+        assert!(
+            shown.contains("h.example") && shown.contains("private_key"),
+            "{shown}"
+        );
     }
 
     #[test]

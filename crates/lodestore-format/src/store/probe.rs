@@ -661,8 +661,8 @@ async fn overwritten(server: &Store, agent: &Store, key: &str) -> KeyVerdict {
         Err(e) => return KeyVerdict::Inconclusive(e),
     };
     let mut original = None;
-    for (id, _) in versions.iter().take(MAX_PROBE_VERSIONS) {
-        match server.read_version_for_probe(key, id).await {
+    for (id, size) in versions.iter().take(MAX_PROBE_VERSIONS) {
+        match server.read_version_for_probe(key, id, *size).await {
             Ok(bytes) if bytes[..] == *PROBE_BODY => {
                 original = Some(id);
                 break;

@@ -132,13 +132,31 @@ pub(super) async fn versions_op(
     ))
 }
 
+/// A probe object is a few dozen bytes; a version far beyond that is foreign.
+const MAX_PROBE_READ: u64 = 4096;
+
+/// `size` is the length the listing reported for this version.
 pub(super) async fn read_version_op(
     op: &Operator,
     key: &str,
     version: &str,
+    size: u64,
 ) -> Result<bytes::Bytes, BlobError> {
     check_key(key)?;
-    let buf = op.read_with(key).version(version).await.map_err(map_err)?;
+    if size > MAX_PROBE_READ {
+        return Err(BlobError::backend(format!(
+            "version of {key} is too large to be a probe object"
+        )));
+    }
+    if size == 0 {
+        return Ok(bytes::Bytes::new());
+    }
+    let buf = op
+        .read_with(key)
+        .version(version)
+        .range(0..size)
+        .await
+        .map_err(map_err)?;
     Ok(buf.to_bytes())
 }
 
@@ -276,6 +294,15 @@ pub(super) async fn deleted_keys_op(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn read_version_refuses_an_oversized_version_without_reading() {
+        let op = Operator::via_iter("memory", std::iter::empty::<(String, String)>()).unwrap();
+        let err = read_version_op(&op, "k", "v1", MAX_PROBE_READ + 1)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("too large"), "{err}");
+    }
 
     #[test]
     fn is_lock_refusal_classifies() {

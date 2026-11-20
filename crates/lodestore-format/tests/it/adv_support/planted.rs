@@ -71,6 +71,10 @@ impl<S: BlobStore> BlobStore for PlantedListing<S> {
         );
         Ok(out)
     }
+
+    fn publishes_atomically(&self) -> bool {
+        self.inner.publishes_atomically()
+    }
 }
 
 /// A store that refuses to hand over a whole object under the given prefixes
@@ -133,6 +137,10 @@ impl<S: BlobStore> BlobStore for RangedOnly<S> {
 
     async fn list(&self, prefix: &str) -> Result<Vec<ListEntry>, BlobError> {
         self.inner.list(prefix).await
+    }
+
+    fn publishes_atomically(&self) -> bool {
+        self.inner.publishes_atomically()
     }
 }
 

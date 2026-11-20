@@ -80,6 +80,10 @@ impl BlobStore for Counting {
     async fn list(&self, prefix: &str) -> Result<Vec<ListEntry>, BlobError> {
         self.inner.list(prefix).await
     }
+
+    fn publishes_atomically(&self) -> bool {
+        true
+    }
 }
 
 fn write_file(path: &Path, data: &[u8], mode: u32) {
