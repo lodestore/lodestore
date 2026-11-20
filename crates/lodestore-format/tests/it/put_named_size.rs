@@ -4,6 +4,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use crate::gc_support::Fx;
 use bytes::Bytes;
 use lodestore_format::Error;
 use lodestore_format::crypto::Entropy;
@@ -134,11 +135,7 @@ async fn backup_and_restore(store: &TornStore, src: &Path, target: &Path) {
     let keys = repo.read_keys().write_keys(repo.config_hash());
     let mut writer = Writer::new(store, keys, repo.config()).await.unwrap();
     let outcome = writer
-        .backup(
-            &[src.to_path_buf()],
-            BackupOptions::default(),
-            &|_| {},
-        )
+        .backup(&[src.to_path_buf()], BackupOptions::default(), &|_| {})
         .await
         .unwrap();
     let mut reader = Reader::open(store, repo.read_keys().duplicate(), repo.config()).unwrap();
@@ -208,4 +205,197 @@ async fn put_named_size_burned_pack_is_resealed_and_restores() {
             fs::read(restored.join(name)).unwrap()
         );
     }
+}
+
+/// A store whose answers are set by the test.
+struct Odd {
+    inner: LocalFsStore,
+    atomic: bool,
+    deny_put: bool,
+    deny_stat: bool,
+    deny_get: bool,
+}
+
+impl Odd {
+    fn new(inner: LocalFsStore, atomic: bool) -> Self {
+        Odd {
+            inner,
+            atomic,
+            deny_put: false,
+            deny_stat: false,
+            deny_get: false,
+        }
+    }
+}
+
+fn denied() -> BlobError {
+    BlobError::Denied {
+        message: "AccessDenied".into(),
+    }
+}
+
+impl BlobStore for Odd {
+    async fn put_if_absent(&self, key: &str, data: Bytes) -> Result<(), BlobError> {
+        if self.deny_put {
+            return Err(denied());
+        }
+        self.inner.put_if_absent(key, data).await
+    }
+
+    async fn get(&self, key: &str) -> Result<Bytes, BlobError> {
+        self.inner.get(key).await
+    }
+
+    async fn get_range(&self, key: &str, range: Range<u64>) -> Result<Bytes, BlobError> {
+        if self.deny_get {
+            return Err(denied());
+        }
+        self.inner.get_range(key, range).await
+    }
+
+    async fn list(&self, prefix: &str) -> Result<Vec<ListEntry>, BlobError> {
+        self.inner.list(prefix).await
+    }
+
+    async fn object_size(&self, key: &str) -> Result<Option<u64>, BlobError> {
+        if self.deny_stat {
+            return Err(denied());
+        }
+        self.inner.object_size(key).await
+    }
+
+    fn publishes_atomically(&self) -> bool {
+        self.atomic
+    }
+}
+
+const KEY: &str = "packs/ab/x";
+
+fn body() -> Vec<u8> {
+    random_bytes(4096, 9)
+}
+
+async fn odd_with(stored: Option<Bytes>, atomic: bool) -> (tempfile::TempDir, Odd) {
+    let dir = tempfile::tempdir().unwrap();
+    let inner = LocalFsStore::new(dir.path().to_path_buf());
+    if let Some(stored) = stored {
+        inner.put_if_absent(KEY, stored).await.unwrap();
+    }
+    (dir, Odd::new(inner, atomic))
+}
+
+fn is_burned(r: lodestore_format::Result<()>) -> bool {
+    matches!(r, Err(Error::NameBurned { .. }))
+}
+
+fn is_denied(r: lodestore_format::Result<()>) -> bool {
+    matches!(r, Err(Error::Store(BlobError::Denied { .. })))
+}
+
+#[tokio::test]
+async fn put_named_non_atomic_full_size_hole_is_name_burned() {
+    let bytes = Bytes::from(body());
+    let holed = torn(&Tear::Hole(100..300), &bytes);
+    assert_eq!(holed.len(), bytes.len());
+    let (_d, store) = odd_with(Some(holed), false).await;
+    assert!(is_burned(put_named(&store, KEY, bytes.to_vec()).await));
+}
+
+#[tokio::test]
+async fn put_named_non_atomic_equal_bytes_ok() {
+    let bytes = Bytes::from(body());
+    let (_d, store) = odd_with(Some(bytes.clone()), false).await;
+    put_named(&store, KEY, bytes.to_vec()).await.unwrap();
+}
+
+#[tokio::test]
+async fn put_named_non_atomic_unreadable_is_error() {
+    let bytes = Bytes::from(body());
+    let (_d, mut store) = odd_with(Some(bytes.clone()), false).await;
+    store.deny_get = true;
+    assert!(is_denied(put_named(&store, KEY, bytes.to_vec()).await));
+}
+
+#[tokio::test]
+async fn put_named_denied_existing_equal_size_ok() {
+    let bytes = Bytes::from(body());
+    for atomic in [true, false] {
+        let (_d, mut store) = odd_with(Some(bytes.clone()), atomic).await;
+        store.deny_put = true;
+        put_named(&store, KEY, bytes.to_vec()).await.unwrap();
+
+        let short = bytes.slice(..100);
+        let (_d, mut store) = odd_with(Some(short), atomic).await;
+        store.deny_put = true;
+        assert!(is_burned(put_named(&store, KEY, bytes.to_vec()).await));
+    }
+    let holed = torn(&Tear::Hole(10..20), &bytes);
+    let (_d, mut store) = odd_with(Some(holed), false).await;
+    store.deny_put = true;
+    assert!(is_burned(put_named(&store, KEY, bytes.to_vec()).await));
+}
+
+#[tokio::test]
+async fn put_named_denied_missing_stays_denied() {
+    let (_d, mut store) = odd_with(None, true).await;
+    store.deny_put = true;
+    assert!(is_denied(put_named(&store, KEY, body()).await));
+
+    let bytes = Bytes::from(body());
+    let (_d, mut store) = odd_with(Some(bytes.clone()), true).await;
+    store.deny_put = true;
+    store.deny_stat = true;
+    assert!(is_denied(put_named(&store, KEY, bytes.to_vec()).await));
+}
+
+#[tokio::test]
+async fn put_named_atomic_unstatable_already_exists_ok() {
+    let bytes = Bytes::from(body());
+    let (_d, mut store) = odd_with(Some(bytes.clone()), true).await;
+    store.deny_stat = true;
+    put_named(&store, KEY, bytes.to_vec()).await.unwrap();
+}
+
+#[tokio::test]
+async fn put_named_non_atomic_unstatable_is_error() {
+    let bytes = Bytes::from(body());
+    let (_d, mut store) = odd_with(Some(bytes.clone()), false).await;
+    store.deny_stat = true;
+    assert!(is_denied(put_named(&store, KEY, bytes.to_vec()).await));
+}
+
+#[tokio::test]
+async fn put_named_size_gc_repack_reseals() {
+    use lodestore_format::gc::repack::repack;
+    use lodestore_format::pack::pack_object_key;
+
+    let fx = Fx::new().await;
+    let shared = ("shared", 1, 100 << 10);
+    let a = fx.backup("a", &[shared, ("only-a", 2, 200 << 10)]).await;
+    fx.backup("b", &[shared, ("only-b", 3, 200 << 10)]).await;
+    fx.forget(&a.snapshot_id).await;
+
+    let fx = fx.wrap(|local| TornStore::new(local, [Some(Tear::Short(100))]));
+    let survey = fx.survey(50).await;
+    assert!(!survey.plan.repack.is_empty());
+    let out = repack(
+        &fx.store,
+        fx.repo.read_keys(),
+        &survey,
+        &mut Entropy::os(),
+        &|_, _| {},
+    )
+    .await
+    .unwrap();
+
+    let burned = fx.store.burned();
+    assert_eq!(burned.len(), 1);
+    assert!(!out.new_packs.is_empty());
+    let mut written = 0;
+    for id in &out.new_packs {
+        let key = pack_object_key(id);
+        assert_ne!(key, burned[0]);
+        written += fx.store.object_size(&key).await.unwrap().unwrap();
+    }
+    assert_eq!(written, out.bytes_written);
 }
