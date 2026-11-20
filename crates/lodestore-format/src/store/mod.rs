@@ -5,6 +5,7 @@ pub mod policy;
 pub mod probe;
 pub mod purge;
 pub mod s3;
+pub mod sftp;
 
 use std::fmt;
 use std::future::Future;
@@ -20,6 +21,7 @@ pub use location::RepoLocation;
 pub use opendal::OpendalStore;
 pub use purge::{BlobPurge, PurgeOutcome, RetainedVersion};
 pub use s3::{S3Options, S3Provider, S3Store, S3Url, StaticCredentials};
+pub use sftp::SftpStore;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BlobError {
@@ -31,6 +33,8 @@ pub enum BlobError {
     Denied { message: String },
     #[error("backend error: {message}")]
     Backend { message: String, temporary: bool },
+    #[error("the SFTP server's host key changed: pinned {pinned}, offered {offered}")]
+    HostKeyMismatch { pinned: String, offered: String },
 }
 
 impl BlobError {
@@ -274,6 +278,7 @@ pub enum Store {
     Local(LocalFsStore),
     S3(S3Store),
     Opendal(OpendalStore),
+    Sftp(SftpStore),
 }
 
 impl Store {
@@ -282,6 +287,7 @@ impl Store {
             Store::Local(_) => true,
             Store::S3(s) => s.conditional_write_supported(),
             Store::Opendal(s) => s.conditional_write_supported(),
+            Store::Sftp(_) => true,
         }
     }
 
@@ -290,7 +296,7 @@ impl Store {
     pub fn sweeps_delete_markers(&self) -> bool {
         match self {
             Store::S3(s) => s.sweeps_delete_markers(),
-            Store::Local(_) | Store::Opendal(_) => true,
+            Store::Local(_) | Store::Opendal(_) | Store::Sftp(_) => true,
         }
     }
 
@@ -306,6 +312,7 @@ impl Store {
             Store::Local(_) => Ok(None),
             Store::S3(s) => s.presign_read(key, ttl).await,
             Store::Opendal(s) => s.presign_read(key, ttl).await,
+            Store::Sftp(_) => Ok(None),
         }
     }
 
@@ -316,6 +323,7 @@ impl Store {
             Store::Local(s) => s.modified_ms(key).await,
             Store::S3(s) => s.modified_ms(key).await,
             Store::Opendal(s) => s.modified_ms(key).await,
+            Store::Sftp(s) => s.modified_ms(key).await,
         }
     }
 
@@ -327,6 +335,7 @@ impl Store {
             Store::Local(_) => None,
             Store::S3(s) => Some(&s.op),
             Store::Opendal(s) => Some(&s.op),
+            Store::Sftp(_) => None,
         })
     }
 
@@ -376,6 +385,7 @@ impl Store {
             Store::Local(_) => Err(BlobError::backend("not supported on a local folder")),
             Store::S3(s) => s.overwrite_for_probe(key, data).await,
             Store::Opendal(s) => s.overwrite_for_probe(key, data).await,
+            Store::Sftp(s) => s.overwrite_for_probe(key, data).await,
         }
     }
 }
@@ -386,6 +396,7 @@ impl BlobStore for Store {
             Store::Local(s) => s.put_if_absent(key, data).await,
             Store::S3(s) => s.put_if_absent(key, data).await,
             Store::Opendal(s) => s.put_if_absent(key, data).await,
+            Store::Sftp(s) => s.put_if_absent(key, data).await,
         }
     }
 
@@ -394,6 +405,7 @@ impl BlobStore for Store {
             Store::Local(s) => s.get(key).await,
             Store::S3(s) => s.get(key).await,
             Store::Opendal(s) => s.get(key).await,
+            Store::Sftp(s) => s.get(key).await,
         }
     }
 
@@ -406,6 +418,7 @@ impl BlobStore for Store {
             Store::Local(s) => s.get_range(key, range).await,
             Store::S3(s) => s.get_range(key, range).await,
             Store::Opendal(s) => s.get_range(key, range).await,
+            Store::Sftp(s) => s.get_range(key, range).await,
         }
     }
 
@@ -414,6 +427,7 @@ impl BlobStore for Store {
             Store::Local(s) => s.list(prefix).await,
             Store::S3(s) => s.list(prefix).await,
             Store::Opendal(s) => s.list(prefix).await,
+            Store::Sftp(s) => s.list(prefix).await,
         }
     }
 
@@ -422,6 +436,7 @@ impl BlobStore for Store {
             Store::Local(s) => s.ensure_prefixes(prefixes).await,
             Store::S3(s) => s.ensure_prefixes(prefixes).await,
             Store::Opendal(s) => s.ensure_prefixes(prefixes).await,
+            Store::Sftp(s) => s.ensure_prefixes(prefixes).await,
         }
     }
 
@@ -430,6 +445,7 @@ impl BlobStore for Store {
             Store::Local(s) => s.object_size(key).await,
             Store::S3(s) => s.object_size(key).await,
             Store::Opendal(s) => s.object_size(key).await,
+            Store::Sftp(s) => s.object_size(key).await,
         }
     }
 
@@ -438,6 +454,7 @@ impl BlobStore for Store {
             Store::Local(s) => s.publishes_atomically(),
             Store::S3(s) => s.publishes_atomically(),
             Store::Opendal(s) => s.publishes_atomically(),
+            Store::Sftp(s) => s.publishes_atomically(),
         }
     }
 }
@@ -448,6 +465,7 @@ impl BlobDelete for Store {
             Store::Local(s) => s.delete(key).await,
             Store::S3(s) => s.delete(key).await,
             Store::Opendal(s) => s.delete(key).await,
+            Store::Sftp(s) => s.delete(key).await,
         }
     }
 }

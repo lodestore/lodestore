@@ -15,6 +15,7 @@ use rand_chacha::rand_core::{Rng, SeedableRng};
 
 mod azblob;
 mod gcs;
+mod sftp;
 
 const LOW_KDF: KdfCost = KdfCost {
     memory_kib: 64,

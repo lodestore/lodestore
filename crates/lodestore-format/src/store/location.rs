@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use super::s3::{DEFAULT_REGION, S3Options, S3Provider, S3Store, StaticCredentials};
-use super::{LocalFsStore, OpendalStore, Store};
+use super::sftp::Publish;
+use super::{LocalFsStore, OpendalStore, SftpStore, Store};
 use crate::error::{Error, Result};
 
 const EXPERIMENTAL: [&str; 4] = ["azblob", "gcs", "sftp", "webdav"];
@@ -97,8 +98,11 @@ impl RepoLocation {
             "gcs" => {
                 self.require("bucket")?;
             }
-            "sftp" | "webdav" => {
-                self.require("endpoint")?;
+            "sftp" => {
+                for option in ["endpoint", "user", "key", "host_key"] {
+                    self.require(option)?;
+                }
+                Publish::parse(self.opt("publish"))?;
             }
             other => {
                 return Err(Error::InvalidInput(format!("unknown backend {other:?}")));
@@ -121,6 +125,10 @@ impl RepoLocation {
             "local" => get("path").to_owned(),
             "azblob" => with_root(format!("azblob://{}", get("container")), get("root")),
             "gcs" => with_root(format!("gcs://{}", get("bucket")), get("root")),
+            "sftp" => with_root(
+                format!("sftp://{}@{}", get("user"), get("endpoint")),
+                get("root"),
+            ),
             other => format!("{other}://{}", get("endpoint")),
         }
     }
@@ -158,6 +166,7 @@ impl RepoLocation {
             "local" => Ok(Store::Local(LocalFsStore::new(PathBuf::from(
                 self.require("path")?,
             )))),
+            "sftp" => Ok(Store::Sftp(SftpStore::open(&self.options)?)),
             other => Ok(Store::Opendal(OpendalStore::open(other, &self.options)?)),
         }
     }
@@ -220,6 +229,18 @@ mod tests {
             RepoLocation::new("nosuch", [("bucket", "b")]),
             RepoLocation::new("azblob", []),
             RepoLocation::new("sftp", []),
+            RepoLocation::new("sftp", [("endpoint", "h"), ("user", "u"), ("key", "k")]),
+            RepoLocation::new(
+                "sftp",
+                [
+                    ("endpoint", "h"),
+                    ("user", "u"),
+                    ("key", "k"),
+                    ("host_key", "h"),
+                    ("publish", "rename"),
+                ],
+            ),
+            RepoLocation::new("webdav", [("endpoint", "h")]),
         ];
         for loc in bad {
             assert!(
@@ -278,6 +299,34 @@ mod tests {
             RepoLocation::new("gcs", [("bucket", "b")]).display(),
             "gcs://b"
         );
+    }
+
+    #[test]
+    fn location_sftp_validates_and_displays() {
+        let loc = RepoLocation::new(
+            "sftp",
+            [
+                ("endpoint", "backup.example:2222"),
+                ("user", "lode"),
+                ("key", "k"),
+                ("host_key", "ssh-ed25519 AAAA"),
+                ("root", "/srv/repo/"),
+            ],
+        );
+        loc.validate().unwrap();
+        assert_eq!(loc.display(), "sftp://lode@backup.example:2222/srv/repo");
+        let direct = RepoLocation::new(
+            "sftp",
+            [
+                ("endpoint", "h"),
+                ("user", "u"),
+                ("key", "k"),
+                ("host_key", "h"),
+                ("publish", "direct"),
+            ],
+        );
+        direct.validate().unwrap();
+        assert_eq!(direct.display(), "sftp://u@h");
     }
 
     #[test]
