@@ -71,7 +71,7 @@ After an update, an existing repository shows **Unchecked** as its measured leve
 ## What the check does not see
 
 - **Where the request comes from.** The server runs the check from its own network with the credentials that hosts receive. A policy that depends on the source of a request (an IP condition, a private endpoint) can allow a host something the check did not see, or refuse it something the check allowed.
-- **Rights over the bucket configuration.** The check tries to write, overwrite and delete objects. It does not measure the right to change the versioning, lifecycle rules, bucket policy or Object Lock settings. A key that may change them can weaken the protection later, and that shows only at the next check.
+- **Rights over the bucket configuration.** The check tries to write, overwrite and delete objects. It does not test whether the agent key holds `s3:PutLifecycleConfiguration`, `s3:PutBucketVersioning`, `s3:PutBucketPolicy` or `s3:BypassGovernanceRetention`. A host with such a key can add a rule that deletes objects or their earlier versions, suspend versioning, change the bucket policy, or remove versions locked in GOVERNANCE mode, and the level stays as measured until the next check; data removed in between is gone. Give the agent key only the rights of the policy that Lodestore shows.
 
 ## Verification status
 
