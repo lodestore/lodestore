@@ -25,8 +25,8 @@ use lodestore_format::crypto::{
 use lodestore_format::error::Result;
 use lodestore_format::fs::restore::check_extents;
 use lodestore_format::image::{
-    BitmapBinding, BitmapNames, FullReason, IMAGE_CHUNK_SIZE, ImageMeta, ImageState,
-    SEGMENT_CHUNKS, merge_head, merge_segments, parse_layout, segment_nodes,
+    BitmapBinding, BitmapNames, FullReason, IMAGE_CHUNK_SIZE, ImageExtent, ImageMeta, ImageSource,
+    ImageState, SEGMENT_CHUNKS, merge_head, merge_segments, parse_layout, segment_nodes,
 };
 use lodestore_format::index::{Index, SupersedesTrust, open_shard};
 use lodestore_format::keys::{
@@ -42,7 +42,7 @@ use lodestore_format::pb;
 use lodestore_format::snapshot::{ENVELOPE_VERSION, open_snapshot};
 use lodestore_format::source::{self, SourceKey};
 use lodestore_format::tree::{decode_tree, hooks};
-use lodestore_nbd::{Client, Limits as NbdLimits, MemExport, serve};
+use lodestore_nbd::{Client, Limits as NbdLimits, MemExport, NbdSource, serve};
 use prost::Message;
 use rand_chacha::ChaCha20Rng;
 use rand_chacha::rand_core::SeedableRng;
@@ -450,6 +450,21 @@ pub fn snapshot_open(data: &[u8]) {
 pub(crate) const NBD_BITMAPS: [&str; 2] = ["b0", "b1"];
 pub(crate) const NBD_READ_LEN: u64 = 64 << 10;
 pub(crate) const NBD_STATUS_LEN: u64 = 1 << 20;
+pub(crate) const NBD_EXTENTS_SHIFT: u64 = 1;
+
+/// The extents of the image source over the first status window, shifted so
+/// that the first and the last piece are cut by the window.
+pub(crate) async fn nbd_extents<S>(client: Client<S>) -> (Client<S>, Result<Vec<ImageExtent>>)
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    let window = NBD_STATUS_LEN
+        .min(client.size())
+        .saturating_sub(NBD_EXTENTS_SHIFT);
+    let mut source = NbdSource::new(client);
+    let found = source.extents(NBD_EXTENTS_SHIFT, window).await;
+    (source.into_client(), found)
+}
 
 pub(crate) fn nbd_limits() -> NbdLimits {
     NbdLimits {
@@ -520,7 +535,9 @@ impl AsyncWrite for Scripted<'_> {
 }
 
 /// The bytes a hostile server sends: the client either refuses them or reads
-/// what they say, and never holds more than the replies it may accept.
+/// what they say, and never holds more than the replies it may accept. The
+/// extents of the image source, which join the allocation and dirty replies,
+/// are driven on top of the client too.
 pub fn nbd_client(data: &[u8]) {
     nbd_runtime().block_on(async {
         let stream = Scripted {
@@ -537,6 +554,7 @@ pub fn nbd_client(data: &[u8]) {
             let _ = client
                 .block_status(0, NBD_STATUS_LEN.min(size) as u32)
                 .await;
+            client = nbd_extents(client).await.0;
         }
         let _ = client.disconnect().await;
     });

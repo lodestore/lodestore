@@ -536,12 +536,15 @@ pub struct InstanceSnapshot {
     pub parent: Option<BlobId>,
     pub disk_size: Option<u64>,
     pub binding: Option<BitmapBinding>,
-    /// The snapshot records a bitmap binding that does not parse; decide counts it as a fork.
+    /// The snapshot records a bitmap binding that does not parse, or its source
+    /// record names the instance but does not decode; decide counts it as a fork.
     pub binding_unreadable: bool,
 }
 
 /// The snapshots whose claim is `key` and whose manifest host is `hostname`,
-/// in the order given.
+/// in the order given. A snapshot of this host whose source record names the
+/// instance but does not decode stays in the list as unreadable; one that
+/// names anything else is not ours and is skipped.
 pub fn instance_snapshots(
     entries: &[SnapshotEntry],
     key: &SourceKey,
@@ -552,13 +555,29 @@ pub fn instance_snapshots(
         .iter()
         .filter_map(|entry| {
             let snapshot = &entry.snapshot;
-            let (claimed, meta) = crate::source::decode(snapshot.source.as_ref()).ok()?;
-            if &claimed != key || snapshot.hostname != hostname {
+            if snapshot.hostname != hostname {
+                return None;
+            }
+            let parent = BlobId::try_from(snapshot.parent.as_slice()).ok();
+            let Ok((claimed, meta)) = crate::source::decode(snapshot.source.as_ref()) else {
+                let names_us = snapshot
+                    .source
+                    .as_ref()
+                    .is_some_and(|s| s.key == key.as_str());
+                return names_us.then_some(InstanceSnapshot {
+                    id: entry.id,
+                    parent,
+                    disk_size: None,
+                    binding: None,
+                    binding_unreadable: true,
+                });
+            };
+            if &claimed != key {
                 return None;
             }
             Some(InstanceSnapshot {
                 id: entry.id,
-                parent: BlobId::try_from(snapshot.parent.as_slice()).ok(),
+                parent,
                 disk_size: disk
                     .as_deref()
                     .and_then(|d| ImageMeta::from_meta(&meta, d).ok())
@@ -854,7 +873,7 @@ fn check_segment(node: &pb::Node) -> Result<()> {
 }
 
 impl ImageLayout {
-    /// One entry per chunk of the image; a layout whose ids do not fill its
+    /// One entry per chunk of the image; a layout whose ids do not match its
     /// extents is an error, never a table with zero chunks in their place.
     pub fn chunk_table(&self) -> Result<Vec<ChunkRef>> {
         let total = usize::try_from(self.size.div_ceil(IMAGE_CHUNK_SIZE))
@@ -878,6 +897,9 @@ impl ImageLayout {
                         .ok_or_else(|| bad("a chunk lies outside the image"))?;
                     *slot = ChunkRef::Data(id);
                 }
+            }
+            if ids.next().is_some() {
+                return Err(bad("a segment has more chunk ids than chunks"));
             }
         }
         Ok(table)

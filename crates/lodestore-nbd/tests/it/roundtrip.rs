@@ -1,5 +1,5 @@
 use lodestore_nbd::wire::{EINVAL, EIO, STATE_DIRTY, STATE_HOLE, STATE_ZERO};
-use lodestore_nbd::{Client, Descriptor, Error, Limits, MemExport, NbdUri, serve};
+use lodestore_nbd::{BlockSize, Client, Descriptor, Error, Limits, MemExport, NbdUri, serve};
 use tokio::io::{DuplexStream, duplex};
 
 const K: u64 = 1024;
@@ -146,6 +146,32 @@ async fn nbd_min_block_refuses_unaligned_requests() {
         assert_eq!(c.read(8192, 4096).await.unwrap().len(), 4096);
     })
     .await;
+}
+
+#[tokio::test]
+async fn nbd_block_max_below_the_min_block_is_raised_to_it() {
+    let mut export = MemExport::new(pattern(M)).min_block(4096);
+    let (c, s) = duplex(64 << 10);
+    let server_limits = Limits {
+        max_read: 512,
+        ..Limits::default()
+    };
+    let server = serve(s, &mut export, &server_limits);
+    let client = async {
+        let mut client = Client::handshake(c, "", &[], Limits::default())
+            .await
+            .unwrap();
+        let block = BlockSize {
+            min: 4096,
+            preferred: 4096,
+            max: 4096,
+        };
+        assert_eq!(client.block_size(), block);
+        assert_eq!(client.read(0, 4096).await.unwrap().len(), 4096);
+        client.disconnect().await.unwrap();
+    };
+    let (served, ()) = tokio::join!(server, client);
+    served.unwrap();
 }
 
 #[tokio::test]
