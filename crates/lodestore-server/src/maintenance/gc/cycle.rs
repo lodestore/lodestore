@@ -26,7 +26,7 @@ use lodestore_format::locks::{
     new_lock_id, publish_gc_manifest, read_gc_locks, read_writer_locks, writer_done_key,
 };
 use lodestore_format::pack::pack_object_key;
-use lodestore_format::store::{BlobDelete, BlobPurge, BlobStore, Store, put_named};
+use lodestore_format::store::{BlobDelete, BlobError, BlobPurge, BlobStore, Store, put_named};
 use lodestore_format::verify_snapshot::verify_shard;
 use lodestore_policy::{format_duration, format_size};
 use sqlx::Row;
@@ -49,6 +49,7 @@ use crate::state::AppState;
 const PACKS_PREFIX: &str = "packs/";
 const PROGRESS_PERIOD: Duration = Duration::from_secs(1);
 const CLOCK_TOLERANCE_MS: i64 = 5 * 60 * 1000;
+const TMP_MIN_AGE_MS: i64 = 24 * 60 * 60 * 1000;
 const INDEX_PREFIX: &str = "index/";
 const SWEPT_PREFIXES: [&str; 4] = [PACKS_PREFIX, INDEX_PREFIX, "snapshots/", LOCKS_PREFIX];
 
@@ -527,6 +528,7 @@ async fn mark_and_repack(
     if plan.delete.is_empty() && plan.repack.is_empty() && oversized == 0 {
         let older_than = now_ms.saturating_sub(cycle.settings.pause_ms);
         let swept = sweep_hidden(state, &cycle.id, &source.store, older_than).await?;
+        sweep_stale_tmp(state, &cycle.id, &source.store, older_than, now_ms).await?;
         let mut report = report;
         report.summary.bytes_freed = swept.bytes_freed;
         apply_locked(state, cycle, &mut report, &swept).await;
@@ -1046,6 +1048,47 @@ async fn sweep_hidden(
     Ok(SweepOutcome::default())
 }
 
+/// Removes the leftovers of interrupted uploads from an SFTP store's `tmp/`.
+/// Their times come from the SFTP server's clock, not ours, so only entries
+/// older than the pause and than a day go: a live upload is never that old,
+/// and a wrong clock on the other side cannot make it look so.
+async fn sweep_stale_tmp(
+    state: &AppState,
+    cycle_id: &str,
+    store: &Store,
+    pause_start_ms: i64,
+    now_ms: i64,
+) -> anyhow::Result<()> {
+    let Store::Sftp(sftp) = store else {
+        return Ok(());
+    };
+    let cutoff = pause_start_ms.min(now_ms.saturating_sub(TMP_MIN_AGE_MS));
+    let mut removed = 0usize;
+    for key in sftp.stale_tmp(cutoff).await? {
+        match store.delete(&key).await {
+            Ok(()) => removed += 1,
+            Err(BlobError::NotFound) => {}
+            Err(BlobError::Denied { message }) => bail!(
+                "The storage refused to remove the abandoned upload {key}: {message}. \
+                 The server's SFTP user must be allowed to delete files in tmp/."
+            ),
+            Err(error) => return Err(error).with_context(|| format!("removing {key}")),
+        }
+    }
+    if removed > 0 {
+        tracing::info!(removed, "removed abandoned uploads from tmp/");
+        event(
+            state,
+            cycle_id,
+            "info",
+            "tmp_swept",
+            &format!("Removed {removed} abandoned upload(s) from tmp/."),
+        )
+        .await;
+    }
+    Ok(())
+}
+
 async fn sweeping(state: &AppState, cycle: &CycleRow, now_ms: i64) -> anyhow::Result<StepOutcome> {
     let gc_id = cycle_gc_id(cycle)?;
     let source = open_repository(state, &cycle.repository_id).await?;
@@ -1094,6 +1137,7 @@ async fn sweeping(state: &AppState, cycle: &CycleRow, now_ms: i64) -> anyhow::Re
 
     let older_than = now_ms.saturating_sub(cycle.settings.pause_ms);
     swept.merge(sweep_hidden(state, &cycle.id, store, older_than).await?);
+    sweep_stale_tmp(state, &cycle.id, store, older_than, now_ms).await?;
     state.readers.invalidate(&cycle.repository_id);
     if let Some(published) = marker.as_ref().and_then(|m| m.modified_ms) {
         let locks = read_writer_locks(store, source.keys.k_idx(), source.keys.repo_id()).await?;
