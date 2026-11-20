@@ -39,12 +39,12 @@ impl client::Handler for AnyHost {
 
 /// An SFTP session opened by hand with a test user's key, so a request the
 /// store would never send can be sent.
-struct Attacker {
-    sftp: SftpSession,
+pub(super) struct Attacker {
+    pub(super) sftp: SftpSession,
     _handle: Handle<AnyHost>,
 }
 
-async fn attacker(sshd: &SshdServer, user: SshUser) -> Attacker {
+pub(super) async fn attacker(sshd: &SshdServer, user: SshUser) -> Attacker {
     let key = PrivateKey::from_openssh(sshd.private_key(user).trim()).unwrap();
     let mut handle = client::connect(Arc::default(), sshd.endpoint(), AnyHost)
         .await

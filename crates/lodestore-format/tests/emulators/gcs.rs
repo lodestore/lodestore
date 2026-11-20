@@ -1,7 +1,7 @@
 use lodestore_format::store::{RepoLocation, Store};
 use lodestore_testkit::gcs::FakeGcsServer;
 
-fn store(gcs: &FakeGcsServer, bucket: &str) -> Store {
+pub(super) fn store(gcs: &FakeGcsServer, bucket: &str) -> Store {
     RepoLocation::new(
         "gcs",
         [
