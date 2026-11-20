@@ -42,5 +42,5 @@ Backrest is a web-accessible backup solution built on top of restic: a web inter
 |---------|----------|---------------|
 | AWS S3 and S3-compatible storage | Yes | Yes |
 | Local folder | Yes | Yes, the agent can delete in it |
-| SFTP, Azure Blob Storage, Google Cloud Storage | Yes | Not yet, see the [roadmap](/roadmap/) |
+| SFTP, Azure Blob Storage, Google Cloud Storage | Yes | Yes from the next release; each backend reports what a host can do to its backups, see [Storage backends](/docs/reference/storage/) |
 | Other services through rclone | Yes | Not in 0.2 |
