@@ -287,7 +287,11 @@ impl ProbeReport {
     }
 
     fn set_blob_error(&mut self, id: CheckId, status: CheckStatus, prefix: &str, e: &BlobError) {
-        self.set(id, status, Some(format!("{prefix}{}", message(e))));
+        let text = match e {
+            BlobError::HostKeyMismatch { .. } => e.to_string(),
+            _ => message(e).to_string(),
+        };
+        self.set(id, status, Some(format!("{prefix}{text}")));
         let i = CHECK_ORDER
             .iter()
             .position(|c| *c == id)
@@ -690,6 +694,22 @@ async fn overwritten(server: &Store, agent: &Store, key: &str) -> KeyVerdict {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_typed_host_key_change_reaches_the_error() {
+        let mut r = ProbeReport::new(false);
+        let changed = BlobError::HostKeyMismatch {
+            pinned: "SHA256:pinned".into(),
+            offered: "SHA256:offered".into(),
+        };
+        r.set_blob_error(CheckId::Write, CheckStatus::Fail, "", &changed);
+        assert_eq!(r.check(CheckId::Write).error, Some(changed.to_string()));
+
+        let hostile = BlobError::backend("the SFTP server's host key changed: pinned <a href=x>");
+        r.set_blob_error(CheckId::List, CheckStatus::Fail, "", &hostile);
+        let error = r.check(CheckId::List).error.clone().unwrap_or_default();
+        assert!(!error.contains("host key"), "{error}");
+    }
 
     fn report_at(level: GuaranteeLevel) -> ProbeReport {
         let mut r = ProbeReport::new(false);

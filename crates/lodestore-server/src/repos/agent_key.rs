@@ -3,7 +3,7 @@ use axum::extract::{Path, State};
 use lodestore_format::store::probe::{CheckId, CheckStatus, GuaranteeLevel, ProbeReport};
 use lodestore_proto::agent::v1::server_message::Body;
 use lodestore_proto::agent::v1::{S3Credentials, ServerMessage, UpdateS3Credentials};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tracing::Instrument;
 use utoipa::ToSchema;
 use utoipa_axum::router::OpenApiRouter;
@@ -29,6 +29,13 @@ pub struct GuaranteeState {
     /// The level the user accepted; it rises on its own only when a check measures a higher one.
     pub guarantee_accepted: String,
     pub guarantee_checked_at: Option<i64>,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct AcceptGuarantee {
+    /// The measured level the user was shown; the accept is refused when the
+    /// stored level is another one by now.
+    pub expected_level: String,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -103,12 +110,14 @@ fn guarantee_write(
 ) -> Result<Option<db::GuaranteeWrite>, ApiError> {
     let measured =
         GuaranteeLevel::parse(&result.guarantee_level).unwrap_or(GuaranteeLevel::Unchecked);
+    let read_accepted = accepted.to_string();
     let accepted = GuaranteeLevel::parse(accepted).unwrap_or(GuaranteeLevel::Unchecked);
     if measured == GuaranteeLevel::Unchecked {
         return Ok(credentials_changed.then(|| db::GuaranteeWrite {
             level: measured.as_str().to_string(),
             notes_json: "[]".to_string(),
             accepted: accepted.as_str().to_string(),
+            read_accepted,
         }));
     }
     Ok(Some(db::GuaranteeWrite {
@@ -116,7 +125,24 @@ fn guarantee_write(
         notes_json: serde_json::to_string(&result.guarantee_notes)
             .map_err(|e| ApiError::Internal(e.into()))?,
         accepted: next_accepted(accepted, measured).as_str().to_string(),
+        read_accepted,
     }))
+}
+
+const GUARANTEE_ATTEMPTS: usize = 5;
+
+fn accept_race() -> ApiError {
+    ApiError::Conflict(
+        "The accepted level kept changing while the check was stored. Check the repository again."
+            .into(),
+    )
+}
+
+async fn accepted_now(state: &AppState, id: &str) -> Result<String, ApiError> {
+    Ok(db::find_repository(state, id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("repository not found".into()))?
+        .guarantee_accepted)
 }
 
 async fn probe_new_key(
@@ -185,19 +211,24 @@ pub(crate) async fn recheck_repository(
     let result = to_result(&report);
     let checks_json =
         serde_json::to_string(&result.checks).map_err(|e| ApiError::Internal(e.into()))?;
-    let accepted = db::find_repository(state, id)
-        .await?
-        .ok_or_else(|| ApiError::NotFound("repository not found".into()))?
-        .guarantee_accepted;
-    let write = guarantee_write(&result, &accepted, false)?;
-    db::update_checks(
-        state,
-        id,
-        &checks_json,
-        &result.agent_key_state,
-        write.as_ref(),
-    )
-    .await?;
+    let mut stored = false;
+    for _ in 0..GUARANTEE_ATTEMPTS {
+        let write = guarantee_write(&result, &accepted_now(state, id).await?, false)?;
+        stored = db::update_checks(
+            state,
+            id,
+            &checks_json,
+            &result.agent_key_state,
+            write.as_ref(),
+        )
+        .await?;
+        if stored {
+            break;
+        }
+    }
+    if !stored {
+        return Err(accept_race());
+    }
     if let Err(error) = crate::catalog::open_repository(state, id).await {
         tracing::warn!(repository_id = %id, error = %format!("{error:#}"), "repository is not available");
     }
@@ -281,9 +312,21 @@ async fn replace_key(
         None => checks.push(fresh),
     }
     let checks_json = serde_json::to_string(&checks).map_err(|e| ApiError::Internal(e.into()))?;
-    let guarantee = guarantee_write(&to_result(&report), &row.guarantee_accepted, true)?
-        .expect("a credential change always writes a level");
-    db::replace_agent_creds(&state, &id, &key, state_name, &checks_json, &guarantee).await?;
+    let mut accepted = row.guarantee_accepted;
+    let mut stored = false;
+    for _ in 0..GUARANTEE_ATTEMPTS {
+        let guarantee = guarantee_write(&to_result(&report), &accepted, true)?
+            .expect("a credential change always writes a level");
+        stored = db::replace_agent_creds(&state, &id, &key, state_name, &checks_json, &guarantee)
+            .await?;
+        if stored {
+            break;
+        }
+        accepted = accepted_now(&state, &id).await?;
+    }
+    if !stored {
+        return Err(accept_race());
+    }
 
     let unavailable = matches!(
         crate::catalog::open_repository(&state, &id).await,
@@ -327,33 +370,41 @@ async fn replace_key(
     post,
     tag = "Repositories",
     summary = "Accept the measured level",
-    description = "Makes the level the last check measured the accepted one.",
+    description = "Makes the level the last check measured the accepted one, provided it is still \
+        `expected_level`, the level the user was shown.",
     security(("session" = [], "csrf" = [])),
     path = "/api/v1/repositories/{id}/guarantee/accept",
     params(("id" = String, Path, description = "Repository id")),
+    request_body = AcceptGuarantee,
     responses(
         (status = 200, description = "The measured level is now the accepted one", body = GuaranteeState),
         (status = 404, description = "Unknown repository", body = ErrorBody),
-        (status = 409, description = "No level was measured, so there is nothing to accept", body = ErrorBody),
+        (status = 409, description = "No level was measured, or the measured level is no longer `expected_level`", body = ErrorBody),
     )
 )]
 async fn accept_guarantee(
     State(state): State<AppState>,
     _user: AuthUser,
     Path(id): Path<String>,
+    Json(body): Json<AcceptGuarantee>,
 ) -> Result<Json<GuaranteeState>, ApiError> {
     if db::find_repository(&state, &id).await?.is_none() {
         return Err(ApiError::NotFound("repository not found".into()));
     }
-    if !db::accept_measured_guarantee(&state, &id).await? {
-        return Err(ApiError::Conflict(
-            "Nothing was measured, so there is no level to accept. Check the repository again."
-                .into(),
-        ));
-    }
+    let accepted = db::accept_measured_guarantee(&state, &id, &body.expected_level).await?;
     let row = db::find_repository(&state, &id)
         .await?
         .ok_or_else(|| ApiError::NotFound("repository not found".into()))?;
+    if !accepted {
+        return Err(ApiError::Conflict(if row.guarantee_level == "unchecked" {
+            "Nothing was measured, so there is no level to accept. Check the repository again."
+                .into()
+        } else {
+            "The measured level has changed since it was shown. Review the new level and accept \
+             it again."
+                .into()
+        }));
+    }
     Ok(Json(GuaranteeState {
         guarantee_level: row.guarantee_level,
         guarantee_accepted: row.guarantee_accepted,

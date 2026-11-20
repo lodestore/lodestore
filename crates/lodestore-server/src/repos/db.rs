@@ -346,20 +346,25 @@ pub async fn active_hosts(state: &AppState) -> anyhow::Result<HashMap<String, i6
     .collect()
 }
 
-/// A measured level to store, with the accepted level already decided.
+/// A measured level to store, with the accepted level already decided from
+/// `read_accepted`, the accepted level stored when the decision was made.
 pub struct GuaranteeWrite {
     pub level: String,
     pub notes_json: String,
     pub accepted: String,
+    pub read_accepted: String,
 }
 
+/// Stores a check. With a level, nothing is written and false is returned
+/// when the accepted level is no longer `read_accepted`: someone accepted a
+/// level meanwhile, and the caller decides again from the new value.
 pub async fn update_checks(
     state: &AppState,
     id: &str,
     checks_json: &str,
     agent_key_state: &str,
     guarantee: Option<&GuaranteeWrite>,
-) -> anyhow::Result<i64> {
+) -> anyhow::Result<bool> {
     let at = now_ms();
     match guarantee {
         None => {
@@ -375,10 +380,10 @@ pub async fn update_checks(
             .await?;
         }
         Some(g) => {
-            sqlx::query(
+            let done = sqlx::query(
                 "UPDATE repositories SET checks_json = $1, agent_key_state = $2, checked_at = $3, \
                  guarantee_level = $4, guarantee_notes_json = $5, guarantee_accepted = $6, \
-                 guarantee_checked_at = $3 WHERE id = $7",
+                 guarantee_checked_at = $3 WHERE id = $7 AND guarantee_accepted = $8",
             )
             .bind(checks_json)
             .bind(agent_key_state)
@@ -387,20 +392,28 @@ pub async fn update_checks(
             .bind(&g.notes_json)
             .bind(&g.accepted)
             .bind(id)
+            .bind(&g.read_accepted)
             .execute(&state.db.pool)
             .await?;
+            return Ok(done.rows_affected() > 0);
         }
     }
-    Ok(at)
+    Ok(true)
 }
 
-/// Makes the measured level the accepted one; false when there is none to accept.
-pub async fn accept_measured_guarantee(state: &AppState, id: &str) -> anyhow::Result<bool> {
+/// Makes the measured level the accepted one when it is still `expected`;
+/// false when there is none to accept or it is another level by now.
+pub async fn accept_measured_guarantee(
+    state: &AppState,
+    id: &str,
+    expected: &str,
+) -> anyhow::Result<bool> {
     let done = sqlx::query(
         "UPDATE repositories SET guarantee_accepted = guarantee_level \
-         WHERE id = $1 AND guarantee_level <> 'unchecked'",
+         WHERE id = $1 AND guarantee_level <> 'unchecked' AND guarantee_level = $2",
     )
     .bind(id)
+    .bind(expected)
     .execute(&state.db.pool)
     .await?;
     Ok(done.rows_affected() > 0)
@@ -493,6 +506,8 @@ pub async fn server_access(state: &AppState, id: &str) -> anyhow::Result<ServerA
 
 /// Swaps the sealed agent key for a new one in one transaction and records
 /// the outcome of the check that approved it, including the level it measured.
+/// Changes nothing and returns false when the accepted level is no longer
+/// `read_accepted`, as [`update_checks`] does.
 pub async fn replace_agent_creds(
     state: &AppState,
     id: &str,
@@ -500,7 +515,7 @@ pub async fn replace_agent_creds(
     agent_key_state: &str,
     checks_json: &str,
     guarantee: &GuaranteeWrite,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     let mut tx = state.db.pool.begin().await?;
     let old = sqlx::query("SELECT agent_creds_secret_id FROM repositories WHERE id = $1")
         .bind(id)
@@ -512,10 +527,11 @@ pub async fn replace_agent_creds(
         .sealer
         .put_secret_on(&mut tx, "repo-agent-creds", &agent_json(key)?)
         .await?;
-    sqlx::query(
+    let done = sqlx::query(
         "UPDATE repositories SET agent_creds_secret_id = $1, agent_key_state = $2, \
          checks_json = $3, checked_at = $4, guarantee_level = $5, guarantee_notes_json = $6, \
-         guarantee_accepted = $7, guarantee_checked_at = $4 WHERE id = $8",
+         guarantee_accepted = $7, guarantee_checked_at = $4 WHERE id = $8 \
+         AND guarantee_accepted = $9",
     )
     .bind(new)
     .bind(agent_key_state)
@@ -525,8 +541,12 @@ pub async fn replace_agent_creds(
     .bind(&guarantee.notes_json)
     .bind(&guarantee.accepted)
     .bind(id)
+    .bind(&guarantee.read_accepted)
     .execute(&mut *tx)
     .await?;
+    if done.rows_affected() == 0 {
+        return Ok(false);
+    }
     if let Some(old) = old {
         sqlx::query("DELETE FROM secrets WHERE id = $1")
             .bind(old)
@@ -534,5 +554,5 @@ pub async fn replace_agent_creds(
             .await?;
     }
     tx.commit().await?;
-    Ok(())
+    Ok(true)
 }

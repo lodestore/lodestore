@@ -5460,7 +5460,7 @@
           "Repositories"
         ],
         "summary": "Accept the measured level",
-        "description": "Makes the level the last check measured the accepted one.",
+        "description": "Makes the level the last check measured the accepted one, provided it is still `expected_level`, the level the user was shown.",
         "operationId": "accept_guarantee",
         "parameters": [
           {
@@ -5473,6 +5473,16 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AcceptGuarantee"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "description": "The measured level is now the accepted one",
@@ -5495,7 +5505,7 @@
             }
           },
           "409": {
-            "description": "No level was measured, so there is nothing to accept",
+            "description": "No level was measured, or the measured level is no longer `expected_level`",
             "content": {
               "application/json": {
                 "schema": {
@@ -6608,6 +6618,18 @@
   },
   "components": {
     "schemas": {
+      "AcceptGuarantee": {
+        "type": "object",
+        "required": [
+          "expected_level"
+        ],
+        "properties": {
+          "expected_level": {
+            "type": "string",
+            "description": "The measured level the user was shown; the accept is refused when the\nstored level is another one by now."
+          }
+        }
+      },
       "Account": {
         "type": "object",
         "required": [

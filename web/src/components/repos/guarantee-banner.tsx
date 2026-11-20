@@ -51,20 +51,27 @@ export function GuaranteeBanner({
 }) {
 	const queryClient = useQueryClient();
 	const [error, setError] = useState<string>();
+	const refetch = () =>
+		Promise.all([
+			queryClient.invalidateQueries({
+				queryKey: getGetRepositoryQueryKey(repository.id),
+			}),
+			queryClient.invalidateQueries({
+				queryKey: getListRepositoriesQueryKey(),
+			}),
+		]);
 	const accept = useAcceptGuarantee({
 		mutation: {
 			onMutate: () => setError(undefined),
-			onError: (e) =>
-				setError(copy.errors.submit(copy.guarantee.acceptFailed, e.message)),
-			onSuccess: () =>
-				Promise.all([
-					queryClient.invalidateQueries({
-						queryKey: getGetRepositoryQueryKey(repository.id),
-					}),
-					queryClient.invalidateQueries({
-						queryKey: getListRepositoriesQueryKey(),
-					}),
-				]),
+			onError: (e) => {
+				if (e.status === 409) {
+					setError(copy.guarantee.levelChanged);
+					void refetch();
+					return;
+				}
+				setError(copy.errors.submit(copy.guarantee.acceptFailed, e.message));
+			},
+			onSuccess: refetch,
 		},
 	});
 	const kind = guaranteeBannerKind(repository);
@@ -109,7 +116,12 @@ export function GuaranteeBanner({
 							variant="outline"
 							className="text-foreground"
 							disabled={accept.isPending}
-							onClick={() => accept.mutate({ id: repository.id })}
+							onClick={() =>
+								accept.mutate({
+									id: repository.id,
+									data: { expected_level: repository.guarantee_level },
+								})
+							}
 						>
 							{accept.isPending && <Spinner />}
 							{accept.isPending

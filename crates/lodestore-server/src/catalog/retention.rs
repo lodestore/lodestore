@@ -273,6 +273,17 @@ pub async fn forget_snapshot(
         .await?
         .with_context(|| format!("snapshot {hex} is not in the catalog"))?;
     let source = open_repository(state, repository_id).await?;
+    // Recorded before the delete: on a store that only hides objects, cleanup
+    // tells the server's hide markers from anyone else's by this row.
+    sqlx::query(
+        "INSERT INTO forgotten_snapshots (id, repository_id, forgotten_at) \
+         VALUES ($1, $2, $3) ON CONFLICT (repository_id, id) DO NOTHING",
+    )
+    .bind(&hex)
+    .bind(repository_id)
+    .bind(now_ms())
+    .execute(&state.db.pool)
+    .await?;
     match source.store.delete(&snapshot_object_key(&id)).await {
         Ok(()) | Err(BlobError::NotFound) => {
             drop_row(state, repository_id, &hex).await?;
