@@ -251,6 +251,46 @@ async fn agent_material_gcs_never_uses_ambient_credentials() {
     ts.stop().await;
 }
 
+/// Asserts that `secret` reached neither the stored location nor the
+/// repository detail, while both the agent and the server still receive it.
+async fn assert_sealed(ts: &TestServer, api: &Api, id: &str, option: &str, secret: &str) {
+    let stored = stored_location(ts, id).await;
+    assert!(stored.get(option).is_none(), "{stored}");
+    let row = sqlx::query("SELECT location_json FROM repositories WHERE id = $1")
+        .bind(id)
+        .fetch_one(&ts.state().db.pool)
+        .await
+        .unwrap();
+    assert!(!row.get::<String, _>("location_json").contains(secret));
+    for path in [
+        format!("/api/v1/repositories/{id}"),
+        "/api/v1/repositories".to_string(),
+    ] {
+        let response = api.get(&path).await;
+        assert_eq!(response.status(), 200);
+        let text = response.text().await.unwrap();
+        assert!(!text.contains(secret), "{path}: {text}");
+    }
+    let material = writer_material(ts.state(), id).await.unwrap();
+    assert_eq!(material.location.options[option], secret);
+    let access = server_access(ts.state(), id).await.unwrap();
+    assert_eq!(access.location.options[option], secret);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn agent_material_gcs_token_is_sealed() {
+    let gcs = FakeGcsServer::start().await;
+    gcs.create_bucket("sealed").await;
+    let ts = TestServer::start(&Backend::Sqlite).await;
+    let api = ts.api().await;
+
+    let token = "ya29.SECRET-GCS-ACCESS-TOKEN";
+    let id = create(&api, &gcs_draft(&gcs, "sealed", json!({ "token": token }))).await;
+    assert_sealed(&ts, &api, &id, "token", token).await;
+    ts.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
 async fn agent_material_shared_credentials_cap_the_level() {
