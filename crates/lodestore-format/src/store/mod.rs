@@ -469,6 +469,33 @@ pub fn open_url(url: &str) -> Result<Store> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn sweeps_delete_markers_is_false_only_for_b2() {
+        let s3 = |provider| {
+            Store::S3(
+                S3Store::with_options(
+                    &S3Options {
+                        endpoint: Some("http://127.0.0.1:9".into()),
+                        bucket: "b".into(),
+                        prefix: String::new(),
+                        region: "us-east-1".into(),
+                        virtual_host_style: false,
+                        provider,
+                    },
+                    None,
+                )
+                .unwrap(),
+            )
+        };
+        assert!(s3(S3Provider::Default).sweeps_delete_markers());
+        assert!(s3(S3Provider::Default).conditional_write_supported());
+        assert!(!s3(S3Provider::B2).sweeps_delete_markers());
+        assert!(!s3(S3Provider::B2).conditional_write_supported());
+        let dir = tempfile::tempdir().unwrap();
+        let local = Store::Local(LocalFsStore::new(dir.path().to_path_buf()));
+        assert!(local.sweeps_delete_markers());
+    }
+
     struct Generous(Bytes);
 
     impl BlobStore for Generous {

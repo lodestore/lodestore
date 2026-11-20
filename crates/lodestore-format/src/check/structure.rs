@@ -22,6 +22,7 @@ use crate::pack::{pack_object_key, parse_entries};
 use crate::pb;
 use crate::reader::{Reader, ReaderCache};
 use crate::snapshot::{MAX_SNAPSHOT_SIZE, SNAPSHOT_PREFIX, open_snapshot, snapshot_object_key};
+use crate::store::probe::is_probe_key;
 use crate::store::{BlobError, BlobStore, ListEntry, read_bounded};
 use crate::tree::{MAX_DEPTH, TreeBudget, count_tree_nodes, decode_tree};
 
@@ -555,6 +556,9 @@ async fn check_with_budget<S: BlobStore>(
     );
     let mut snapshots = Vec::new();
     for entry in snapshot_objects {
+        if is_probe_key(&entry.key) {
+            continue;
+        }
         let id = entry
             .key
             .strip_prefix(SNAPSHOT_PREFIX)

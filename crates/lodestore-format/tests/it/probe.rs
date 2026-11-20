@@ -566,6 +566,82 @@ async fn probe_s3_deleting_agent_on_a_versioned_bucket_is_host_can() {
     assert_eq!(report.weaknesses, [Weakness::AgentCanDelete]);
 }
 
+#[tokio::test]
+async fn probe_leaves_no_versions_behind_on_a_versioned_bucket() {
+    let (minio, root, write_only) = versioned_minio_with_user(None).await;
+    let (key, secret) = minio.root_credentials();
+    let deleting = s3_store(&minio, &key, &secret);
+    for agent in [&write_only, &deleting] {
+        let report = probe(&root, AgentProbe::Store(agent)).await;
+        assert!(!report.blocking());
+        let left = minio
+            .mc(&[
+                "ls",
+                "--versions",
+                "--recursive",
+                "--json",
+                &format!("lode/{BUCKET}"),
+            ])
+            .await
+            .unwrap();
+        assert!(left.trim().is_empty(), "{left}");
+    }
+}
+
+#[tokio::test]
+async fn probe_names_are_ignored_by_readers() {
+    use lodestore_format::check::structure::check_structure;
+    use lodestore_format::snapshot::list_snapshots;
+    use lodestore_format::store::probe::PROBE_PREFIXES;
+
+    let fx = crate::gc_support::Fx::new().await;
+    let outcome = fx.backup("a", &[("one", 1, 200 << 10)]).await;
+    let packs_before = fx.packs().await.len();
+    for prefix in PROBE_PREFIXES {
+        fx.store
+            .put_if_absent(&format!("{prefix}x"), Bytes::from_static(b"junk"))
+            .await
+            .unwrap();
+    }
+
+    let listed = list_snapshots(&fx.store, fx.repo.read_keys())
+        .await
+        .unwrap();
+    assert_eq!(listed.entries.len(), 1);
+    assert_eq!(listed.entries[0].id, outcome.snapshot_id);
+    assert!(listed.skipped.is_empty(), "{:?}", listed.skipped);
+
+    fx.assert_all_restore().await;
+
+    let report = check_structure(
+        &fx.store,
+        fx.repo.read_keys(),
+        fx.repo.config(),
+        &|_, _, _| {},
+    )
+    .await
+    .unwrap();
+    assert!(report.findings.is_empty(), "{:?}", report.findings);
+    assert!(report.notes.is_empty(), "{:?}", report.notes);
+
+    let rebuilt = rebuild_index(&fx.store, fx.repo.read_keys(), &|_, _| {})
+        .await
+        .unwrap();
+    assert_eq!(rebuilt.packs_scanned, 0);
+    assert!(
+        rebuilt.packs_skipped.is_empty(),
+        "{:?}",
+        rebuilt.packs_skipped
+    );
+    assert_eq!(fx.packs().await.len(), packs_before + 1);
+
+    let survey = fx.survey(50).await;
+    assert!(survey.ignored.is_empty(), "{:?}", survey.ignored);
+    assert!(survey.quarantined.is_empty());
+    assert_eq!(survey.snapshots, [outcome.snapshot_id]);
+    assert!(!format!("{:?}", survey.plan).contains("probe-"));
+}
+
 #[test]
 fn opendal_unknown_scheme_rejected() {
     let err = OpendalStore::open("nosuchbackend", &BTreeMap::new()).unwrap_err();

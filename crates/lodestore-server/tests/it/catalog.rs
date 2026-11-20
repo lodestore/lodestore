@@ -395,6 +395,25 @@ async fn catalog_skips_unreadable_objects() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn catalog_ignores_probe_names() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let host = enroll(&ts, &api, &repo, "host-a", "a").await;
+        write_snapshot(&ts, "main", "host-a", &[]).await;
+        let dir = ts.local_repo_root("main").join("snapshots");
+        std::fs::write(dir.join("probe-x"), b"left by a capability probe").unwrap();
+
+        let report = sync(&api, &repo).await;
+        assert_eq!(report["added"], 1, "[{}]", backend.name());
+        assert_eq!(report["skipped"], 0);
+        assert_eq!(host_snapshots(&api, &host).await.len(), 1);
+        ts.stop().await;
+    }
+}
+
 const PAST_MS: i64 = 1_767_323_045_000;
 
 fn set_mtime(ts: &TestServer, name: &str, id: &str, ms: i64) {
