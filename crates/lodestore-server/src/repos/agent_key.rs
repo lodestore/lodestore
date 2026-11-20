@@ -110,12 +110,14 @@ fn guarantee_write(
 ) -> Result<Option<db::GuaranteeWrite>, ApiError> {
     let measured =
         GuaranteeLevel::parse(&result.guarantee_level).unwrap_or(GuaranteeLevel::Unchecked);
+    let read_accepted = accepted.to_string();
     let accepted = GuaranteeLevel::parse(accepted).unwrap_or(GuaranteeLevel::Unchecked);
     if measured == GuaranteeLevel::Unchecked {
         return Ok(credentials_changed.then(|| db::GuaranteeWrite {
             level: measured.as_str().to_string(),
             notes_json: "[]".to_string(),
             accepted: accepted.as_str().to_string(),
+            read_accepted,
         }));
     }
     Ok(Some(db::GuaranteeWrite {
@@ -123,7 +125,24 @@ fn guarantee_write(
         notes_json: serde_json::to_string(&result.guarantee_notes)
             .map_err(|e| ApiError::Internal(e.into()))?,
         accepted: next_accepted(accepted, measured).as_str().to_string(),
+        read_accepted,
     }))
+}
+
+const GUARANTEE_ATTEMPTS: usize = 5;
+
+fn accept_race() -> ApiError {
+    ApiError::Conflict(
+        "The accepted level kept changing while the check was stored. Check the repository again."
+            .into(),
+    )
+}
+
+async fn accepted_now(state: &AppState, id: &str) -> Result<String, ApiError> {
+    Ok(db::find_repository(state, id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("repository not found".into()))?
+        .guarantee_accepted)
 }
 
 async fn probe_new_key(
@@ -192,19 +211,24 @@ pub(crate) async fn recheck_repository(
     let result = to_result(&report);
     let checks_json =
         serde_json::to_string(&result.checks).map_err(|e| ApiError::Internal(e.into()))?;
-    let accepted = db::find_repository(state, id)
-        .await?
-        .ok_or_else(|| ApiError::NotFound("repository not found".into()))?
-        .guarantee_accepted;
-    let write = guarantee_write(&result, &accepted, false)?;
-    db::update_checks(
-        state,
-        id,
-        &checks_json,
-        &result.agent_key_state,
-        write.as_ref(),
-    )
-    .await?;
+    let mut stored = false;
+    for _ in 0..GUARANTEE_ATTEMPTS {
+        let write = guarantee_write(&result, &accepted_now(state, id).await?, false)?;
+        stored = db::update_checks(
+            state,
+            id,
+            &checks_json,
+            &result.agent_key_state,
+            write.as_ref(),
+        )
+        .await?;
+        if stored {
+            break;
+        }
+    }
+    if !stored {
+        return Err(accept_race());
+    }
     if let Err(error) = crate::catalog::open_repository(state, id).await {
         tracing::warn!(repository_id = %id, error = %format!("{error:#}"), "repository is not available");
     }
@@ -288,9 +312,21 @@ async fn replace_key(
         None => checks.push(fresh),
     }
     let checks_json = serde_json::to_string(&checks).map_err(|e| ApiError::Internal(e.into()))?;
-    let guarantee = guarantee_write(&to_result(&report), &row.guarantee_accepted, true)?
-        .expect("a credential change always writes a level");
-    db::replace_agent_creds(&state, &id, &key, state_name, &checks_json, &guarantee).await?;
+    let mut accepted = row.guarantee_accepted;
+    let mut stored = false;
+    for _ in 0..GUARANTEE_ATTEMPTS {
+        let guarantee = guarantee_write(&to_result(&report), &accepted, true)?
+            .expect("a credential change always writes a level");
+        stored = db::replace_agent_creds(&state, &id, &key, state_name, &checks_json, &guarantee)
+            .await?;
+        if stored {
+            break;
+        }
+        accepted = accepted_now(&state, &id).await?;
+    }
+    if !stored {
+        return Err(accept_race());
+    }
 
     let unavailable = matches!(
         crate::catalog::open_repository(&state, &id).await,

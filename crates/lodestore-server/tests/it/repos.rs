@@ -531,3 +531,67 @@ async fn migration_0037_carries_the_current_level_as_accepted() {
         ts.stop().await;
     }
 }
+
+async fn accepted(ts: &TestServer, id: &str) -> String {
+    sqlx::query("SELECT guarantee_accepted FROM repositories WHERE id = $1")
+        .bind(id)
+        .fetch_one(&ts.state().db.pool)
+        .await
+        .unwrap()
+        .try_get("guarantee_accepted")
+        .unwrap()
+}
+
+async fn accept_now(ts: &TestServer, id: &str, level: &str) {
+    sqlx::query("UPDATE repositories SET guarantee_accepted = $1 WHERE id = $2")
+        .bind(level)
+        .bind(id)
+        .execute(&ts.state().db.pool)
+        .await
+        .unwrap();
+}
+
+/// A check reads the accepted level, someone accepts another one, and then
+/// the check stores what it decided from the old value: the accept stays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn guarantee_write_never_overwrites_an_accept_in_between() {
+    use lodestore_server::repos::db::{
+        AccessKey, GuaranteeWrite, replace_agent_creds, update_checks,
+    };
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let id = ts.create_local_repository("raced").await;
+        let decided = || GuaranteeWrite {
+            level: "create_only_enforced".into(),
+            notes_json: "[]".into(),
+            accepted: "create_only_enforced".into(),
+            read_accepted: "overwrite_keeps_old_version".into(),
+        };
+
+        accept_now(&ts, &id, "host_can_overwrite_or_delete").await;
+        let stored = update_checks(ts.state(), &id, "[]", "verified", Some(&decided()))
+            .await
+            .unwrap();
+        assert!(!stored, "[{}]", backend.name());
+        assert_eq!(accepted(&ts, &id).await, "host_can_overwrite_or_delete");
+
+        let key = AccessKey {
+            access_key_id: "new".into(),
+            secret_access_key: "new-secret".into(),
+        };
+        let stored = replace_agent_creds(ts.state(), &id, &key, "verified", "[]", &decided())
+            .await
+            .unwrap();
+        assert!(!stored, "[{}]", backend.name());
+        assert_eq!(accepted(&ts, &id).await, "host_can_overwrite_or_delete");
+
+        accept_now(&ts, &id, "overwrite_keeps_old_version").await;
+        assert!(
+            update_checks(ts.state(), &id, "[]", "verified", Some(&decided()))
+                .await
+                .unwrap()
+        );
+        assert_eq!(accepted(&ts, &id).await, "create_only_enforced");
+        ts.stop().await;
+    }
+}
