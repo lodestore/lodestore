@@ -269,7 +269,8 @@ impl FinishedPack {
     /// content-derived name. The frames, the entries and the sealed pack key
     /// stay as they are, so the layout is the one [`PackBuilder::finish`] makes.
     pub fn reseal(&mut self, entropy: &mut Entropy) -> Result<()> {
-        let header = seal_pack_header(&self.pack_key, &self.repo_id, &self.record.entries, entropy)?;
+        let header =
+            seal_pack_header(&self.pack_key, &self.repo_id, &self.record.entries, entropy)?;
         let header_len = u32::try_from(header.len())
             .map_err(|_| Error::InvalidInput("pack header too large".into()))?;
         self.bytes.truncate(self.frames_end);

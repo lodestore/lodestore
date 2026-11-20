@@ -1,18 +1,22 @@
 use std::collections::VecDeque;
 use std::fs;
+use std::future::Future;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use crate::gc_support::Fx;
+use crate::gc_support::{Fx, assert_same_files};
 use bytes::Bytes;
 use lodestore_format::Error;
-use lodestore_format::crypto::Entropy;
+use lodestore_format::crypto::{BlobId, Entropy};
+use lodestore_format::index::{open_shard, parse_hex32};
 use lodestore_format::keys::KdfCost;
+use lodestore_format::pack::pack_object_key;
 use lodestore_format::reader::{Reader, RestoreOptions};
 use lodestore_format::repo::{InitOptions, PendingInit, Repository};
 use lodestore_format::store::{BlobError, BlobStore, ListEntry, LocalFsStore, put_named};
 use lodestore_format::writer::{BackupOptions, Writer};
+use proptest::prelude::*;
 use rand_chacha::ChaCha20Rng;
 use rand_chacha::rand_core::{Rng, SeedableRng};
 
@@ -367,7 +371,6 @@ async fn put_named_non_atomic_unstatable_is_error() {
 #[tokio::test]
 async fn put_named_size_gc_repack_reseals() {
     use lodestore_format::gc::repack::repack;
-    use lodestore_format::pack::pack_object_key;
 
     let fx = Fx::new().await;
     let shared = ("shared", 1, 100 << 10);
@@ -398,4 +401,130 @@ async fn put_named_size_gc_repack_reseals() {
         written += fx.store.object_size(&key).await.unwrap().unwrap();
     }
     assert_eq!(written, out.bytes_written);
+}
+
+const MAX_RESEALS: usize = 3;
+
+async fn backup_with<S: BlobStore>(store: &S, src: &Path) -> lodestore_format::Result<BlobId> {
+    let repo = Repository::open(store, b"pw").await?;
+    let keys = repo.read_keys().write_keys(repo.config_hash());
+    let mut writer = Writer::new(store, keys, repo.config()).await?;
+    let options = BackupOptions {
+        pack_target_size: 48 << 10,
+        index_flush_packs: 2,
+        ..Default::default()
+    };
+    let outcome = writer
+        .backup(&[src.to_path_buf()], options, &|_| {})
+        .await?;
+    Ok(outcome.snapshot_id)
+}
+
+async fn restore_with<S: BlobStore>(store: &S, id: &BlobId, target: &Path) {
+    let repo = Repository::open(store, b"pw").await.unwrap();
+    let mut reader = Reader::open(store, repo.read_keys().duplicate(), repo.config()).unwrap();
+    let report = reader
+        .restore(id, target, &RestoreOptions::default(), &|_| {})
+        .await
+        .unwrap();
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+}
+
+/// Every pack an index shard names is stored whole under its own name.
+async fn assert_indexed_packs_whole<S: BlobStore>(store: &S) {
+    let repo = Repository::open(store, b"pw").await.unwrap();
+    let read = repo.read_keys();
+    let mut packs = 0;
+    for shard in store.list("index/").await.unwrap() {
+        let shard_id = parse_hex32(shard.key.strip_prefix("index/").unwrap()).unwrap();
+        let bytes = store.get(&shard.key).await.unwrap();
+        let opened = open_shard(read.k_idx(), read.repo_id(), &shard_id, &bytes).unwrap();
+        for pack in opened.packs {
+            let pack_id: BlobId = pack.pack_id.as_slice().try_into().unwrap();
+            let stored = store.get(&pack_object_key(&pack_id)).await.unwrap();
+            assert_eq!(stored.len() as u64, pack.pack_size);
+            assert_eq!(blake3::hash(&stored).as_bytes(), &pack_id);
+            packs += 1;
+        }
+    }
+    assert!(packs > 0);
+}
+
+fn tear_strategy() -> impl Strategy<Value = Tear> {
+    prop_oneof![
+        (0usize..100_000).prop_map(Tear::Short),
+        (0usize..100_000, 1usize..64).prop_map(|(start, len)| Tear::Hole(start..start + len)),
+    ]
+}
+
+/// Tears in runs of at most `MAX_RESEALS`, each run ended by an upload that
+/// goes through, so no pack is torn more often than the writer retries.
+fn plan_strategy() -> impl Strategy<Value = Vec<Option<Tear>>> {
+    prop::collection::vec(
+        prop::collection::vec(tear_strategy(), 0..=MAX_RESEALS),
+        0..6,
+    )
+    .prop_map(|runs| {
+        runs.into_iter()
+            .flat_map(|run| run.into_iter().map(Some).chain(std::iter::once(None)))
+            .collect()
+    })
+}
+
+fn run<T>(f: impl Future<Output = T>) -> T {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(f)
+}
+
+async fn torn_matches_local(files: Vec<(usize, u8)>, plan: Vec<Option<Tear>>) {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    fs::create_dir(&src).unwrap();
+    for (i, (len, seed)) in files.iter().enumerate() {
+        fs::write(src.join(format!("f{i}.bin")), random_bytes(*len, *seed)).unwrap();
+    }
+
+    let torn_store = TornStore::new(init_repo(&tmp.path().join("torn")).await, plan);
+    let local = init_repo(&tmp.path().join("local")).await;
+
+    let torn_id = backup_with(&torn_store, &src).await.unwrap();
+    let local_id = backup_with(&local, &src).await.unwrap();
+    assert_indexed_packs_whole(&torn_store).await;
+
+    let (torn_out, local_out) = (tmp.path().join("out-torn"), tmp.path().join("out-local"));
+    restore_with(&torn_store, &torn_id, &torn_out).await;
+    restore_with(&local, &local_id, &local_out).await;
+    assert_same_files(
+        &restored_path(&torn_out, &src),
+        &restored_path(&local_out, &src),
+    );
+    assert_same_files(&src, &restored_path(&torn_out, &src));
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(24))]
+
+    #[test]
+    fn put_named_size_torn_store_matches_local_fs(
+        files in prop::collection::vec((1usize..150_000, any::<u8>()), 1..5),
+        plan in plan_strategy(),
+    ) {
+        run(torn_matches_local(files, plan));
+    }
+}
+
+#[tokio::test]
+async fn put_named_size_too_many_tears_fails_without_snapshot() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = small_tree(tmp.path());
+    let plan = (0..=MAX_RESEALS).map(|_| Some(Tear::Short(10)));
+    let store = TornStore::new(init_repo(&tmp.path().join("repo")).await, plan);
+
+    let err = backup_with(&store, &src).await.unwrap_err();
+    assert!(matches!(err, Error::NameBurned { .. }), "{err:?}");
+    assert_eq!(store.burned().len(), MAX_RESEALS + 1);
+    assert!(store.list("snapshots/").await.unwrap().is_empty());
 }
