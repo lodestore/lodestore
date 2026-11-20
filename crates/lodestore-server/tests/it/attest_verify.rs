@@ -1385,6 +1385,10 @@ impl<S: BlobStore> Counting<S> {
 }
 
 impl<S: BlobStore> BlobStore for Counting<S> {
+    fn publishes_atomically(&self) -> bool {
+        self.inner.publishes_atomically()
+    }
+
     async fn put_if_absent(&self, key: &str, data: bytes::Bytes) -> Result<(), BlobError> {
         self.inner.put_if_absent(key, data).await
     }
