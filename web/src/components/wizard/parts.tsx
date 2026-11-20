@@ -23,7 +23,7 @@ export function StepCard({
 	return (
 		<div className="flex w-full flex-col gap-8">
 			<div className="flex flex-col gap-6">{children}</div>
-			<footer className="sticky bottom-0 flex min-h-16 shrink-0 items-center justify-between gap-2 border-t py-2 bg-background">
+			<footer className="sticky bottom-0 flex min-h-16 shrink-0 flex-wrap items-center justify-between gap-2 border-t py-2 bg-background">
 				{onBack ? (
 					<Button
 						type="button"
