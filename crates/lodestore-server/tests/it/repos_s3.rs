@@ -277,6 +277,107 @@ async fn wizard_s3_versioned_bucket_needs_no_consent() {
     .await;
 }
 
+async fn refused_for_weaker_guarantee(http: &Http, draft: &Value) -> Value {
+    let refused = http
+        .post("/api/v1/repositories/wizard", &without_consent(draft))
+        .await;
+    assert_eq!(refused.status(), 409);
+    let refused = body(refused).await;
+    assert_eq!(refused["code"], "weaker_guarantee");
+    refused
+}
+
+fn notes(result: &Value) -> Vec<&str> {
+    result["guarantee_notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wizard_s3_lifecycle_rule_caps_the_level() {
+    each_backend(|backend| async move {
+        let minio = MinioServer::start().await;
+        minio.create_versioned_bucket(BUCKET).await;
+        minio
+            .mc(&[
+                "ilm",
+                "rule",
+                "add",
+                &format!("lode/{BUCKET}"),
+                "--noncurrent-expire-days",
+                "1",
+            ])
+            .await
+            .expect("mc ilm rule add");
+        let server = minio.root_credentials();
+        let agent = agent_user(&minio, BUCKET).await;
+        let ts = TestServer::start(&backend).await;
+        let http = Http::login(&ts).await;
+        let draft = s3_draft(&minio, BUCKET, "cloud", &server, &agent);
+
+        let checked = body(http.post("/api/v1/repositories/check", &draft).await).await;
+        assert_eq!(
+            checked["guarantee_level"],
+            "host_can_overwrite_or_delete",
+            "[{}] {checked}",
+            backend.name()
+        );
+        assert!(notes(&checked).contains(&"lifecycle_deletes"), "{checked}");
+        let refused = refused_for_weaker_guarantee(&http, &draft).await;
+        assert!(notes(&refused["check"]).contains(&"lifecycle_deletes"));
+
+        let created = create_s3(&http, &draft).await;
+        assert_eq!(created["guarantee_level"], "host_can_overwrite_or_delete");
+        ts.stop().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wizard_s3_unreadable_lifecycle_downgrades_old_version() {
+    each_backend(|backend| async move {
+        let minio = MinioServer::start().await;
+        minio.create_versioned_bucket(BUCKET).await;
+        let policy = json!({
+            "Version": "2012-10-17",
+            "Statement": [
+                { "Effect": "Allow", "Action": ["s3:*"], "Resource": ["arn:aws:s3:::*"] },
+                {
+                    "Effect": "Deny",
+                    "Action": ["s3:GetLifecycleConfiguration"],
+                    "Resource": ["arn:aws:s3:::*"],
+                },
+            ],
+        });
+        let server = minio
+            .create_user_with_policy(BUCKET, &policy.to_string())
+            .await;
+        let agent = agent_user(&minio, BUCKET).await;
+        let ts = TestServer::start(&backend).await;
+        let http = Http::login(&ts).await;
+        let draft = s3_draft(&minio, BUCKET, "cloud", &server, &agent);
+
+        let checked = body(http.post("/api/v1/repositories/check", &draft).await).await;
+        assert_eq!(
+            checked["guarantee_level"],
+            "host_can_overwrite_or_delete",
+            "[{}] {checked}",
+            backend.name()
+        );
+        assert!(
+            notes(&checked).contains(&"lifecycle_unverified"),
+            "{checked}"
+        );
+        let refused = refused_for_weaker_guarantee(&http, &draft).await;
+        assert!(notes(&refused["check"]).contains(&"lifecycle_unverified"));
+        ts.stop().await;
+    })
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn wizard_unchecked_needs_consent() {
     each_backend(|backend| async move {
