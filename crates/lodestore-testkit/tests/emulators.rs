@@ -1,6 +1,9 @@
 //! Self-tests of the emulator harness. They need Docker, Node and network
 //! access for the first download, so they run through `scripts/test-emulators.sh`.
 
+use std::time::Duration;
+
+use lodestore_testkit::azurite::AzuriteServer;
 use lodestore_testkit::fault_proxy::{FaultPlan, FaultProxy};
 use lodestore_testkit::gcs::FakeGcsServer;
 use lodestore_testkit::minio::free_port;
@@ -71,5 +74,35 @@ async fn gcs_harness_records_a_resumable_conditional_upload() {
         with_query("PUT", "upload_id="),
         2,
         "both completions went through the proxy: {requests:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn azurite_harness_rcl_sas_refuses_a_second_put() {
+    let azurite = AzuriteServer::start().await;
+    azurite.create_container("repo").await;
+    let sas = azurite.container_sas("repo", "rcl", Duration::from_secs(600));
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let url = format!("{}/repo/blob?{sas}", azurite.endpoint());
+    let put = || async {
+        client
+            .put(&url)
+            .header("x-ms-blob-type", "BlockBlob")
+            .header("x-ms-version", "2022-11-02")
+            .body("payload")
+            .send()
+            .await
+            .expect("send the put")
+            .status()
+    };
+
+    assert_eq!(put().await, reqwest::StatusCode::CREATED);
+    assert_eq!(put().await, reqwest::StatusCode::FORBIDDEN);
+    assert_eq!(
+        azurite
+            .put_blob_shared_key("repo", "blob", b"payload", true)
+            .await,
+        reqwest::StatusCode::CONFLICT
     );
 }

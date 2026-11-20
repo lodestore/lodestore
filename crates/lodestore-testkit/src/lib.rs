@@ -3,6 +3,7 @@
 //! injects S3 failures and records requests, and an HTTP CONNECT proxy.
 #![forbid(unsafe_code)]
 
+pub mod azurite;
 pub mod connect_proxy;
 pub mod fault_proxy;
 pub mod gcs;
