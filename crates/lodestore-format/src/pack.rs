@@ -259,6 +259,29 @@ pub struct FinishedPack {
     pub bytes: Vec<u8>,
     pub pack_id: BlobId,
     pub record: pb::PackRecord,
+    frames_end: usize,
+    pack_key: Key32,
+    repo_id: RepoId,
+}
+
+impl FinishedPack {
+    /// Seals the header again under a fresh nonce, which gives the pack a new
+    /// content-derived name. The frames, the entries and the sealed pack key
+    /// stay as they are, so the layout is the one [`PackBuilder::finish`] makes.
+    pub fn reseal(&mut self, entropy: &mut Entropy) -> Result<()> {
+        let header =
+            seal_pack_header(&self.pack_key, &self.repo_id, &self.record.entries, entropy)?;
+        let header_len = u32::try_from(header.len())
+            .map_err(|_| Error::InvalidInput("pack header too large".into()))?;
+        self.bytes.truncate(self.frames_end);
+        self.bytes.extend_from_slice(&header);
+        self.bytes.extend_from_slice(&header_len.to_le_bytes());
+        self.bytes.extend_from_slice(PACK_MAGIC);
+        self.pack_id = *blake3::hash(&self.bytes).as_bytes();
+        self.record.pack_id = self.pack_id.to_vec();
+        self.record.pack_size = self.bytes.len() as u64;
+        Ok(())
+    }
 }
 
 /// Accumulates frames of one blob type. Data and tree blobs never share a
@@ -383,6 +406,7 @@ impl PackBuilder {
         let header = seal_pack_header(&self.pack_key, &self.repo_id, &entries, entropy)?;
         let header_len = u32::try_from(header.len())
             .map_err(|_| Error::InvalidInput("pack header too large".into()))?;
+        let frames_end = self.buf.len();
         self.buf.extend_from_slice(&header);
         self.buf.extend_from_slice(&header_len.to_le_bytes());
         self.buf.extend_from_slice(PACK_MAGIC);
@@ -399,6 +423,9 @@ impl PackBuilder {
             bytes: self.buf,
             pack_id,
             record,
+            frames_end,
+            pack_key: self.pack_key,
+            repo_id: self.repo_id,
         })
     }
 }
@@ -498,6 +525,38 @@ mod tests {
         );
 
         assert!(open_prefix(&sk, &[9; 16], &done.bytes[..PACK_PREFIX_LEN]).is_err());
+    }
+
+    #[test]
+    fn reseal_renames_the_pack_and_keeps_the_layout() {
+        let mut ent = seeded(8);
+        let repo: RepoId = [3; 16];
+        let (sk, pk) = XWing::derive_keypair(&[4u8; 32]);
+        let mut b = PackBuilder::new(BLOB_TYPE_DATA, &repo, &pk, &mut ent).unwrap();
+        for i in 0u8..3 {
+            b.add(&[i + 1; 32], &vec![i; 2000], &mut ent).unwrap();
+        }
+        let mut done = b.finish(&mut ent).unwrap();
+        let (before_id, before_len) = (done.pack_id, done.bytes.len());
+        let frames = done.bytes[..done.frames_end].to_vec();
+        done.reseal(&mut ent).unwrap();
+
+        assert_ne!(done.pack_id, before_id);
+        assert_eq!(done.bytes.len(), before_len);
+        assert_eq!(&done.bytes[..done.frames_end], &frames[..]);
+        assert_eq!(done.pack_id, *blake3::hash(&done.bytes).as_bytes());
+        assert_eq!(done.record.pack_id, done.pack_id.to_vec());
+        assert_eq!(done.record.pack_size as usize, done.bytes.len());
+        assert!(done.bytes.ends_with(PACK_MAGIC));
+
+        let key = open_prefix(&sk, &repo, &done.bytes[..PACK_PREFIX_LEN]).unwrap();
+        let n = done.bytes.len();
+        let header_len = le_u32(&done.bytes[n - TRAILER_LEN..n - 6]) as usize;
+        let header = &done.bytes[n - TRAILER_LEN - header_len..n - TRAILER_LEN];
+        assert_eq!(
+            open_pack_header(&key, &repo, header).unwrap(),
+            done.record.entries
+        );
     }
 
     #[test]

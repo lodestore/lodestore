@@ -99,6 +99,14 @@ impl<S: BlobStore> BlobStore for Throttled<S> {
     async fn ensure_prefixes(&self, prefixes: &[&str]) -> Result<(), BlobError> {
         self.inner.ensure_prefixes(prefixes).await
     }
+
+    async fn object_size(&self, key: &str) -> Result<Option<u64>, BlobError> {
+        self.inner.object_size(key).await
+    }
+
+    fn publishes_atomically(&self) -> bool {
+        self.inner.publishes_atomically()
+    }
 }
 
 #[cfg(test)]
@@ -144,6 +152,43 @@ mod tests {
         async fn list(&self, _prefix: &str) -> Result<Vec<ListEntry>, BlobError> {
             Ok(Vec::new())
         }
+    }
+
+    struct Stat;
+
+    impl BlobStore for Stat {
+        async fn put_if_absent(&self, _: &str, _: Bytes) -> Result<(), BlobError> {
+            Ok(())
+        }
+
+        async fn get(&self, _: &str) -> Result<Bytes, BlobError> {
+            Err(BlobError::NotFound)
+        }
+
+        async fn get_range(&self, _: &str, _: Range<u64>) -> Result<Bytes, BlobError> {
+            Err(BlobError::NotFound)
+        }
+
+        async fn list(&self, _: &str) -> Result<Vec<ListEntry>, BlobError> {
+            Err(BlobError::backend("the listing must not be asked"))
+        }
+
+        async fn object_size(&self, _: &str) -> Result<Option<u64>, BlobError> {
+            Ok(Some(42))
+        }
+
+        fn publishes_atomically(&self) -> bool {
+            false
+        }
+    }
+
+    #[tokio::test]
+    async fn throttle_forwards_object_size_and_atomicity() {
+        let store = Throttled::new(Stat, None, counter());
+        assert_eq!(store.object_size("k").await.unwrap(), Some(42));
+        assert!(!store.publishes_atomically());
+        let atomic = Throttled::new(Mem::default(), None, counter());
+        assert!(atomic.publishes_atomically());
     }
 
     fn counter() -> Arc<AtomicU64> {

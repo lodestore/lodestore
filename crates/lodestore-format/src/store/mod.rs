@@ -98,6 +98,26 @@ pub trait BlobStore: Send + Sync {
     ) -> impl Future<Output = std::result::Result<(), BlobError>> + Send {
         async { Ok(()) }
     }
+
+    /// The size of the object, `None` when it is not there. The default asks
+    /// the listing for the exact key; a store with a cheaper stat overrides it.
+    fn object_size(
+        &self,
+        key: &str,
+    ) -> impl Future<Output = std::result::Result<Option<u64>, BlobError>> + Send {
+        async move {
+            let listed = self.list(key).await?;
+            Ok(listed.into_iter().find(|e| e.key == key).map(|e| e.size))
+        }
+    }
+
+    /// Whether an object becomes visible only once it is complete. A store
+    /// that can leave a torn object under the final name (a direct SFTP write)
+    /// returns `false`, and then an existing name is trusted only after its
+    /// bytes are compared.
+    fn publishes_atomically(&self) -> bool {
+        true
+    }
 }
 
 /// Deletion, kept apart from [`BlobStore`] so that code which only needs to
@@ -108,11 +128,61 @@ pub trait BlobDelete: Send + Sync {
 }
 
 /// Writes an object whose name is derived from its bytes. `AlreadyExists`
-/// then means the identical object is already there, which is success.
+/// counts as success only when the object under the name is the one written;
+/// otherwise the name is burned and the caller must pick another.
 pub async fn put_named<S: BlobStore>(store: &S, key: &str, bytes: Vec<u8>) -> Result<()> {
-    match store.put_if_absent(key, Bytes::from(bytes)).await {
-        Ok(()) | Err(BlobError::AlreadyExists) => Ok(()),
+    put_named_bytes(store, key, &Bytes::from(bytes)).await
+}
+
+/// [`put_named`] for bytes the caller keeps, so that a burned name can be
+/// retried without a copy.
+pub async fn put_named_bytes<S: BlobStore>(store: &S, key: &str, bytes: &Bytes) -> Result<()> {
+    match store.put_if_absent(key, bytes.clone()).await {
+        Ok(()) => Ok(()),
+        Err(BlobError::AlreadyExists) => match store.object_size(key).await {
+            Ok(Some(size)) => confirm_present(store, key, bytes, size).await,
+            Ok(None) => Err(BlobError::backend(format!(
+                "{key} reported as existing, then not found"
+            ))
+            .into()),
+            // An atomic store never shows an incomplete object, and a
+            // write-only key may not stat what it just created.
+            Err(BlobError::Denied { .. }) if store.publishes_atomically() => Ok(()),
+            Err(e) => Err(e.into()),
+        },
+        // A key that may not overwrite can be refused instead of told the
+        // object exists; that is a presence only if the object is seen.
+        Err(denied @ BlobError::Denied { .. }) => match store.object_size(key).await {
+            Ok(Some(size)) => confirm_present(store, key, bytes, size).await,
+            _ => Err(denied.into()),
+        },
         Err(e) => Err(e.into()),
+    }
+}
+
+/// An object of `size` bytes holds the name. It is the one written when the
+/// size agrees and, on a store that can leave a torn object under the final
+/// name, when the bytes agree too: a direct write arrives out of order, so a
+/// full-size object can still have a hole. The read is capped at one byte
+/// past what was written.
+async fn confirm_present<S: BlobStore>(
+    store: &S,
+    key: &str,
+    bytes: &Bytes,
+    size: u64,
+) -> Result<()> {
+    let len = bytes.len() as u64;
+    if size != len {
+        return Err(Error::NameBurned { key: key.into() });
+    }
+    if store.publishes_atomically() {
+        return Ok(());
+    }
+    let seen = store.get_range(key, 0..len + 1).await?;
+    if seen == *bytes {
+        Ok(())
+    } else {
+        Err(Error::NameBurned { key: key.into() })
     }
 }
 
@@ -180,6 +250,17 @@ impl<T: BlobStore> BlobStore for &T {
         prefixes: &[&str],
     ) -> impl Future<Output = std::result::Result<(), BlobError>> + Send {
         (**self).ensure_prefixes(prefixes)
+    }
+
+    fn object_size(
+        &self,
+        key: &str,
+    ) -> impl Future<Output = std::result::Result<Option<u64>, BlobError>> + Send {
+        (**self).object_size(key)
+    }
+
+    fn publishes_atomically(&self) -> bool {
+        (**self).publishes_atomically()
     }
 }
 
@@ -283,6 +364,22 @@ impl BlobStore for Store {
             Store::Local(s) => s.ensure_prefixes(prefixes).await,
             Store::S3(s) => s.ensure_prefixes(prefixes).await,
             Store::Opendal(s) => s.ensure_prefixes(prefixes).await,
+        }
+    }
+
+    async fn object_size(&self, key: &str) -> std::result::Result<Option<u64>, BlobError> {
+        match self {
+            Store::Local(s) => s.object_size(key).await,
+            Store::S3(s) => s.object_size(key).await,
+            Store::Opendal(s) => s.object_size(key).await,
+        }
+    }
+
+    fn publishes_atomically(&self) -> bool {
+        match self {
+            Store::Local(s) => s.publishes_atomically(),
+            Store::S3(s) => s.publishes_atomically(),
+            Store::Opendal(s) => s.publishes_atomically(),
         }
     }
 }

@@ -35,6 +35,8 @@ pub enum Error {
     DeadlineExceeded { limit_secs: u64 },
     #[error("the snapshot's directory tree has more than {limit} {what}; the walk was stopped")]
     WalkLimit { what: &'static str, limit: u64 },
+    #[error("an incomplete or different object already holds the name {key}")]
+    NameBurned { key: String },
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }

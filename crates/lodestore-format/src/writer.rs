@@ -35,10 +35,12 @@ use crate::index::{
 };
 use crate::keys::WriteKeys;
 use crate::locks;
-use crate::pack::{MAX_TREE_ULEN, PACK_TARGET_SIZE, PackBuilder, pack_object_key, parse_entries};
+use crate::pack::{
+    FinishedPack, MAX_TREE_ULEN, PACK_TARGET_SIZE, PackBuilder, pack_object_key, parse_entries,
+};
 use crate::pb;
 use crate::snapshot::{ParentTree, seal_snapshot, snapshot_object_key};
-use crate::store::{BlobError, BlobStore, put_named, read_bounded};
+use crate::store::{BlobError, BlobStore, put_named, put_named_bytes, read_bounded};
 use crate::tree::{
     MAX_DIR_ENTRIES, MAX_DIR_TREE_BYTES, MAX_HELD_ENTRIES, MAX_HELD_TREE_BYTES, encode_tree,
     split_nodes, validate_name,
@@ -790,8 +792,8 @@ impl<S: BlobStore> Writer<S> {
             if builder.is_empty() {
                 continue;
             }
-            let done = builder.finish(&mut self.entropy)?;
-            put_named(&self.store, &pack_object_key(&done.pack_id), done.bytes).await?;
+            let mut done = builder.finish(&mut self.entropy)?;
+            upload_pack(&self.store, &mut done, &mut self.entropy).await?;
             records.push(done.record);
         }
         let mut index_refs = Vec::new();
@@ -823,6 +825,32 @@ impl<S: BlobStore> Writer<S> {
         )?;
         put_named(&self.store, &snapshot_object_key(&id), bytes).await?;
         Ok(id)
+    }
+}
+
+/// How many times a pack is sealed again when its name is burned.
+pub(crate) const MAX_RESEALS: u32 = 3;
+
+/// Uploads a finished pack. When the store holds something else under the
+/// pack's name, only the header is sealed again (a fresh nonce renames the
+/// pack) and the upload is retried, up to [`MAX_RESEALS`] times. On success
+/// `done.bytes` is spent and `done.record` describes the stored pack.
+pub(crate) async fn upload_pack<S: BlobStore>(
+    store: &S,
+    done: &mut FinishedPack,
+    entropy: &mut Entropy,
+) -> Result<()> {
+    let mut resealed = 0;
+    loop {
+        let bytes = bytes::Bytes::from(std::mem::take(&mut done.bytes));
+        match put_named_bytes(store, &pack_object_key(&done.pack_id), &bytes).await {
+            Err(Error::NameBurned { .. }) if resealed < MAX_RESEALS => {
+                done.bytes = Vec::from(bytes);
+                done.reseal(entropy)?;
+                resealed += 1;
+            }
+            other => return other,
+        }
     }
 }
 
@@ -1096,8 +1124,8 @@ impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
         if builder.is_empty() {
             return Ok(());
         }
-        let done = builder.finish(&mut self.w.entropy)?;
-        put_named(&self.w.store, &pack_object_key(&done.pack_id), done.bytes).await?;
+        let mut done = builder.finish(&mut self.w.entropy)?;
+        upload_pack(&self.w.store, &mut done, &mut self.w.entropy).await?;
         self.uploaded.push(done.record);
         Ok(())
     }

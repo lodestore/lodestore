@@ -32,6 +32,7 @@ mod list_independence;
 mod no_plaintext;
 mod probe;
 mod provenance;
+mod put_named_size;
 mod reader_shared;
 mod restore_hostile;
 mod restore_plan;
