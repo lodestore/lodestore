@@ -1,7 +1,8 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use lodestore_format::store::{BlobStore, RepoLocation, Store};
+use lodestore_format::Error;
+use lodestore_format::store::{BlobError, BlobStore, RepoLocation, Store, put_named};
 use lodestore_testkit::azurite::AzuriteServer;
 use rand_chacha::ChaCha20Rng;
 use rand_chacha::rand_core::{Rng, SeedableRng};
@@ -66,4 +67,38 @@ async fn azblob_pack_of_max_size_is_one_put_blob() {
         agent.object_size("packs/max").await.unwrap(),
         Some(data.len() as u64)
     );
+}
+
+#[tokio::test]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn azblob_rcl_retry_after_lost_response_is_ok() {
+    let az = AzuriteServer::start().await;
+    az.create_container("retry").await;
+    let agent = sas_store(&az, "retry", "rcl");
+    let bytes = Bytes::from(vec![7u8; 4096]);
+    lodestore_format::store::put_named_bytes(&agent, "packs/p1", &bytes)
+        .await
+        .unwrap();
+    let raw = agent.put_if_absent("packs/p1", bytes.clone()).await;
+    assert!(matches!(raw, Err(BlobError::Denied { .. })), "{raw:?}");
+    lodestore_format::store::put_named_bytes(&agent, "packs/p1", &bytes)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn azblob_rcl_retry_with_short_object_is_name_burned() {
+    let az = AzuriteServer::start().await;
+    az.create_container("burned").await;
+    let owner = account_store(&az, "burned").await;
+    owner
+        .put_if_absent("packs/p2", Bytes::from(vec![1u8; 100]))
+        .await
+        .unwrap();
+    let agent = sas_store(&az, "burned", "rcl");
+    let err = put_named(&agent, "packs/p2", vec![1u8; 4096])
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::NameBurned { .. }), "{err:?}");
 }

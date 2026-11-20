@@ -14,6 +14,7 @@ use rand_chacha::ChaCha20Rng;
 use rand_chacha::rand_core::{Rng, SeedableRng};
 
 mod azblob;
+mod gcs;
 
 const LOW_KDF: KdfCost = KdfCost {
     memory_kib: 64,
