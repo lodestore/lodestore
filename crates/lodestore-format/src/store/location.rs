@@ -490,7 +490,7 @@ mod tests {
             [
                 ("container", "c"),
                 ("endpoint", "http://127.0.0.1:1"),
-                ("sas_token", "sv=1&sig=SECRETSIG"),
+                ("sas_token", "sv=1&spr=https,http&sig=SECRETSIG"),
             ],
         );
         let store = loc.open(None).unwrap();
