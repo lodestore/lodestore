@@ -12485,7 +12485,6 @@
           "id",
           "name",
           "backend",
-          "experimental",
           "location_display",
           "hosts_count",
           "agent_key_state",
@@ -12509,9 +12508,6 @@
           },
           "cleanup": {
             "$ref": "#/components/schemas/CleanupSummary"
-          },
-          "experimental": {
-            "type": "boolean"
           },
           "guarantee_accepted": {
             "type": "string",

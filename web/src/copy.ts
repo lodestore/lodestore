@@ -263,9 +263,16 @@ export const copy = {
 	backend: {
 		s3: "S3-compatible storage such as AWS S3, MinIO or Ceph.",
 		local: "Local folder. A path both the server and the agent can see.",
-		experimental: "Experimental",
 		twoKeys:
 			"Two keys. The server key has full access and manages the repository. The agent key can only write, so a compromised host cannot delete backups.",
+	},
+	guarantee: {
+		levels: {
+			create_only_enforced: "Create-only enforced",
+			overwrite_keeps_old_version: "Overwrite keeps old version",
+			host_can_overwrite_or_delete: "Host can overwrite or delete",
+			unchecked: "Unchecked",
+		},
 	},
 	policy: {
 		title: "Policy for the agent key",

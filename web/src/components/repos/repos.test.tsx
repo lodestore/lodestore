@@ -20,7 +20,8 @@ const azureRepository = {
 	id: "repo-2",
 	name: "archive",
 	backend: "azblob",
-	experimental: true,
+	guarantee_level: "host_can_overwrite_or_delete",
+	guarantee_accepted: "host_can_overwrite_or_delete",
 	location_display: "azblob://container",
 	agent_key_state: "unchecked",
 	checked_at: null,
@@ -52,7 +53,7 @@ async function openAfterGuard(
 }
 
 describe("repositories list", () => {
-	it("shows the backend, experimental and agent key state of every repository", async () => {
+	it("shows the backend, guarantee level and agent key state of every repository", async () => {
 		useSignedIn({ repositories: [s3Repository, azureRepository] });
 		renderApp("/settings/repositories");
 
@@ -71,13 +72,39 @@ describe("repositories list", () => {
 			"Actions",
 		]);
 		expect(screen.getByText("archive")).toBeInTheDocument();
-		expect(screen.getByText("Experimental")).toBeInTheDocument();
+		expect(
+			screen.getByText("Host can overwrite or delete"),
+		).toBeInTheDocument();
+		expect(screen.queryByText("Create-only enforced")).not.toBeInTheDocument();
 		expect(screen.getByText("Can delete")).toBeInTheDocument();
 		expect(screen.getByText("Not checked")).toBeInTheDocument();
 		expect(screen.getByText("s3://bucket/prefix")).toBeInTheDocument();
 		expect(
 			screen.getByRole("link", { name: "Add repository" }),
 		).toHaveAttribute("href", "/settings/repositories/new");
+	});
+
+	it("badges every level except create-only enforced, unchecked included", async () => {
+		useSignedIn({
+			repositories: [
+				s3Repository,
+				azureRepository,
+				{
+					...azureRepository,
+					id: "repo-3",
+					name: "unmeasured",
+					guarantee_level: "unchecked",
+				},
+			],
+		});
+		renderApp("/settings/repositories");
+
+		expect(await screen.findByText("unmeasured")).toBeInTheDocument();
+		expect(screen.getByText("Unchecked")).toBeInTheDocument();
+		expect(
+			screen.getByText("Host can overwrite or delete"),
+		).toBeInTheDocument();
+		expect(screen.queryByText("Create-only enforced")).not.toBeInTheDocument();
 	});
 
 	it("shows the empty state when the list becomes empty", async () => {
