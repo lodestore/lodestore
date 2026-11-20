@@ -13,6 +13,7 @@ use lodestore_format::writer::{BackupOptions, BackupOutcome, Writer};
 use rand_chacha::ChaCha20Rng;
 use rand_chacha::rand_core::{Rng, SeedableRng};
 
+mod adv_storage_sftp;
 mod azblob;
 mod gcs;
 mod sftp;
