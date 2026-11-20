@@ -394,13 +394,19 @@ pub async fn update_checks(
     Ok(at)
 }
 
-/// Makes the measured level the accepted one; false when there is none to accept.
-pub async fn accept_measured_guarantee(state: &AppState, id: &str) -> anyhow::Result<bool> {
+/// Makes the measured level the accepted one when it is still `expected`;
+/// false when there is none to accept or it is another level by now.
+pub async fn accept_measured_guarantee(
+    state: &AppState,
+    id: &str,
+    expected: &str,
+) -> anyhow::Result<bool> {
     let done = sqlx::query(
         "UPDATE repositories SET guarantee_accepted = guarantee_level \
-         WHERE id = $1 AND guarantee_level <> 'unchecked'",
+         WHERE id = $1 AND guarantee_level <> 'unchecked' AND guarantee_level = $2",
     )
     .bind(id)
+    .bind(expected)
     .execute(&state.db.pool)
     .await?;
     Ok(done.rows_affected() > 0)

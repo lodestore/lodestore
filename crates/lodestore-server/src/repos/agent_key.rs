@@ -3,7 +3,7 @@ use axum::extract::{Path, State};
 use lodestore_format::store::probe::{CheckId, CheckStatus, GuaranteeLevel, ProbeReport};
 use lodestore_proto::agent::v1::server_message::Body;
 use lodestore_proto::agent::v1::{S3Credentials, ServerMessage, UpdateS3Credentials};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tracing::Instrument;
 use utoipa::ToSchema;
 use utoipa_axum::router::OpenApiRouter;
@@ -29,6 +29,13 @@ pub struct GuaranteeState {
     /// The level the user accepted; it rises on its own only when a check measures a higher one.
     pub guarantee_accepted: String,
     pub guarantee_checked_at: Option<i64>,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct AcceptGuarantee {
+    /// The measured level the user was shown; the accept is refused when the
+    /// stored level is another one by now.
+    pub expected_level: String,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -327,33 +334,41 @@ async fn replace_key(
     post,
     tag = "Repositories",
     summary = "Accept the measured level",
-    description = "Makes the level the last check measured the accepted one.",
+    description = "Makes the level the last check measured the accepted one, provided it is still \
+        `expected_level`, the level the user was shown.",
     security(("session" = [], "csrf" = [])),
     path = "/api/v1/repositories/{id}/guarantee/accept",
     params(("id" = String, Path, description = "Repository id")),
+    request_body = AcceptGuarantee,
     responses(
         (status = 200, description = "The measured level is now the accepted one", body = GuaranteeState),
         (status = 404, description = "Unknown repository", body = ErrorBody),
-        (status = 409, description = "No level was measured, so there is nothing to accept", body = ErrorBody),
+        (status = 409, description = "No level was measured, or the measured level is no longer `expected_level`", body = ErrorBody),
     )
 )]
 async fn accept_guarantee(
     State(state): State<AppState>,
     _user: AuthUser,
     Path(id): Path<String>,
+    Json(body): Json<AcceptGuarantee>,
 ) -> Result<Json<GuaranteeState>, ApiError> {
     if db::find_repository(&state, &id).await?.is_none() {
         return Err(ApiError::NotFound("repository not found".into()));
     }
-    if !db::accept_measured_guarantee(&state, &id).await? {
-        return Err(ApiError::Conflict(
-            "Nothing was measured, so there is no level to accept. Check the repository again."
-                .into(),
-        ));
-    }
+    let accepted = db::accept_measured_guarantee(&state, &id, &body.expected_level).await?;
     let row = db::find_repository(&state, &id)
         .await?
         .ok_or_else(|| ApiError::NotFound("repository not found".into()))?;
+    if !accepted {
+        return Err(ApiError::Conflict(if row.guarantee_level == "unchecked" {
+            "Nothing was measured, so there is no level to accept. Check the repository again."
+                .into()
+        } else {
+            "The measured level has changed since it was shown. Review the new level and accept \
+             it again."
+                .into()
+        }));
+    }
     Ok(Json(GuaranteeState {
         guarantee_level: row.guarantee_level,
         guarantee_accepted: row.guarantee_accepted,

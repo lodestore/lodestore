@@ -310,6 +310,8 @@ export const copy = {
 		acceptNewLevel: "Accept the new level",
 		accepting: "Accepting…",
 		acceptFailed: "accept the new level",
+		levelChanged:
+			"The level changed while this page was open. Review the new level before you accept it.",
 		seeChecks: "See storage checks",
 	},
 	policy: {

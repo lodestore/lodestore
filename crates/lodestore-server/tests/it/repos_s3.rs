@@ -1410,7 +1410,7 @@ async fn guarantee_accept_sets_accepted() {
         let accepted = http
             .post(
                 &format!("/api/v1/repositories/{id}/guarantee/accept"),
-                &json!({}),
+                &json!({ "expected_level": "host_can_overwrite_or_delete" }),
             )
             .await;
         assert_eq!(accepted.status(), 200, "[{}]", backend.name());
@@ -1423,6 +1423,34 @@ async fn guarantee_accept_sets_accepted() {
         assert!(accepted["guarantee_checked_at"].is_i64());
         let shown = detail(&http, &id).await;
         assert_eq!(shown["guarantee_accepted"], "host_can_overwrite_or_delete");
+        ts.stop().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn guarantee_accept_of_a_level_no_longer_measured_is_conflict() {
+    each_backend(|backend| async move {
+        let minio = MinioServer::start().await;
+        minio.create_versioned_bucket(BUCKET).await;
+        let ts = TestServer::start(&backend).await;
+        let http = Http::login(&ts).await;
+        let id = lowered_repository(&minio, &http).await;
+        let url = format!("/api/v1/repositories/{id}/guarantee/accept");
+
+        let stale = http
+            .post(
+                &url,
+                &json!({ "expected_level": "overwrite_keeps_old_version" }),
+            )
+            .await;
+        assert_eq!(stale.status(), 409, "[{}]", backend.name());
+        let shown = detail(&http, &id).await;
+        assert_eq!(shown["guarantee_accepted"], "overwrite_keeps_old_version");
+        let missing = http.post(&url, &json!({})).await;
+        assert_eq!(missing.status(), 422);
+        let shown = detail(&http, &id).await;
+        assert_eq!(shown["guarantee_accepted"], "overwrite_keeps_old_version");
         ts.stop().await;
     })
     .await;
@@ -1447,14 +1475,14 @@ async fn guarantee_accept_unchecked_is_conflict() {
         let refused = http
             .post(
                 &format!("/api/v1/repositories/{id}/guarantee/accept"),
-                &json!({}),
+                &json!({ "expected_level": "unchecked" }),
             )
             .await;
         assert_eq!(refused.status(), 409, "[{}]", backend.name());
         let unknown = http
             .post(
                 "/api/v1/repositories/no-such-repository/guarantee/accept",
-                &json!({}),
+                &json!({ "expected_level": "unchecked" }),
             )
             .await;
         assert_eq!(unknown.status(), 404);
