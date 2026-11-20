@@ -20,6 +20,7 @@ fn local_draft(root: &std::path::Path, name: &str) -> Value {
     json!({
         "name": name,
         "location": { "backend": "local", "options": { "path": root.display().to_string() } },
+        "accept_weaker_guarantee": true,
     })
 }
 
@@ -216,6 +217,105 @@ async fn local_wizard_creates_repository(backend: &Backend) {
 async fn wizard_local_creates_repository() {
     for backend in backends() {
         local_wizard_creates_repository(&backend).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wizard_local_folder_needs_consent() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let mut draft = local_draft(&ts.local_repo_root("main"), "main");
+        draft["accept_weaker_guarantee"] = json!(false);
+
+        let refused = api.post("/api/v1/repositories/wizard", &draft).await;
+        assert_eq!(refused.status(), 409, "[{}]", backend.name());
+        let refused = body(refused).await;
+        assert_eq!(refused["code"], "weaker_guarantee");
+        assert_eq!(
+            refused["check"]["guarantee_level"],
+            "host_can_overwrite_or_delete"
+        );
+        assert!(
+            refused["message"]
+                .as_str()
+                .unwrap()
+                .contains("Every host that writes to this folder"),
+            "{refused}"
+        );
+        let list = body(api.get("/api/v1/repositories").await).await;
+        assert_eq!(list.as_array().unwrap().len(), 0);
+
+        draft["accept_weaker_guarantee"] = json!(true);
+        let started = api.post("/api/v1/repositories/wizard", &draft).await;
+        assert_eq!(started.status(), 201);
+        let started = body(started).await;
+        let key = started["recovery_key"].as_str().unwrap();
+        let committed = api
+            .post(
+                &format!(
+                    "/api/v1/repositories/wizard/{}/commit",
+                    started["wizard_id"].as_str().unwrap()
+                ),
+                &json!({ "password": PASSWORD, "recovery_key_last_group": last_group(key) }),
+            )
+            .await;
+        assert_eq!(committed.status(), 201);
+
+        let list = body(api.get("/api/v1/repositories").await).await;
+        assert_eq!(list[0]["guarantee_level"], "host_can_overwrite_or_delete");
+        assert_eq!(
+            list[0]["guarantee_accepted"],
+            "host_can_overwrite_or_delete"
+        );
+        assert!(list[0]["guarantee_checked_at"].is_i64());
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn connect_existing_needs_consent() {
+    for backend in backends() {
+        let first = TestServer::start(&backend).await;
+        first.create_local_repository("existing").await;
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let mut request = json!({
+            "draft": {
+                "name": "existing",
+                "location": {
+                    "backend": "local",
+                    "options": { "path": first.local_repo_root("existing").display().to_string() },
+                },
+            },
+            "password": "test-password",
+            "recovery_key": null,
+        });
+
+        let refused = api.post("/api/v1/repositories/connect", &request).await;
+        assert_eq!(refused.status(), 409, "[{}]", backend.name());
+        let refused = body(refused).await;
+        assert_eq!(refused["code"], "weaker_guarantee");
+        assert!(
+            refused["message"]
+                .as_str()
+                .unwrap()
+                .contains("connect the repository anyway"),
+            "{refused}"
+        );
+        let list = body(api.get("/api/v1/repositories").await).await;
+        assert_eq!(list.as_array().unwrap().len(), 0);
+
+        request["draft"]["accept_weaker_guarantee"] = json!(true);
+        let connected = api.post("/api/v1/repositories/connect", &request).await;
+        assert_eq!(connected.status(), 201, "[{}]", backend.name());
+        let connected = body(connected).await;
+        assert_eq!(
+            connected["guarantee_accepted"],
+            "host_can_overwrite_or_delete"
+        );
+        ts.stop().await;
+        first.stop().await;
     }
 }
 
