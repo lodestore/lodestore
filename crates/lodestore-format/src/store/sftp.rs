@@ -1324,6 +1324,10 @@ impl BlobPurge for SftpStore {
     ) -> std::result::Result<Vec<String>, BlobError> {
         Ok(Vec::new())
     }
+
+    async fn rewritten_keys(&self, _prefix: &str) -> std::result::Result<Vec<String>, BlobError> {
+        Ok(Vec::new())
+    }
 }
 
 #[cfg(test)]

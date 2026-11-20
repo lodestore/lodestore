@@ -12,6 +12,7 @@ use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::{HeaderName, StatusCode, header};
 use axum::response::Response;
+use tokio::sync::oneshot;
 
 const SLOW_DOWN: &str =
     "<Error><Code>SlowDown</Code><Message>Please reduce your request rate.</Message></Error>";
@@ -124,12 +125,20 @@ fn redact_query(query: &str) -> String {
         .join("&")
 }
 
+struct Hold {
+    method: &'static str,
+    query_parts: Vec<String>,
+    reached: oneshot::Sender<()>,
+    resume: oneshot::Receiver<()>,
+}
+
 struct Inner {
     upstream: String,
     client: reqwest::Client,
     rules: Mutex<Vec<(FaultRule, u32)>>,
     counters: Arc<Counters>,
     requests: Mutex<Vec<RecordedRequest>>,
+    holds: Mutex<Vec<Hold>>,
 }
 
 pub struct FaultProxy {
@@ -158,6 +167,7 @@ impl FaultProxy {
             ),
             counters: Arc::clone(&counters),
             requests: Mutex::default(),
+            holds: Mutex::default(),
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -183,6 +193,26 @@ impl FaultProxy {
 
     pub fn counters(&self) -> Arc<Counters> {
         Arc::clone(&self.counters)
+    }
+
+    /// Holds the next `method` request whose query contains every one of
+    /// `query_parts`
+    /// before it reaches the upstream. The returned receiver fires when it
+    /// arrives; the request goes on once the returned sender fires or drops.
+    pub fn hold(
+        &self,
+        method: &'static str,
+        query_parts: &[&str],
+    ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (reached, arrived) = oneshot::channel();
+        let (release, resume) = oneshot::channel();
+        self.inner.holds.lock().unwrap().push(Hold {
+            method,
+            query_parts: query_parts.iter().map(|q| (*q).to_owned()).collect(),
+            reached,
+            resume,
+        });
+        (arrived, release)
     }
 
     /// Every request received so far, in arrival order, whatever the rules did
@@ -274,6 +304,18 @@ async fn handle(State(st): State<Arc<Inner>>, req: Request) -> Response {
     }
     if action == Some(FaultAction::DenyUnconditional) {
         return xml(StatusCode::FORBIDDEN, ACCESS_DENIED);
+    }
+
+    let hold = {
+        let mut holds = st.holds.lock().unwrap();
+        holds
+            .iter()
+            .position(|h| h.method == verb && h.query_parts.iter().all(|q| query.contains(q)))
+            .map(|i| holds.remove(i))
+    };
+    if let Some(hold) = hold {
+        let _ = hold.reached.send(());
+        let _ = hold.resume.await;
     }
 
     let url = format!(

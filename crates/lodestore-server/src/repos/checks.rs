@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::time::Duration;
 
+use lodestore_format::store::location::secret_option_names;
 use lodestore_format::store::probe::{
     AgentKeyState, AgentProbe, CHECK_ORDER, Check, CheckId, CheckStatus, GuaranteeLevel, ProbeKeys,
     ProbeReport, SKIPPED_NOTE, Weakness, probe_keep, remove_probe_objects,
@@ -37,17 +38,8 @@ pub fn open_store(
     }))
 }
 
-/// Options that carry secrets, by backend. They are sealed on their own and
+/// Splits off the options that carry secrets: they are sealed on their own and
 /// never appear in the stored location or in any response.
-pub fn secret_option_names(backend: &str) -> &'static [&'static str] {
-    match backend {
-        "azblob" => &["account_key", "sas_token"],
-        "gcs" => &["credential"],
-        "sftp" => &["key"],
-        _ => &[],
-    }
-}
-
 pub fn split_secret_options(location: &RepoLocation) -> (RepoLocation, BTreeMap<String, String>) {
     let names = secret_option_names(&location.backend);
     let (secret, public): (BTreeMap<_, _>, BTreeMap<_, _>) = location
@@ -301,6 +293,38 @@ pub fn consent_message(result: &CheckResult, verb: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_secret_option_is_split_off() {
+        for (backend, secrets, public) in [
+            (
+                "azblob",
+                &["account_key", "sas_token", "encryption_key"][..],
+                &["container", "account_name", "encryption_key_sha256"][..],
+            ),
+            (
+                "gcs",
+                &["credential", "token"][..],
+                &["bucket", "credential_path"][..],
+            ),
+            ("sftp", &["key"][..], &["user", "host_key"][..]),
+        ] {
+            let location = RepoLocation::new(
+                backend,
+                secrets.iter().chain(public).map(|k| (*k, "SECRETVALUE")),
+            );
+            let (stored, sealed) = split_secret_options(&location);
+            let sealed: Vec<&str> = sealed.keys().map(String::as_str).collect();
+            let mut expected = secrets.to_vec();
+            expected.sort_unstable();
+            assert_eq!(sealed, expected, "{backend}");
+            assert!(
+                stored.options.keys().all(|k| public.contains(&k.as_str())),
+                "{backend}: {:?}",
+                stored.options.keys()
+            );
+        }
+    }
 
     fn at(level: GuaranteeLevel) -> ProbeReport {
         ProbeReport {

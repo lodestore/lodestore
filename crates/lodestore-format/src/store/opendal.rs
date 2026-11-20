@@ -6,7 +6,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use opendal::{ErrorKind, Operator};
 
-use super::purge::{BlobPurge, PurgeOutcome, deleted_keys_op, purge_op};
+use super::purge::{BlobPurge, PurgeOutcome, deleted_keys_op, purge_op, rewritten_keys_op};
 use super::s3::{check_key, get_range_op, layered, list_op, map_err, modified_op, presign_op};
 use super::{BlobDelete, BlobError, BlobStore, ListEntry, Presigned};
 use crate::error::{Error, Result};
@@ -121,5 +121,9 @@ impl BlobPurge for OpendalStore {
         older_than_ms: i64,
     ) -> std::result::Result<Vec<String>, BlobError> {
         deleted_keys_op(&self.op, prefix, older_than_ms).await
+    }
+
+    async fn rewritten_keys(&self, prefix: &str) -> std::result::Result<Vec<String>, BlobError> {
+        rewritten_keys_op(&self.op, prefix).await
     }
 }

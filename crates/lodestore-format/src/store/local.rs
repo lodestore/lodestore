@@ -298,6 +298,10 @@ impl BlobPurge for LocalFsStore {
     ) -> Result<Vec<String>, BlobError> {
         Ok(Vec::new())
     }
+
+    async fn rewritten_keys(&self, _prefix: &str) -> Result<Vec<String>, BlobError> {
+        Ok(Vec::new())
+    }
 }
 
 #[cfg(test)]

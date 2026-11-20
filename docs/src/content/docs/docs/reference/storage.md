@@ -12,8 +12,8 @@ The web wizard creates S3 and local-folder repositories. Azure Blob Storage, Goo
 |---------|----------|----------------|
 | S3 and compatible (AWS, MinIO, Ceph) | `bucket`, `endpoint`, `region`, `path_style`, `prefix` | the server key and the agent key |
 | S3 on Backblaze B2 | the S3 options and `provider = b2` | the server key and the agent key |
-| Azure Blob Storage | `container`, `root`, `endpoint`, `account_name` | `sas_token`, or `account_key` (with `account_name`) |
-| Google Cloud Storage | `bucket`, `root`, `endpoint` | `credential` (the service account key as JSON) |
+| Azure Blob Storage | `container`, `root`, `endpoint`, `account_name` | `sas_token`, or `account_key` (with `account_name`); `encryption_key` for a customer-provided key |
+| Google Cloud Storage | `bucket`, `root`, `endpoint` | `credential` (the service account key as JSON), or `token` (an OAuth access token) |
 | SFTP | `endpoint` (`host:port`), `user`, `host_key`, `root`, `publish` | `key` (the private key) |
 | Local folder | `path` (absolute) | none |
 

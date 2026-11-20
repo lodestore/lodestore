@@ -33,6 +33,17 @@ pub struct RepoLocation {
     pub options: BTreeMap<String, String>,
 }
 
+/// The options a store reads that hold a secret (a key, a token or a
+/// signature), by backend. S3 keys never travel in the options.
+pub fn secret_option_names(backend: &str) -> &'static [&'static str] {
+    match backend {
+        "azblob" => &["account_key", "sas_token", "encryption_key"],
+        "gcs" => &["credential", "token"],
+        "sftp" => &["key"],
+        _ => &[],
+    }
+}
+
 fn is_secret_option(key: &str) -> bool {
     let key = key.to_ascii_lowercase();
     [
@@ -482,6 +493,15 @@ mod tests {
         azblob(&[]).validate().unwrap();
     }
 
+    #[test]
+    fn secret_options_are_redacted_in_debug() {
+        for backend in ["azblob", "gcs", "sftp"] {
+            for name in secret_option_names(backend) {
+                assert!(is_secret_option(name), "{backend}: {name}");
+            }
+        }
+    }
+
     #[tokio::test]
     async fn azblob_transport_error_does_not_leak_sas_token() {
         use crate::store::BlobStore;
@@ -490,7 +510,7 @@ mod tests {
             [
                 ("container", "c"),
                 ("endpoint", "http://127.0.0.1:1"),
-                ("sas_token", "sv=1&sig=SECRETSIG"),
+                ("sas_token", "sv=1&spr=https,http&sig=SECRETSIG"),
             ],
         );
         let store = loc.open(None).unwrap();
