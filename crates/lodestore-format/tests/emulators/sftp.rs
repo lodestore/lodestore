@@ -1,6 +1,12 @@
+use std::collections::BTreeMap;
 use std::process::Command;
 
 use bytes::Bytes;
+use lodestore_format::crypto::BlobId;
+use lodestore_format::index::{open_shard, parse_hex32};
+use lodestore_format::pack::pack_object_key;
+use lodestore_format::repo::Repository;
+use lodestore_format::store::sftp::Tear;
 use lodestore_format::store::{BlobDelete, BlobError, BlobPurge, BlobStore, RepoLocation, Store};
 use lodestore_testkit::sshd::{SshUser, SshdServer};
 
@@ -538,4 +544,93 @@ async fn sftp_ecdsa_key_authenticates() {
         .await
         .unwrap();
     assert_eq!(&server.get("packs/05/ecdsa").await.unwrap()[..], b"ok");
+}
+
+fn direct_agent(sshd: &SshdServer, plan: impl IntoIterator<Item = Option<Tear>>) -> Store {
+    let Store::Sftp(inner) = location(
+        sshd,
+        SshUser::NoLink,
+        &sshd.host_key(),
+        &[("publish", "direct")],
+    ) else {
+        panic!("not an SFTP store");
+    };
+    inner.tear_puts(plan);
+    Store::Sftp(inner)
+}
+
+/// The packs the index shards name, with the size each claims.
+async fn indexed_packs(store: &Store) -> BTreeMap<String, u64> {
+    let repo = Repository::open(store, b"pw").await.unwrap();
+    let read = repo.read_keys();
+    let mut packs = BTreeMap::new();
+    for shard in store.list("index/").await.unwrap() {
+        let shard_id = parse_hex32(shard.key.strip_prefix("index/").unwrap()).unwrap();
+        let bytes = store.get(&shard.key).await.unwrap();
+        let opened = open_shard(read.k_idx(), read.repo_id(), &shard_id, &bytes).unwrap();
+        for pack in opened.packs {
+            let id: BlobId = pack.pack_id.as_slice().try_into().unwrap();
+            packs.insert(pack_object_key(&id), pack.pack_size);
+        }
+    }
+    packs
+}
+
+/// Every pack the index names is listed under its own name at the size the
+/// index claims, and its bytes hash to the name. Returns the listed packs the
+/// index does not name.
+async fn assert_indexed_packs_whole(store: &Store) -> BTreeMap<String, u64> {
+    let indexed = indexed_packs(store).await;
+    assert!(!indexed.is_empty());
+    let mut listed: BTreeMap<String, u64> = store
+        .list("packs/")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|e| (e.key, e.size))
+        .collect();
+    for (key, size) in &indexed {
+        assert_eq!(listed.remove(key), Some(*size), "{key}");
+        let stored = store.get(key).await.unwrap();
+        assert_eq!(stored.len() as u64, *size, "{key}");
+        let id = key.rsplit('/').next().and_then(parse_hex32).unwrap();
+        assert_eq!(blake3::hash(&stored).as_bytes(), &id, "{key}");
+    }
+    listed
+}
+
+async fn torn_pack_is_resealed_and_restores(tear: Tear) -> BTreeMap<String, u64> {
+    let sshd = SshdServer::start().await;
+    let server = store(&sshd, SshUser::Srv);
+    let agent = direct_agent(&sshd, [Some(tear)]);
+    super::init_repo(&server).await;
+
+    let src = tempfile::tempdir().unwrap();
+    super::make_tree(src.path(), 3);
+    let outcome = super::backup(&agent, src.path()).await;
+    super::restore_and_compare(&server, &outcome, src.path()).await;
+
+    let leftovers = assert_indexed_packs_whole(&server).await;
+    assert_eq!(leftovers.len(), 1, "{leftovers:?}");
+    for key in leftovers.keys() {
+        let stored = server.get(key).await.unwrap();
+        let id = key.rsplit('/').next().and_then(parse_hex32).unwrap();
+        assert_ne!(blake3::hash(&stored).as_bytes(), &id, "{key} is torn");
+    }
+    leftovers
+}
+
+#[tokio::test]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn sftp_direct_torn_pack_is_resealed_and_restores() {
+    let leftovers = torn_pack_is_resealed_and_restores(Tear::Short(4)).await;
+    assert_eq!(leftovers.values().copied().collect::<Vec<_>>(), [4]);
+}
+
+#[tokio::test]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn sftp_direct_holed_pack_is_resealed_and_restores() {
+    let leftovers = torn_pack_is_resealed_and_restores(Tear::Hole).await;
+    let size = *leftovers.values().next().unwrap();
+    assert!(size > 4, "{leftovers:?}");
 }

@@ -199,11 +199,23 @@ struct Conn {
 #[cfg(feature = "test-hooks")]
 type BeforeHardlink = Arc<dyn Fn(&str) + Send + Sync>;
 
+/// How a direct write is cut off by [`SftpStore::tear_next_put`].
+#[cfg(feature = "test-hooks")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tear {
+    /// Hand the server this many bytes, then break the connection.
+    Short(usize),
+    /// Write the second half of the object before the first, then break the
+    /// connection: the file has its full length and zeros at the front.
+    Hole,
+}
+
 #[cfg(feature = "test-hooks")]
 #[derive(Default)]
 struct Hooks {
     missing: std::sync::Mutex<Vec<String>>,
     before_hardlink: std::sync::Mutex<Option<BeforeHardlink>>,
+    tears: std::sync::Mutex<std::collections::VecDeque<Option<Tear>>>,
 }
 
 struct Inner {
@@ -391,6 +403,23 @@ impl SftpStore {
         }
     }
 
+    /// Cuts off the next direct write of an object under `packs/`; later
+    /// ones are queued behind it. Index shards and snapshots are never torn:
+    /// only packs are published again under a new name.
+    #[cfg(feature = "test-hooks")]
+    pub fn tear_next_put(&self, tear: Tear) {
+        self.tear_puts([Some(tear)]);
+    }
+
+    /// Queues one entry per direct write under `packs/`: `Some` tears it,
+    /// `None` lets it through.
+    #[cfg(feature = "test-hooks")]
+    pub fn tear_puts(&self, plan: impl IntoIterator<Item = Option<Tear>>) {
+        if let Ok(mut queue) = self.inner.hooks.tears.lock() {
+            queue.extend(plan);
+        }
+    }
+
     fn advertises(&self, conn: &Conn, extension: &str) -> bool {
         let offered = if extension == HARDLINK {
             conn.hardlink
@@ -569,6 +598,41 @@ impl SftpStore {
         Ok(())
     }
 
+    #[cfg(feature = "test-hooks")]
+    async fn write_torn(
+        conn: &Conn,
+        path: &str,
+        data: &[u8],
+        tear: Tear,
+    ) -> std::result::Result<(), SftpFail> {
+        let attrs = FileAttributes {
+            permissions: Some(FILE_MODE),
+            ..FileAttributes::empty()
+        };
+        let mut file = conn
+            .sftp
+            .open_with_flags_and_attributes(
+                path,
+                OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::WRITE,
+                attrs,
+            )
+            .await?;
+        match tear {
+            Tear::Short(len) => file.write_all(&data[..len.min(data.len())]).await?,
+            Tear::Hole => {
+                let half = data.len() / 2;
+                file.seek(SeekFrom::Start(half as u64)).await?;
+                file.write_all(&data[half..]).await?;
+            }
+        }
+        file.flush().await?;
+        Err(SftpFail {
+            status: None,
+            message: "the connection was cut by a test hook".into(),
+            transport: true,
+        })
+    }
+
     async fn put_hardlink(&self, key: &str, data: &Bytes) -> std::result::Result<(), BlobError> {
         let target = self.path(key);
         let mut retries_left = 1u8;
@@ -725,9 +789,27 @@ impl SftpStore {
     async fn put_direct(&self, key: &str, data: &Bytes) -> std::result::Result<(), BlobError> {
         let target = self.path(key);
         let mut retries_left = 1u8;
+        #[cfg(feature = "test-hooks")]
+        let mut tear = if key.starts_with("packs/") {
+            self.inner
+                .hooks
+                .tears
+                .lock()
+                .ok()
+                .and_then(|mut queue| queue.pop_front().flatten())
+        } else {
+            None
+        };
         loop {
             let conn = self.conn().await?;
-            let fail = match Self::write_new(&conn, &target, data).await {
+            #[cfg(feature = "test-hooks")]
+            let written = match tear.take() {
+                Some(tear) => Self::write_torn(&conn, &target, data, tear).await,
+                None => Self::write_new(&conn, &target, data).await,
+            };
+            #[cfg(not(feature = "test-hooks"))]
+            let written = Self::write_new(&conn, &target, data).await;
+            let fail = match written {
                 Ok(()) => return Ok(()),
                 Err(fail) => fail,
             };
