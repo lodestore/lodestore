@@ -66,6 +66,7 @@ impl BlobPurge for Store {
             Store::Local(s) => s.purge(key).await,
             Store::S3(s) => s.purge(key).await,
             Store::Opendal(s) => s.purge(key).await,
+            Store::Sftp(s) => s.purge(key).await,
         }
     }
 
@@ -78,6 +79,7 @@ impl BlobPurge for Store {
             Store::Local(s) => s.deleted_keys(prefix, older_than_ms).await,
             Store::S3(s) => s.deleted_keys(prefix, older_than_ms).await,
             Store::Opendal(s) => s.deleted_keys(prefix, older_than_ms).await,
+            Store::Sftp(s) => s.deleted_keys(prefix, older_than_ms).await,
         }
     }
 }
@@ -92,7 +94,9 @@ pub fn is_lock_refusal(error: &BlobError) -> bool {
         BlobError::Denied { message } | BlobError::Backend { message, .. } => {
             message.to_ascii_lowercase()
         }
-        BlobError::AlreadyExists | BlobError::NotFound => return false,
+        BlobError::AlreadyExists | BlobError::NotFound | BlobError::HostKeyMismatch { .. } => {
+            return false;
+        }
     };
     ["worm", "objectlocked", "object lock"]
         .iter()
