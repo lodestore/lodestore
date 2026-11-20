@@ -240,6 +240,18 @@ impl BlobStore for LocalFsStore {
         .map_err(|e: std::io::Error| io_err(e))
     }
 
+    async fn object_size(&self, key: &str) -> Result<Option<u64>, BlobError> {
+        let path = self.path_of(key)?;
+        match tokio::task::spawn_blocking(move || std::fs::metadata(path))
+            .await
+            .map_err(io_err)?
+        {
+            Ok(meta) => Ok(Some(meta.len())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(io_err(e)),
+        }
+    }
+
     async fn ensure_prefixes(&self, prefixes: &[&str]) -> Result<(), BlobError> {
         for p in prefixes {
             let path = self.path_of(p.trim_end_matches('/'))?;
