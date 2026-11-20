@@ -41,6 +41,7 @@ const PREFIXES: [&str; 3] = ["packs/", "index/", "snapshots/"];
 #[derive(Clone, Copy)]
 enum Bucket {
     Versioned,
+    VersionedB2,
     Compliance,
     Governance,
 }
@@ -73,7 +74,7 @@ impl Cloud {
     async fn start(kind: Bucket) -> Cloud {
         let minio = MinioServer::start().await;
         match kind {
-            Bucket::Versioned => minio.create_versioned_bucket(BUCKET).await,
+            Bucket::Versioned | Bucket::VersionedB2 => minio.create_versioned_bucket(BUCKET).await,
             Bucket::Compliance => minio.create_locked_bucket(BUCKET).await,
             Bucket::Governance => minio.create_governance_bucket(BUCKET).await,
         }
@@ -81,11 +82,14 @@ impl Cloud {
             .create_user_with_policy(BUCKET, &agent_minio_policy_json(BUCKET, ""))
             .await;
         let server_key = minio.root_credentials();
-        let options = BTreeMap::from([
+        let mut options = BTreeMap::from([
             ("bucket".to_string(), BUCKET.to_string()),
             ("endpoint".to_string(), minio.endpoint().to_string()),
             ("path_style".to_string(), "true".to_string()),
         ]);
+        if matches!(kind, Bucket::VersionedB2) {
+            options.insert("provider".to_string(), "b2".to_string());
+        }
         let server_store = open(&options, &server_key);
         let agent_store = open(&options, &agent_key);
         let mut entropy = Entropy::os();
@@ -436,6 +440,36 @@ async fn gc_s3_versioned_purge() {
         assert!(done["bytes_freed"].as_u64().unwrap() > 0, "{done}");
         cloud.assert_restores(&b).await;
         cloud.assert_restores(&c).await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_s3_b2_preset_keeps_objects_hidden_by_someone_else() {
+    on_each_backend(Bucket::VersionedB2, async |cloud, ts, repo| {
+        let a = cloud.backup("a", 11).await;
+        let b = cloud.backup("b", 12).await;
+        let before = cloud.listing().await;
+        let manifest = snapshot_object_key(&parse_hex32(&a.id).unwrap());
+        assert!(before.contains_key(&manifest));
+        let hider = operator_as(&cloud.minio, &cloud.server_key.0, &cloud.server_key.1);
+        hider.delete(&manifest).await.unwrap();
+        assert!(!cloud.listing().await.contains_key(&manifest));
+
+        let id = real_cycle(ts, repo).await;
+        assert_eq!(
+            finish(ts, &id, three_days_on()).await,
+            GcState::Done,
+            "{:?}",
+            failure(ts, &id).await
+        );
+
+        let versions = cloud.minio.object_versions_all(BUCKET, &manifest).await;
+        assert!(
+            versions.iter().any(|(_, marker)| !marker),
+            "the hidden manifest was purged: {versions:?}"
+        );
+        cloud.assert_restores(&b).await;
     })
     .await;
 }

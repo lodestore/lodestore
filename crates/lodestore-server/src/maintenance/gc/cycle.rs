@@ -526,7 +526,7 @@ async fn mark_and_repack(
     let oversized = surveyed.shards.oversized.len();
     if plan.delete.is_empty() && plan.repack.is_empty() && oversized == 0 {
         let older_than = now_ms.saturating_sub(cycle.settings.pause_ms);
-        let swept = sweep_deleted(&source.store, older_than).await?;
+        let swept = sweep_hidden(state, &cycle.id, &source.store, older_than).await?;
         let mut report = report;
         report.summary.bytes_freed = swept.bytes_freed;
         apply_locked(state, cycle, &mut report, &swept).await;
@@ -1022,6 +1022,30 @@ async fn sweep_deleted<S: BlobStore + BlobDelete + BlobPurge>(
     Ok(swept)
 }
 
+/// [`sweep_deleted`], unless the store's `sweeps_delete_markers()` is false:
+/// on B2 an agent key can hide an object, and sweeping the marker would turn
+/// that into a delete. The packs the server itself decides to delete still go
+/// through `purge`, which removes every version.
+async fn sweep_hidden(
+    state: &AppState,
+    cycle_id: &str,
+    store: &Store,
+    older_than: i64,
+) -> anyhow::Result<SweepOutcome> {
+    if store.sweeps_delete_markers() {
+        return sweep_deleted(store, older_than).await;
+    }
+    event(
+        state,
+        cycle_id,
+        "info",
+        "hidden_not_swept",
+        "Hidden objects are not swept on this storage: the server cannot tell who hid them.",
+    )
+    .await;
+    Ok(SweepOutcome::default())
+}
+
 async fn sweeping(state: &AppState, cycle: &CycleRow, now_ms: i64) -> anyhow::Result<StepOutcome> {
     let gc_id = cycle_gc_id(cycle)?;
     let source = open_repository(state, &cycle.repository_id).await?;
@@ -1069,7 +1093,7 @@ async fn sweeping(state: &AppState, cycle: &CycleRow, now_ms: i64) -> anyhow::Re
     }
 
     let older_than = now_ms.saturating_sub(cycle.settings.pause_ms);
-    swept.merge(sweep_deleted(store, older_than).await?);
+    swept.merge(sweep_hidden(state, &cycle.id, store, older_than).await?);
     state.readers.invalidate(&cycle.repository_id);
     if let Some(published) = marker.as_ref().and_then(|m| m.modified_ms) {
         let locks = read_writer_locks(store, source.keys.k_idx(), source.keys.repo_id()).await?;
