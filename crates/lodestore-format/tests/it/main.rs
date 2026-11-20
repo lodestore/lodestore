@@ -8,6 +8,7 @@ mod adv_gc;
 mod adv_gc_mark;
 mod adv_latest;
 mod adv_restore;
+mod adv_storage_b2;
 mod attest;
 mod attest_lifecycle;
 mod attested_dedup;

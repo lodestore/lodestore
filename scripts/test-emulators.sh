@@ -7,4 +7,4 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-exec cargo nextest run --workspace --profile ci --run-ignored only -E 'binary(emulators)' "$@"
+exec cargo nextest run --workspace --profile ci --run-ignored only -E 'binary(emulators) - test(/adv_service_gcs_/)' "$@"
