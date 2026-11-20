@@ -94,6 +94,10 @@ impl BlobStore for Hooked<'_> {
         }
         Ok(listed)
     }
+
+    fn publishes_atomically(&self) -> bool {
+        true
+    }
 }
 
 impl BlobDelete for Hooked<'_> {

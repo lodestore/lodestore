@@ -363,6 +363,10 @@ impl<S: BlobStore> BlobStore for Wrapped<S> {
         }
         Ok(listed)
     }
+
+    fn publishes_atomically(&self) -> bool {
+        self.inner.publishes_atomically()
+    }
 }
 
 #[tokio::test]

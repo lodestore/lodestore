@@ -370,6 +370,10 @@ impl BlobStore for FailIndexPuts<'_> {
     async fn list(&self, prefix: &str) -> Result<Vec<ListEntry>, BlobError> {
         self.inner.list(prefix).await
     }
+
+    fn publishes_atomically(&self) -> bool {
+        true
+    }
 }
 
 #[tokio::test]
@@ -449,6 +453,10 @@ impl BlobStore for RangeLog<'_> {
 
     async fn list(&self, prefix: &str) -> Result<Vec<ListEntry>, BlobError> {
         self.inner.list(prefix).await
+    }
+
+    fn publishes_atomically(&self) -> bool {
+        true
     }
 }
 
@@ -734,6 +742,10 @@ impl BlobStore for PackOverread<'_> {
 
     async fn list(&self, prefix: &str) -> Result<Vec<ListEntry>, BlobError> {
         self.0.list(prefix).await
+    }
+
+    fn publishes_atomically(&self) -> bool {
+        true
     }
 }
 

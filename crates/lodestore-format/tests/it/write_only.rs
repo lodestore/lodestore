@@ -44,6 +44,10 @@ impl<S: BlobStore> BlobStore for DenyDelete<S> {
     async fn ensure_prefixes(&self, prefixes: &[&str]) -> Result<(), BlobError> {
         self.0.ensure_prefixes(prefixes).await
     }
+
+    fn publishes_atomically(&self) -> bool {
+        self.0.publishes_atomically()
+    }
 }
 
 impl<S: Send + Sync> BlobDelete for DenyDelete<S> {
@@ -101,6 +105,10 @@ impl<S: BlobStore> BlobStore for NoDelete<S> {
 
     async fn list(&self, prefix: &str) -> Result<Vec<ListEntry>, BlobError> {
         self.0.list(prefix).await
+    }
+
+    fn publishes_atomically(&self) -> bool {
+        self.0.publishes_atomically()
     }
 }
 

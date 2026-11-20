@@ -48,6 +48,10 @@ impl<S: BlobStore> BlobStore for LaggyListStore<S> {
     async fn ensure_prefixes(&self, prefixes: &[&str]) -> Result<(), BlobError> {
         self.0.ensure_prefixes(prefixes).await
     }
+
+    fn publishes_atomically(&self) -> bool {
+        self.0.publishes_atomically()
+    }
 }
 
 fn make_tree(root: &Path) {

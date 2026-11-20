@@ -164,6 +164,10 @@ impl<S: BlobStore> BlobStore for DenyLocks<S> {
         }
         self.0.list(prefix).await
     }
+
+    fn publishes_atomically(&self) -> bool {
+        self.0.publishes_atomically()
+    }
 }
 
 #[tokio::test]

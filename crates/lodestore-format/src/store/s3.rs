@@ -416,6 +416,10 @@ impl BlobStore for S3Store {
     async fn list(&self, prefix: &str) -> std::result::Result<Vec<ListEntry>, BlobError> {
         list_op(&self.op, prefix).await
     }
+
+    fn publishes_atomically(&self) -> bool {
+        true
+    }
 }
 
 impl BlobDelete for S3Store {
