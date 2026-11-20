@@ -305,7 +305,7 @@ function GuaranteeBlock({
 			<AlertTitle>
 				{unchecked ? copy.guarantee.uncheckedTitle : copy.guarantee.weakTitle}
 			</AlertTitle>
-			<AlertDescription className="flex flex-col gap-4">
+			<AlertDescription className="flex flex-col gap-4 [&_p:not(:last-child)]:mb-0">
 				{unchecked && <p>{copy.guarantee.uncheckedBody}</p>}
 				<GuaranteeNotes codes={result.guarantee_notes} />
 				{unchecked && (
@@ -313,6 +313,7 @@ function GuaranteeBlock({
 						<Button
 							type="button"
 							variant="outline"
+							className="text-foreground"
 							disabled={disabled}
 							onClick={onCheckAgain}
 						>

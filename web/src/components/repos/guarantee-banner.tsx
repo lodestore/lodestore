@@ -81,7 +81,7 @@ export function GuaranteeBanner({
 		<Alert className={kind === "notes" ? undefined : "text-warning"}>
 			{kind === "notes" ? <Info aria-hidden /> : <TriangleAlert aria-hidden />}
 			<AlertTitle>{title}</AlertTitle>
-			<AlertDescription className="flex flex-col gap-4">
+			<AlertDescription className="flex flex-col gap-4 [&_p:not(:last-child)]:mb-0">
 				{kind === "unchecked" && <p>{copy.guarantee.uncheckedBody}</p>}
 				{kind === "downgrade" && (
 					<p>
@@ -107,6 +107,7 @@ export function GuaranteeBanner({
 						<Button
 							type="button"
 							variant="outline"
+							className="text-foreground"
 							disabled={accept.isPending}
 							onClick={() => accept.mutate({ id: repository.id })}
 						>
