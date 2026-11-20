@@ -15,7 +15,6 @@ use crate::repos::{CheckDto, CheckResult, LocationDto, RepositoryDraft};
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(10);
-const HOST_KEY_CHANGED: &str = "host key changed";
 
 pub(crate) fn invalid(e: impl Display) -> ApiError {
     ApiError::Validation(e.to_string())
@@ -176,10 +175,7 @@ pub async fn run_storage_probe(opened: &Opened) -> ProbeReport {
         Err(_) => tracing::warn!("removing the probe objects timed out after {CLEANUP_TIMEOUT:?}"),
     }
     for check in &mut report.checks {
-        if let Some(detail) = check.detail.clone() {
-            if detail.contains(HOST_KEY_CHANGED) {
-                check.error = Some(detail.clone());
-            }
+        if let Some(detail) = &check.detail {
             tracing::warn!(
                 check = check.id.as_str(),
                 status = ?check.status,
