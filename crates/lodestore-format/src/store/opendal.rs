@@ -11,12 +11,11 @@ use super::s3::{check_key, get_range_op, layered, list_op, map_err, modified_op,
 use super::{BlobDelete, BlobError, BlobStore, ListEntry, Presigned};
 use crate::error::{Error, Result};
 
-/// Any OpenDAL service opened by scheme name at run time. Used for the
-/// experimental backends; a scheme whose service was not compiled in is
-/// reported as unavailable instead of failing the build.
+/// An OpenDAL service opened by scheme name at run time: Azure Blob and GCS.
+/// A scheme whose service was not compiled in is reported as unavailable
+/// instead of failing the build.
 pub struct OpendalStore {
     pub(super) op: Operator,
-    conditional: bool,
 }
 
 impl fmt::Debug for OpendalStore {
@@ -38,15 +37,11 @@ impl OpendalStore {
                 ))
             }
         })?;
-        let conditional = op.info().capability().write_with_if_not_exists;
-        Ok(OpendalStore {
-            op: layered(op),
-            conditional,
-        })
+        Ok(OpendalStore { op: layered(op) })
     }
 
     pub fn conditional_write_supported(&self) -> bool {
-        self.conditional
+        self.op.info().capability().write_with_if_not_exists
     }
 }
 
@@ -79,21 +74,11 @@ impl OpendalStore {
 impl BlobStore for OpendalStore {
     async fn put_if_absent(&self, key: &str, data: Bytes) -> std::result::Result<(), BlobError> {
         check_key(key)?;
-        if self.conditional {
-            return match self.op.write_with(key, data).if_not_exists(true).await {
-                Ok(_) => Ok(()),
-                Err(e) if e.kind() == ErrorKind::ConditionNotMatch => Err(BlobError::AlreadyExists),
-                Err(e) => Err(map_err(e)),
-            };
+        match self.op.write_with(key, data).if_not_exists(true).await {
+            Ok(_) => Ok(()),
+            Err(e) if e.kind() == ErrorKind::ConditionNotMatch => Err(BlobError::AlreadyExists),
+            Err(e) => Err(map_err(e)),
         }
-        // ponytail: stat then write is racy; without a conditional write on the
-        // backend (webdav) two writers can both pass the stat.
-        match self.op.stat(key).await {
-            Ok(_) => return Err(BlobError::AlreadyExists),
-            Err(e) if e.kind() == ErrorKind::NotFound => {}
-            Err(e) => return Err(map_err(e)),
-        }
-        self.op.write(key, data).await.map(|_| ()).map_err(map_err)
     }
 
     async fn get(&self, key: &str) -> std::result::Result<Bytes, BlobError> {
