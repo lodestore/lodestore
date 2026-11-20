@@ -634,3 +634,42 @@ async fn sftp_direct_holed_pack_is_resealed_and_restores() {
     let size = *leftovers.values().next().unwrap();
     assert!(size > 4, "{leftovers:?}");
 }
+
+#[tokio::test]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn sftp_stale_tmp_lists_only_old_entries() {
+    let sshd = SshdServer::start().await;
+    let Store::Sftp(server) = store(&sshd, SshUser::Srv) else {
+        panic!("not an SFTP store");
+    };
+    let server_store = Store::Sftp(server.clone());
+    server_store.ensure_prefixes(&["packs"]).await.unwrap();
+    assert!(server.stale_tmp(i64::MAX).await.unwrap().is_empty());
+
+    let agent = store(&sshd, SshUser::Agent);
+    for key in ["packs/00/a", "packs/00/b"] {
+        agent
+            .put_if_absent(key, Bytes::from_static(b"x"))
+            .await
+            .unwrap();
+    }
+    let listing = exec(&sshd, &["ls", &format!("{REPO}/tmp")]);
+    let mut names: Vec<&str> = listing.lines().collect();
+    names.sort_unstable();
+    assert_eq!(names.len(), 2, "{listing}");
+    exec(
+        &sshd,
+        &[
+            "touch",
+            "-d",
+            "@1000000000",
+            &format!("{REPO}/tmp/{}", names[0]),
+        ],
+    );
+
+    let old = format!("tmp/{}", names[0]);
+    let both: Vec<String> = names.iter().map(|n| format!("tmp/{n}")).collect();
+    assert_eq!(server.stale_tmp(2_000_000_000_000).await.unwrap(), both);
+    assert_eq!(server.stale_tmp(1_000_000_000_000).await.unwrap(), [old]);
+    assert!(server.stale_tmp(999_999_999_999).await.unwrap().is_empty());
+}
