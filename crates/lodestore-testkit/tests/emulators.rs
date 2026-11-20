@@ -7,6 +7,45 @@ use lodestore_testkit::azurite::AzuriteServer;
 use lodestore_testkit::fault_proxy::{FaultPlan, FaultProxy};
 use lodestore_testkit::gcs::FakeGcsServer;
 use lodestore_testkit::minio::free_port;
+use lodestore_testkit::sshd::{SshUser, SshdServer};
+
+/// Runs one command through the system `sftp` client as `user`; the flag says
+/// whether it succeeded, the text is everything the client printed.
+fn sftp(server: &SshdServer, user: SshUser, command: &str) -> (bool, String) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let key = dir.path().join("key");
+    std::fs::write(&key, server.private_key(user)).unwrap();
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::write(dir.path().join("local"), "payload").unwrap();
+    let batch = dir.path().join("batch");
+    std::fs::write(&batch, format!("{command}\n")).unwrap();
+    let (host, port) = server
+        .endpoint()
+        .split_once(':')
+        .map(|(h, p)| (h.to_owned(), p.to_owned()))
+        .unwrap();
+    let out = std::process::Command::new("sftp")
+        .current_dir(dir.path())
+        .args(["-b"])
+        .arg(&batch)
+        .arg("-i")
+        .arg(&key)
+        .args(["-P", &port])
+        .args(["-o", "IdentitiesOnly=yes"])
+        .args(["-o", "BatchMode=yes"])
+        .args(["-o", "StrictHostKeyChecking=no"])
+        .args(["-o", "UserKnownHostsFile=/dev/null"])
+        .arg(format!("{}@{host}", user.login()))
+        .output()
+        .expect("run sftp");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    (out.status.success(), text)
+}
 
 async fn resumable_put(
     client: &reqwest::Client,
@@ -105,4 +144,54 @@ async fn azurite_harness_rcl_sas_refuses_a_second_put() {
             .await,
         reqwest::StatusCode::CONFLICT
     );
+}
+
+#[tokio::test]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn sshd_harness_restricts_the_agent() {
+    let sshd = SshdServer::start().await;
+    assert!(sshd.host_key().starts_with("ssh-ed25519 "));
+    assert_eq!(sshd.root(), "/data");
+
+    let (ok, out) = sftp(&sshd, SshUser::Agent, "put local /data/tmp/a");
+    assert!(ok, "agent creates a file: {out}");
+    let (ok, out) = sftp(&sshd, SshUser::AgentEcdsa, "put local /data/tmp/e");
+    assert!(ok, "the ecdsa key works for the agent: {out}");
+    for command in ["rm /data/tmp/a", "mkdir /data/tmp/dir"] {
+        let (ok, out) = sftp(&sshd, SshUser::Agent, command);
+        assert!(
+            !ok && out.contains("Permission denied"),
+            "{command} must be refused: {out}"
+        );
+    }
+    let (ok, out) = sftp(&sshd, SshUser::Agent, "ln /data/tmp/a /data/packs/a");
+    assert!(ok, "agent publishes with a hardlink: {out}");
+
+    let (ok, out) = sftp(&sshd, SshUser::NoLink, "put local /data/tmp/b");
+    assert!(ok, "nolink creates a file: {out}");
+    let (ok, out) = sftp(&sshd, SshUser::NoLink, "ln /data/tmp/b /data/packs/b");
+    assert!(
+        !ok && out.contains("does not support hardlink@openssh.com"),
+        "nolink does not offer the hardlink request: {out}"
+    );
+
+    let requests = std::process::Command::new("docker")
+        .args(["exec", sshd.container()])
+        .args(["/usr/lib/openssh/sftp-server", "-Q", "requests"])
+        .output()
+        .expect("run docker exec");
+    let requests = String::from_utf8_lossy(&requests.stdout);
+    assert!(requests.contains("hardlink") && requests.contains("fsync"));
+
+    assert!(
+        sshd.log().contains("/data/tmp/a"),
+        "the sftp-server log records the requests: {}",
+        sshd.log()
+    );
+
+    let before = sshd.host_key();
+    sshd.rotate_host_key();
+    assert_ne!(sshd.host_key(), before);
+    let (ok, out) = sftp(&sshd, SshUser::Srv, "ls /data");
+    assert!(ok, "sshd serves with the new host key: {out}");
 }

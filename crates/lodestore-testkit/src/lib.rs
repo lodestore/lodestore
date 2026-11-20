@@ -10,6 +10,7 @@ pub mod gcs;
 pub mod minio;
 pub mod minisign;
 pub mod qemu;
+pub mod sshd;
 
 #[cfg(test)]
 pub(crate) fn assert_pinned(key: &str, value: &str) {

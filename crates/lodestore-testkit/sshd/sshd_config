@@ -1,0 +1,33 @@
+Port 22
+HostKey /etc/ssh/ssh_host_ed25519_key
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+UsePAM no
+AuthorizedKeysFile /etc/ssh/authorized/%u
+LogLevel VERBOSE
+Subsystem sftp internal-sftp
+
+Match User agent
+    ChrootDirectory /srv/repo
+    ForceCommand internal-sftp -l VERBOSE -P remove,rmdir,rename,posix-rename,setstat,fsetstat,lsetstat,symlink,copy-data,mkdir -u 0222
+    AllowTcpForwarding no
+    X11Forwarding no
+
+Match User nolink
+    ChrootDirectory /srv/repo
+    ForceCommand internal-sftp -l VERBOSE -P remove,rmdir,rename,posix-rename,setstat,fsetstat,lsetstat,symlink,copy-data,hardlink,mkdir -u 0222
+    AllowTcpForwarding no
+    X11Forwarding no
+
+Match User srv
+    ChrootDirectory /srv/repo
+    ForceCommand internal-sftp -l VERBOSE
+    AllowTcpForwarding no
+    X11Forwarding no
+
+Match User wide
+    ChrootDirectory /srv/repo
+    ForceCommand internal-sftp -l VERBOSE -u 0222
+    AllowTcpForwarding no
+    X11Forwarding no
