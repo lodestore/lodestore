@@ -53,7 +53,12 @@ fn run_chain(lode: &dyn Fn() -> Command, key_file: &Path, tmp: &Path) {
     let src = src.canonicalize().unwrap();
 
     lode()
-        .args(["repo", "init", "--recovery-key-file"])
+        .args([
+            "repo",
+            "init",
+            "--accept-weaker-guarantee",
+            "--recovery-key-file",
+        ])
         .arg(key_file)
         .assert()
         .success();

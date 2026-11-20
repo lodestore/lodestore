@@ -6,6 +6,7 @@ pub mod probe;
 pub mod purge;
 pub mod s3;
 pub mod sftp;
+mod url;
 
 use std::fmt;
 use std::future::Future;
@@ -471,13 +472,19 @@ impl BlobDelete for Store {
 }
 
 /// Opens a repository location: a folder path, absolute or relative, or
-/// `s3:http(s)://host[:port]/bucket[/prefix]`.
+/// `s3:http(s)://host[:port]/bucket[/prefix]`, `azblob://`, `gcs://` or `sftp://`.
 pub fn open_url(url: &str) -> Result<Store> {
     if url.is_empty() {
         return Err(Error::InvalidInput("repository location is empty".into()));
     }
     if url.starts_with("s3:") {
         return Ok(Store::S3(S3Store::open(url, None)?));
+    }
+    if ["azblob://", "gcs://", "sftp://"]
+        .iter()
+        .any(|scheme| url.starts_with(scheme))
+    {
+        return RepoLocation::from_url(url)?.open(None);
     }
     let root = std::path::absolute(url)?;
     Ok(Store::Local(LocalFsStore::new(root)))

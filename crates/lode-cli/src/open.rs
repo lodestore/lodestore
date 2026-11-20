@@ -18,7 +18,7 @@ use lodestore_format::locks::{
 use lodestore_format::provenance::{ATTESTATIONS_MISSING, ProvenanceSet};
 use lodestore_format::reader::Reader;
 use lodestore_format::repo::Repository;
-use lodestore_format::store::{BlobError, Store, open_url, read_bounded};
+use lodestore_format::store::{BlobError, RepoLocation, Store, open_url, read_bounded};
 use lodestore_format::writer::{Deadline, Writer};
 
 use crate::cli::{SecretArgs, UnlockError, UsageError};
@@ -44,7 +44,73 @@ pub fn resolve_repository(flag: Option<String>, profile: Option<&Profile>) -> Re
     })
 }
 
+fn is_remote_scheme(url: &str) -> bool {
+    ["azblob://", "gcs://", "sftp://"]
+        .iter()
+        .any(|scheme| url.starts_with(scheme))
+}
+
+/// A non-empty environment variable, kept out of plain `String`s that outlive
+/// the call.
+fn env_secret(name: &str) -> Option<Zeroizing<String>> {
+    std::env::var(name)
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(Zeroizing::new)
+}
+
+fn env_required(name: &str, what: &str) -> Result<Zeroizing<String>> {
+    env_secret(name).ok_or_else(|| anyhow::anyhow!("set {name} to {what}"))
+}
+
+fn azblob_options(location: &mut RepoLocation) -> Result<()> {
+    let account = env_required("LODE_AZBLOB_ACCOUNT_NAME", "the storage account name")?;
+    if !account.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        anyhow::bail!("LODE_AZBLOB_ACCOUNT_NAME must be letters and digits only");
+    }
+    match (
+        env_secret("LODE_AZBLOB_ACCOUNT_KEY"),
+        env_secret("LODE_AZBLOB_SAS_TOKEN"),
+    ) {
+        (Some(key), None) => location
+            .options
+            .insert("account_key".into(), key.to_string()),
+        (None, Some(sas)) => location.options.insert("sas_token".into(), sas.to_string()),
+        (Some(_), Some(_)) => {
+            anyhow::bail!("set only one of LODE_AZBLOB_ACCOUNT_KEY and LODE_AZBLOB_SAS_TOKEN")
+        }
+        (None, None) => anyhow::bail!(
+            "set LODE_AZBLOB_ACCOUNT_KEY or LODE_AZBLOB_SAS_TOKEN to authenticate to Azure Blob Storage"
+        ),
+    };
+    let endpoint = env_secret("LODE_AZBLOB_ENDPOINT").map_or_else(
+        || format!("https://{}.blob.core.windows.net", *account),
+        |e| e.to_string(),
+    );
+    location.options.insert("endpoint".into(), endpoint);
+    location
+        .options
+        .insert("account_name".into(), account.to_string());
+    Ok(())
+}
+
+/// Secrets come from the environment only; the URL carries none.
+fn remote_location(url: &str) -> Result<RepoLocation> {
+    let mut location = RepoLocation::from_url(url)?;
+    if location.backend == "azblob" {
+        azblob_options(&mut location)?;
+    }
+    Ok(location)
+}
+
 pub fn open_store(url: &str) -> Result<Store> {
+    if is_remote_scheme(url) {
+        // The URL is not echoed here: a mistake in it may sit next to a secret.
+        let location = remote_location(url)?;
+        return location
+            .open(None)
+            .with_context(|| format!("cannot open repository {}", location.display()));
+    }
     open_url(url).with_context(|| format!("cannot open repository {url}"))
 }
 

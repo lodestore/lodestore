@@ -193,7 +193,12 @@ fn cli_exit_already_initialized_11() {
     let repo = tmp.path().join("repo");
     init_repo(&repo);
     lode(&repo)
-        .args(["repo", "init", "--recovery-key-file"])
+        .args([
+            "repo",
+            "init",
+            "--accept-weaker-guarantee",
+            "--recovery-key-file",
+        ])
         .arg(tmp.path().join("second.key"))
         .assert()
         .code(11);
@@ -285,7 +290,13 @@ fn cli_init_json_requires_recovery_key_file() {
 
     let key_file = tmp.path().join("repo.key");
     let assert = lode(&repo)
-        .args(["repo", "init", "--json", "--recovery-key-file"])
+        .args([
+            "repo",
+            "init",
+            "--json",
+            "--accept-weaker-guarantee",
+            "--recovery-key-file",
+        ])
         .arg(&key_file)
         .assert()
         .success();
