@@ -797,6 +797,7 @@ async fn verifying(state: &AppState, cycle: &CycleRow) -> anyhow::Result<StepOut
     if current.is_none_or(|c| c.state != GcState::Verifying) {
         return finished(state, &cycle.id).await;
     }
+    refuse_foreign_hidden_snapshots(state, cycle, &source).await?;
     refuse_old_shard_readers(
         state,
         &cycle.repository_id,
@@ -1050,12 +1051,14 @@ async fn sweep_hidden(
     Ok(SweepOutcome::default())
 }
 
-/// Fails the cycle before it plans a delete when, on a store whose hide
-/// markers are not swept, a snapshot manifest is hidden that the server never
-/// forgot. The survey reads only current versions, so it would take such a
-/// snapshot for forgotten and delete the packs that only it still uses. The
-/// check runs after the survey has listed the snapshots: a manifest hidden
-/// before that listing leaves a marker that is seen here.
+/// Fails the cycle when, on a store whose hide markers are not swept, a
+/// snapshot manifest the server never forgot has a hide marker or an older
+/// version in its history. The survey and the check before the sweep read only
+/// current versions, so a manifest hidden while they list looks forgotten and
+/// the packs that only it uses would be deleted. Such a hide leaves a marker
+/// that an agent key cannot remove, even when the manifest is put back before
+/// this check reads the history, so running it after each listing of the
+/// snapshots catches every hide that listing could have missed.
 async fn refuse_foreign_hidden_snapshots(
     state: &AppState,
     cycle: &CycleRow,
@@ -1066,7 +1069,7 @@ async fn refuse_foreign_hidden_snapshots(
     }
     let hidden = source
         .store
-        .deleted_keys(SNAPSHOTS_PREFIX, i64::MAX)
+        .rewritten_keys(SNAPSHOTS_PREFIX)
         .await
         .context("listing hidden snapshots")?;
     if hidden.is_empty() {
@@ -1091,9 +1094,10 @@ async fn refuse_foreign_hidden_snapshots(
         return Ok(());
     };
     let message = format!(
-        "The snapshot {}{} hidden by someone other than the server. Cleanup would delete the data that only \
-         hidden snapshots still use, so nothing was deleted. Remove the delete marker to bring the snapshot \
-         back, or remove the object with all its versions to forget it, then run cleanup again.",
+        "The snapshot {}{} hidden or replaced by someone other than the server. Cleanup would delete the data \
+         that only hidden snapshots still use, so nothing was deleted. Remove its delete markers and older \
+         versions to keep the snapshot, or remove the object with all its versions to forget it, then run \
+         cleanup again.",
         first,
         match foreign.len() - 1 {
             0 => " is".to_string(),

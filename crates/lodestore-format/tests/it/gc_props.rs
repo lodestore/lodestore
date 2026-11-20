@@ -116,6 +116,10 @@ impl<S: BlobPurge> BlobPurge for Hostile<S> {
     ) -> Result<Vec<String>, BlobError> {
         self.inner.deleted_keys(prefix, older_than_ms).await
     }
+
+    async fn rewritten_keys(&self, prefix: &str) -> Result<Vec<String>, BlobError> {
+        self.inner.rewritten_keys(prefix).await
+    }
 }
 
 fn bytes_under(reads: &[(String, u64)], prefix: &str) -> u64 {

@@ -121,6 +121,10 @@ impl BlobPurge for Hooked<'_> {
     ) -> Result<Vec<String>, BlobError> {
         self.inner.deleted_keys(prefix, older_than_ms).await
     }
+
+    async fn rewritten_keys(&self, prefix: &str) -> Result<Vec<String>, BlobError> {
+        self.inner.rewritten_keys(prefix).await
+    }
 }
 
 fn keys() -> ReadKeys {

@@ -7,7 +7,7 @@ use opendal::layers::{RetryLayer, TimeoutLayer};
 use opendal::{ErrorKind, Operator, services};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use super::purge::{BlobPurge, PurgeOutcome, deleted_keys_op, purge_op};
+use super::purge::{BlobPurge, PurgeOutcome, deleted_keys_op, purge_op, rewritten_keys_op};
 use super::{BlobDelete, BlobError, BlobStore, ListEntry, Presigned};
 use crate::error::{Error, Result};
 
@@ -440,6 +440,10 @@ impl BlobPurge for S3Store {
         older_than_ms: i64,
     ) -> std::result::Result<Vec<String>, BlobError> {
         deleted_keys_op(&self.op, prefix, older_than_ms).await
+    }
+
+    async fn rewritten_keys(&self, prefix: &str) -> std::result::Result<Vec<String>, BlobError> {
+        rewritten_keys_op(&self.op, prefix).await
     }
 }
 

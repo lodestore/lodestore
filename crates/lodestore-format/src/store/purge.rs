@@ -44,6 +44,14 @@ pub trait BlobPurge: Send + Sync {
         prefix: &str,
         older_than_ms: i64,
     ) -> impl Future<Output = Result<Vec<String>, BlobError>> + Send;
+
+    /// Keys under `prefix` whose version history holds anything besides one
+    /// live current version: a delete marker, current or not, or an older
+    /// version. Empty on stores without versions.
+    fn rewritten_keys(
+        &self,
+        prefix: &str,
+    ) -> impl Future<Output = Result<Vec<String>, BlobError>> + Send;
 }
 
 impl<T: BlobPurge> BlobPurge for &T {
@@ -57,6 +65,13 @@ impl<T: BlobPurge> BlobPurge for &T {
         older_than_ms: i64,
     ) -> impl Future<Output = Result<Vec<String>, BlobError>> + Send {
         (**self).deleted_keys(prefix, older_than_ms)
+    }
+
+    fn rewritten_keys(
+        &self,
+        prefix: &str,
+    ) -> impl Future<Output = Result<Vec<String>, BlobError>> + Send {
+        (**self).rewritten_keys(prefix)
     }
 }
 
@@ -80,6 +95,15 @@ impl BlobPurge for Store {
             Store::S3(s) => s.deleted_keys(prefix, older_than_ms).await,
             Store::Opendal(s) => s.deleted_keys(prefix, older_than_ms).await,
             Store::Sftp(s) => s.deleted_keys(prefix, older_than_ms).await,
+        }
+    }
+
+    async fn rewritten_keys(&self, prefix: &str) -> Result<Vec<String>, BlobError> {
+        match self {
+            Store::Local(s) => s.rewritten_keys(prefix).await,
+            Store::S3(s) => s.rewritten_keys(prefix).await,
+            Store::Opendal(s) => s.rewritten_keys(prefix).await,
+            Store::Sftp(s) => s.rewritten_keys(prefix).await,
         }
     }
 }
@@ -252,6 +276,21 @@ async fn plain_delete(op: &Operator, key: &str) -> PurgeOutcome {
 
 // ponytail: materialises every version under the prefix; stream the lister
 // if a bucket's version listing stops fitting in memory.
+async fn list_versions(op: &Operator, prefix: &str) -> Result<Vec<opendal::Entry>, BlobError> {
+    let dir = prefix.rsplit_once('/').map_or("", |(d, _)| d);
+    let dir = if dir.is_empty() {
+        "/".to_owned()
+    } else {
+        format!("{dir}/")
+    };
+    op.list_with(&dir)
+        .recursive(true)
+        .versions(true)
+        .deleted(true)
+        .await
+        .map_err(map_err)
+}
+
 pub(super) async fn deleted_keys_op(
     op: &Operator,
     prefix: &str,
@@ -260,19 +299,7 @@ pub(super) async fn deleted_keys_op(
     if !versioned(op) {
         return Ok(Vec::new());
     }
-    let dir = prefix.rsplit_once('/').map_or("", |(d, _)| d);
-    let dir = if dir.is_empty() {
-        "/".to_owned()
-    } else {
-        format!("{dir}/")
-    };
-    let entries = op
-        .list_with(&dir)
-        .recursive(true)
-        .versions(true)
-        .deleted(true)
-        .await
-        .map_err(map_err)?;
+    let entries = list_versions(op, prefix).await?;
     let mut out: Vec<String> = entries
         .iter()
         .filter(|e| {
@@ -282,6 +309,28 @@ pub(super) async fn deleted_keys_op(
                 && meta
                     .last_modified()
                     .is_some_and(|t| timestamp_ms(t) <= older_than_ms)
+        })
+        .map(|e| e.path().trim_start_matches('/').to_owned())
+        .filter(|k| k.starts_with(prefix))
+        .collect();
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
+pub(super) async fn rewritten_keys_op(
+    op: &Operator,
+    prefix: &str,
+) -> Result<Vec<String>, BlobError> {
+    if !versioned(op) {
+        return Ok(Vec::new());
+    }
+    let mut out: Vec<String> = list_versions(op, prefix)
+        .await?
+        .iter()
+        .filter(|e| {
+            let meta = e.metadata();
+            meta.is_deleted() || meta.is_current() != Some(true)
         })
         .map(|e| e.path().trim_start_matches('/').to_owned())
         .filter(|k| k.starts_with(prefix))
