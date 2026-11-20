@@ -346,24 +346,64 @@ pub async fn active_hosts(state: &AppState) -> anyhow::Result<HashMap<String, i6
     .collect()
 }
 
+/// A measured level to store, with the accepted level already decided.
+pub struct GuaranteeWrite {
+    pub level: String,
+    pub notes_json: String,
+    pub accepted: String,
+}
+
 pub async fn update_checks(
     state: &AppState,
     id: &str,
     checks_json: &str,
     agent_key_state: &str,
+    guarantee: Option<&GuaranteeWrite>,
 ) -> anyhow::Result<i64> {
     let at = now_ms();
-    sqlx::query(
-        "UPDATE repositories SET checks_json = $1, agent_key_state = $2, checked_at = $3 \
-         WHERE id = $4",
+    match guarantee {
+        None => {
+            sqlx::query(
+                "UPDATE repositories SET checks_json = $1, agent_key_state = $2, checked_at = $3 \
+                 WHERE id = $4",
+            )
+            .bind(checks_json)
+            .bind(agent_key_state)
+            .bind(at)
+            .bind(id)
+            .execute(&state.db.pool)
+            .await?;
+        }
+        Some(g) => {
+            sqlx::query(
+                "UPDATE repositories SET checks_json = $1, agent_key_state = $2, checked_at = $3, \
+                 guarantee_level = $4, guarantee_notes_json = $5, guarantee_accepted = $6, \
+                 guarantee_checked_at = $3 WHERE id = $7",
+            )
+            .bind(checks_json)
+            .bind(agent_key_state)
+            .bind(at)
+            .bind(&g.level)
+            .bind(&g.notes_json)
+            .bind(&g.accepted)
+            .bind(id)
+            .execute(&state.db.pool)
+            .await?;
+        }
+    }
+    Ok(at)
+}
+
+/// Makes the measured level the accepted one; false when there is none to accept.
+pub async fn accept_measured_guarantee(state: &AppState, id: &str) -> anyhow::Result<bool> {
+    let done = sqlx::query(
+        "UPDATE repositories SET guarantee_accepted = guarantee_level \
+         WHERE id = $1 AND guarantee_level <> 'unchecked'",
     )
-    .bind(checks_json)
-    .bind(agent_key_state)
-    .bind(at)
     .bind(id)
     .execute(&state.db.pool)
     .await?;
-    Ok(at)
+    Ok(done.rows_affected() > 0)
 }
 
 /// Everything the server needs to talk to a repository's storage and to open
@@ -452,13 +492,14 @@ pub async fn server_access(state: &AppState, id: &str) -> anyhow::Result<ServerA
 }
 
 /// Swaps the sealed agent key for a new one in one transaction and records
-/// the outcome of the check that approved it.
+/// the outcome of the check that approved it, including the level it measured.
 pub async fn replace_agent_creds(
     state: &AppState,
     id: &str,
     key: &AccessKey,
     agent_key_state: &str,
     checks_json: &str,
+    guarantee: &GuaranteeWrite,
 ) -> anyhow::Result<()> {
     let mut tx = state.db.pool.begin().await?;
     let old = sqlx::query("SELECT agent_creds_secret_id FROM repositories WHERE id = $1")
@@ -473,12 +514,16 @@ pub async fn replace_agent_creds(
         .await?;
     sqlx::query(
         "UPDATE repositories SET agent_creds_secret_id = $1, agent_key_state = $2, \
-         checks_json = $3, checked_at = $4 WHERE id = $5",
+         checks_json = $3, checked_at = $4, guarantee_level = $5, guarantee_notes_json = $6, \
+         guarantee_accepted = $7, guarantee_checked_at = $4 WHERE id = $8",
     )
     .bind(new)
     .bind(agent_key_state)
     .bind(checks_json)
     .bind(now_ms())
+    .bind(&guarantee.level)
+    .bind(&guarantee.notes_json)
+    .bind(&guarantee.accepted)
     .bind(id)
     .execute(&mut *tx)
     .await?;

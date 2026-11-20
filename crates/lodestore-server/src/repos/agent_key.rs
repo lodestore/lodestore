@@ -1,6 +1,6 @@
 use axum::Json;
 use axum::extract::{Path, State};
-use lodestore_format::store::probe::{CheckId, CheckStatus, ProbeReport};
+use lodestore_format::store::probe::{CheckId, CheckStatus, GuaranteeLevel, ProbeReport};
 use lodestore_proto::agent::v1::server_message::Body;
 use lodestore_proto::agent::v1::{S3Credentials, ServerMessage, UpdateS3Credentials};
 use serde::Serialize;
@@ -11,9 +11,7 @@ use utoipa_axum::routes;
 
 use crate::auth::AuthUser;
 use crate::error::{ApiError, ErrorBody};
-use crate::repos::checks::{
-    agent_key_state_name, open_parts, run_probe, run_storage_probe, to_result,
-};
+use crate::repos::checks::{agent_key_state_name, open_parts, run_probe, to_result};
 use crate::repos::db::{self, AccessKey, ServerAccess};
 use crate::repos::{CheckDto, CheckResult, Credentials, unlock_with_server_slot};
 use crate::state::AppState;
@@ -22,6 +20,15 @@ use crate::state::AppState;
 pub struct KeyVerification {
     pub agent_key_state: String,
     pub check: CheckDto,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct GuaranteeState {
+    /// The level the last check measured.
+    pub guarantee_level: String,
+    /// The level the user accepted; it rises on its own only when a check measures a higher one.
+    pub guarantee_accepted: String,
+    pub guarantee_checked_at: Option<i64>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -76,6 +83,42 @@ fn server_key_problem(report: &ProbeReport) -> Option<ApiError> {
     })
 }
 
+/// The accepted level rises when a check measures a higher one and never falls
+/// on its own; a weak level is never accepted from `unchecked` (D-01, D-09).
+fn next_accepted(accepted: GuaranteeLevel, measured: GuaranteeLevel) -> GuaranteeLevel {
+    match (accepted.rank(), measured.rank()) {
+        (None, Some(m)) if m > 0 => measured,
+        (Some(a), Some(m)) if m > a => measured,
+        _ => accepted,
+    }
+}
+
+/// What to store after a check. A level that could not be measured changes
+/// nothing, except right after the credentials changed: the stored level was
+/// measured with the old key, so it becomes `unchecked`.
+fn guarantee_write(
+    result: &CheckResult,
+    accepted: &str,
+    credentials_changed: bool,
+) -> Result<Option<db::GuaranteeWrite>, ApiError> {
+    let measured =
+        GuaranteeLevel::parse(&result.guarantee_level).unwrap_or(GuaranteeLevel::Unchecked);
+    let accepted = GuaranteeLevel::parse(accepted).unwrap_or(GuaranteeLevel::Unchecked);
+    if measured == GuaranteeLevel::Unchecked {
+        return Ok(credentials_changed.then(|| db::GuaranteeWrite {
+            level: measured.as_str().to_string(),
+            notes_json: "[]".to_string(),
+            accepted: accepted.as_str().to_string(),
+        }));
+    }
+    Ok(Some(db::GuaranteeWrite {
+        level: measured.as_str().to_string(),
+        notes_json: serde_json::to_string(&result.guarantee_notes)
+            .map_err(|e| ApiError::Internal(e.into()))?,
+        accepted: next_accepted(accepted, measured).as_str().to_string(),
+    }))
+}
+
 async fn probe_new_key(
     id: &str,
     access: &ServerAccess,
@@ -86,7 +129,7 @@ async fn probe_new_key(
         access.server_creds.clone(),
         Some(key),
     )?;
-    let report = run_storage_probe(&opened)
+    let report = run_probe(&opened)
         .instrument(tracing::info_span!("agent_key_probe", repository_id = %id))
         .await;
     match server_key_problem(&report) {
@@ -99,6 +142,9 @@ async fn probe_new_key(
     post,
     tag = "Repositories",
     summary = "Check a repository again",
+    description = "Measures the storage again with the stored keys and stores the measured level. \
+        The accepted level rises when a higher level is measured and stays put otherwise; a check \
+        that could not measure anything changes neither level.",
     security(("session" = [], "csrf" = [])),
     path = "/api/v1/repositories/{id}/check",
     params(("id" = String, Path, description = "Repository id")),
@@ -112,7 +158,14 @@ async fn recheck(
     _user: AuthUser,
     Path(id): Path<String>,
 ) -> Result<Json<CheckResult>, ApiError> {
-    let access = load(&state, &id).await?;
+    recheck_repository(&state, &id).await.map(Json)
+}
+
+pub(crate) async fn recheck_repository(
+    state: &AppState,
+    id: &str,
+) -> Result<CheckResult, ApiError> {
+    let access = load(state, id).await?;
     let opened = open_parts(
         access.location.clone(),
         access.server_creds.clone(),
@@ -128,15 +181,27 @@ async fn recheck(
             false
         }
     };
-    state.repos.lock().unlocked.insert(id.clone(), unlocked);
+    state.repos.lock().unlocked.insert(id.to_string(), unlocked);
     let result = to_result(&report);
     let checks_json =
         serde_json::to_string(&result.checks).map_err(|e| ApiError::Internal(e.into()))?;
-    db::update_checks(&state, &id, &checks_json, &result.agent_key_state).await?;
-    if let Err(error) = crate::catalog::open_repository(&state, &id).await {
+    let accepted = db::find_repository(state, id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("repository not found".into()))?
+        .guarantee_accepted;
+    let write = guarantee_write(&result, &accepted, false)?;
+    db::update_checks(
+        state,
+        id,
+        &checks_json,
+        &result.agent_key_state,
+        write.as_ref(),
+    )
+    .await?;
+    if let Err(error) = crate::catalog::open_repository(state, id).await {
         tracing::warn!(repository_id = %id, error = %format!("{error:#}"), "repository is not available");
     }
-    Ok(Json(result))
+    Ok(result)
 }
 
 #[utoipa::path(
@@ -200,10 +265,13 @@ async fn replace_key(
     }
 
     let state_name = agent_key_state_name(&report);
-    let mut checks = db::find_repository(&state, &id)
+    let row = db::find_repository(&state, &id)
         .await?
-        .and_then(|r| r.checks_json)
-        .map(|j| serde_json::from_str::<Vec<CheckDto>>(&j))
+        .ok_or_else(|| ApiError::NotFound("repository not found".into()))?;
+    let mut checks = row
+        .checks_json
+        .as_deref()
+        .map(serde_json::from_str::<Vec<CheckDto>>)
         .transpose()
         .map_err(|e| ApiError::Internal(e.into()))?
         .unwrap_or_default();
@@ -213,7 +281,9 @@ async fn replace_key(
         None => checks.push(fresh),
     }
     let checks_json = serde_json::to_string(&checks).map_err(|e| ApiError::Internal(e.into()))?;
-    db::replace_agent_creds(&state, &id, &key, state_name, &checks_json).await?;
+    let guarantee = guarantee_write(&to_result(&report), &row.guarantee_accepted, true)?
+        .expect("a credential change always writes a level");
+    db::replace_agent_creds(&state, &id, &key, state_name, &checks_json, &guarantee).await?;
 
     let unavailable = matches!(
         crate::catalog::open_repository(&state, &id).await,
@@ -253,9 +323,48 @@ async fn replace_key(
     }))
 }
 
+#[utoipa::path(
+    post,
+    tag = "Repositories",
+    summary = "Accept the measured level",
+    description = "Makes the level the last check measured the accepted one.",
+    security(("session" = [], "csrf" = [])),
+    path = "/api/v1/repositories/{id}/guarantee/accept",
+    params(("id" = String, Path, description = "Repository id")),
+    responses(
+        (status = 200, description = "The measured level is now the accepted one", body = GuaranteeState),
+        (status = 404, description = "Unknown repository", body = ErrorBody),
+        (status = 409, description = "No level was measured, so there is nothing to accept", body = ErrorBody),
+    )
+)]
+async fn accept_guarantee(
+    State(state): State<AppState>,
+    _user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<Json<GuaranteeState>, ApiError> {
+    if db::find_repository(&state, &id).await?.is_none() {
+        return Err(ApiError::NotFound("repository not found".into()));
+    }
+    if !db::accept_measured_guarantee(&state, &id).await? {
+        return Err(ApiError::Conflict(
+            "Nothing was measured, so there is no level to accept. Check the repository again."
+                .into(),
+        ));
+    }
+    let row = db::find_repository(&state, &id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("repository not found".into()))?;
+    Ok(Json(GuaranteeState {
+        guarantee_level: row.guarantee_level,
+        guarantee_accepted: row.guarantee_accepted,
+        guarantee_checked_at: row.guarantee_checked_at,
+    }))
+}
+
 pub fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(recheck))
+        .routes(routes!(accept_guarantee))
         .routes(routes!(verify_key))
         .routes(routes!(replace_key))
 }
@@ -264,6 +373,58 @@ pub fn routes() -> OpenApiRouter<AppState> {
 mod tests {
     use super::*;
     use crate::repos::checks::timed_out_report;
+
+    #[test]
+    fn next_accepted_follows_the_table() {
+        use GuaranteeLevel::*;
+        for (accepted, measured, expected) in [
+            (Unchecked, CreateOnlyEnforced, CreateOnlyEnforced),
+            (
+                Unchecked,
+                OverwriteKeepsOldVersion,
+                OverwriteKeepsOldVersion,
+            ),
+            (Unchecked, HostCanOverwriteOrDelete, Unchecked),
+            (
+                OverwriteKeepsOldVersion,
+                CreateOnlyEnforced,
+                CreateOnlyEnforced,
+            ),
+            (
+                OverwriteKeepsOldVersion,
+                HostCanOverwriteOrDelete,
+                OverwriteKeepsOldVersion,
+            ),
+            (
+                HostCanOverwriteOrDelete,
+                OverwriteKeepsOldVersion,
+                OverwriteKeepsOldVersion,
+            ),
+            (
+                CreateOnlyEnforced,
+                OverwriteKeepsOldVersion,
+                CreateOnlyEnforced,
+            ),
+            (CreateOnlyEnforced, Unchecked, CreateOnlyEnforced),
+            (
+                OverwriteKeepsOldVersion,
+                Unchecked,
+                OverwriteKeepsOldVersion,
+            ),
+            (
+                HostCanOverwriteOrDelete,
+                Unchecked,
+                HostCanOverwriteOrDelete,
+            ),
+            (Unchecked, Unchecked, Unchecked),
+        ] {
+            assert_eq!(
+                next_accepted(accepted, measured),
+                expected,
+                "{accepted:?} {measured:?}"
+            );
+        }
+    }
 
     #[test]
     fn failed_server_write_is_a_server_key_problem() {
