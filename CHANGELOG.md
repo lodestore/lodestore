@@ -55,6 +55,7 @@ All notable changes to Lodestore are recorded here. The format follows [Keep a C
 
 ### Fixed
 
+- Retention could forget a newer snapshot and keep an older one when several backups were stored within the same second on S3, which keeps object times in whole seconds. Such snapshots are now ordered by when the server catalogued them.
 - A snapshot that the storage stored ahead of the server clock is skipped when the server picks the latest snapshot of a source, as `lode` already did; the two no longer disagree.
 - A job whose snapshot claims a malformed source fails at once, with `verification_failed` or `snapshot_policy_mismatch`, instead of being retried by the verification forever.
 - An instance that is no longer expected does not make a host healthy, and its old success no longer sets the last success of the fleet overview.

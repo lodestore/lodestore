@@ -4,7 +4,7 @@ use anyhow::Context;
 use lodestore_format::index::{hex32, parse_hex32};
 use lodestore_format::snapshot::snapshot_object_key;
 use lodestore_format::store::{BlobDelete, BlobError};
-use lodestore_policy::retention::{Candidate, Decision, Rule, evaluate, timezone_of};
+use lodestore_policy::retention::{Candidate, Decision, Rule, evaluate, newest_first, timezone_of};
 use lodestore_policy::{BackupPolicy, Retention};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
@@ -85,13 +85,13 @@ struct PairRow {
 }
 
 const PAIRS_SQL: &str = "SELECT s.id, s.host_id, a.hostname, s.time_ms, s.received_at, \
-     s.received_exact, s.suspicious, s.incomplete, s.origin, s.stdin_name, \
+     s.discovered_at, s.received_exact, s.suspicious, s.incomplete, s.origin, s.stdin_name, \
      s.source_type, s.source_ref, s.source_label FROM snapshots s \
      JOIN agents a ON a.id = s.host_id \
      WHERE s.policy_name = $1 AND s.repository_id = $2 AND s.job_id IS NOT NULL \
      AND s.verified_at IS NOT NULL";
 const HOST_SQL: &str = "SELECT s.id, s.host_id, a.hostname, s.time_ms, s.received_at, \
-     s.received_exact, s.suspicious, s.incomplete, s.origin, s.stdin_name, \
+     s.discovered_at, s.received_exact, s.suspicious, s.incomplete, s.origin, s.stdin_name, \
      s.source_type, s.source_ref, s.source_label FROM snapshots s \
      JOIN agents a ON a.id = s.host_id \
      WHERE s.policy_name = $1 AND s.repository_id = $2 AND s.host_id = $3 \
@@ -155,6 +155,7 @@ fn pair_row(r: &sqlx::any::AnyRow, include_stdin: bool) -> anyhow::Result<Option
         candidate: Candidate {
             id: r.try_get("id")?,
             received_at_ms: r.try_get("received_at")?,
+            discovered_at_ms: r.try_get("discovered_at")?,
             suspicious: r.try_get::<i64, _>("suspicious")? != 0,
             incomplete: r.try_get::<i64, _>("incomplete")? != 0,
         },
@@ -196,15 +197,11 @@ fn decide(policy: &BackupPolicy, rules: &Retention, rows: &[&PairRow]) -> Vec<De
             decisions.extend(evaluate(rules, &timezone, candidates));
         }
     }
-    let received: BTreeMap<&str, i64> = rows
+    let candidates: BTreeMap<&str, &Candidate> = rows
         .iter()
-        .map(|r| (r.candidate.id.as_str(), r.candidate.received_at_ms))
+        .map(|r| (r.candidate.id.as_str(), &r.candidate))
         .collect();
-    decisions.sort_by(|a, b| {
-        received[b.id.as_str()]
-            .cmp(&received[a.id.as_str()])
-            .then_with(|| a.id.cmp(&b.id))
-    });
+    decisions.sort_by(|a, b| newest_first(candidates[a.id.as_str()], candidates[b.id.as_str()]));
     decisions.extend(unconfirmed);
     decisions
 }
