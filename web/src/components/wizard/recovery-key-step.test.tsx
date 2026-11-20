@@ -29,6 +29,7 @@ function renderStep() {
 		<RecoveryKeyStep
 			draft={newDraft()}
 			onBack={() => {}}
+			onWeaker={() => {}}
 			onCreated={() => {}}
 		/>,
 	);
@@ -161,6 +162,7 @@ describe("RecoveryKeyStep", () => {
 				<RecoveryKeyStep
 					draft={draft}
 					onBack={() => {}}
+					onWeaker={() => {}}
 					onCreated={() => setDraft((d) => ({ ...d }))}
 				/>
 			);

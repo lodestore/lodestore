@@ -20,7 +20,20 @@ No bucket? See [Using a local or network folder](#using-a-local-or-network-folde
 
 Only there can a host hold a separate key without delete rights, and only there is Object Lock available. Those two are what keep a compromised host from destroying its own backups. With Object Lock in COMPLIANCE mode, even the server cannot delete locked data before its retention period ends.
 
-No delete rights does not mean no overwrite. The wizard tries to replace a throwaway object with the agent key and shows the result. **Write-only verified** means the storage refused. **Can overwrite** means it did not, and on MinIO this is what you will see: whoever steals the key can replace objects with garbage. Turn on versioning or Object Lock on the bucket, so that a replaced object keeps its earlier version. See [Agent credentials](/docs/security/threat-model/#agent-credentials).
+No delete rights does not mean no overwrite. The wizard tries to replace and delete a throwaway object with the agent key and names what a host can do with this storage:
+
+- **Create-only enforced.** The storage refuses to replace or delete what a host wrote.
+- **Overwrite keeps old version.** A host can replace an object, but the storage keeps the earlier version and the host cannot delete it. The wizard shows the result and asks for nothing.
+- **Host can overwrite or delete.** A compromised host can replace or delete its backups. The wizard lists why and creates the repository only after you confirm.
+- **Unchecked.** The check could not measure what a host can do. You can check again, or confirm and continue.
+
+A bucket without versioning ends at **Host can overwrite or delete**: the storage lets the agent key replace an object, and whoever steals the key can replace objects with garbage. Turn on versioning on the bucket before the wizard, so that a replaced object keeps its earlier version. On MinIO:
+
+```sh
+mc version enable ALIAS/BUCKET
+```
+
+Object Lock gives the same protection with retention rules. A lifecycle rule on the bucket that deletes objects or their earlier versions lowers the level again. See [Agent credentials](/docs/security/threat-model/#agent-credentials) and [S3 policy with Object Lock](/docs/recipes/s3-iam-object-lock/).
 
 Set the address of the machine that runs the server and the release to install. Use an address the backed-up host can reach.
 
@@ -59,7 +72,7 @@ This quickstart uses plain HTTP so that it works on any network. For anything be
 The wizard opens after you sign in. It has four steps:
 
 1. **Storage.** Choose S3-compatible storage and enter the bucket and, for storage other than AWS, the endpoint.
-2. **Access.** Enter the server key and the agent key. Create the agent key first: the wizard shows the policy to attach to it, and checks what the agent key can do: it must be able to write, and it should be unable to delete or overwrite. A key that can do either is accepted with a warning.
+2. **Access.** Enter the server key and the agent key. Create the agent key first: the wizard shows the policy to attach to it, and checks what the agent key can do: it must be able to write. The result is one of the four levels above; for **Host can overwrite or delete** and **Unchecked** you confirm before you continue.
 3. **Recovery key.** Choose a repository password and save the recovery key. Either one opens the repository even if the server is lost.
 4. **First host.** The wizard shows the install command for the first host. You can also skip this step and use **Add host** later.
 
@@ -203,7 +216,7 @@ The continuous integration job does not run this section.
 A repository can live in a folder: a local disk, or a network share such as NFS mounted at the same path on the server and on every agent. The file system must support hard links.
 
 :::caution
-In a folder there is no separate agent key: the agent can delete and overwrite backups, and a compromised host can destroy its own. There is no Object Lock either. Prefer S3-compatible storage for data a compromised host must not be able to destroy.
+In a folder there is no separate agent key: the agent can delete and overwrite backups, and a compromised host can destroy its own. There is no Object Lock either. The wizard reports **Host can overwrite or delete** and creates the repository only after you confirm it. Prefer S3-compatible storage for data a compromised host must not be able to destroy.
 :::
 
 The repository has to be a folder that both the server and the agent can see, at the same path. The agent runs as root and creates files only their owner can read, so the server container has to run as root too. Start it with this command instead of the one above. Ports 8080 and 8443 must not be held by the server of the main path, by the HTTPS variant or by an earlier run of this one, so remove them first:

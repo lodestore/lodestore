@@ -1,4 +1,8 @@
-import type { FieldError, PreflightProblem } from "@/api/gen/model";
+import type {
+	CheckResult,
+	FieldError,
+	PreflightProblem,
+} from "@/api/gen/model";
 
 export class ApiError extends Error {
 	readonly status: number;
@@ -6,13 +10,18 @@ export class ApiError extends Error {
 	readonly retryAfter?: number;
 	readonly problems?: PreflightProblem[];
 	readonly errors?: FieldError[];
+	readonly check?: CheckResult;
 
 	constructor(
 		status: number,
 		code: string,
 		message: string,
 		retryAfter?: number,
-		details: { problems?: PreflightProblem[]; errors?: FieldError[] } = {},
+		details: {
+			problems?: PreflightProblem[];
+			errors?: FieldError[];
+			check?: CheckResult;
+		} = {},
 	) {
 		super(message);
 		this.name = "ApiError";
@@ -21,6 +30,7 @@ export class ApiError extends Error {
 		this.retryAfter = retryAfter;
 		this.problems = details.problems;
 		this.errors = details.errors;
+		this.check = details.check;
 	}
 }
 
@@ -111,6 +121,7 @@ export async function apiFetch<T>(
 			message?: string;
 			problems?: PreflightProblem[];
 			errors?: FieldError[];
+			check?: CheckResult;
 		} | null;
 		const retryAfter = Number(response.headers.get("Retry-After"));
 		const error = new ApiError(
@@ -120,7 +131,7 @@ export async function apiFetch<T>(
 				body?.errors?.map((e) => e.message).join(" ") ??
 				response.statusText,
 			Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : undefined,
-			{ problems: body?.problems, errors: body?.errors },
+			{ problems: body?.problems, errors: body?.errors, check: body?.check },
 		);
 		if (response.status === 401 && !AUTH_PATHS.includes(url)) {
 			unauthorizedHandler?.();

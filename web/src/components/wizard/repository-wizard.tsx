@@ -3,7 +3,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { checkStorage } from "@/api/gen/endpoints";
-import type { RepositorySummary } from "@/api/gen/model";
+import type { CheckResult, RepositorySummary } from "@/api/gen/model";
 import { WizardLayout } from "@/components/layout/wizard-layout";
 import {
 	AlertDialog,
@@ -97,6 +97,9 @@ export type WizardMode = "welcome" | "settings";
 
 const CHECK_TIMEOUT_MS = 60_000;
 
+const withoutConsent = (d: Draft) =>
+	d.acceptWeakerGuarantee ? { ...d, acceptWeakerGuarantee: false } : d;
+
 export function RepositoryWizard({
 	mode,
 	step,
@@ -145,7 +148,16 @@ export function RepositoryWizard({
 
 	function change(patch: Partial<Draft>) {
 		setDraft((d) => ({ ...d, ...patch }));
+		if (Object.keys(patch).every((key) => key === "acceptWeakerGuarantee")) {
+			return;
+		}
 		setCheck((c) => (c.phase === "done" ? { ...c, stale: true } : c));
+	}
+
+	function weakerGuarantee(result: CheckResult) {
+		setDraft(withoutConsent);
+		setCheck({ phase: "done", result, stale: false });
+		go("access");
 	}
 
 	function chooseBackend(backend: Backend) {
@@ -156,10 +168,14 @@ export function RepositoryWizard({
 
 	async function runCheck() {
 		setCheck({ phase: "running" });
+		setDraft(withoutConsent);
 		try {
-			const result = await checkStorage(toApiDraft(draft), {
-				signal: AbortSignal.timeout(CHECK_TIMEOUT_MS),
-			});
+			const result = await checkStorage(
+				toApiDraft({ ...draft, acceptWeakerGuarantee: false }),
+				{
+					signal: AbortSignal.timeout(CHECK_TIMEOUT_MS),
+				},
+			);
 			setCheck({ phase: "done", result, stale: false });
 		} catch (error) {
 			const message = (error instanceof Error ? error.message : "").replace(
@@ -281,6 +297,7 @@ export function RepositoryWizard({
 						<ConnectExistingStep
 							draft={draft}
 							onBack={() => go("access")}
+							onWeaker={weakerGuarantee}
 							onConnected={(repository) =>
 								void finish(repository, copy.existingRepo.connected, true)
 							}
@@ -289,6 +306,7 @@ export function RepositoryWizard({
 						<RecoveryKeyStep
 							draft={draft}
 							onBack={() => go("access")}
+							onWeaker={weakerGuarantee}
 							onCreated={(repository) =>
 								void finish(
 									repository,

@@ -18,6 +18,8 @@ const localChecks = {
 	existing_repository: false,
 	blocking: false,
 	agent_key_state: "unchecked",
+	guarantee_level: "create_only_enforced",
+	guarantee_notes: [],
 	checks: [
 		{ id: "write", status: "pass" },
 		{ id: "list", status: "pass" },
@@ -355,6 +357,8 @@ function s3Result(
 		existing_repository: false,
 		blocking: Object.values(base).some((c) => c.status === "fail"),
 		agent_key_state: "verified",
+		guarantee_level: "create_only_enforced",
+		guarantee_notes: [],
 		checks: Object.entries(base).map(([id, c]) => ({ id, ...c })),
 		...overrides,
 	};
@@ -413,7 +417,11 @@ describe("repository wizard with S3", () => {
 		const { calls, buckets } = mockS3(
 			s3Result(
 				{ agent_delete: { status: "warn" } },
-				{ agent_key_state: "can_delete" },
+				{
+					agent_key_state: "can_delete",
+					guarantee_level: "host_can_overwrite_or_delete",
+					guarantee_notes: ["agent_can_delete"],
+				},
 			),
 		);
 		const user = userEvent.setup();
@@ -449,6 +457,14 @@ describe("repository wizard with S3", () => {
 			await screen.findByText("The agent key can delete objects"),
 		).toBeInTheDocument();
 		expect(screen.getByText(/versioning or Object Lock/)).toBeInTheDocument();
+		expect(
+			screen.getByRole("button", { name: "Continue to recovery key" }),
+		).toBeDisabled();
+		await user.click(
+			screen.getByRole("checkbox", {
+				name: "I understand and want to continue",
+			}),
+		);
 		expect(
 			screen.getByRole("button", { name: "Continue to recovery key" }),
 		).toBeEnabled();
@@ -722,5 +738,159 @@ describe("repository wizard with S3", () => {
 			screen.getByLabelText("Agent key (write-only): Secret access key"),
 		).toHaveValue("");
 		expect(screen.getByLabelText("Server key: Access key ID")).toHaveValue("");
+	});
+});
+
+function mockLocal(overrides: Record<string, unknown>) {
+	const calls = mockServer();
+	server.use(
+		http.post("/api/v1/repositories/check", async ({ request }) => {
+			calls.check.push(await request.json());
+			return HttpResponse.json({ ...localChecks, ...overrides });
+		}),
+	);
+	return calls;
+}
+
+const CONSENT = { name: "I understand and want to continue" };
+
+describe("guarantee consent", () => {
+	it("asks for consent to a host that can overwrite and sends it with the draft", async () => {
+		const calls = mockLocal({
+			guarantee_level: "host_can_overwrite_or_delete",
+			guarantee_notes: ["not_enforceable", "agent_can_overwrite"],
+		});
+		const user = userEvent.setup();
+		renderApp("/welcome");
+
+		await toAccess(user);
+		await user.click(screen.getByRole("button", { name: "Check storage" }));
+
+		expect(
+			await screen.findByText("A host could change or delete backups here"),
+		).toBeInTheDocument();
+		expect(
+			screen.getByText(
+				"Every host that writes to this folder can change or delete its backups.",
+			),
+		).toBeInTheDocument();
+		expect(
+			screen.getByText(
+				"A host can replace backups, and the storage keeps no earlier version.",
+			),
+		).toBeInTheDocument();
+		const next = screen.getByRole("button", {
+			name: "Continue to recovery key",
+		});
+		expect(next).toBeDisabled();
+
+		await user.click(screen.getByRole("checkbox", CONSENT));
+		expect(next).toBeEnabled();
+		await user.click(next);
+		await screen.findByText("lode-rk1-aaaa-bbbb-wxyz");
+		expect(calls.wizard).toEqual([
+			{
+				name: "default",
+				accept_weaker_guarantee: true,
+				location: { backend: "local", options: { path: "/srv/lodestore" } },
+			},
+		]);
+		expect(calls.check).toEqual([
+			{
+				name: "default",
+				location: { backend: "local", options: { path: "/srv/lodestore" } },
+			},
+		]);
+	});
+
+	it("says an unmeasured level could not be measured and offers another check", async () => {
+		const calls = mockLocal({ guarantee_level: "unchecked" });
+		const user = userEvent.setup();
+		renderApp("/welcome");
+
+		await toAccess(user);
+		await user.click(screen.getByRole("button", { name: "Check storage" }));
+
+		expect(
+			await screen.findByText("Lodestore could not measure what a host can do"),
+		).toBeInTheDocument();
+		const next = screen.getByRole("button", {
+			name: "Continue to recovery key",
+		});
+		expect(next).toBeDisabled();
+		await user.click(screen.getByRole("checkbox", CONSENT));
+		expect(next).toBeEnabled();
+
+		await user.click(screen.getByRole("button", { name: "Check again" }));
+		await waitFor(() => expect(calls.check).toHaveLength(2));
+		expect(await screen.findByRole("checkbox", CONSENT)).not.toBeChecked();
+		expect(
+			screen.getByRole("button", { name: "Continue to recovery key" }),
+		).toBeDisabled();
+	});
+
+	it("shows the consent block again when the server refuses a weaker level", async () => {
+		mockLocal({});
+		const weak = {
+			...localChecks,
+			guarantee_level: "host_can_overwrite_or_delete",
+			guarantee_notes: ["not_enforceable"],
+		};
+		server.use(
+			http.post("/api/v1/repositories/wizard", () =>
+				HttpResponse.json(
+					{ code: "weaker_guarantee", message: "weaker", check: weak },
+					{ status: 409 },
+				),
+			),
+		);
+		const user = userEvent.setup();
+		renderApp("/welcome");
+
+		await toAccess(user);
+		await checkStorage(user);
+
+		expect(
+			await screen.findByText("A host could change or delete backups here"),
+		).toBeInTheDocument();
+		expect(screen.getByRole("checkbox", CONSENT)).not.toBeChecked();
+		expect(screen.queryByText(/Couldn't/)).toBeNull();
+	});
+
+	it("shows an overwrite that keeps the old version as it is, without consent", async () => {
+		mockLocal({ guarantee_level: "overwrite_keeps_old_version" });
+		const user = userEvent.setup();
+		renderApp("/welcome");
+
+		await toAccess(user);
+		await user.click(screen.getByRole("button", { name: "Check storage" }));
+
+		expect(
+			await screen.findByText("Guarantee level: Overwrite keeps old version."),
+		).toBeInTheDocument();
+		expect(screen.queryByRole("checkbox", CONSENT)).toBeNull();
+		expect(
+			screen.getByRole("button", { name: "Continue to recovery key" }),
+		).toBeEnabled();
+	});
+
+	it("lists a note on a strong level without asking for consent", async () => {
+		mockLocal({
+			guarantee_level: "create_only_enforced",
+			guarantee_notes: ["lifecycle_unverified"],
+		});
+		const user = userEvent.setup();
+		renderApp("/welcome");
+
+		await toAccess(user);
+		await user.click(screen.getByRole("button", { name: "Check storage" }));
+
+		expect(
+			await screen.findByText(/lifecycle rules could not be read/),
+		).toBeInTheDocument();
+		expect(screen.queryByRole("checkbox", CONSENT)).toBeNull();
+		expect(
+			screen.getByRole("button", { name: "Continue to recovery key" }),
+		).toBeEnabled();
 	});
 });

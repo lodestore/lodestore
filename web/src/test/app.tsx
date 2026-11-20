@@ -14,6 +14,7 @@ export const repository = {
 	guarantee_level: "create_only_enforced",
 	guarantee_accepted: "create_only_enforced",
 	guarantee_checked_at: null,
+	guarantee_notes: [],
 	location_display: "s3://bucket/prefix",
 	hosts_count: 0,
 	agent_key_state: "verified",
