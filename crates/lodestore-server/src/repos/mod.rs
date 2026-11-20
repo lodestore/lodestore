@@ -92,6 +92,10 @@ pub struct RepositoryDraft {
     pub location: LocationDto,
     pub server_credentials: Option<Credentials>,
     pub agent_credentials: Option<Credentials>,
+    /// Create the repository even when the storage does not stop a host from
+    /// changing or deleting backups, or when the check could not measure it.
+    #[serde(default)]
+    pub accept_weaker_guarantee: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -106,6 +110,11 @@ pub struct CheckResult {
     pub existing_repository: bool,
     pub blocking: bool,
     pub agent_key_state: String,
+    /// What a host can do with this storage: `create_only_enforced`,
+    /// `overwrite_keeps_old_version`, `host_can_overwrite_or_delete` or `unchecked`.
+    pub guarantee_level: String,
+    /// Why the level is not the strongest one, as weakness codes.
+    pub guarantee_notes: Vec<String>,
     pub checks: Vec<CheckDto>,
 }
 
@@ -119,6 +128,11 @@ pub struct RepositoryBase {
     pub hosts_count: i64,
     pub agent_key_state: String,
     pub checked_at: Option<i64>,
+    /// The level the last check measured.
+    pub guarantee_level: String,
+    /// The level the user agreed to when creating or connecting the repository.
+    pub guarantee_accepted: String,
+    pub guarantee_checked_at: Option<i64>,
     pub unlocked: Option<bool>,
     /// Why the server refuses to open the repository, set when its config
     /// does not match what was recorded.
@@ -141,6 +155,8 @@ pub struct RepositoryDetail {
     pub location: LocationDto,
     /// What the storage checks of the connection found.
     pub checks: Vec<CheckDto>,
+    /// Why the measured level is not the strongest one, as weakness codes.
+    pub guarantee_notes: Vec<String>,
 }
 
 pub(crate) fn base_of(
@@ -162,6 +178,9 @@ pub(crate) fn base_of(
         hosts_count,
         agent_key_state: row.agent_key_state.clone(),
         checked_at: row.checked_at,
+        guarantee_level: row.guarantee_level.clone(),
+        guarantee_accepted: row.guarantee_accepted.clone(),
+        guarantee_checked_at: row.guarantee_checked_at,
         unlocked,
         unavailable_reason: row.open_error.clone(),
         cleanup,
@@ -243,6 +262,8 @@ async fn get_repository(
         .transpose()
         .map_err(|e| ApiError::Internal(e.into()))?
         .unwrap_or_default();
+    let guarantee_notes = serde_json::from_str(&row.guarantee_notes_json)
+        .map_err(|e| ApiError::Internal(e.into()))?;
     Ok(Json(RepositoryDetail {
         base: base_of(
             &row,
@@ -255,6 +276,7 @@ async fn get_repository(
             options: row.options.clone(),
         },
         checks,
+        guarantee_notes,
     }))
 }
 

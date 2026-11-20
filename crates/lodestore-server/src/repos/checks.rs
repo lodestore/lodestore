@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use lodestore_format::store::probe::{
     AgentKeyState, AgentProbe, CHECK_ORDER, Check, CheckId, CheckStatus, GuaranteeLevel, ProbeKeys,
-    ProbeReport, SKIPPED_NOTE, probe_keep, remove_probe_objects,
+    ProbeReport, SKIPPED_NOTE, Weakness, probe_keep, remove_probe_objects,
 };
 use lodestore_format::store::{RepoLocation, StaticCredentials, Store};
 
@@ -223,6 +223,12 @@ pub fn to_result(report: &ProbeReport) -> CheckResult {
         existing_repository: report.existing_repository,
         blocking: report.blocking(),
         agent_key_state: agent_key_state_name(report).to_string(),
+        guarantee_level: report.guarantee.as_str().to_string(),
+        guarantee_notes: report
+            .weaknesses
+            .iter()
+            .map(|w| w.as_str().to_string())
+            .collect(),
         checks: report
             .checks
             .iter()
@@ -239,4 +245,34 @@ pub fn to_result(report: &ProbeReport) -> CheckResult {
             })
             .collect(),
     }
+}
+
+/// A new repository on this storage needs the user's explicit agreement: a host
+/// can change or delete backups, or the check could not tell.
+pub fn needs_consent(result: &CheckResult) -> bool {
+    matches!(
+        GuaranteeLevel::parse(&result.guarantee_level),
+        Some(GuaranteeLevel::HostCanOverwriteOrDelete | GuaranteeLevel::Unchecked)
+    )
+}
+
+/// The refusal text sent with the `weaker_guarantee` conflict.
+pub fn consent_message(result: &CheckResult, verb: &str) -> String {
+    if GuaranteeLevel::parse(&result.guarantee_level) == Some(GuaranteeLevel::Unchecked) {
+        return format!(
+            "The check could not measure what a host can do with this storage. Run the check \
+             again, or send accept_weaker_guarantee to {verb} the repository anyway."
+        );
+    }
+    let reasons: Vec<&str> = result
+        .guarantee_notes
+        .iter()
+        .filter_map(|n| Weakness::parse(n))
+        .map(Weakness::message)
+        .collect();
+    format!(
+        "This storage does not stop a host from destroying backups. {} Send \
+         accept_weaker_guarantee to {verb} the repository anyway.",
+        reasons.join(" ")
+    )
 }

@@ -20,6 +20,7 @@ use lodestore_proto::agent::v1::agent_message::Body as AgentBody;
 use lodestore_proto::agent::v1::server_message::Body as ServerBody;
 use lodestore_proto::agent::v1::{AgentMessage, Hello, Versions};
 use lodestore_server::repos::db::{server_access, writer_material};
+use lodestore_testkit::fault_proxy::{FaultAction, FaultPlan, FaultProxy, FaultRule};
 use lodestore_testkit::minio::MinioServer;
 use serde_json::{Value, json};
 use tokio_stream::wrappers::ReceiverStream;
@@ -126,7 +127,14 @@ fn s3_draft(
         },
         "server_credentials": creds(server),
         "agent_credentials": creds(agent),
+        "accept_weaker_guarantee": true,
     })
+}
+
+fn without_consent(draft: &Value) -> Value {
+    let mut draft = draft.clone();
+    draft["accept_weaker_guarantee"] = json!(false);
+    draft
 }
 
 async fn agent_user(minio: &MinioServer, bucket: &str) -> (String, String) {
@@ -196,8 +204,40 @@ async fn wizard_s3_write_only_key_can_overwrite_on_minio() {
         assert_eq!(checked["agent_key_state"], "can_overwrite");
         assert_eq!(checked["blocking"], false);
 
+        let refused = http
+            .post("/api/v1/repositories/wizard", &without_consent(&draft))
+            .await;
+        assert_eq!(refused.status(), 409, "[{}]", backend.name());
+        let refused = body(refused).await;
+        assert_eq!(refused["code"], "weaker_guarantee");
+        assert_eq!(
+            refused["check"]["guarantee_level"],
+            "host_can_overwrite_or_delete"
+        );
+        assert!(
+            refused["check"]["guarantee_notes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|n| n == "agent_can_overwrite")
+        );
+        assert!(
+            refused["message"]
+                .as_str()
+                .unwrap()
+                .contains("A host can replace backups"),
+            "{refused}"
+        );
+        let list = body(http.get("/api/v1/repositories").await).await;
+        assert_eq!(list.as_array().unwrap().len(), 0);
+
         let created = create_s3(&http, &draft).await;
         assert_eq!(created["agent_key_state"], "can_overwrite");
+        assert_eq!(created["guarantee_level"], "host_can_overwrite_or_delete");
+        assert_eq!(
+            created["guarantee_accepted"],
+            "host_can_overwrite_or_delete"
+        );
         let id = created["id"].as_str().unwrap();
         let detail = body(http.get(&format!("/api/v1/repositories/{id}")).await).await;
         assert_eq!(detail["agent_key_state"], "can_overwrite");
@@ -205,6 +245,77 @@ async fn wizard_s3_write_only_key_can_overwrite_on_minio() {
         assert_eq!(detail["location"]["options"]["bucket"], BUCKET);
         let text = detail.to_string();
         assert!(!text.contains(&server.1) && !text.contains(&agent.1));
+        ts.stop().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wizard_s3_versioned_bucket_needs_no_consent() {
+    each_backend(|backend| async move {
+        let minio = MinioServer::start().await;
+        minio.create_versioned_bucket(BUCKET).await;
+        let server = minio.root_credentials();
+        let agent = agent_user(&minio, BUCKET).await;
+        let ts = TestServer::start(&backend).await;
+        let http = Http::login(&ts).await;
+        let draft = without_consent(&s3_draft(&minio, BUCKET, "cloud", &server, &agent));
+
+        let checked = body(http.post("/api/v1/repositories/check", &draft).await).await;
+        assert_eq!(
+            checked["guarantee_level"],
+            "overwrite_keeps_old_version",
+            "[{}] {checked}",
+            backend.name()
+        );
+
+        let created = create_s3(&http, &draft).await;
+        assert_eq!(created["guarantee_level"], "overwrite_keeps_old_version");
+        assert_eq!(created["guarantee_accepted"], "overwrite_keeps_old_version");
+        ts.stop().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wizard_unchecked_needs_consent() {
+    each_backend(|backend| async move {
+        let minio = MinioServer::start().await;
+        minio.create_bucket(BUCKET).await;
+        let server = minio.root_credentials();
+        let agent = agent_user(&minio, BUCKET).await;
+        let plan = FaultPlan::none().with(FaultRule {
+            method: "DELETE",
+            key_prefix: String::new(),
+            action: FaultAction::NotImplemented,
+            times: u32::MAX,
+        });
+        let proxy = FaultProxy::start(minio.endpoint(), plan).await;
+        let ts = TestServer::start(&backend).await;
+        let http = Http::login(&ts).await;
+        let mut draft = s3_draft(&minio, BUCKET, "cloud", &server, &agent);
+        draft["location"]["options"]["endpoint"] = json!(proxy.endpoint());
+
+        let refused = http
+            .post("/api/v1/repositories/wizard", &without_consent(&draft))
+            .await;
+        assert_eq!(refused.status(), 409, "[{}]", backend.name());
+        let refused = body(refused).await;
+        assert_eq!(refused["code"], "weaker_guarantee", "{refused}");
+        assert_eq!(refused["check"]["guarantee_level"], "unchecked");
+        assert!(
+            refused["message"]
+                .as_str()
+                .unwrap()
+                .contains("Run the check again"),
+            "{refused}"
+        );
+        let list = body(http.get("/api/v1/repositories").await).await;
+        assert_eq!(list.as_array().unwrap().len(), 0);
+
+        let created = create_s3(&http, &draft).await;
+        assert_eq!(created["guarantee_level"], "unchecked");
+        assert_eq!(created["guarantee_accepted"], "unchecked");
         ts.stop().await;
     })
     .await;

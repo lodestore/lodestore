@@ -97,6 +97,8 @@ pub struct RepoExtras {
     pub checks_json: Option<String>,
     pub agent_key_state: Option<String>,
     pub checked_at: Option<i64>,
+    pub guarantee_level: Option<String>,
+    pub guarantee_notes_json: Option<String>,
 }
 
 pub async fn create_repository(state: &AppState, new: NewRepository) -> anyhow::Result<String> {
@@ -137,12 +139,20 @@ pub async fn create_repository_ext(
         None => None,
     };
     let now = now_ms();
+    let guarantee_level = extras
+        .guarantee_level
+        .unwrap_or_else(|| "unchecked".to_string());
+    let guarantee_notes_json = extras
+        .guarantee_notes_json
+        .unwrap_or_else(|| "[]".to_string());
     sqlx::query(
         "INSERT INTO repositories (id, name, backend, location_json, format_repo_id, \
          config_hash, master_secret_id, server_slot_secret_id, server_creds_secret_id, \
          agent_creds_secret_id, agent_key_state, checks_json, checked_at, created_at, \
-         provenance_backfilled_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+         provenance_backfilled_at, guarantee_level, guarantee_accepted, guarantee_notes_json, \
+         guarantee_checked_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, \
+         $18, $19)",
     )
     .bind(&id)
     .bind(&new.name)
@@ -163,6 +173,10 @@ pub async fn create_repository_ext(
     .bind(extras.checked_at)
     .bind(now)
     .bind(now)
+    .bind(&guarantee_level)
+    .bind(&guarantee_level)
+    .bind(&guarantee_notes_json)
+    .bind(extras.checked_at)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -254,6 +268,10 @@ pub struct RepoFull {
     pub agent_key_state: String,
     pub checks_json: Option<String>,
     pub checked_at: Option<i64>,
+    pub guarantee_level: String,
+    pub guarantee_accepted: String,
+    pub guarantee_notes_json: String,
+    pub guarantee_checked_at: Option<i64>,
     pub open_error: Option<String>,
 }
 
@@ -267,6 +285,10 @@ fn full_row(r: &sqlx::any::AnyRow) -> anyhow::Result<RepoFull> {
         agent_key_state: r.try_get("agent_key_state")?,
         checks_json: r.try_get("checks_json")?,
         checked_at: r.try_get("checked_at")?,
+        guarantee_level: r.try_get("guarantee_level")?,
+        guarantee_accepted: r.try_get("guarantee_accepted")?,
+        guarantee_notes_json: r.try_get("guarantee_notes_json")?,
+        guarantee_checked_at: r.try_get("guarantee_checked_at")?,
         open_error: r.try_get("open_error")?,
     })
 }
@@ -274,7 +296,8 @@ fn full_row(r: &sqlx::any::AnyRow) -> anyhow::Result<RepoFull> {
 pub async fn list_repositories(state: &AppState) -> anyhow::Result<Vec<RepoFull>> {
     sqlx::query(
         "SELECT id, name, backend, location_json, experimental, agent_key_state, checks_json, \
-         checked_at, open_error FROM repositories ORDER BY created_at, id",
+         checked_at, guarantee_level, guarantee_accepted, guarantee_notes_json, \
+         guarantee_checked_at, open_error FROM repositories ORDER BY created_at, id",
     )
     .fetch_all(&state.db.pool)
     .await?
@@ -286,7 +309,8 @@ pub async fn list_repositories(state: &AppState) -> anyhow::Result<Vec<RepoFull>
 pub async fn find_repository(state: &AppState, id: &str) -> anyhow::Result<Option<RepoFull>> {
     sqlx::query(
         "SELECT id, name, backend, location_json, experimental, agent_key_state, checks_json, \
-         checked_at, open_error FROM repositories WHERE id = $1",
+         checked_at, guarantee_level, guarantee_accepted, guarantee_notes_json, \
+         guarantee_checked_at, open_error FROM repositories WHERE id = $1",
     )
     .bind(id)
     .fetch_optional(&state.db.pool)

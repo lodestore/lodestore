@@ -3849,7 +3849,7 @@
             }
           },
           "409": {
-            "description": "The storage failed a check or holds no repository",
+            "description": "The storage failed a check, holds no repository, or needs `accept_weaker_guarantee` (code `weaker_guarantee`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -3906,7 +3906,7 @@
             }
           },
           "409": {
-            "description": "The storage failed a check or already holds a repository",
+            "description": "The storage failed a check, already holds a repository, or needs `accept_weaker_guarantee` (code `weaker_guarantee`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -7998,6 +7998,8 @@
           "existing_repository",
           "blocking",
           "agent_key_state",
+          "guarantee_level",
+          "guarantee_notes",
           "checks"
         ],
         "properties": {
@@ -8015,6 +8017,17 @@
           },
           "existing_repository": {
             "type": "boolean"
+          },
+          "guarantee_level": {
+            "type": "string",
+            "description": "What a host can do with this storage: `create_only_enforced`,\n`overwrite_keeps_old_version`, `host_can_overwrite_or_delete` or `unchecked`."
+          },
+          "guarantee_notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Why the level is not the strongest one, as weakness codes."
           }
         }
       },
@@ -12476,6 +12489,8 @@
           "location_display",
           "hosts_count",
           "agent_key_state",
+          "guarantee_level",
+          "guarantee_accepted",
           "cleanup"
         ],
         "properties": {
@@ -12497,6 +12512,21 @@
           },
           "experimental": {
             "type": "boolean"
+          },
+          "guarantee_accepted": {
+            "type": "string",
+            "description": "The level the user agreed to when creating or connecting the repository."
+          },
+          "guarantee_checked_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "guarantee_level": {
+            "type": "string",
+            "description": "The level the last check measured."
           },
           "hosts_count": {
             "type": "integer",
@@ -12535,7 +12565,8 @@
             "type": "object",
             "required": [
               "location",
-              "checks"
+              "checks",
+              "guarantee_notes"
             ],
             "properties": {
               "checks": {
@@ -12544,6 +12575,13 @@
                   "$ref": "#/components/schemas/CheckDto"
                 },
                 "description": "What the storage checks of the connection found."
+              },
+              "guarantee_notes": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Why the measured level is not the strongest one, as weakness codes."
               },
               "location": {
                 "$ref": "#/components/schemas/LocationDto"
@@ -12558,6 +12596,10 @@
           "location"
         ],
         "properties": {
+          "accept_weaker_guarantee": {
+            "type": "boolean",
+            "description": "Create the repository even when the storage does not stop a host from\nchanging or deleting backups, or when the check could not measure it."
+          },
           "agent_credentials": {
             "oneOf": [
               {
