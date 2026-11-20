@@ -330,6 +330,30 @@ impl AzuriteServer {
             .await
     }
 
+    /// A request authorised by a container SAS, for attacks the store never
+    /// sends. `query` is appended to the SAS, e.g. `comp=block&blockid=AAAA`.
+    pub async fn sas_request(
+        &self,
+        method: &str,
+        container: &str,
+        blob: &str,
+        sas: &str,
+        query: &str,
+        body: &'static [u8],
+    ) -> reqwest::StatusCode {
+        let method = reqwest::Method::from_bytes(method.as_bytes()).expect("http method");
+        let url = format!("{}/{container}/{blob}?{sas}&{query}", self.endpoint());
+        self.client
+            .request(method, url)
+            .header("x-ms-version", API_VERSION)
+            .header("x-ms-blob-type", "BlockBlob")
+            .body(body)
+            .send()
+            .await
+            .expect("send the request")
+            .status()
+    }
+
     /// A container SAS with the given permission letters, as a query string
     /// without the leading `?`.
     pub fn container_sas(&self, container: &str, permissions: &str, ttl: Duration) -> String {

@@ -7,7 +7,7 @@ use lodestore_testkit::azurite::AzuriteServer;
 use rand_chacha::ChaCha20Rng;
 use rand_chacha::rand_core::{Rng, SeedableRng};
 
-async fn account_store(az: &AzuriteServer, container: &str) -> Store {
+pub(super) async fn account_store(az: &AzuriteServer, container: &str) -> Store {
     RepoLocation::new(
         "azblob",
         [
@@ -21,7 +21,7 @@ async fn account_store(az: &AzuriteServer, container: &str) -> Store {
     .unwrap()
 }
 
-fn sas_store(az: &AzuriteServer, container: &str, permissions: &str) -> Store {
+pub(super) fn sas_store(az: &AzuriteServer, container: &str, permissions: &str) -> Store {
     let sas = az.container_sas(container, permissions, Duration::from_secs(3600));
     RepoLocation::new(
         "azblob",

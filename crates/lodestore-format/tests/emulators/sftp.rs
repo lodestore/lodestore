@@ -23,9 +23,14 @@ use proptest::test_runner::TestRunner;
 use rand_chacha::ChaCha20Rng;
 use rand_chacha::rand_core::{Rng, SeedableRng};
 
-const REPO: &str = "/srv/repo/data";
+pub(super) const REPO: &str = "/srv/repo/data";
 
-fn location(sshd: &SshdServer, user: SshUser, host_key: &str, extra: &[(&str, &str)]) -> Store {
+pub(super) fn location(
+    sshd: &SshdServer,
+    user: SshUser,
+    host_key: &str,
+    extra: &[(&str, &str)],
+) -> Store {
     let key = sshd.private_key(user);
     let endpoint = sshd.endpoint();
     let mut options = vec![
@@ -39,11 +44,11 @@ fn location(sshd: &SshdServer, user: SshUser, host_key: &str, extra: &[(&str, &s
     RepoLocation::new("sftp", options).open(None).unwrap()
 }
 
-fn store(sshd: &SshdServer, user: SshUser) -> Store {
+pub(super) fn store(sshd: &SshdServer, user: SshUser) -> Store {
     location(sshd, user, &sshd.host_key(), &[])
 }
 
-fn exec(sshd: &SshdServer, args: &[&str]) -> String {
+pub(super) fn exec(sshd: &SshdServer, args: &[&str]) -> String {
     let out = Command::new("docker")
         .arg("exec")
         .arg(sshd.container())
@@ -53,7 +58,7 @@ fn exec(sshd: &SshdServer, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
-fn modes(sshd: &SshdServer) -> Vec<(String, String)> {
+pub(super) fn modes(sshd: &SshdServer) -> Vec<(String, String)> {
     exec(sshd, &["find", REPO, "-type", "f", "-printf", "%m %p\\n"])
         .lines()
         .filter_map(|l| l.split_once(' '))
@@ -63,7 +68,7 @@ fn modes(sshd: &SshdServer) -> Vec<(String, String)> {
 
 /// The sftp-server messages of a log slice. The syslog socket delivers them
 /// back to back, each led by its priority tag.
-fn messages(log: &str) -> Vec<&str> {
+pub(super) fn messages(log: &str) -> Vec<&str> {
     log.split("<38>")
         .skip(1)
         .filter_map(|m| m.split_once("]: ").map(|(_, rest)| rest.trim()))
@@ -72,7 +77,7 @@ fn messages(log: &str) -> Vec<&str> {
 
 /// No request that could replace, hide or remove an object, and no refusal
 /// beyond the extension advertisement every session starts with.
-fn assert_no_destructive_requests(ops: &[&str]) {
+pub(super) fn assert_no_destructive_requests(ops: &[&str]) {
     const STARTUP_REFUSALS: [&str; 4] = ["posix-rename", "lsetstat", "copy-data", "hardlink"];
     for op in ops {
         if let Some(rest) = op.strip_prefix("Refusing denylisted ") {
@@ -92,7 +97,7 @@ fn assert_no_destructive_requests(ops: &[&str]) {
     }
 }
 
-fn tail_after(log: &str, mark: usize) -> &str {
+pub(super) fn tail_after(log: &str, mark: usize) -> &str {
     log.get(mark..).unwrap_or("")
 }
 
@@ -559,7 +564,7 @@ async fn sftp_ecdsa_key_authenticates() {
     assert_eq!(&server.get("packs/05/ecdsa").await.unwrap()[..], b"ok");
 }
 
-fn direct_agent(
+pub(super) fn direct_agent(
     sshd: &SshdServer,
     root: &str,
     plan: impl IntoIterator<Item = Option<Tear>>,
@@ -691,7 +696,7 @@ async fn sftp_stale_tmp_lists_only_old_entries() {
     assert!(server.stale_tmp(999_999_999_999).await.unwrap().is_empty());
 }
 
-fn sftp_of(store: Store) -> lodestore_format::store::SftpStore {
+pub(super) fn sftp_of(store: Store) -> lodestore_format::store::SftpStore {
     let Store::Sftp(inner) = store else {
         panic!("not an SFTP store");
     };
@@ -743,7 +748,7 @@ async fn sftp_agent_cannot_open_server_files_for_write() {
     );
 }
 
-fn weaknesses(report: &ProbeReport) -> Vec<&'static str> {
+pub(super) fn weaknesses(report: &ProbeReport) -> Vec<&'static str> {
     report.weaknesses.iter().map(|w| w.as_str()).collect()
 }
 
