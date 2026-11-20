@@ -68,7 +68,16 @@ What it grants, and what it leaves out:
 
 If the repository lives in a folder of the bucket, the wizard puts the folder into every resource and prefix.
 
-After you attach the policy, the wizard checks the key. **Write-only verified** means the key can write and cannot delete or overwrite. See [the threat model](/docs/security/threat-model/) for what this does and does not protect against.
+After you attach the policy, the wizard checks the key and reports one of four levels:
+
+| Level | What a host can do | Confirmation |
+| --- | --- | --- |
+| Create-only enforced | Add objects. The storage refuses to replace or delete them. | None. |
+| Overwrite keeps old version | Replace an object, but the storage keeps the earlier version and the key cannot delete it. | None. The level is shown as it is. |
+| Host can overwrite or delete | Replace or delete its own backups. The wizard lists the reasons. | You confirm before the repository is created. |
+| Unchecked | The check could not measure it. | You can check again, or confirm and continue. |
+
+You get **Create-only enforced** when the storage refuses the overwrite, which the policy above does on AWS S3, and **Overwrite keeps old version** when the bucket has versioning or Object Lock. A lifecycle rule on the bucket that deletes objects or their earlier versions lowers **Overwrite keeps old version** to **Host can overwrite or delete**. If the lifecycle rules cannot be read, **Create-only enforced** carries a note and **Overwrite keeps old version** drops to **Host can overwrite or delete**. See [the threat model](/docs/security/threat-model/) for what this does and does not protect against.
 
 ### MinIO
 
@@ -80,7 +89,13 @@ mc admin user add ALIAS AGENT_ACCESS_KEY AGENT_SECRET_KEY
 mc admin policy attach ALIAS lodestore-agent --user AGENT_ACCESS_KEY
 ```
 
-On MinIO a stolen agent key can therefore still overwrite an object. Object Lock or versioning on the bucket is what makes that harmless: the older version stays.
+On MinIO a stolen agent key can therefore still overwrite an object. Versioning or Object Lock on the bucket is what makes that harmless: the older version stays, and the wizard reports **Overwrite keeps old version** without asking you to confirm. Turn versioning on before the wizard:
+
+```sh
+mc version enable ALIAS/my-bucket
+```
+
+Without it, MinIO ends at **Host can overwrite or delete** and the wizard asks you to confirm.
 
 ## The server key
 
