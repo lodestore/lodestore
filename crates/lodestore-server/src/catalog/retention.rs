@@ -310,9 +310,17 @@ pub async fn forget_snapshot(
             find::cache::remove(&find::cache::dir(&state.config.data_dir), &hex);
             Ok(ForgetOutcome::Blocked { reason: message })
         }
-        Err(error) => Ok(ForgetOutcome::Failed {
-            reason: error.to_string(),
-        }),
+        Err(error) => {
+            // The snapshot may still be live: a later hide of it is nobody's forget.
+            sqlx::query("DELETE FROM forgotten_snapshots WHERE id = $1 AND repository_id = $2")
+                .bind(&hex)
+                .bind(repository_id)
+                .execute(&state.db.pool)
+                .await?;
+            Ok(ForgetOutcome::Failed {
+                reason: error.to_string(),
+            })
+        }
     }
 }
 

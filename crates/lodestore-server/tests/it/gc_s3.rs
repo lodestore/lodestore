@@ -25,7 +25,7 @@ use lodestore_server::maintenance::gc::{
     GcOrigin, GcSettings, GcState, db, run_dry_run_at, start_cycle,
 };
 use lodestore_server::repos::db::{AccessKey, NewRepository, RepoLocation as DbLocation};
-use lodestore_testkit::fault_proxy::{FaultPlan, FaultProxy};
+use lodestore_testkit::fault_proxy::{FaultAction, FaultPlan, FaultProxy, FaultRule};
 use lodestore_testkit::minio::MinioServer;
 use opendal::{Operator, services};
 use serde_json::Value;
@@ -598,6 +598,67 @@ async fn gc_s3_b2_preset_refuses_a_snapshot_hidden_during_the_pause() {
         cloud.assert_restores(&b).await;
     })
     .await;
+}
+
+/// A forget whose delete failed leaves the snapshot in the bucket, and a
+/// later hide of it by someone else must not pass for the server's own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_s3_b2_preset_failed_forget_keeps_the_snapshot_protected() {
+    for backend in backends() {
+        let cloud = Cloud::start(Bucket::VersionedB2).await;
+        let plan = FaultPlan::none().with(FaultRule {
+            method: "DELETE",
+            key_prefix: "snapshots/".to_string(),
+            action: FaultAction::NotImplemented,
+            times: 1,
+        });
+        let proxy = FaultProxy::start(cloud.minio.endpoint(), plan).await;
+        let mut options = cloud.options.clone();
+        options.insert("endpoint".to_string(), proxy.endpoint());
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+        let repo = cloud.register_at(&ts, &options).await;
+
+        let a = cloud.backup("a", 11).await;
+        let b = cloud.backup("b", 12).await;
+        sync_repository(ts.state(), &repo).await.unwrap();
+        let forgotten =
+            lodestore_server::catalog::retention::forget_snapshot(ts.state(), &repo, &a.id)
+                .await
+                .unwrap();
+        assert!(
+            matches!(
+                forgotten,
+                lodestore_server::catalog::retention::ForgetOutcome::Failed { .. }
+            ),
+            "{forgotten:?}"
+        );
+        let before = cloud.listing().await;
+        let manifest = snapshot_object_key(&parse_hex32(&a.id).unwrap());
+        assert!(before.contains_key(&manifest));
+        let hider = operator_as(&cloud.minio, &cloud.server_key.0, &cloud.server_key.1);
+        hider.delete(&manifest).await.unwrap();
+
+        let id = real_cycle(&ts, &repo).await;
+        assert_eq!(finish(&ts, &id, three_days_on()).await, GcState::Failed);
+        let error = failure(&ts, &id).await.unwrap_or_default();
+        assert!(error.contains(&manifest), "{error}");
+        assert_eq!(
+            gone(&before, &cloud.listing().await),
+            vec![manifest.clone()]
+        );
+        for (version, marker) in cloud.minio.object_versions_all(BUCKET, &manifest).await {
+            if marker {
+                cloud
+                    .minio
+                    .delete_version(BUCKET, &manifest, &version)
+                    .await
+                    .unwrap();
+            }
+        }
+        cloud.assert_restores(&a).await;
+        cloud.assert_restores(&b).await;
+        ts.stop().await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
