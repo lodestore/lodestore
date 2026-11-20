@@ -1,6 +1,6 @@
 [package]
 name = "lodestore-testkit"
-description = "Test harness: pinned MinIO and a fault-injecting S3 proxy"
+description = "Test harness: pinned storage emulators and a fault-injecting recording proxy"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
