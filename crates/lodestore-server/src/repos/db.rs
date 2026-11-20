@@ -33,7 +33,6 @@ impl std::fmt::Debug for AccessKey {
 pub struct NewRepository {
     pub name: String,
     pub location: RepoLocation,
-    pub experimental: bool,
     pub format_repo_id: [u8; 16],
     pub config_hash: [u8; 32],
     pub master: MasterKey,
@@ -139,17 +138,16 @@ pub async fn create_repository_ext(
     };
     let now = now_ms();
     sqlx::query(
-        "INSERT INTO repositories (id, name, backend, location_json, experimental, format_repo_id, \
+        "INSERT INTO repositories (id, name, backend, location_json, format_repo_id, \
          config_hash, master_secret_id, server_slot_secret_id, server_creds_secret_id, \
          agent_creds_secret_id, agent_key_state, checks_json, checked_at, created_at, \
          provenance_backfilled_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
     )
     .bind(&id)
     .bind(&new.name)
     .bind(&new.location.backend)
     .bind(serde_json::to_string(&new.location.options)?)
-    .bind(i64::from(new.experimental))
     .bind(new.format_repo_id.to_vec())
     .bind(new.config_hash.to_vec())
     .bind(master)

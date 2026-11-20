@@ -219,7 +219,6 @@ async fn adv_shard_planted_before_upgrade_never_yields_successful_unrestorable_b
                 backend: "local".to_string(),
                 options: BTreeMap::from([("path".to_string(), root.display().to_string())]),
             },
-            experimental: false,
             format_repo_id,
             config_hash: hash,
             master,

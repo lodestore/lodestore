@@ -294,7 +294,6 @@ async fn register(state: &AppState, r: Registration) -> Result<RepositorySummary
         agent_creds,
         ..
     } = r.opened;
-    let experimental = location.is_experimental();
     let (public, secret_options) = split_secret_options(&location);
     let checks_json =
         serde_json::to_string(&r.checks.checks).map_err(|e| ApiError::Internal(e.into()))?;
@@ -306,7 +305,6 @@ async fn register(state: &AppState, r: Registration) -> Result<RepositorySummary
                 backend: public.backend,
                 options: public.options,
             },
-            experimental,
             format_repo_id: r.format_repo_id,
             config_hash: r.config_hash,
             master: r.master,

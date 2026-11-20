@@ -158,7 +158,6 @@ async fn adv_lying_attested_shard_costs_one_backup() {
                 backend: "local".to_string(),
                 options: BTreeMap::from([("path".to_string(), root.display().to_string())]),
             },
-            experimental: false,
             format_repo_id,
             config_hash: hash,
             master,
