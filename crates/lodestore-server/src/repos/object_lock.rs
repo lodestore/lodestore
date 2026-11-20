@@ -193,12 +193,13 @@ pub(crate) fn lifecycle_verdict(
         return LifecycleVerdict::Inconclusive;
     };
     match (status, error_code(body)) {
+        (200, _) if root_element(body) != Some("LifecycleConfiguration") => {
+            LifecycleVerdict::Unverified
+        }
         (200, _) if body.len() >= MAX_BODY || lifecycle_deletes(body, repo_prefix) => {
             LifecycleVerdict::Deletes
         }
-        (200, _) | (404, _) | (_, Some("NoSuchLifecycleConfiguration")) => {
-            LifecycleVerdict::NoRules
-        }
+        (200, _) | (404, Some("NoSuchLifecycleConfiguration")) => LifecycleVerdict::NoRules,
         (501, _) | (_, Some("NotImplemented")) => LifecycleVerdict::Unverified,
         (408 | 429 | 500..=599, _) | (_, Some("SlowDown" | "RequestTimeout")) => {
             LifecycleVerdict::Inconclusive
@@ -284,6 +285,25 @@ fn tokens(xml: &str) -> Option<Vec<Tok<'_>>> {
         out.push(Tok::Text(rest));
     }
     Some(out)
+}
+
+/// The name of the first element of `xml`, past any declaration.
+fn root_element(xml: &str) -> Option<&str> {
+    let mut rest = xml;
+    loop {
+        let start = rest.find('<')?;
+        rest = &rest[start..];
+        let end = tag_end(rest)?;
+        let inner = &rest[1..end];
+        rest = &rest[end + 1..];
+        if inner.starts_with(['?', '!', '/']) {
+            continue;
+        }
+        return inner
+            .split(|c: char| c.is_whitespace() || c == '/')
+            .next()
+            .and_then(|n| n.rsplit(':').next());
+    }
 }
 
 fn prefixes_overlap(rule: &str, repo: &str) -> bool {
@@ -632,11 +652,29 @@ mod tests {
         let code = |c: &str| format!("<Error><Code>{c}</Code></Error>");
         let v = |status, body: &str| lifecycle_verdict(Some((status, body)), "repo");
         assert_eq!(v(404, &code("NoSuchLifecycleConfiguration")), NoRules);
-        assert_eq!(v(404, ""), NoRules);
         assert_eq!(v(200, &config(&rule(ENABLED, "", NONCURRENT))), Deletes);
         assert_eq!(v(200, &config("")), NoRules);
-        assert_eq!(v(200, &"x".repeat(MAX_BODY)), Deletes);
+        assert_eq!(
+            v(200, &format!("<?xml version=\"1.0\"?>{}", config(""))),
+            NoRules
+        );
+        assert_eq!(
+            v(
+                200,
+                &format!("<LifecycleConfiguration>{}", "x".repeat(MAX_BODY))
+            ),
+            Deletes
+        );
         for (status, body) in [
+            (404, String::new()),
+            (404, code("NoSuchBucket")),
+            (404, code("NoSuchKey")),
+            (200, String::new()),
+            (
+                200,
+                "<ListBucketResult><Name>repo</Name></ListBucketResult>".into(),
+            ),
+            (200, "<?xml version=\"1.0\"?><ListBucketResult/>".into()),
             (403, code("AccessDenied")),
             (405, String::new()),
             (501, code("NotImplemented")),
