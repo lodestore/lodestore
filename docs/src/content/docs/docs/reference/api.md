@@ -192,13 +192,13 @@ Every route here needs a signed-in administrator session with the CSRF token; no
 
 | `backend` | Options |
 |---|---|
-| `s3` | `bucket`, `endpoint`, `region`, `path_style`, `provider`; the server key and the agent key go in `server_credentials` and `agent_credentials` |
+| `s3` | `bucket`, `endpoint`, `region`, `path_style`, `prefix`, `provider`; the server key and the agent key go in `server_credentials` and `agent_credentials` |
 | `local` | `path` (absolute) |
-| `azblob` | `container`, `root`, `endpoint`, `account_name`, and one of `sas_token` or `account_key` (with `account_name`) |
-| `gcs` | `bucket`, `root`, `endpoint`, `credential` (the service account key as JSON) |
+| `azblob` | `container`, `root`, `endpoint`, `account_name`, and one of `sas_token` or `account_key` (with `account_name`); `encryption_key`, `encryption_key_sha256` and `encryption_algorithm` for a customer-provided key |
+| `gcs` | `bucket`, `root`, `endpoint`, `credential` (the service account key as JSON) or `token`, `credential_path`, `skip_signature`, `allow_anonymous`, `disable_vm_metadata`, `disable_config_load` |
 | `sftp` | `endpoint` (`host:port`), `user`, `key` (the private key), `host_key`, `root`, `publish` |
 
-`account_key`, `sas_token` and `encryption_key` (`azblob`), `credential` and `token` (`gcs`) and `key` (`sftp`) are secrets: they are sealed on their own and never appear in a response. `publish` is `hardlink` (the default: the file is written under a temporary name and linked into place, so it appears whole or not at all) or `direct` (the final name is created and written, so a cut-off upload leaves a short file). A draft that cannot work answers `422`: an `sftp` location without `host_key` ("Enter the SFTP server's host key: one line of `ssh-keyscan -p <port> <host>` output"), a `gcs` location with only `credential_path` (agents cannot read a file on the server) and none of `credential`, `token`, `skip_signature` or `allow_anonymous`, an `azblob` location without `sas_token` or `account_key` with `account_name`, and an unknown `publish` value.
+`account_key`, `sas_token` and `encryption_key` (`azblob`), `credential` and `token` (`gcs`) and `key` (`sftp`) are secrets: they are sealed on their own and never appear in a response. `publish` is `hardlink` (the default: the file is written under a temporary name and linked into place, so it appears whole or not at all) or `direct` (the final name is created and written, so a cut-off upload leaves a short file). A draft that cannot work answers `422`: an `sftp` location without `host_key` ("Enter the SFTP server's host key: one line of `ssh-keyscan -p <port> <host>` output"), a `gcs` location with only `credential_path` (agents cannot read a file on the server) and none of `credential`, `token`, `skip_signature` or `allow_anonymous`, an `azblob` location without `sas_token` or `account_key` with `account_name`, an unknown `publish` value, and any option not in the table: names are matched exactly, so another spelling (`Token`) or an alias of the storage library (`sas_key`, `azure_storage_account_key`) answers `422` with the name of the option, and nothing is stored.
 
 **Levels.** A check measures what a host can do with the storage and reports one `guarantee_level`:
 
