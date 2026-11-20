@@ -36,6 +36,35 @@ export LODE_PASSWORD_FILE=./repository-key
 
 The repository location is `s3:` followed by the storage address and the bucket, and a folder inside the bucket if the repository does not start at its root: `s3:https://host/bucket/folder`. For MinIO or another S3-compatible storage use its address, for example `s3:http://192.0.2.20:9000/my-bucket`. `lode` reads the keys and the region from the standard AWS environment variables or the AWS shared config files. Without `AWS_REGION` it uses `us-east-1`, which is right for most S3-compatible storage but not for AWS.
 
+### Azure Blob Storage, Google Cloud Storage and SFTP
+
+For another storage, change the location and the credentials; the password file and the commands below stay the same. Secrets are read from the environment only, never from the location.
+
+Azure Blob Storage, with a container named `backups` and an account key (or `LODE_AZBLOB_SAS_TOKEN` for a SAS token that can read and list):
+
+```sh
+export LODE_AZBLOB_ACCOUNT_NAME=mystorageaccount
+export LODE_AZBLOB_ACCOUNT_KEY=your-read-access-key
+export LODE_REPOSITORY="azblob://backups"
+```
+
+Google Cloud Storage, with a service account key file that can read the bucket:
+
+```sh
+export LODE_GCS_CREDENTIAL_FILE=./service-account.json
+export LODE_REPOSITORY="gcs://my-bucket/folder"
+```
+
+SFTP, with the private key of a user that can read the repository folder, and the host key of the server pinned. `ssh-keyscan -p 22 backup.example.net` prints it; check it against a source you trust before you use it, because `lode` does not trust a host key on first use and refuses to connect without one:
+
+```sh
+export LODE_SFTP_KEY_FILE=./restore-key
+export LODE_SFTP_HOST_KEY="ssh-ed25519 AAAA..."
+export LODE_REPOSITORY="sftp://restore@backup.example.net/srv/lodestore"
+```
+
+If the server publishes without hard links, set `LODE_SFTP_PUBLISH=direct` as it was configured for backups. The full list of variables is in [the command line reference](/docs/reference/cli/#repository-location).
+
 List the snapshots, then restore:
 
 ```sh

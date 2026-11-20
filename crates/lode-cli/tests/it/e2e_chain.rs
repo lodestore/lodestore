@@ -53,7 +53,12 @@ fn run_chain(lode: &dyn Fn() -> Command, key_file: &Path, tmp: &Path) {
     let src = src.canonicalize().unwrap();
 
     lode()
-        .args(["repo", "init", "--recovery-key-file"])
+        .args([
+            "repo",
+            "init",
+            "--accept-weaker-guarantee",
+            "--recovery-key-file",
+        ])
         .arg(key_file)
         .assert()
         .success();
@@ -124,6 +129,60 @@ async fn e2e_chain_minio() {
         cmd
     };
     run_chain(&lode_s3, &tmp.path().join("repo.recovery-key"), tmp.path());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cli_s3_versioned_init_reports_unverified_lifecycle() {
+    let minio = MinioServer::start().await;
+    minio.create_versioned_bucket("versioned").await;
+    let arn = |path: &str| format!("arn:aws:s3:::versioned{path}");
+    let policy = serde_json::json!({
+        "Version": "2012-10-17",
+        "Statement": [
+            {"Effect": "Allow",
+             "Action": ["s3:GetObject", "s3:GetObjectVersion", "s3:PutObject"],
+             "Resource": [arn("/*")]},
+            {"Effect": "Allow",
+             "Action": ["s3:ListBucket", "s3:ListBucketVersions", "s3:GetBucketLocation"],
+             "Resource": [arn("")]},
+        ],
+    });
+    let (user, secret) = minio
+        .create_user_with_policy("versioned", &policy.to_string())
+        .await;
+    let url = format!("s3:{}/versioned", minio.endpoint());
+    let tmp = tempfile::tempdir().unwrap();
+    let key_file = tmp.path().join("repo.recovery-key");
+    let init = |extra: &[&str]| {
+        let mut cmd = lode(Path::new(&url));
+        cmd.env("AWS_ACCESS_KEY_ID", &user)
+            .env("AWS_SECRET_ACCESS_KEY", &secret)
+            .env("AWS_EC2_METADATA_DISABLED", "true")
+            .args(["repo", "init"])
+            .args(extra)
+            .arg("--recovery-key-file")
+            .arg(&key_file);
+        cmd
+    };
+
+    let refused = init(&[]).assert().failure();
+    let err = String::from_utf8_lossy(&refused.get_output().stderr).into_owned();
+    assert!(
+        err.contains(
+            "The bucket's lifecycle rules could not be read; check that none deletes objects or earlier versions."
+        ),
+        "{err}"
+    );
+    assert!(err.contains("--accept-weaker-guarantee"), "{err}");
+    assert!(!err.contains(&secret), "{err}");
+    assert!(!key_file.exists());
+
+    let accepted = init(&["--accept-weaker-guarantee"]).assert().success();
+    let out = String::from_utf8_lossy(&accepted.get_output().stdout).into_owned();
+    assert!(
+        out.contains("storage guarantee: host_can_overwrite_or_delete"),
+        "{out}"
+    );
 }
 
 fn backed_up(tmp: &Path) -> (PathBuf, PathBuf) {

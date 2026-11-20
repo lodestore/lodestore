@@ -40,7 +40,12 @@ pub fn key_file_of(repo: &Path) -> PathBuf {
 pub fn init_repo(repo: &Path) -> PathBuf {
     let key_file = key_file_of(repo);
     lode(repo)
-        .args(["repo", "init", "--recovery-key-file"])
+        .args([
+            "repo",
+            "init",
+            "--accept-weaker-guarantee",
+            "--recovery-key-file",
+        ])
         .arg(&key_file)
         .assert()
         .success();

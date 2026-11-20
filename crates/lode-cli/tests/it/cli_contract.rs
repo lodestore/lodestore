@@ -193,10 +193,52 @@ fn cli_exit_already_initialized_11() {
     let repo = tmp.path().join("repo");
     init_repo(&repo);
     lode(&repo)
-        .args(["repo", "init", "--recovery-key-file"])
+        .args([
+            "repo",
+            "init",
+            "--accept-weaker-guarantee",
+            "--recovery-key-file",
+        ])
         .arg(tmp.path().join("second.key"))
         .assert()
         .code(11);
+}
+
+#[test]
+fn cli_local_init_needs_consent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let key_file = common::key_file_of(&repo);
+    let refused = lode(&repo)
+        .args(["repo", "init", "--recovery-key-file"])
+        .arg(&key_file)
+        .assert()
+        .failure();
+    let err = stderr_of(&refused);
+    assert!(err.contains("--accept-weaker-guarantee"), "{err}");
+    assert!(
+        err.contains("Every host that writes to this folder can change or delete its backups"),
+        "{err}"
+    );
+    assert!(!repo.join("config").exists());
+    assert!(!key_file.exists());
+
+    let accepted = lode(&repo)
+        .args([
+            "repo",
+            "init",
+            "--accept-weaker-guarantee",
+            "--recovery-key-file",
+        ])
+        .arg(&key_file)
+        .assert()
+        .success();
+    let out = String::from_utf8(accepted.get_output().stdout.clone()).unwrap();
+    assert!(
+        out.contains("storage guarantee: host_can_overwrite_or_delete"),
+        "{out}"
+    );
+    assert!(repo.join("config").exists());
 }
 
 #[test]
@@ -285,7 +327,13 @@ fn cli_init_json_requires_recovery_key_file() {
 
     let key_file = tmp.path().join("repo.key");
     let assert = lode(&repo)
-        .args(["repo", "init", "--json", "--recovery-key-file"])
+        .args([
+            "repo",
+            "init",
+            "--json",
+            "--accept-weaker-guarantee",
+            "--recovery-key-file",
+        ])
         .arg(&key_file)
         .assert()
         .success();
