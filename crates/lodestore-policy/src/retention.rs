@@ -13,6 +13,7 @@ pub const FLOOR: usize = 2;
 pub struct Candidate {
     pub id: String,
     pub received_at_ms: i64,
+    pub discovered_at_ms: i64,
     pub suspicious: bool,
     pub incomplete: bool,
 }
@@ -46,13 +47,19 @@ pub fn timezone_of(spec: &PolicySpec) -> TimeZone {
         .unwrap_or(TimeZone::UTC)
 }
 
+/// Storage times of S3 have whole seconds, so backups stored within one second
+/// are told apart by when the server catalogued them, never by the time the
+/// agent wrote into the manifest.
+pub fn newest_first(a: &Candidate, b: &Candidate) -> std::cmp::Ordering {
+    b.received_at_ms
+        .cmp(&a.received_at_ms)
+        .then_with(|| b.discovered_at_ms.cmp(&a.discovered_at_ms))
+        .then_with(|| a.id.cmp(&b.id))
+}
+
 pub fn evaluate(rules: &Retention, tz: &TimeZone, candidates: &[Candidate]) -> Vec<Decision> {
     let mut order: Vec<&Candidate> = candidates.iter().collect();
-    order.sort_by(|a, b| {
-        b.received_at_ms
-            .cmp(&a.received_at_ms)
-            .then_with(|| a.id.cmp(&b.id))
-    });
+    order.sort_by(|a, b| newest_first(a, b));
     let mut reasons: Vec<Vec<Rule>> = vec![Vec::new(); order.len()];
     let good: Vec<usize> = (0..order.len())
         .filter(|&i| !order[i].suspicious && !order[i].incomplete)

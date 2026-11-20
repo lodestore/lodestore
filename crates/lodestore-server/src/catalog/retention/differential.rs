@@ -139,6 +139,7 @@ fn candidate(index: usize, spec: &Spec) -> Candidate {
     Candidate {
         id: format!("{index:064x}"),
         received_at_ms: BASE_MS + spec.hours * HOUR_MS,
+        discovered_at_ms: 0,
         suspicious: spec.suspicious,
         incomplete: spec.incomplete,
     }
