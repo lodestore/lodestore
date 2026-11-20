@@ -144,10 +144,9 @@ async fn sftp_failure_without_object_is_backend_error() {
     let server = store(&sshd, SshUser::Srv);
     let agent = store(&sshd, SshUser::Agent);
     server.ensure_prefixes(&["packs"]).await.unwrap();
-    // The final name is a directory: the link is refused and nothing is
-    // there that a stat could call an existing object.
+    let too_long = format!("packs/00/{}", "a".repeat(300));
     let err = agent
-        .put_if_absent("packs/missing-dir/obj", Bytes::from_static(b"x"))
+        .put_if_absent(&too_long, Bytes::from_static(b"x"))
         .await
         .unwrap_err();
     assert!(
@@ -156,11 +155,25 @@ async fn sftp_failure_without_object_is_backend_error() {
             BlobError::Backend {
                 temporary: false,
                 ..
-            } | BlobError::Denied { .. }
+            }
         ),
         "{err:?}"
     );
-    assert!(!matches!(err, BlobError::AlreadyExists));
+}
+
+#[tokio::test]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn sftp_missing_directory_is_denied_for_the_agent() {
+    let sshd = SshdServer::start().await;
+    let server = store(&sshd, SshUser::Srv);
+    let agent = store(&sshd, SshUser::Agent);
+    server.ensure_prefixes(&["packs"]).await.unwrap();
+    let err = agent
+        .put_if_absent("packs/zz/obj", Bytes::from_static(b"x"))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, BlobError::Denied { .. }), "{err:?}");
+    assert_eq!(server.object_size("packs/zz/obj").await.unwrap(), None);
 }
 
 #[tokio::test]
@@ -192,9 +205,9 @@ async fn sftp_vanished_tmp_is_retried_with_a_new_name() {
         .unwrap();
     assert_eq!(&agent.get("packs/00/vanish").await.unwrap()[..], b"payload");
     let log = sshd.log();
-    let opens = tail_after(&log, mark)
-        .lines()
-        .filter(|l| l.contains("open \"/data/tmp/") && l.contains("EXCL"))
+    let opens = messages(tail_after(&log, mark))
+        .into_iter()
+        .filter(|m| m.starts_with("open \"/data/tmp/") && m.contains("EXCL"))
         .count();
     assert_eq!(opens, 2, "{log}");
 }
@@ -347,4 +360,25 @@ async fn sftp_reconnects_after_the_connection_drops() {
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     assert_eq!(&server.get("packs/04/first").await.unwrap()[..], b"one");
     assert_eq!(&server.get("packs/04/second").await.unwrap()[..], b"two");
+}
+
+#[tokio::test]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn sftp_agent_cannot_overwrite_a_probe_object() {
+    use lodestore_format::store::probe::{AgentKeyState, AgentProbe, probe};
+
+    let sshd = SshdServer::start().await;
+    let server = store(&sshd, SshUser::Srv);
+    server
+        .ensure_prefixes(&["packs", "index", "snapshots"])
+        .await
+        .unwrap();
+
+    let agent = store(&sshd, SshUser::Agent);
+    let report = probe(&server, AgentProbe::Store(&agent)).await;
+    assert_eq!(report.agent_key, AgentKeyState::Verified, "{report:?}");
+
+    let wide = store(&sshd, SshUser::Wide);
+    let report = probe(&server, AgentProbe::Store(&wide)).await;
+    assert_ne!(report.agent_key, AgentKeyState::Verified, "{report:?}");
 }
