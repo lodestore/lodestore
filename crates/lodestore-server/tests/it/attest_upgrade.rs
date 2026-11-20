@@ -201,6 +201,7 @@ async fn attest_upgrade_new_repository_gets_marker_on_creation() {
         let draft = json!({
             "name": "fresh",
             "location": { "backend": "local", "options": { "path": root.display().to_string() } },
+            "accept_weaker_guarantee": true,
         });
         let started = api.post("/api/v1/repositories/wizard", &draft).await;
         assert_eq!(started.status(), 201);
