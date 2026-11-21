@@ -17,7 +17,7 @@ use lodestore_format::locks::{
 use lodestore_format::pb;
 use lodestore_format::reader::{Reader, RestoreOptions};
 use lodestore_format::repo::{InitOptions, PendingInit, Repository};
-use lodestore_format::store::{BlobError, BlobStore, ListEntry, LocalFsStore};
+use lodestore_format::store::{BlobError, BlobStore, ListEntry, LocalFsStore, put_named};
 use lodestore_format::writer::{BackupOptions, BackupOutcome, Writer};
 use rand_chacha::ChaCha20Rng;
 use rand_chacha::rand_core::{Rng, SeedableRng};
@@ -294,18 +294,20 @@ async fn gc_locks_publish_is_idempotent_per_id() {
     let f = fixture().await;
     let keys = f.repo.read_keys();
     let id = new_lock_id(&mut Entropy::os());
-    for _ in 0..2 {
-        publish_gc_manifest(
-            &f.store,
-            keys.k_idx(),
-            keys.repo_id(),
-            &id,
-            &[[1; 32]],
-            &mut Entropy::os(),
-        )
-        .await
-        .unwrap();
-    }
+    publish_gc_manifest(
+        &f.store,
+        keys.k_idx(),
+        keys.repo_id(),
+        &id,
+        &[[1; 32]],
+        &mut Entropy::os(),
+    )
+    .await
+    .unwrap();
+    // A retry resends the bytes already written; a second seal carries a new timestamp and may differ in size.
+    let key = gc_manifest_key(&id);
+    let written = f.store.get(&key).await.unwrap();
+    put_named(&f.store, &key, written.to_vec()).await.unwrap();
     let locks = read_gc_locks(&f.store, keys.k_idx(), keys.repo_id())
         .await
         .unwrap();
