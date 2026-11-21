@@ -12,7 +12,7 @@ use lodestore_format::repo::Repository;
 use lodestore_format::store::probe::{
     AgentKeyState, AgentProbe, CheckId, GuaranteeLevel, ProbeReport, probe,
 };
-use lodestore_format::store::sftp::Tear;
+use lodestore_format::store::sftp::{SftpStore, Tear};
 use lodestore_format::store::{
     BlobDelete, BlobError, BlobPurge, BlobStore, LocalFsStore, RepoLocation, Store,
 };
@@ -507,6 +507,47 @@ async fn sftp_changed_host_key_is_a_hard_error() {
         assert_ne!(pinned, offered);
         assert!(!err.to_string().contains("ssh-ed25519"));
     }
+}
+
+#[tokio::test]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn sftp_offered_host_key_matches_and_writes_nothing() {
+    let sshd = SshdServer::start().await;
+    let files = |sshd: &SshdServer| exec(sshd, &["find", sshd.root(), "-type", "f"]);
+    let (mark, before) = (sshd.log().len(), files(&sshd));
+
+    let offered = SftpStore::offered_host_key(&sshd.endpoint()).await.unwrap();
+    let pinned = sshd.host_key();
+    assert_eq!(
+        offered.fingerprint,
+        SftpStore::host_key_fingerprint(&pinned).unwrap()
+    );
+    assert_eq!(
+        SftpStore::host_key_fingerprint(&offered.openssh).unwrap(),
+        offered.fingerprint
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let log = sshd.log();
+    let tail = tail_after(&log, mark);
+    for forbidden in ["Accepted publickey", "Failed publickey", "subsystem"] {
+        assert!(!tail.contains(forbidden), "{forbidden}: {tail}");
+    }
+    assert_eq!(files(&sshd), before);
+
+    let store = location(&sshd, SshUser::Srv, &offered.openssh, &[]);
+    let err = store.get("absent").await.unwrap_err();
+    assert!(matches!(err, BlobError::NotFound), "{err:?}");
+
+    sshd.rotate_host_key();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let rotated = SftpStore::offered_host_key(&sshd.endpoint()).await.unwrap();
+    assert_ne!(rotated.fingerprint, offered.fingerprint);
+    let reopened = location(&sshd, SshUser::Srv, &offered.openssh, &[]);
+    let err = reopened.get("absent").await.unwrap_err();
+    let BlobError::HostKeyMismatch { offered: seen, .. } = &err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(*seen, rotated.fingerprint);
 }
 
 #[tokio::test]

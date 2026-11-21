@@ -168,22 +168,68 @@ impl client::Handler for Pinned {
         &mut self,
         key: &PublicKeyOrCertificate,
     ) -> std::result::Result<bool, Self::Error> {
-        let seen = match key {
-            PublicKeyOrCertificate::PublicKey { key, .. } => {
-                if key.key_data() == self.pinned.key_data() {
-                    return Ok(true);
-                }
-                fingerprint(key)
-            }
-            PublicKeyOrCertificate::Certificate(cert) => format!(
-                "a host certificate for {}",
-                fingerprint(&PublicKey::from(cert.public_key().clone()))
-            ),
+        let seen = match offered_public_key(key) {
+            Ok(key) if key.key_data() == self.pinned.key_data() => return Ok(true),
+            Ok(key) => fingerprint(&key),
+            Err(certificate) => certificate,
         };
         if let Ok(mut slot) = self.offered.lock() {
             *slot = Some(seen);
         }
         Ok(false)
+    }
+}
+
+/// The plain key a server offered; a host certificate is described instead,
+/// because it is never a key that can be pinned.
+fn offered_public_key(key: &PublicKeyOrCertificate) -> std::result::Result<PublicKey, String> {
+    match key {
+        PublicKeyOrCertificate::PublicKey { key, .. } => Ok(key.clone()),
+        PublicKeyOrCertificate::Certificate(cert) => Err(format!(
+            "a host certificate for {}",
+            fingerprint(&PublicKey::from(cert.public_key().clone()))
+        )),
+    }
+}
+
+type OfferedSlot = Arc<std::sync::Mutex<Option<std::result::Result<PublicKey, String>>>>;
+
+/// Remembers the host key and refuses it, so the handshake ends before any
+/// authentication.
+struct Capture {
+    slot: OfferedSlot,
+}
+
+impl client::Handler for Capture {
+    type Error = russh::Error;
+
+    async fn check_server_key(
+        &mut self,
+        key: &PublicKeyOrCertificate,
+    ) -> std::result::Result<bool, Self::Error> {
+        if let Ok(mut slot) = self.slot.lock() {
+            *slot = Some(offered_public_key(key));
+        }
+        Ok(false)
+    }
+}
+
+/// The host key a server presented on first contact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OfferedHostKey {
+    pub openssh: String,
+    pub fingerprint: String,
+}
+
+fn connect_error(e: &russh::Error) -> BlobError {
+    match e {
+        russh::Error::NoCommonAlgo {
+            kind: russh::AlgorithmKind::Key,
+            ..
+        } => BlobError::backend(
+            "the SFTP server offers no ed25519 or ECDSA host key; Lodestore pins only those",
+        ),
+        _ => temporary(format!("cannot connect to the SFTP server: {e}")),
     }
 }
 
@@ -429,7 +475,62 @@ pub fn check_listing(prefix: &str, dir: &str, raw: &[RawEntry]) -> std::result::
     Ok(())
 }
 
+fn client_config() -> Arc<client::Config> {
+    Arc::new(client::Config {
+        keepalive_interval: Some(KEEPALIVE),
+        preferred: russh::Preferred {
+            key: std::borrow::Cow::Borrowed(HOST_KEY_ALGORITHMS),
+            host_key_certificates: std::borrow::Cow::Borrowed(&[]),
+            ..russh::Preferred::DEFAULT
+        },
+        ..Default::default()
+    })
+}
+
 impl SftpStore {
+    /// First contact: the host key the server presents, learned by the SSH
+    /// handshake alone. The handshake is cut off before authentication, so no
+    /// credential is sent, no channel is opened and nothing is written.
+    pub async fn offered_host_key(endpoint: &str) -> Result<OfferedHostKey> {
+        let (host, port) = parse_endpoint(endpoint)?;
+        let slot: OfferedSlot = Arc::default();
+        let handler = Capture {
+            slot: Arc::clone(&slot),
+        };
+        let connecting = client::connect(client_config(), (host.as_str(), port), handler);
+        let outcome = tokio::time::timeout(CONNECT_TIMEOUT, connecting).await;
+        let seen = slot.lock().ok().and_then(|mut s| s.take());
+        match (seen, outcome) {
+            (Some(Ok(mut key)), _) => {
+                key.set_comment("");
+                let openssh = key.to_openssh().map_err(|e| {
+                    Error::Store(BlobError::backend(format!(
+                        "cannot encode the SFTP host key: {e}"
+                    )))
+                })?;
+                Ok(OfferedHostKey {
+                    openssh,
+                    fingerprint: fingerprint(&key),
+                })
+            }
+            (Some(Err(_)), _) => Err(Error::Store(BlobError::backend(
+                "the SFTP server offered a host certificate; Lodestore pins plain ed25519 or ECDSA host keys only",
+            ))),
+            (None, Err(_)) => Err(Error::Store(temporary(
+                "cannot connect to the SFTP server: timed out",
+            ))),
+            (None, Ok(Err(e))) => Err(Error::Store(connect_error(&e))),
+            (None, Ok(Ok(_))) => Err(Error::Store(temporary(
+                "cannot connect to the SFTP server: no host key was offered",
+            ))),
+        }
+    }
+
+    /// The SHA256 fingerprint of a pinned host key line.
+    pub fn host_key_fingerprint(line: &str) -> Result<String> {
+        Ok(fingerprint(&parse_host_key(line)?))
+    }
+
     pub fn open(options: &BTreeMap<String, String>) -> Result<Self> {
         let opt = |k: &str| {
             debug_assert!(super::location::is_known_option("sftp", k), "{k}");
@@ -561,15 +662,7 @@ impl SftpStore {
 
     async fn connect(&self) -> std::result::Result<Conn, BlobError> {
         let inner = &self.inner;
-        let config = Arc::new(client::Config {
-            keepalive_interval: Some(KEEPALIVE),
-            preferred: russh::Preferred {
-                key: std::borrow::Cow::Borrowed(HOST_KEY_ALGORITHMS),
-                host_key_certificates: std::borrow::Cow::Borrowed(&[]),
-                ..russh::Preferred::DEFAULT
-            },
-            ..Default::default()
-        });
+        let config = client_config();
         let offered = Arc::new(std::sync::Mutex::new(None));
         let handler = Pinned {
             pinned: inner.host_key.clone(),
@@ -586,7 +679,7 @@ impl SftpStore {
                         pinned: fingerprint(&inner.host_key),
                         offered,
                     },
-                    None => temporary(format!("cannot connect to the SFTP server: {e}")),
+                    None => connect_error(&e),
                 });
             }
         };
@@ -1515,6 +1608,114 @@ mod tests {
             open("not a key", &ed_pub, &[]),
         ] {
             assert!(matches!(refused, Err(Error::InvalidInput(_))));
+        }
+    }
+
+    fn host_key_line(args: &[&str]) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("k");
+        let status = std::process::Command::new("ssh-keygen")
+            .args(["-q", "-C", "t", "-N", ""])
+            .args(args)
+            .arg("-f")
+            .arg(&path)
+            .status()
+            .expect("ssh-keygen");
+        assert!(status.success());
+        std::fs::read_to_string(dir.path().join("k.pub")).unwrap()
+    }
+
+    #[test]
+    fn host_key_fingerprint_matches_the_pinned_key() {
+        for args in [&["-t", "ed25519"][..], &["-t", "ecdsa", "-b", "256"][..]] {
+            let line = host_key_line(args);
+            let key = PublicKey::from_openssh(line.trim()).unwrap();
+            let fp = SftpStore::host_key_fingerprint(&line).unwrap();
+            assert!(fp.starts_with("SHA256:"));
+            assert_eq!(fp, key.fingerprint(HashAlg::Sha256).to_string());
+        }
+        for refused in [
+            host_key_line(&["-t", "rsa", "-b", "2048"]),
+            "ssh-ed25519-cert-v01@openssh.com AAAAIHNzaC1lZDI1NTE5LWNlcnQtdjAxQG9wZW5zc2guY29t"
+                .into(),
+            "not a key".into(),
+        ] {
+            assert!(matches!(
+                SftpStore::host_key_fingerprint(&refused),
+                Err(Error::InvalidInput(_))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn offered_host_key_rejects_a_bad_endpoint() {
+        for endpoint in ["", "host:notaport"] {
+            assert!(matches!(
+                SftpStore::offered_host_key(endpoint).await,
+                Err(Error::InvalidInput(_))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn offered_host_key_unreachable_is_temporary() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let err = SftpStore::offered_host_key(&format!("127.0.0.1:{port}"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::Store(BlobError::Backend {
+                    temporary: true,
+                    ..
+                })
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn offered_public_key_keeps_a_plain_key() {
+        let key = PublicKey::from_openssh(host_key_line(&["-t", "ed25519"]).trim()).unwrap();
+        let offered = PublicKeyOrCertificate::PublicKey {
+            key: key.clone(),
+            hash_alg: None,
+        };
+        assert_eq!(offered_public_key(&offered), Ok(key));
+    }
+
+    #[test]
+    fn rsa_only_server_is_a_permanent_error() {
+        let no_key = russh::Error::NoCommonAlgo {
+            kind: russh::AlgorithmKind::Key,
+            ours: vec!["ssh-ed25519".into()],
+            theirs: vec!["rsa-sha2-512".into()],
+        };
+        assert!(matches!(
+            connect_error(&no_key),
+            BlobError::Backend {
+                temporary: false,
+                ref message,
+            } if message.contains("no ed25519 or ECDSA host key")
+        ));
+        for other in [
+            russh::Error::NoCommonAlgo {
+                kind: russh::AlgorithmKind::Kex,
+                ours: vec![],
+                theirs: vec![],
+            },
+            russh::Error::Disconnect,
+        ] {
+            assert!(matches!(
+                connect_error(&other),
+                BlobError::Backend {
+                    temporary: true,
+                    ..
+                }
+            ));
         }
     }
 
