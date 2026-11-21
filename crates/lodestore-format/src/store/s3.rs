@@ -588,6 +588,19 @@ mod tests {
             "a tokenizer=1 and mytoken=2"
         );
         assert_eq!(
+            redact_query_strings("url: http://h/k?a=1, :b"),
+            "url: http://h/k?<redacted> :b"
+        );
+        assert_eq!(
+            redact_query_strings("url: http://h/k?a=1, b"),
+            "url: http://h/k?<redacted> b"
+        );
+        assert_eq!(
+            redact_query_strings("a%26sig%3DSECRET x"),
+            "a%26sig%3D<redacted> x"
+        );
+        assert_eq!(redact_query_strings("sig= x"), "sig= x");
+        assert_eq!(
             redact_query_strings("sig=SECRETü x ü?ü token%3Dü"),
             "sig=<redacted> x ü?<redacted> token%3D<redacted>"
         );
