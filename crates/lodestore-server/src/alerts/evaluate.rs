@@ -1,4 +1,6 @@
-use super::inputs::Inputs;
+use lodestore_format::store::probe::GuaranteeLevel;
+
+use super::inputs::{Inputs, RepositoryGuarantee};
 use super::model::{AlertFacts, AlertType, CertKind, HostFacts, Severity, Thresholds, offline};
 
 const DAY_MS: i64 = 86_400_000;
@@ -256,7 +258,43 @@ pub fn evaluate(
             )
         });
     }
+    for g in &inputs.guarantees {
+        let Some(reason) = guarantee_reason(g) else {
+            continue;
+        };
+        out.push(Candidate {
+            severity: Severity::Warning,
+            facts: AlertFacts {
+                guarantee_level: Some(g.level.clone()),
+                guarantee_accepted: Some(g.accepted.clone()),
+                guarantee_reason: Some(reason.into()),
+                unchecked_runs: Some(g.unchecked_runs),
+                failed_runs: Some(g.failed_runs),
+                ..AlertFacts::default()
+            },
+            ..for_repository(
+                &g.repository_id,
+                &g.repository,
+                AlertType::GuaranteeDowngraded,
+                format!("guarantee_downgraded:{}", g.repository_id),
+            )
+        });
+    }
     out
+}
+
+fn rank(level: &str) -> Option<u8> {
+    GuaranteeLevel::parse(level)
+        .unwrap_or(GuaranteeLevel::Unchecked)
+        .rank()
+}
+
+/// Why a repository's storage protection deserves an alert, if it does.
+pub fn guarantee_reason(g: &RepositoryGuarantee) -> Option<&'static str> {
+    match (rank(&g.level), rank(&g.accepted)) {
+        (Some(measured), Some(accepted)) if measured < accepted => Some("lower"),
+        _ => None,
+    }
 }
 
 fn for_repository(id: &str, name: &str, kind: AlertType, key: String) -> Candidate {

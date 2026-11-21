@@ -154,6 +154,7 @@ pub enum AlertType {
     AgentSessionConflict,
     AgentCertificateRejected,
     SourceInstanceGone,
+    GuaranteeDowngraded,
 }
 
 impl AlertType {
@@ -170,6 +171,7 @@ impl AlertType {
             AlertType::AgentSessionConflict => "agent_session_conflict",
             AlertType::AgentCertificateRejected => "agent_certificate_rejected",
             AlertType::SourceInstanceGone => "source_instance_gone",
+            AlertType::GuaranteeDowngraded => "guarantee_downgraded",
         }
     }
 
@@ -186,6 +188,7 @@ impl AlertType {
             "agent_session_conflict" => AlertType::AgentSessionConflict,
             "agent_certificate_rejected" => AlertType::AgentCertificateRejected,
             "source_instance_gone" => AlertType::SourceInstanceGone,
+            "guarantee_downgraded" => AlertType::GuaranteeDowngraded,
             _ => return None,
         })
     }
@@ -287,6 +290,16 @@ pub struct AlertFacts {
     pub previous_ip: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guarantee_level: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guarantee_accepted: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guarantee_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unchecked_runs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_runs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

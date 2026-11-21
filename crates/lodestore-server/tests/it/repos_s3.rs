@@ -1524,3 +1524,120 @@ async fn guarantee_accept_needs_session_and_csrf() {
     })
     .await;
 }
+
+const HOUR: i64 = 3_600_000;
+
+async fn quiet_server(backend: &Backend) -> TestServer {
+    TestServer::start_with(backend, |c| c.schedule_tick_secs = 0).await
+}
+
+async fn daily_tick(ts: &TestServer, at_ms: i64) -> Vec<String> {
+    lodestore_server::maintenance::guarantee::tick(
+        ts.state(),
+        at_ms,
+        &tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap()
+}
+
+async fn guarantee_alerts(
+    ts: &TestServer,
+    at_ms: i64,
+    state: &str,
+) -> Vec<(String, String, Value)> {
+    lodestore_server::alerts::tick(ts.state(), at_ms)
+        .await
+        .unwrap();
+    sqlx::query(
+        "SELECT key, severity, facts_json FROM alerts \
+         WHERE type = 'guarantee_downgraded' AND state = $1 ORDER BY key",
+    )
+    .bind(state)
+    .fetch_all(&ts.state().db.pool)
+    .await
+    .unwrap()
+    .iter()
+    .map(|row| {
+        (
+            sqlx::Row::get::<String, _>(row, "key"),
+            sqlx::Row::get::<String, _>(row, "severity"),
+            serde_json::from_str(&sqlx::Row::get::<String, _>(row, "facts_json")).unwrap(),
+        )
+    })
+    .collect()
+}
+
+async fn repo_marks(ts: &TestServer, id: &str) -> sqlx::any::AnyRow {
+    sqlx::query(
+        "SELECT checked_at, guarantee_checked_at, guarantee_tick_at, guarantee_level, \
+         guarantee_accepted, guarantee_unchecked_runs, guarantee_failed_runs, access_generation \
+         FROM repositories WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_one(&ts.state().db.pool)
+    .await
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn guarantee_downgrade_raises_an_alert_and_accept_clears_it() {
+    each_backend(|backend| async move {
+        let minio = MinioServer::start().await;
+        minio.create_versioned_bucket(BUCKET).await;
+        let server = minio.root_credentials();
+        let agent = agent_user(&minio, BUCKET).await;
+        let ts = quiet_server(&backend).await;
+        let http = Http::login(&ts).await;
+        let created = create_s3(&http, &s3_draft(&minio, BUCKET, "cloud", &server, &agent)).await;
+        let id = created["id"].as_str().unwrap();
+        assert_eq!(created["guarantee_accepted"], "overwrite_keeps_old_version");
+        let now = lodestore_server::db::now_ms();
+
+        minio
+            .mc(&["version", "suspend", &bucket_path()])
+            .await
+            .expect("mc version suspend");
+        assert_eq!(daily_tick(&ts, now + 25 * HOUR).await, [id]);
+        assert!(daily_tick(&ts, now + 26 * HOUR).await.is_empty());
+        let marks = repo_marks(&ts, id).await;
+        for column in ["checked_at", "guarantee_checked_at", "guarantee_tick_at"] {
+            assert_eq!(
+                sqlx::Row::get::<Option<i64>, _>(&marks, column),
+                Some(now + 25 * HOUR),
+                "{column} [{}]",
+                backend.name()
+            );
+        }
+
+        let firing = guarantee_alerts(&ts, now + 25 * HOUR, "firing").await;
+        assert_eq!(firing.len(), 1, "[{}]", backend.name());
+        let (key, severity, facts) = &firing[0];
+        assert_eq!(key, &format!("guarantee_downgraded:{id}"));
+        assert_eq!(severity, "warning");
+        assert_eq!(facts["guarantee_level"], "host_can_overwrite_or_delete");
+        assert_eq!(facts["guarantee_accepted"], "overwrite_keeps_old_version");
+        assert_eq!(facts["guarantee_reason"], "lower");
+
+        let accepted = http
+            .post(
+                &format!("/api/v1/repositories/{id}/guarantee/accept"),
+                &json!({ "expected_level": "host_can_overwrite_or_delete" }),
+            )
+            .await;
+        assert_eq!(accepted.status(), 200);
+        assert!(
+            guarantee_alerts(&ts, now + 25 * HOUR, "firing")
+                .await
+                .is_empty()
+        );
+        assert_eq!(
+            guarantee_alerts(&ts, now + 25 * HOUR, "resolved")
+                .await
+                .len(),
+            1
+        );
+        ts.stop().await;
+    })
+    .await;
+}

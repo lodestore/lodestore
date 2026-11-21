@@ -10,6 +10,7 @@ use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 use crate::auth::AuthUser;
+use crate::db::now_ms;
 use crate::error::{ApiError, ErrorBody};
 use crate::repos::checks::{agent_key_state_name, open_parts, run_probe, to_result};
 use crate::repos::db::{self, AccessKey, ServerAccess};
@@ -191,6 +192,17 @@ pub(crate) async fn recheck_repository(
     state: &AppState,
     id: &str,
 ) -> Result<CheckResult, ApiError> {
+    recheck_repository_at(state, id, now_ms(), false).await
+}
+
+/// `at_ms` is when the probe starts; the daily tick and the tests pass their
+/// own clock. `daily` marks the tick's own run.
+pub async fn recheck_repository_at(
+    state: &AppState,
+    id: &str,
+    at_ms: i64,
+    daily: bool,
+) -> Result<CheckResult, ApiError> {
     let access = load(state, id).await?;
     let opened = open_parts(
         access.location.clone(),
@@ -214,14 +226,20 @@ pub(crate) async fn recheck_repository(
     let mut stored = false;
     for _ in 0..GUARANTEE_ATTEMPTS {
         let write = guarantee_write(&result, &accepted_now(state, id).await?, false)?;
-        stored = db::update_checks(
+        let outcome = db::update_checks(
             state,
             id,
-            &checks_json,
-            &result.agent_key_state,
-            write.as_ref(),
+            &db::CheckWrite {
+                generation: access.generation,
+                at_ms,
+                checks_json: &checks_json,
+                agent_key_state: &result.agent_key_state,
+                guarantee: write.as_ref(),
+                daily,
+            },
         )
         .await?;
+        stored = outcome == db::Stored::Written;
         if stored {
             break;
         }

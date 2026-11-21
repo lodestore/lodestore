@@ -611,8 +611,18 @@ async fn accept_now(ts: &TestServer, id: &str, level: &str) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn guarantee_write_never_overwrites_an_accept_in_between() {
     use lodestore_server::repos::db::{
-        AccessKey, GuaranteeWrite, replace_agent_creds, update_checks,
+        AccessKey, CheckWrite, GuaranteeWrite, Stored, replace_agent_creds, update_checks,
     };
+    fn write(g: &GuaranteeWrite) -> CheckWrite<'_> {
+        CheckWrite {
+            generation: 0,
+            at_ms: lodestore_server::db::now_ms(),
+            checks_json: "[]",
+            agent_key_state: "verified",
+            guarantee: Some(g),
+            daily: false,
+        }
+    }
     for backend in backends() {
         let ts = TestServer::start(&backend).await;
         let id = ts.create_local_repository("raced").await;
@@ -624,10 +634,10 @@ async fn guarantee_write_never_overwrites_an_accept_in_between() {
         };
 
         accept_now(&ts, &id, "host_can_overwrite_or_delete").await;
-        let stored = update_checks(ts.state(), &id, "[]", "verified", Some(&decided()))
+        let stored = update_checks(ts.state(), &id, &write(&decided()))
             .await
             .unwrap();
-        assert!(!stored, "[{}]", backend.name());
+        assert_eq!(stored, Stored::AcceptedChanged, "[{}]", backend.name());
         assert_eq!(accepted(&ts, &id).await, "host_can_overwrite_or_delete");
 
         let key = AccessKey {
@@ -641,10 +651,11 @@ async fn guarantee_write_never_overwrites_an_accept_in_between() {
         assert_eq!(accepted(&ts, &id).await, "host_can_overwrite_or_delete");
 
         accept_now(&ts, &id, "overwrite_keeps_old_version").await;
-        assert!(
-            update_checks(ts.state(), &id, "[]", "verified", Some(&decided()))
+        assert_eq!(
+            update_checks(ts.state(), &id, &write(&decided()))
                 .await
-                .unwrap()
+                .unwrap(),
+            Stored::Written
         );
         assert_eq!(accepted(&ts, &id).await, "create_only_enforced");
         ts.stop().await;

@@ -6935,6 +6935,14 @@
               "null"
             ]
           },
+          "failed_runs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
           "findings": {
             "type": [
               "integer",
@@ -6942,6 +6950,24 @@
             ],
             "format": "int64",
             "minimum": 0
+          },
+          "guarantee_accepted": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "guarantee_level": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "guarantee_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "ip": {
             "type": [
@@ -6995,6 +7021,14 @@
               "string",
               "null"
             ]
+          },
+          "unchecked_runs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
           }
         }
       },
@@ -7088,7 +7122,8 @@
           "repository_unavailable",
           "agent_session_conflict",
           "agent_certificate_rejected",
-          "source_instance_gone"
+          "source_instance_gone",
+          "guarantee_downgraded"
         ]
       },
       "Alerts": {

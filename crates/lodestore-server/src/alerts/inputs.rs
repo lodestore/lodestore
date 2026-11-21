@@ -26,6 +26,23 @@ pub struct Inputs {
     pub unavailable: Vec<UnavailableRepository>,
     pub security: Vec<SecurityAlert>,
     pub unreadable_policies: Vec<String>,
+    pub guarantees: Vec<RepositoryGuarantee>,
+    /// Whether the daily guarantee recheck runs at all.
+    pub daily_recheck: bool,
+}
+
+/// What the guarantee alert needs to know about a repository.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryGuarantee {
+    pub repository_id: String,
+    pub repository: String,
+    pub level: String,
+    pub accepted: String,
+    pub unchecked_runs: u64,
+    pub failed_runs: u64,
+    /// When a level was last written; the creation time before that was recorded.
+    pub measured_at_ms: i64,
+    pub tick_at_ms: Option<i64>,
 }
 
 /// The last verdict of a check level in a repository, when it was a failure.
@@ -282,6 +299,7 @@ pub async fn gather_with(
     let quarantines = quarantines(state).await?;
     let unavailable = unavailable_repositories(state).await?;
     let security = security_alerts(state).await?;
+    let guarantees = guarantees(state).await?;
     Ok(Inputs {
         hosts,
         server_cert,
@@ -291,7 +309,40 @@ pub async fn gather_with(
         unavailable,
         security,
         unreadable_policies,
+        guarantees,
+        daily_recheck: state.config.schedule_tick_secs > 0,
     })
+}
+
+async fn guarantees(state: &AppState) -> anyhow::Result<Vec<RepositoryGuarantee>> {
+    let rows = sqlx::query(
+        "SELECT id, name, guarantee_level, guarantee_accepted, guarantee_unchecked_runs, \
+         guarantee_failed_runs, guarantee_checked_at, guarantee_tick_at, created_at \
+         FROM repositories ORDER BY name, id",
+    )
+    .fetch_all(&state.db.pool)
+    .await
+    .context("reading repository guarantees")?;
+    rows.iter()
+        .map(|row| {
+            let checked: Option<i64> = row.try_get("guarantee_checked_at")?;
+            Ok(RepositoryGuarantee {
+                repository_id: row.try_get("id")?,
+                repository: row.try_get("name")?,
+                level: row.try_get("guarantee_level")?,
+                accepted: row.try_get("guarantee_accepted")?,
+                unchecked_runs: u64::try_from(row.try_get::<i64, _>("guarantee_unchecked_runs")?)
+                    .unwrap_or(0),
+                failed_runs: u64::try_from(row.try_get::<i64, _>("guarantee_failed_runs")?)
+                    .unwrap_or(0),
+                measured_at_ms: match checked {
+                    Some(at) => at,
+                    None => row.try_get("created_at")?,
+                },
+                tick_at_ms: row.try_get("guarantee_tick_at")?,
+            })
+        })
+        .collect()
 }
 
 /// Events live in memory; the still-open alert rows keep a security alert across a restart until their own 24 hours are over.
