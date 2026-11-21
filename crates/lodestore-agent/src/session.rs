@@ -549,3 +549,100 @@ async fn session_once(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const KEY_A: &str =
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPXNmebOc3wEWwOMVZdkvtvsvLmchHYR1uQeOBlJtQWZ";
+    const KEY_B: &str =
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBPSPxzrVHcF2zQSv3p5NxFPivXZiF0zvk7gjPiCjLBd";
+    const KEY_RSA: &str = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAAgQC7";
+    const KEY_CERT: &str =
+        "ssh-ed25519-cert-v01@openssh.com AAAAIHNzaC1lZDI1NTE5LWNlcnQtdjAxQG9wZW5zc2guY29t";
+
+    fn paths(dir: &tempfile::TempDir) -> Paths {
+        Paths {
+            config_dir: dir.path().join("etc"),
+            state_dir: dir.path().join("var"),
+        }
+    }
+
+    fn write_repository(paths: &Paths, backend: &str, host_key: &str) -> Vec<u8> {
+        let value = serde_json::json!({
+            "repository_id": "r1",
+            "backend": backend,
+            "options": {
+                "endpoint": "127.0.0.1:22",
+                "user": "backup",
+                "key": "placeholder",
+                "host_key": host_key,
+                "root": "/srv/repo",
+            },
+        });
+        write_json_file(&paths.repository_json(), &value).unwrap();
+        std::fs::read(paths.repository_json()).unwrap()
+    }
+
+    fn stored(paths: &Paths) -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(paths.repository_json()).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn store_host_key_rewrites_only_the_host_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths(&dir);
+        write_repository(&paths, "sftp", KEY_A);
+        let mut expected = stored(&paths);
+        store_host_key(&paths, KEY_B).unwrap();
+        expected["options"]["host_key"] = KEY_B.into();
+        assert_eq!(stored(&paths), expected);
+
+        let bytes = std::fs::read(paths.repository_json()).unwrap();
+        let mtime = std::fs::metadata(paths.repository_json())
+            .unwrap()
+            .modified()
+            .unwrap();
+        store_host_key(&paths, KEY_B).unwrap();
+        assert_eq!(std::fs::read(paths.repository_json()).unwrap(), bytes);
+        let after = std::fs::metadata(paths.repository_json())
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert_eq!(after, mtime);
+    }
+
+    #[test]
+    fn store_host_key_ignores_other_backends() {
+        for backend in ["s3", "local"] {
+            let dir = tempfile::tempdir().unwrap();
+            let paths = paths(&dir);
+            let before = write_repository(&paths, backend, KEY_A);
+            store_host_key(&paths, KEY_B).unwrap();
+            assert_eq!(std::fs::read(paths.repository_json()).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn store_host_key_keeps_the_file_on_a_bad_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths(&dir);
+        let before = write_repository(&paths, "sftp", KEY_A);
+        for bad in ["", "garbage", KEY_RSA, KEY_CERT] {
+            store_host_key(&paths, bad).unwrap();
+            assert_eq!(std::fs::read(paths.repository_json()).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn apply_host_key_keeps_going_when_the_file_cannot_be_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths(&dir);
+        let before = write_repository(&paths, "sftp", KEY_A);
+        std::fs::create_dir(paths.state_dir.join(".repository.json.tmp")).unwrap();
+        assert!(store_host_key(&paths, KEY_B).is_err());
+        apply_host_key(&paths, KEY_B);
+        assert_eq!(std::fs::read(paths.repository_json()).unwrap(), before);
+    }
+}
