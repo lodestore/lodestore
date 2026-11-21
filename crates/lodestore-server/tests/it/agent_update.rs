@@ -1373,7 +1373,12 @@ async fn migration_0035_gives_channels_with_every_type_the_gone_alert() {
             .unwrap();
         }
 
-        migrator.migrations = all;
+        migrator.migrations = all
+            .iter()
+            .filter(|m| m.version < 41)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into();
         migrator.run(&pool).await.unwrap();
 
         let types = |id: &'static str| {
