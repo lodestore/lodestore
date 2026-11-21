@@ -592,9 +592,7 @@ async fn probe_agent(
             KeyVerdict::Verified => {}
             KeyVerdict::CanDelete => can_delete = true,
             KeyVerdict::CanOverwrite { level, weakness } => {
-                if overwrote.is_none_or(|(have, _)| level.rank() < have.rank()) {
-                    overwrote = Some((level, weakness));
-                }
+                overwrote = Some(weaker(overwrote, (level, weakness)));
             }
         }
     }
@@ -620,12 +618,11 @@ async fn probe_agent(
         if let Some(w) = weakness {
             report.add_weakness(w);
         }
-        let note = if level == GuaranteeLevel::OverwriteKeepsOldVersion {
-            "the agent key cannot delete but can overwrite existing objects; the storage keeps the earlier version"
-        } else {
-            "the agent key cannot delete but can overwrite existing objects"
-        };
-        report.set(CheckId::AgentDelete, CheckStatus::Warn, Some(note.into()));
+        report.set(
+            CheckId::AgentDelete,
+            CheckStatus::Warn,
+            Some(overwrite_note(level).into()),
+        );
     } else {
         report.agent_key = AgentKeyState::Verified;
         report.guarantee = GuaranteeLevel::CreateOnlyEnforced;
@@ -651,6 +648,37 @@ async fn probe_agent_key(server: &Store, agent: &Store, key: &str, body: Bytes) 
     }
 }
 
+type Overwrite = (GuaranteeLevel, Option<Weakness>);
+
+/// The outcome to keep across keys: the weakest level wins and a tie keeps the
+/// first, so the order of the layout prefixes never lifts the level.
+fn weaker(have: Option<Overwrite>, new: Overwrite) -> Overwrite {
+    match have {
+        Some(have) if new.0.rank() >= have.0.rank() => have,
+        _ => new,
+    }
+}
+
+/// Says whether the overwritten data survives, so the operator sees why the
+/// level is not the lowest one.
+fn overwrite_note(level: GuaranteeLevel) -> &'static str {
+    if level == GuaranteeLevel::OverwriteKeepsOldVersion {
+        "the agent key cannot delete but can overwrite existing objects; the storage keeps the earlier version"
+    } else {
+        "the agent key cannot delete but can overwrite existing objects"
+    }
+}
+
+/// A single version means the overwrite replaced the original in place.
+fn keeps_two_versions(versions: &[(String, u64)]) -> bool {
+    versions.len() >= 2
+}
+
+/// Only a version holding the original probe bytes proves the data was kept.
+fn is_probe_body(bytes: &[u8]) -> bool {
+    bytes == PROBE_BODY
+}
+
 /// The agent replaced the object and could not delete it. The storage keeps
 /// the original only if the server sees an earlier version holding the
 /// original bytes and the agent cannot delete that version.
@@ -660,14 +688,14 @@ async fn overwritten(server: &Store, agent: &Store, key: &str) -> KeyVerdict {
         weakness: Some(Weakness::AgentCanOverwrite),
     };
     let versions = match server.versions_for_probe(key).await {
-        Ok(Some(v)) if v.len() >= 2 => v,
+        Ok(Some(v)) if keeps_two_versions(&v) => v,
         Ok(_) => return replaced,
         Err(e) => return KeyVerdict::Inconclusive(e),
     };
     let mut original = None;
     for (id, size) in versions.iter().take(MAX_PROBE_VERSIONS) {
         match server.read_version_for_probe(key, id, *size).await {
-            Ok(bytes) if bytes[..] == *PROBE_BODY => {
+            Ok(bytes) if is_probe_body(&bytes) => {
                 original = Some(id);
                 break;
             }
@@ -694,6 +722,47 @@ async fn overwritten(server: &Store, agent: &Store, key: &str) -> KeyVerdict {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn weakest_overwrite_wins_in_any_order() {
+        let kept = (GuaranteeLevel::OverwriteKeepsOldVersion, None);
+        let replaced = (
+            GuaranteeLevel::HostCanOverwriteOrDelete,
+            Some(Weakness::AgentCanOverwrite),
+        );
+        let versions_gone = (
+            GuaranteeLevel::HostCanOverwriteOrDelete,
+            Some(Weakness::AgentCanDeleteVersions),
+        );
+        assert_eq!(weaker(None, kept), kept);
+        assert_eq!(weaker(Some(kept), replaced), replaced);
+        assert_eq!(weaker(Some(replaced), kept), replaced);
+        assert_eq!(weaker(Some(replaced), versions_gone), replaced);
+        assert_eq!(weaker(Some(versions_gone), replaced), versions_gone);
+    }
+
+    #[test]
+    fn overwrite_note_names_the_kept_version() {
+        assert_eq!(
+            overwrite_note(GuaranteeLevel::OverwriteKeepsOldVersion),
+            "the agent key cannot delete but can overwrite existing objects; the storage keeps the earlier version"
+        );
+        assert_eq!(
+            overwrite_note(GuaranteeLevel::HostCanOverwriteOrDelete),
+            "the agent key cannot delete but can overwrite existing objects"
+        );
+    }
+
+    #[test]
+    fn original_needs_two_versions_and_the_probe_body() {
+        let v = |id: &str| (id.to_owned(), 1);
+        assert!(!keeps_two_versions(&[]));
+        assert!(!keeps_two_versions(&[v("a")]));
+        assert!(keeps_two_versions(&[v("a"), v("b")]));
+        assert!(is_probe_body(PROBE_BODY));
+        assert!(!is_probe_body(OVERWRITE_BODY));
+        assert!(!is_probe_body(b""));
+    }
 
     #[test]
     fn only_a_typed_host_key_change_reaches_the_error() {
