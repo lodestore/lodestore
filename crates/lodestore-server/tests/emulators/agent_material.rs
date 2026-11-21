@@ -401,7 +401,7 @@ async fn host_key_changed_raises_its_own_alert_and_clears_on_the_pinned_key() {
             lodestore_server::maintenance::guarantee::tick(ts.state(), now + hours * HOUR, &stop)
                 .await
                 .unwrap();
-        assert_eq!(ran, [id.clone()]);
+        assert_eq!(ran, std::slice::from_ref(&id));
         lodestore_server::alerts::tick(ts.state(), now + hours * HOUR)
             .await
             .unwrap();
