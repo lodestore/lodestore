@@ -67,8 +67,10 @@ scrape_configs:
 | `LodestoreAgentSessionConflict` | warning | `lodestore_alerts_active{type="agent_session_conflict"} > 0` |
 | `LodestoreAgentCertificateRejected` | critical | `lodestore_alerts_active{type="agent_certificate_rejected"} > 0` |
 | `LodestoreSourceInstanceGone` | warning | `lodestore_alerts_active{type="source_instance_gone"} > 0` |
+| `LodestoreGuaranteeDowngraded` | warning | `lodestore_alerts_active{type="guarantee_downgraded"} > 0` |
+| `LodestoreHostKeyChanged` | critical | `lodestore_alerts_active{type="host_key_changed"} > 0` |
 
-The last five carry no repository or host label; the repository or host is named in the alert in Lodestore. They have the same names and titles as the alerts of Lodestore itself, see [Alerts and notifications](/docs/guides/alerts/). The rules and the built-in notifications work on the same facts, so use one or the other for a given person; with both on, a failure is reported twice. The 15 minutes and the 14 days are written into the rules, edit the file to change them. The dead-man limit is not: `lodestore_backup_overdue` already uses the per-policy limit the server works out, including `spec.alerts.maxAge`.
+The last seven carry no repository or host label; the repository or host is named in the alert in Lodestore. They have the same names and titles as the alerts of Lodestore itself, see [Alerts and notifications](/docs/guides/alerts/). The rules and the built-in notifications work on the same facts, so use one or the other for a given person; with both on, a failure is reported twice. The 15 minutes and the 14 days are written into the rules, edit the file to change them. The dead-man limit is not: `lodestore_backup_overdue` already uses the per-policy limit the server works out, including `spec.alerts.maxAge`.
 
 The dashboard and the rules use only the metrics below. A test in the repository scrapes a running server and checks that every metric they name exists.
 
@@ -134,5 +136,5 @@ To alert on the age yourself: `time() - lodestore_backup_last_success_timestamp_
 
 | Metric | Labels | Meaning |
 |--------|--------|---------|
-| `lodestore_alerts_active` | `type`, `silenced` | Alerts firing now, by type (`backup_failed`, `no_recent_backup`, `agent_offline`, `check_failed`, `certificate_expiring`, `agent_update_failed`, `snapshot_quarantined`, `repository_unavailable`, `agent_session_conflict`, `agent_certificate_rejected`, `source_instance_gone`) and whether their host is silenced (`true` or `false`). All combinations are always present. |
+| `lodestore_alerts_active` | `type`, `silenced` | Alerts firing now, by type (`backup_failed`, `no_recent_backup`, `agent_offline`, `check_failed`, `certificate_expiring`, `agent_update_failed`, `snapshot_quarantined`, `repository_unavailable`, `agent_session_conflict`, `agent_certificate_rejected`, `source_instance_gone`, `guarantee_downgraded`, `host_key_changed`) and whether their host is silenced (`true` or `false`). All combinations are always present. |
 | `lodestore_unknown_agent_refusals` | none | Agent calls refused since the server started because the certificate belongs to no known agent, for example after the catalog was restored from an older backup. The agents ask for a re-enroll. |
