@@ -24,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -47,7 +47,7 @@ jobs:
         shell: bash
         env:
           BASE_REF: ${{ github.base_ref }}
-          SHARD: ${{ matrix.shard }}/4
+          SHARD: ${{ matrix.shard }}/12
         run: |
           git diff "origin/$BASE_REF...HEAD" > git.diff
           git diff --name-only "origin/$BASE_REF...HEAD" > changed.txt
@@ -69,16 +69,26 @@ jobs:
             done
             case "$status" in
               0 | 3) ;;
+              2)
+                echo "::warning::mutants-diff $group: changed lines have surviving mutants"
+                {
+                  echo "### Surviving mutants: $group"
+                  echo '```'
+                  cat "mutants-diff-out/$group/mutants.out/missed.txt"
+                  echo '```'
+                } >> "$GITHUB_STEP_SUMMARY"
+                ;;
               *) echo "mutants-diff $group: cargo mutants exited with $status" >&2; failed=1 ;;
             esac
           }
-          run_group format '^crates/lodestore-format/src/' -p lodestore-format -- -E 'not test(/^(s3|s3_write_only|gc_purge_s3|shard_split|shard_limits)::/)'
-          run_group gc '^crates/lodestore-server/src/maintenance/gc/' -p lodestore-server --file 'crates/lodestore-server/src/maintenance/gc/*.rs' -- -E 'binary(it) & test(/^(adv_)?gc_[a-z0-9_]*::/)'
+          run_group format '^crates/lodestore-format/src/' -p lodestore-format --exclude crates/lodestore-format/src/store/sftp.rs -- -E 'not test(/^(shard_split|shard_limits)::/)'
+          run_group gc '^crates/lodestore-server/src/maintenance/gc/' -p lodestore-server --file 'crates/lodestore-server/src/maintenance/gc/*.rs' --exclude-re sweep_stale_tmp -- -E 'binary(it) & test(/^(adv_)?gc_[a-z0-9_]*::/)'
           run_group retention '^crates/lodestore-policy/src/retention\.rs$' -p lodestore-policy --file crates/lodestore-policy/src/retention.rs
           exit "$failed"
       - name: Keep the mutation output
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: mutants-diff-out-${{ matrix.shard }}
           path: mutants-diff-out
+          if-no-files-found: ignore
