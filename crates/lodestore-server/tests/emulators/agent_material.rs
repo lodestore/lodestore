@@ -16,7 +16,7 @@ use sqlx::Row;
 
 pub(crate) const PASSWORD: &str = "correct horse battery";
 
-async fn body(response: reqwest::Response) -> Value {
+pub(crate) async fn body(response: reqwest::Response) -> Value {
     response.json().await.expect("a JSON body")
 }
 
@@ -88,7 +88,7 @@ pub(crate) async fn create(api: &Api, draft: &Value) -> String {
     body(committed).await["id"].as_str().unwrap().to_string()
 }
 
-async fn stored_location(ts: &TestServer, id: &str) -> Value {
+pub(crate) async fn stored_location(ts: &TestServer, id: &str) -> Value {
     let row = sqlx::query("SELECT location_json FROM repositories WHERE id = $1")
         .bind(id)
         .fetch_one(&ts.state().db.pool)
@@ -124,7 +124,7 @@ async fn agent_material_sftp_host_key_reaches_the_agent() {
         .as_object_mut()
         .unwrap()
         .remove("host_key");
-    let refused = api.post("/api/v1/repositories/check", &unpinned).await;
+    let refused = api.post("/api/v1/repositories/wizard", &unpinned).await;
     assert_eq!(refused.status(), 422);
     let refused = body(refused).await;
     assert!(

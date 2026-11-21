@@ -14,7 +14,7 @@ use crate::repos::db::AccessKey;
 use crate::repos::object_lock::{self, LifecycleVerdict};
 use crate::repos::{CheckDto, CheckResult, LocationDto, RepositoryDraft};
 
-const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(crate) fn invalid(e: impl Display) -> ApiError {
@@ -116,13 +116,14 @@ pub fn open_draft(draft: &RepositoryDraft) -> Result<Opened, ApiError> {
 }
 
 pub(crate) fn timed_out_report() -> ProbeReport {
+    unchecked_report("the storage did not answer within the time allowed for the checks")
+}
+
+pub(crate) fn unchecked_report(message: &str) -> ProbeReport {
     let note = |status, error: &str| (status, Some(error.to_string()));
     let skipped = || note(CheckStatus::Neutral, SKIPPED_NOTE);
     let outcomes = [
-        note(
-            CheckStatus::Fail,
-            "the storage did not answer within the time allowed for the checks",
-        ),
+        note(CheckStatus::Fail, message),
         skipped(),
         skipped(),
         skipped(),
@@ -258,6 +259,7 @@ pub fn to_result(report: &ProbeReport) -> CheckResult {
                 error: c.error.clone(),
             })
             .collect(),
+        host_key: None,
     }
 }
 

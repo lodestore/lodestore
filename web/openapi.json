@@ -8168,6 +8168,17 @@
               "type": "string"
             },
             "description": "Why the level is not the strongest one, as weakness codes."
+          },
+          "host_key": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/OfferedHostKeyDto",
+                "description": "The SFTP server's host key, when the draft had none: confirm it and send it back as the `host_key` option."
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         }
       },
@@ -11991,6 +12002,24 @@
             "items": {
               "$ref": "#/components/schemas/Scope"
             }
+          }
+        }
+      },
+      "OfferedHostKeyDto": {
+        "type": "object",
+        "description": "The host key an SFTP server presented on first contact.",
+        "required": [
+          "key",
+          "fingerprint"
+        ],
+        "properties": {
+          "fingerprint": {
+            "type": "string",
+            "description": "The SHA256 fingerprint of the key, as `ssh-keygen -l` prints it."
+          },
+          "key": {
+            "type": "string",
+            "description": "One OpenSSH public key line."
           }
         }
       },
