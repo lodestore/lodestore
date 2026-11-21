@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::agent_material::{HOUR, alerts_of, body, create, sftp_draft, stored_location};
-use crate::common::{Api, Backend, TestServer};
+use crate::common::{Api, Backend, TestServer, backends};
 use crate::host_key_push::{
     capabilities_vec, enroll_agent, host_key_of, open_session, open_session_at,
 };
@@ -361,8 +361,14 @@ async fn host_key_replace_pins_the_new_key_and_clears_the_alert() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
 async fn host_key_replace_discards_a_result_from_an_older_access_generation() {
+    for backend in backends() {
+        stale_generation_is_discarded(&backend).await;
+    }
+}
+
+async fn stale_generation_is_discarded(backend: &Backend) {
     let sshd = SshdServer::start().await;
-    let ts = TestServer::start(&Backend::Sqlite).await;
+    let ts = TestServer::start(backend).await;
     let api = ts.api().await;
     let id = create(&api, &sftp_draft(&sshd, "sftp-repo")).await;
     let pinned = pinned_key(&ts, &id).await;
