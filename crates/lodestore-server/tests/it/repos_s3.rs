@@ -18,7 +18,7 @@ use lodestore_proto::PROTOCOL_VERSION;
 use lodestore_proto::agent::v1::agent_client::AgentClient;
 use lodestore_proto::agent::v1::agent_message::Body as AgentBody;
 use lodestore_proto::agent::v1::server_message::Body as ServerBody;
-use lodestore_proto::agent::v1::{AgentMessage, Hello, Versions};
+use lodestore_proto::agent::v1::{AgentMessage, Hello, ServerMessage, Versions};
 use lodestore_server::repos::db::{server_access, writer_material};
 use lodestore_testkit::fault_proxy::{FaultAction, FaultPlan, FaultProxy, FaultRule};
 use lodestore_testkit::minio::MinioServer;
@@ -1016,6 +1016,121 @@ async fn agent_key_replace_pushes_to_online_agents() {
 
         let later = enroll_agent(&ts, &http, id, "later").await;
         assert_eq!(delivered_key(&later), new_key.0);
+        ts.stop().await;
+    })
+    .await;
+}
+
+async fn open_raw_session(grpc_address: String, paths: Paths) -> tonic::Streaming<ServerMessage> {
+    let read = |p: std::path::PathBuf| std::fs::read_to_string(p).unwrap();
+    let (ca, cert, key) = (read(paths.ca()), read(paths.cert()), read(paths.key()));
+    let channel = connect::channel(
+        &grpc_address,
+        "127.0.0.1",
+        tls::pinned_config(&ca, Some((&cert, &key))).unwrap(),
+        &NetOptions::default(),
+    )
+    .await
+    .unwrap();
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    tx.send(AgentMessage {
+        body: Some(AgentBody::Hello(Hello {
+            versions: Some(Versions {
+                min: PROTOCOL_VERSION,
+                max: PROTOCOL_VERSION,
+            }),
+            agent_version: "test".into(),
+            ..Default::default()
+        })),
+    })
+    .await
+    .unwrap();
+    tokio::spawn(async move {
+        let _tx = tx;
+        std::future::pending::<()>().await
+    });
+    let mut stream = AgentClient::new(channel)
+        .session(ReceiverStream::new(rx))
+        .await
+        .unwrap()
+        .into_inner();
+    let first = stream.message().await.unwrap().unwrap();
+    assert!(matches!(first.body, Some(ServerBody::HelloAck(_))));
+    stream
+}
+
+async fn next_s3_key(stream: &mut tonic::Streaming<ServerMessage>) -> String {
+    let message = tokio::time::timeout(Duration::from_secs(10), stream.message())
+        .await
+        .expect("a storage key message")
+        .unwrap()
+        .unwrap();
+    let Some(ServerBody::UpdateS3Credentials(update)) = message.body else {
+        panic!("expected UpdateS3Credentials, got {message:?}");
+    };
+    update.credentials.unwrap().access_key_id
+}
+
+async fn wait_for_holders(lock: &std::sync::Arc<tokio::sync::Mutex<()>>, count: usize) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while std::sync::Arc::strong_count(lock) != count {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the lock has {} holders, expected {count}",
+            std::sync::Arc::strong_count(lock)
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agent_key_replace_and_session_start_do_not_interleave() {
+    each_backend(|backend| async move {
+        let minio = MinioServer::start().await;
+        minio.create_bucket(BUCKET).await;
+        let server = minio.root_credentials();
+        let agent = agent_user(&minio, BUCKET).await;
+        let ts = TestServer::start(&backend).await;
+        let http = std::sync::Arc::new(Http::login(&ts).await);
+        let created = create_s3(&http, &s3_draft(&minio, BUCKET, "cloud", &server, &agent)).await;
+        let id = created["id"].as_str().unwrap().to_string();
+        let paths = enroll_agent(&ts, &http, &id, "online").await;
+        let new_key = agent_user(&minio, BUCKET).await;
+        let lock = ts.state().repos.access_lock(&id);
+
+        let held = lock.lock().await;
+        wait_for_holders(&lock, 2).await;
+        let put = {
+            let (http, path, key) = (
+                std::sync::Arc::clone(&http),
+                format!("/api/v1/repositories/{id}/agent-key"),
+                creds(&new_key),
+            );
+            tokio::spawn(async move {
+                let response = http.put(&path, &key).await;
+                (response.status().as_u16(), body(response).await)
+            })
+        };
+        wait_for_holders(&lock, 3).await;
+        let stored = server_access(ts.state(), &id).await.unwrap();
+        assert_eq!(stored.agent_creds.unwrap().access_key_id, agent.0);
+        let opening = tokio::spawn(open_raw_session(ts.grpc_address(), paths.clone()));
+        wait_for_holders(&lock, 4).await;
+        assert!(!put.is_finished());
+        drop(held);
+
+        let (status, replaced) = put.await.unwrap();
+        assert_eq!(status, 200, "{replaced}");
+        assert_eq!(replaced["online_notified"], 1, "{replaced}");
+        let mut stream = opening.await.unwrap();
+        assert_eq!(next_s3_key(&mut stream).await, new_key.0);
+        assert_eq!(next_s3_key(&mut stream).await, new_key.0);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), stream.message())
+                .await
+                .is_err(),
+            "the old key must not follow the new one"
+        );
         ts.stop().await;
     })
     .await;

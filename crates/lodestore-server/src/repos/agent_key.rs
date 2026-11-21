@@ -381,6 +381,8 @@ async fn replace_key(
         )));
     }
 
+    let access_lock = state.repos.access_lock(&id);
+    let held = access_lock.lock().await;
     let state_name = agent_key_state_name(&report);
     let row = db::find_repository(&state, &id)
         .await?
@@ -439,6 +441,7 @@ async fn replace_key(
             )
         })
         .count() as u32;
+    drop(held);
     let active = db::active_hosts(&state)
         .await?
         .get(&id)

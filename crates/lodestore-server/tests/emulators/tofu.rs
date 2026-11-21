@@ -498,3 +498,128 @@ async fn host_key_replace_and_session_start_do_not_interleave() {
     assert_eq!(pinned_key(&ts, &id).await, third);
     ts.stop().await;
 }
+
+async fn untouched(ts: &TestServer, id: &str, generation_before: i64, pinned: &str) {
+    assert_eq!(pinned_key(ts, id).await, pinned);
+    assert_eq!(generation(ts, id).await, generation_before);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn host_key_replace_refuses_a_key_the_server_does_not_present() {
+    let sshd = SshdServer::start().await;
+    let ts = TestServer::start(&Backend::Sqlite).await;
+    let api = ts.api().await;
+    let id = create(&api, &sftp_draft(&sshd, "sftp-repo")).await;
+    let pinned = pinned_key(&ts, &id).await;
+    let before = generation(&ts, &id).await;
+    let (level, accepted) = (
+        row(&ts, &id, "guarantee_level").await,
+        row(&ts, &id, "guarantee_accepted").await,
+    );
+    let path = format!("/api/v1/repositories/{id}/host-key");
+
+    let response = api.put(&path, &json!({ "host_key": OTHER_KEY })).await;
+    assert_eq!(response.status(), 422);
+    let refused = body(response).await;
+    let message = refused["message"].as_str().unwrap();
+    assert!(message.contains("could not be verified"), "{message}");
+    assert!(message.contains("host key"), "{message}");
+    assert!(message.contains("unchanged"), "{message}");
+
+    for garbage in ["", "not a key", "ssh-ed25519 AAAA"] {
+        let response = api.put(&path, &json!({ "host_key": garbage })).await;
+        assert_eq!(response.status(), 422, "{garbage:?}");
+    }
+    untouched(&ts, &id, before, &pinned).await;
+    assert_eq!(row(&ts, &id, "guarantee_level").await, level);
+    assert_eq!(row(&ts, &id, "guarantee_accepted").await, accepted);
+    ts.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn host_key_replace_needs_session_csrf_and_step_up() {
+    let sshd = SshdServer::start().await;
+    let ts = TestServer::start(&Backend::Sqlite).await;
+    let api = ts.api().await;
+    let id = create(&api, &sftp_draft(&sshd, "sftp-repo")).await;
+    let paths = enroll_agent(&ts, &api, &id, "sftp-agent").await;
+    let mut stream = open_session(&ts, &paths, &["host_key_v1"]).await;
+    let pinned = pinned_key(&ts, &id).await;
+    assert_eq!(next_host_key(&mut stream).await, pinned);
+    let before = generation(&ts, &id).await;
+    let level = row(&ts, &id, "guarantee_level").await;
+    let key = json!({ "host_key": pinned });
+    let client = reqwest::Client::new();
+    let base = ts.rest_url();
+
+    for (verb, suffix) in [("PUT", ""), ("POST", "/check")] {
+        let url = format!("{base}/api/v1/repositories/{id}/host-key{suffix}");
+        let request = |client: &reqwest::Client| match verb {
+            "PUT" => client.put(&url),
+            _ => client.post(&url),
+        };
+        let anonymous = request(&client).json(&key).send().await.unwrap();
+        assert_eq!(anonymous.status(), 401, "{verb} without a session");
+        let without_csrf = request(&client)
+            .header("cookie", api.cookie())
+            .json(&key)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(without_csrf.status(), 403, "{verb} without CSRF");
+    }
+    untouched(&ts, &id, before, &pinned).await;
+
+    sqlx::query("UPDATE sessions SET authenticated_at = $1")
+        .bind(lodestore_server::db::now_ms() - 16 * 60_000)
+        .execute(&ts.state().db.pool)
+        .await
+        .unwrap();
+    let path = format!("/api/v1/repositories/{id}/host-key");
+    let stale = api.put(&path, &key).await;
+    assert_eq!(stale.status(), 403);
+    assert_eq!(body(stale).await["code"], "step_up_required");
+    untouched(&ts, &id, before, &pinned).await;
+    assert_eq!(row(&ts, &id, "guarantee_level").await, level);
+    silent_of_host_keys(&mut stream).await;
+    let offer = api.post(&format!("{path}/check"), &json!({})).await;
+    assert_eq!(offer.status(), 200);
+
+    let stepped = api
+        .post(
+            "/api/v1/auth/step-up",
+            &json!({ "password": crate::common::ADMIN_PASSWORD }),
+        )
+        .await;
+    assert_eq!(stepped.status(), 204);
+    let replaced = api.put(&path, &key).await;
+    assert_eq!(replaced.status(), 200);
+    assert_eq!(generation(&ts, &id).await, before + 1);
+    assert_eq!(next_host_key(&mut stream).await, pinned);
+    ts.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn host_key_endpoints_refuse_other_backends() {
+    let ts = TestServer::start(&Backend::Sqlite).await;
+    let api = ts.api().await;
+    let local = ts.create_local_repository("local-repo").await;
+    let key = json!({ "host_key": OTHER_KEY });
+    for id in [local.as_str(), "no-such-repository"] {
+        let expected = if id == local { 409 } else { 404 };
+        let path = format!("/api/v1/repositories/{id}/host-key");
+        assert_eq!(api.put(&path, &key).await.status(), expected, "{id}");
+        assert_eq!(
+            api.post(&format!("{path}/check"), &json!({}))
+                .await
+                .status(),
+            expected,
+            "{id}"
+        );
+    }
+    assert_eq!(generation(&ts, &local).await, 0);
+    ts.stop().await;
+}
