@@ -15,6 +15,8 @@ use crate::state::AppState;
 
 pub const RECHECK_AFTER_MS: i64 = 24 * 3_600_000;
 const RUN_EVERY: Duration = Duration::from_secs(3600);
+/// The first pass waits, so a starting server does not probe every repository at once.
+const START_DELAY: Duration = Duration::from_secs(600);
 const RECHECK_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// A repository is due when the later of its last written level and its last
@@ -120,7 +122,8 @@ pub async fn tick(
 }
 
 pub async fn run(state: AppState, stop: CancellationToken) -> anyhow::Result<()> {
-    let mut interval = tokio::time::interval(RUN_EVERY);
+    let mut interval =
+        tokio::time::interval_at(tokio::time::Instant::now() + START_DELAY, RUN_EVERY);
     loop {
         tokio::select! {
             () = stop.cancelled() => return Ok(()),

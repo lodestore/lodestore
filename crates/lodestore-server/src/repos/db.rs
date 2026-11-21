@@ -392,13 +392,15 @@ pub async fn update_checks(
                  guarantee_tick_at = CASE WHEN $5 = 1 THEN $3 ELSE guarantee_tick_at END, \
                  guarantee_unchecked_runs = CASE WHEN $5 = 1 \
                  THEN guarantee_unchecked_runs + 1 ELSE guarantee_unchecked_runs END, \
-                 guarantee_failed_runs = 0 WHERE id = $4",
+                 guarantee_failed_runs = 0 WHERE id = $4 AND access_generation = $6 \
+                 AND (checked_at IS NULL OR checked_at <= $3)",
             )
             .bind(write.checks_json)
             .bind(write.agent_key_state)
             .bind(write.at_ms)
             .bind(id)
             .bind(daily)
+            .bind(write.generation)
             .execute(&state.db.pool)
             .await?,
             Some(g) => sqlx::query(
@@ -407,7 +409,8 @@ pub async fn update_checks(
                  guarantee_checked_at = $3, \
                  guarantee_tick_at = CASE WHEN $9 = 1 THEN $3 ELSE guarantee_tick_at END, \
                  guarantee_unchecked_runs = 0, guarantee_failed_runs = 0 \
-                 WHERE id = $7 AND guarantee_accepted = $8",
+                 WHERE id = $7 AND guarantee_accepted = $8 AND access_generation = $10 \
+                 AND (checked_at IS NULL OR checked_at <= $3)",
             )
             .bind(write.checks_json)
             .bind(write.agent_key_state)
@@ -418,13 +421,29 @@ pub async fn update_checks(
             .bind(id)
             .bind(&g.read_accepted)
             .bind(daily)
+            .bind(write.generation)
             .execute(&state.db.pool)
             .await?,
         };
-    Ok(if done.rows_affected() > 0 {
-        Stored::Written
-    } else {
-        Stored::AcceptedChanged
+    if done.rows_affected() > 0 {
+        return Ok(Stored::Written);
+    }
+    let row = sqlx::query("SELECT access_generation, checked_at FROM repositories WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&state.db.pool)
+        .await?;
+    Ok(match row {
+        None => Stored::Missing,
+        Some(row) => {
+            let checked_at: Option<i64> = row.try_get("checked_at")?;
+            if row.try_get::<i64, _>("access_generation")? != write.generation
+                || checked_at.is_some_and(|at| at > write.at_ms)
+            {
+                Stored::Stale
+            } else {
+                Stored::AcceptedChanged
+            }
+        }
     })
 }
 
@@ -579,7 +598,8 @@ pub async fn replace_agent_creds(
     let done = sqlx::query(
         "UPDATE repositories SET agent_creds_secret_id = $1, agent_key_state = $2, \
          checks_json = $3, checked_at = $4, guarantee_level = $5, guarantee_notes_json = $6, \
-         guarantee_accepted = $7, guarantee_checked_at = $4, guarantee_unchecked_runs = 0, \
+         guarantee_accepted = $7, guarantee_checked_at = $4, \
+         access_generation = access_generation + 1, guarantee_unchecked_runs = 0, \
          guarantee_failed_runs = 0 WHERE id = $8 AND guarantee_accepted = $9",
     )
     .bind(new)

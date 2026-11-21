@@ -178,6 +178,7 @@ async fn probe_new_key(
     responses(
         (status = 200, description = "Fresh capability checks with the stored keys", body = CheckResult),
         (status = 404, description = "Unknown repository", body = ErrorBody),
+        (status = 409, description = "The storage access changed, or a newer check was stored, while this one ran", body = ErrorBody),
     )
 )]
 async fn recheck(
@@ -239,9 +240,21 @@ pub async fn recheck_repository_at(
             },
         )
         .await?;
-        stored = outcome == db::Stored::Written;
-        if stored {
-            break;
+        match outcome {
+            db::Stored::Written => {
+                stored = true;
+                break;
+            }
+            db::Stored::AcceptedChanged => {}
+            db::Stored::Stale => {
+                return Err(ApiError::Conflict(
+                    "The storage access changed or a newer check was stored during this check. Check the repository again."
+                        .into(),
+                ));
+            }
+            db::Stored::Missing => {
+                return Err(ApiError::NotFound("repository not found".into()));
+            }
         }
     }
     if !stored {

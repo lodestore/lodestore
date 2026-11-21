@@ -4345,6 +4345,16 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "The storage access changed, or a newer check was stored, while this one ran",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         },
         "security": [
