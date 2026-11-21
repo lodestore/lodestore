@@ -34,13 +34,14 @@ const STABLE_STREAM: Duration = Duration::from_secs(60);
 const RENEW_RETRY: Duration = Duration::from_secs(60);
 const MAX_SKEW_SECS: i64 = 300;
 const JOBS_DRAIN: Duration = Duration::from_secs(30);
-pub const CAPABILITIES: [&str; 6] = [
+pub const CAPABILITIES: [&str; 7] = [
     "restore_v1",
     "limits_v1",
     "gc_v1",
     "restore_roots_v1",
     "shard_limit_v1",
     "source:files",
+    "host_key_v1",
 ];
 const CAP_UPDATE: &str = "update_v1";
 
@@ -238,6 +239,42 @@ fn store_s3_credentials(paths: &Paths, key: &S3Credentials) -> Result<(), AgentE
     }
     write_json_file(&paths.s3_credentials(), &value)?;
     tracing::info!("agent S3 key updated");
+    Ok(())
+}
+
+fn apply_host_key(paths: &Paths, host_key: &str) {
+    if let Err(error) = store_host_key(paths, host_key) {
+        tracing::warn!(%error, "could not store the SFTP host key");
+    }
+}
+
+fn store_host_key(paths: &Paths, host_key: &str) -> Result<(), AgentError> {
+    let path = paths.repository_json();
+    let Some(mut file) = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+    else {
+        tracing::warn!("repository.json is unreadable; SFTP host key not stored");
+        return Ok(());
+    };
+    if file.get("backend").and_then(|b| b.as_str()) != Some("sftp") {
+        tracing::warn!("SFTP host key received for a repository that is not SFTP; ignored");
+        return Ok(());
+    }
+    let Some(options) = file.get_mut("options").and_then(|o| o.as_object_mut()) else {
+        tracing::warn!("repository.json has no options; SFTP host key not stored");
+        return Ok(());
+    };
+    if options.get("host_key").and_then(|k| k.as_str()) == Some(host_key) {
+        return Ok(());
+    }
+    if lodestore_format::store::SftpStore::host_key_fingerprint(host_key).is_err() {
+        tracing::warn!("SFTP host key from the server is not a usable ed25519/ECDSA key; ignored");
+        return Ok(());
+    }
+    options.insert("host_key".into(), host_key.into());
+    write_json_file(&path, &file)?;
+    tracing::info!("SFTP host key updated");
     Ok(())
 }
 
@@ -500,6 +537,9 @@ async fn session_once(
                             store_s3_credentials(paths, &key)?;
                         }
                     }
+                    Some(ServerBody::UpdateHostKey(update)) => {
+                        apply_host_key(paths, &update.host_key);
+                    }
                     Some(body) => hub.handle(body),
                     None => {}
                 },
@@ -507,5 +547,102 @@ async fn session_once(
                 Err(s) => return Err(AgentError::from_status(&s)),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const KEY_A: &str =
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPXNmebOc3wEWwOMVZdkvtvsvLmchHYR1uQeOBlJtQWZ";
+    const KEY_B: &str =
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBPSPxzrVHcF2zQSv3p5NxFPivXZiF0zvk7gjPiCjLBd";
+    const KEY_RSA: &str = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAAgQC7";
+    const KEY_CERT: &str =
+        "ssh-ed25519-cert-v01@openssh.com AAAAIHNzaC1lZDI1NTE5LWNlcnQtdjAxQG9wZW5zc2guY29t";
+
+    fn paths(dir: &tempfile::TempDir) -> Paths {
+        Paths {
+            config_dir: dir.path().join("etc"),
+            state_dir: dir.path().join("var"),
+        }
+    }
+
+    fn write_repository(paths: &Paths, backend: &str, host_key: &str) -> Vec<u8> {
+        let value = serde_json::json!({
+            "repository_id": "r1",
+            "backend": backend,
+            "options": {
+                "endpoint": "127.0.0.1:22",
+                "user": "backup",
+                "key": "placeholder",
+                "host_key": host_key,
+                "root": "/srv/repo",
+            },
+        });
+        write_json_file(&paths.repository_json(), &value).unwrap();
+        std::fs::read(paths.repository_json()).unwrap()
+    }
+
+    fn stored(paths: &Paths) -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(paths.repository_json()).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn store_host_key_rewrites_only_the_host_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths(&dir);
+        write_repository(&paths, "sftp", KEY_A);
+        let mut expected = stored(&paths);
+        store_host_key(&paths, KEY_B).unwrap();
+        expected["options"]["host_key"] = KEY_B.into();
+        assert_eq!(stored(&paths), expected);
+
+        let bytes = std::fs::read(paths.repository_json()).unwrap();
+        let mtime = std::fs::metadata(paths.repository_json())
+            .unwrap()
+            .modified()
+            .unwrap();
+        store_host_key(&paths, KEY_B).unwrap();
+        assert_eq!(std::fs::read(paths.repository_json()).unwrap(), bytes);
+        let after = std::fs::metadata(paths.repository_json())
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert_eq!(after, mtime);
+    }
+
+    #[test]
+    fn store_host_key_ignores_other_backends() {
+        for backend in ["s3", "local"] {
+            let dir = tempfile::tempdir().unwrap();
+            let paths = paths(&dir);
+            let before = write_repository(&paths, backend, KEY_A);
+            store_host_key(&paths, KEY_B).unwrap();
+            assert_eq!(std::fs::read(paths.repository_json()).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn store_host_key_keeps_the_file_on_a_bad_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths(&dir);
+        let before = write_repository(&paths, "sftp", KEY_A);
+        for bad in ["", "garbage", KEY_RSA, KEY_CERT] {
+            store_host_key(&paths, bad).unwrap();
+            assert_eq!(std::fs::read(paths.repository_json()).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn apply_host_key_keeps_going_when_the_file_cannot_be_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths(&dir);
+        let before = write_repository(&paths, "sftp", KEY_A);
+        std::fs::create_dir(paths.state_dir.join(".repository.json.tmp")).unwrap();
+        assert!(store_host_key(&paths, KEY_B).is_err());
+        apply_host_key(&paths, KEY_B);
+        assert_eq!(std::fs::read(paths.repository_json()).unwrap(), before);
     }
 }

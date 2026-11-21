@@ -113,6 +113,7 @@ message ServerMessage {
     JobForget job_forget = 8;
     UpdateAssign update_assign = 9;
     UpdateStatusAck update_status_ack = 10;
+    UpdateHostKey update_host_key = 11;
   }
 }
 
@@ -126,6 +127,11 @@ message HelloAck {
 
 message UpdateS3Credentials {
   S3Credentials credentials = 1;
+}
+
+// The SFTP host key the server pinned for the agent's repository.
+message UpdateHostKey {
+  string host_key = 1;
 }
 
 enum DisconnectReason {
