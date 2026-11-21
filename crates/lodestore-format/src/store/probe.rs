@@ -196,6 +196,13 @@ impl Weakness {
     }
 }
 
+/// The SFTP server presented a host key other than the pinned one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostKeyChange {
+    pub pinned: String,
+    pub offered: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProbeReport {
     pub existing_repository: bool,
@@ -203,6 +210,7 @@ pub struct ProbeReport {
     pub agent_key: AgentKeyState,
     pub guarantee: GuaranteeLevel,
     pub weaknesses: Vec<Weakness>,
+    pub host_key_changed: Option<HostKeyChange>,
 }
 
 impl ProbeReport {
@@ -218,6 +226,7 @@ impl ProbeReport {
             agent_key: AgentKeyState::Unchecked,
             guarantee: GuaranteeLevel::Unchecked,
             weaknesses: Vec::new(),
+            host_key_changed: None,
         }
     }
 
@@ -288,7 +297,13 @@ impl ProbeReport {
 
     fn set_blob_error(&mut self, id: CheckId, status: CheckStatus, prefix: &str, e: &BlobError) {
         let text = match e {
-            BlobError::HostKeyMismatch { .. } => e.to_string(),
+            BlobError::HostKeyMismatch { pinned, offered } => {
+                self.host_key_changed = Some(HostKeyChange {
+                    pinned: pinned.clone(),
+                    offered: offered.clone(),
+                });
+                e.to_string()
+            }
             _ => message(e).to_string(),
         };
         self.set(id, status, Some(format!("{prefix}{text}")));
@@ -773,11 +788,20 @@ mod tests {
         };
         r.set_blob_error(CheckId::Write, CheckStatus::Fail, "", &changed);
         assert_eq!(r.check(CheckId::Write).error, Some(changed.to_string()));
+        assert_eq!(
+            r.host_key_changed,
+            Some(HostKeyChange {
+                pinned: "SHA256:pinned".into(),
+                offered: "SHA256:offered".into(),
+            })
+        );
+        r.host_key_changed = None;
 
         let hostile = BlobError::backend("the SFTP server's host key changed: pinned <a href=x>");
         r.set_blob_error(CheckId::List, CheckStatus::Fail, "", &hostile);
         let error = r.check(CheckId::List).error.clone().unwrap_or_default();
         assert!(!error.contains("host key"), "{error}");
+        assert_eq!(r.host_key_changed, None);
     }
 
     fn report_at(level: GuaranteeLevel) -> ProbeReport {

@@ -155,6 +155,7 @@ pub enum AlertType {
     AgentCertificateRejected,
     SourceInstanceGone,
     GuaranteeDowngraded,
+    HostKeyChanged,
 }
 
 impl AlertType {
@@ -172,6 +173,7 @@ impl AlertType {
             AlertType::AgentCertificateRejected => "agent_certificate_rejected",
             AlertType::SourceInstanceGone => "source_instance_gone",
             AlertType::GuaranteeDowngraded => "guarantee_downgraded",
+            AlertType::HostKeyChanged => "host_key_changed",
         }
     }
 
@@ -189,6 +191,7 @@ impl AlertType {
             "agent_certificate_rejected" => AlertType::AgentCertificateRejected,
             "source_instance_gone" => AlertType::SourceInstanceGone,
             "guarantee_downgraded" => AlertType::GuaranteeDowngraded,
+            "host_key_changed" => AlertType::HostKeyChanged,
             _ => return None,
         })
     }
@@ -300,6 +303,10 @@ pub struct AlertFacts {
     pub unchecked_runs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failed_runs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offered_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

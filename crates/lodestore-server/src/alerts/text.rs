@@ -19,6 +19,7 @@ pub fn alertname(kind: AlertType) -> &'static str {
         AlertType::AgentCertificateRejected => "LodestoreAgentCertificateRejected",
         AlertType::SourceInstanceGone => "LodestoreSourceInstanceGone",
         AlertType::GuaranteeDowngraded => "LodestoreGuaranteeDowngraded",
+        AlertType::HostKeyChanged => "LodestoreHostKeyChanged",
     }
 }
 
@@ -57,6 +58,10 @@ pub fn title(c: &Candidate, now_ms: i64) -> String {
         }
         AlertType::RepositoryUnavailable => format!(
             "Repository {} is unavailable",
+            c.repository_name.as_deref().unwrap_or("unknown repository"),
+        ),
+        AlertType::HostKeyChanged => format!(
+            "SFTP host key changed for {}",
             c.repository_name.as_deref().unwrap_or("unknown repository"),
         ),
         AlertType::GuaranteeDowngraded => {
@@ -166,6 +171,11 @@ pub fn detail(c: &Candidate) -> String {
                 .as_deref()
                 .unwrap_or("unknown")
                 .trim_end_matches('.'),
+        ),
+        AlertType::HostKeyChanged => format!(
+            "The SFTP server presented {}, but {} is pinned. Backups to this repository fail until this is resolved. If the server was reinstalled or its key was rotated, confirm the new key; otherwise treat it as an interception attempt.",
+            c.facts.offered_fingerprint.as_deref().unwrap_or("unknown"),
+            c.facts.pinned_fingerprint.as_deref().unwrap_or("unknown"),
         ),
         AlertType::GuaranteeDowngraded => {
             let level = level_words(c.facts.guarantee_level.as_deref());
@@ -315,6 +325,23 @@ mod tests {
             alertname(AlertType::GuaranteeDowngraded),
             "LodestoreGuaranteeDowngraded"
         );
+        assert_eq!(
+            alertname(AlertType::HostKeyChanged),
+            "LodestoreHostKeyChanged"
+        );
+    }
+
+    #[test]
+    fn host_key_changed_text_holds_fingerprints_only() {
+        let facts = AlertFacts {
+            pinned_fingerprint: Some("SHA256:old".into()),
+            offered_fingerprint: Some("SHA256:new".into()),
+            ..AlertFacts::default()
+        };
+        let (title, detail) = text(AlertType::HostKeyChanged, facts);
+        assert!(title.starts_with("SFTP host key changed for"), "{title}");
+        assert!(detail.contains("presented SHA256:new"), "{detail}");
+        assert!(detail.contains("SHA256:old is pinned"), "{detail}");
     }
 
     #[test]

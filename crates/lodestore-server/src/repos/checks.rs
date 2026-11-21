@@ -139,6 +139,7 @@ pub(crate) fn timed_out_report() -> ProbeReport {
         agent_key: AgentKeyState::Unchecked,
         guarantee: GuaranteeLevel::Unchecked,
         weaknesses: Vec::new(),
+        host_key_changed: None,
     }
 }
 

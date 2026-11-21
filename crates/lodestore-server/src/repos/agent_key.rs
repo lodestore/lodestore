@@ -242,6 +242,20 @@ pub async fn recheck_repository_at(
         .await?;
         match outcome {
             db::Stored::Written => {
+                if access.location.backend == "sftp" {
+                    let reached = report.check(CheckId::Write).status != CheckStatus::Fail;
+                    if let Err(error) = db::record_host_key_check(
+                        state,
+                        id,
+                        access.generation,
+                        report.host_key_changed.as_ref(),
+                        reached,
+                    )
+                    .await
+                    {
+                        tracing::warn!(repository_id = %id, error = %format!("{error:#}"), "could not record the host key check");
+                    }
+                }
                 stored = true;
                 break;
             }

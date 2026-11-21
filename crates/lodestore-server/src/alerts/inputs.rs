@@ -43,6 +43,8 @@ pub struct RepositoryGuarantee {
     /// When a level was last written; the creation time before that was recorded.
     pub measured_at_ms: i64,
     pub tick_at_ms: Option<i64>,
+    /// The pinned and the offered SFTP host key fingerprints while the server presents another key.
+    pub host_key_mismatch: Option<(String, String)>,
 }
 
 /// The last verdict of a check level in a repository, when it was a failure.
@@ -314,10 +316,21 @@ pub async fn gather_with(
     })
 }
 
+fn parse_mismatch(json: &str) -> (String, String) {
+    let field = |v: &serde_json::Value, k: &str| {
+        v.get(k)
+            .and_then(|x| x.as_str())
+            .unwrap_or("unknown")
+            .to_string()
+    };
+    let v = serde_json::from_str::<serde_json::Value>(json).unwrap_or_default();
+    (field(&v, "pinned"), field(&v, "offered"))
+}
+
 async fn guarantees(state: &AppState) -> anyhow::Result<Vec<RepositoryGuarantee>> {
     let rows = sqlx::query(
         "SELECT id, name, guarantee_level, guarantee_accepted, guarantee_unchecked_runs, \
-         guarantee_failed_runs, guarantee_checked_at, guarantee_tick_at, created_at \
+         guarantee_failed_runs, guarantee_checked_at, guarantee_tick_at, created_at, host_key_mismatch_json \
          FROM repositories ORDER BY name, id",
     )
     .fetch_all(&state.db.pool)
@@ -340,6 +353,9 @@ async fn guarantees(state: &AppState) -> anyhow::Result<Vec<RepositoryGuarantee>
                     None => row.try_get("created_at")?,
                 },
                 tick_at_ms: row.try_get("guarantee_tick_at")?,
+                host_key_mismatch: row
+                    .try_get::<Option<String>, _>("host_key_mismatch_json")?
+                    .map(|json| parse_mismatch(&json)),
             })
         })
         .collect()
