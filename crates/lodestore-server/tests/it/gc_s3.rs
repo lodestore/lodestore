@@ -25,6 +25,7 @@ use lodestore_server::maintenance::gc::{
     GcOrigin, GcSettings, GcState, db, run_dry_run_at, start_cycle,
 };
 use lodestore_server::repos::db::{AccessKey, NewRepository, RepoLocation as DbLocation};
+use lodestore_testkit::fault_proxy::{FaultAction, FaultPlan, FaultProxy, FaultRule};
 use lodestore_testkit::minio::MinioServer;
 use opendal::{Operator, services};
 use serde_json::Value;
@@ -41,6 +42,7 @@ const PREFIXES: [&str; 3] = ["packs/", "index/", "snapshots/"];
 #[derive(Clone, Copy)]
 enum Bucket {
     Versioned,
+    VersionedB2,
     Compliance,
     Governance,
 }
@@ -73,7 +75,7 @@ impl Cloud {
     async fn start(kind: Bucket) -> Cloud {
         let minio = MinioServer::start().await;
         match kind {
-            Bucket::Versioned => minio.create_versioned_bucket(BUCKET).await,
+            Bucket::Versioned | Bucket::VersionedB2 => minio.create_versioned_bucket(BUCKET).await,
             Bucket::Compliance => minio.create_locked_bucket(BUCKET).await,
             Bucket::Governance => minio.create_governance_bucket(BUCKET).await,
         }
@@ -81,11 +83,14 @@ impl Cloud {
             .create_user_with_policy(BUCKET, &agent_minio_policy_json(BUCKET, ""))
             .await;
         let server_key = minio.root_credentials();
-        let options = BTreeMap::from([
+        let mut options = BTreeMap::from([
             ("bucket".to_string(), BUCKET.to_string()),
             ("endpoint".to_string(), minio.endpoint().to_string()),
             ("path_style".to_string(), "true".to_string()),
         ]);
+        if matches!(kind, Bucket::VersionedB2) {
+            options.insert("provider".to_string(), "b2".to_string());
+        }
         let server_store = open(&options, &server_key);
         let agent_store = open(&options, &agent_key);
         let mut entropy = Entropy::os();
@@ -123,15 +128,18 @@ impl Cloud {
     }
 
     async fn register(&self, ts: &TestServer) -> String {
+        self.register_at(ts, &self.options).await
+    }
+
+    async fn register_at(&self, ts: &TestServer, options: &BTreeMap<String, String>) -> String {
         let repo = lodestore_server::repos::db::create_repository(
             ts.state(),
             NewRepository {
                 name: "cloud".to_string(),
                 location: DbLocation {
                     backend: "s3".to_string(),
-                    options: self.options.clone(),
+                    options: options.clone(),
                 },
-                experimental: false,
                 format_repo_id: self.format_repo_id,
                 config_hash: self.config_hash,
                 master: self.master.clone(),
@@ -437,6 +445,250 @@ async fn gc_s3_versioned_purge() {
         assert!(done["bytes_freed"].as_u64().unwrap() > 0, "{done}");
         cloud.assert_restores(&b).await;
         cloud.assert_restores(&c).await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_s3_b2_preset_keeps_objects_hidden_by_someone_else() {
+    on_each_backend(Bucket::VersionedB2, async |cloud, ts, repo| {
+        let a = cloud.backup("a", 11).await;
+        let b = cloud.backup("b", 12).await;
+        let before = cloud.listing().await;
+        let manifest = snapshot_object_key(&parse_hex32(&a.id).unwrap());
+        assert!(before.contains_key(&manifest));
+        let hider = operator_as(&cloud.minio, &cloud.server_key.0, &cloud.server_key.1);
+        hider.delete(&manifest).await.unwrap();
+        assert!(!cloud.listing().await.contains_key(&manifest));
+        sync_repository(ts.state(), repo).await.unwrap();
+
+        let id = real_cycle(ts, repo).await;
+        assert_eq!(finish(ts, &id, three_days_on()).await, GcState::Failed);
+        let error = failure(ts, &id).await.unwrap_or_default();
+        assert!(
+            error.contains(&manifest) && error.contains("someone other than the server"),
+            "{error}"
+        );
+        assert_eq!(
+            gone(&before, &cloud.listing().await),
+            vec![manifest.clone()]
+        );
+
+        let versions = cloud.minio.object_versions_all(BUCKET, &manifest).await;
+        assert!(
+            versions.iter().any(|(_, marker)| !marker),
+            "the hidden manifest was purged: {versions:?}"
+        );
+        for (version, marker) in &versions {
+            if *marker {
+                cloud
+                    .minio
+                    .delete_version(BUCKET, &manifest, version)
+                    .await
+                    .unwrap();
+            }
+        }
+        cloud.assert_restores(&a).await;
+        cloud.assert_restores(&b).await;
+    })
+    .await;
+}
+
+/// An agent key hides a snapshot before the cycle, puts its manifest back
+/// while the cycle marks, and hides it again during the pause. Every check
+/// that reads only the current version sees nothing wrong at its moment.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_s3_b2_preset_refuses_a_snapshot_hidden_again_after_marking() {
+    for backend in backends() {
+        let cloud = Cloud::start(Bucket::VersionedB2).await;
+        let proxy = FaultProxy::start(cloud.minio.endpoint(), FaultPlan::none()).await;
+        let mut options = cloud.options.clone();
+        options.insert("endpoint".to_string(), proxy.endpoint());
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+        let repo = cloud.register_at(&ts, &options).await;
+
+        let a = cloud.backup("a", 11).await;
+        let b = cloud.backup("b", 12).await;
+        let before = cloud.listing().await;
+        let manifest = snapshot_object_key(&parse_hex32(&a.id).unwrap());
+        let body = cloud.server_store.get(&manifest).await.unwrap();
+        let hider = operator_as(&cloud.minio, &cloud.server_key.0, &cloud.server_key.1);
+        hider.delete(&manifest).await.unwrap();
+        sync_repository(ts.state(), &repo).await.unwrap();
+
+        let id = real_cycle(&ts, &repo).await;
+        let now = three_days_on();
+        let (listed, resume) = proxy.hold("GET", &["versions", "prefix=snapshots"]);
+        let (_, ()) = tokio::join!(settle(&ts, &id, now), async {
+            listed.await.unwrap();
+            cloud
+                .agent_store
+                .put_if_absent(&manifest, body.clone())
+                .await
+                .unwrap();
+            resume.send(()).unwrap();
+        });
+        hider.delete(&manifest).await.unwrap();
+
+        assert_eq!(finish(&ts, &id, now).await, GcState::Failed);
+        let error = failure(&ts, &id).await.unwrap_or_default();
+        assert!(
+            error.contains(&manifest) && error.contains("someone other than the server"),
+            "{error}"
+        );
+        assert_eq!(
+            gone(&before, &cloud.listing().await),
+            vec![manifest.clone()]
+        );
+
+        for (version, marker) in cloud.minio.object_versions_all(BUCKET, &manifest).await {
+            if marker {
+                cloud
+                    .minio
+                    .delete_version(BUCKET, &manifest, &version)
+                    .await
+                    .unwrap();
+            }
+        }
+        cloud.assert_restores(&a).await;
+        cloud.assert_restores(&b).await;
+        ts.stop().await;
+    }
+}
+
+/// A snapshot the survey saw and an agent key hides during the pause is
+/// missing from the listing the sweep relies on, so the cycle stops there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_s3_b2_preset_refuses_a_snapshot_hidden_during_the_pause() {
+    on_each_backend(Bucket::VersionedB2, async |cloud, ts, repo| {
+        let a = cloud.backup("a", 11).await;
+        let b = cloud.backup("b", 12).await;
+        sync_repository(ts.state(), repo).await.unwrap();
+        lodestore_server::catalog::retention::forget_snapshot(ts.state(), repo, &a.id)
+            .await
+            .unwrap();
+        let before = cloud.listing().await;
+
+        let id = real_cycle(ts, repo).await;
+        let now = three_days_on();
+        assert!(matches!(
+            settle(ts, &id, now).await,
+            StepOutcome::Waiting { .. }
+        ));
+        let manifest = snapshot_object_key(&parse_hex32(&b.id).unwrap());
+        let hider = operator_as(&cloud.minio, &cloud.server_key.0, &cloud.server_key.1);
+        hider.delete(&manifest).await.unwrap();
+
+        assert_eq!(finish(ts, &id, now).await, GcState::Failed);
+        let error = failure(ts, &id).await.unwrap_or_default();
+        assert!(error.contains(&manifest), "{error}");
+        assert_eq!(
+            gone(&before, &cloud.listing().await),
+            vec![manifest.clone()]
+        );
+        for (version, marker) in cloud.minio.object_versions_all(BUCKET, &manifest).await {
+            if marker {
+                cloud
+                    .minio
+                    .delete_version(BUCKET, &manifest, &version)
+                    .await
+                    .unwrap();
+            }
+        }
+        cloud.assert_restores(&b).await;
+    })
+    .await;
+}
+
+/// A forget whose delete failed leaves the snapshot in the bucket, and a
+/// later hide of it by someone else must not pass for the server's own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_s3_b2_preset_failed_forget_keeps_the_snapshot_protected() {
+    for backend in backends() {
+        let cloud = Cloud::start(Bucket::VersionedB2).await;
+        let plan = FaultPlan::none().with(FaultRule {
+            method: "DELETE",
+            key_prefix: "snapshots/".to_string(),
+            action: FaultAction::NotImplemented,
+            times: 1,
+        });
+        let proxy = FaultProxy::start(cloud.minio.endpoint(), plan).await;
+        let mut options = cloud.options.clone();
+        options.insert("endpoint".to_string(), proxy.endpoint());
+        let ts = TestServer::start_with(&backend, |c| c.schedule_tick_secs = 0).await;
+        let repo = cloud.register_at(&ts, &options).await;
+
+        let a = cloud.backup("a", 11).await;
+        let b = cloud.backup("b", 12).await;
+        sync_repository(ts.state(), &repo).await.unwrap();
+        let forgotten =
+            lodestore_server::catalog::retention::forget_snapshot(ts.state(), &repo, &a.id)
+                .await
+                .unwrap();
+        assert!(
+            matches!(
+                forgotten,
+                lodestore_server::catalog::retention::ForgetOutcome::Failed { .. }
+            ),
+            "{forgotten:?}"
+        );
+        let before = cloud.listing().await;
+        let manifest = snapshot_object_key(&parse_hex32(&a.id).unwrap());
+        assert!(before.contains_key(&manifest));
+        let hider = operator_as(&cloud.minio, &cloud.server_key.0, &cloud.server_key.1);
+        hider.delete(&manifest).await.unwrap();
+
+        let id = real_cycle(&ts, &repo).await;
+        assert_eq!(finish(&ts, &id, three_days_on()).await, GcState::Failed);
+        let error = failure(&ts, &id).await.unwrap_or_default();
+        assert!(error.contains(&manifest), "{error}");
+        assert_eq!(
+            gone(&before, &cloud.listing().await),
+            vec![manifest.clone()]
+        );
+        for (version, marker) in cloud.minio.object_versions_all(BUCKET, &manifest).await {
+            if marker {
+                cloud
+                    .minio
+                    .delete_version(BUCKET, &manifest, &version)
+                    .await
+                    .unwrap();
+            }
+        }
+        cloud.assert_restores(&a).await;
+        cloud.assert_restores(&b).await;
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_s3_b2_preset_frees_what_the_server_forgot() {
+    on_each_backend(Bucket::VersionedB2, async |cloud, ts, repo| {
+        let a = cloud.backup("a", 11).await;
+        let b = cloud.backup("b", 12).await;
+        sync_repository(ts.state(), repo).await.unwrap();
+        let forgotten =
+            lodestore_server::catalog::retention::forget_snapshot(ts.state(), repo, &a.id)
+                .await
+                .unwrap();
+        assert!(
+            matches!(
+                forgotten,
+                lodestore_server::catalog::retention::ForgetOutcome::Deleted
+            ),
+            "{forgotten:?}"
+        );
+
+        let id = real_cycle(ts, repo).await;
+        assert_eq!(
+            finish(ts, &id, three_days_on()).await,
+            GcState::Done,
+            "{:?}",
+            failure(ts, &id).await
+        );
+        let done = report(ts, repo, &id).await;
+        assert!(done["bytes_freed"].as_u64().unwrap() > 0, "{done}");
+        cloud.assert_restores(&b).await;
     })
     .await;
 }

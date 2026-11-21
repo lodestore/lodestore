@@ -17,6 +17,7 @@ on:
       - crates/lodestore-format/src/verify_snapshot.rs
       - crates/lodestore-format/src/crypto.rs
       - crates/lodestore-format/src/gc/**
+      - crates/lodestore-format/src/store/sftp.rs
       - crates/lodestore-agent/src/update/minisign.rs
       - crates/lodestore-agent/src/jobs/restore.rs
       - crates/lodestore-nbd/**
@@ -53,7 +54,7 @@ jobs:
           EVENT: ${{ github.event_name }}
         run: |
           if [ "$EVENT" = pull_request ]; then
-            echo 'list=["index_shard","tree_decode","image_layout","image_state","nbd_client","nbd_server"]' >> "$GITHUB_OUTPUT"
+            echo 'list=["index_shard","tree_decode","image_layout","image_state","nbd_client","nbd_server","sftp_listing"]' >> "$GITHUB_OUTPUT"
             echo "seconds=30" >> "$GITHUB_OUTPUT"
           else
             list=$(for f in fuzz/fuzz_targets/*.rs; do basename "$f" .rs; done | jq -R . | jq -sc .)

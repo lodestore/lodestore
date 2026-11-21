@@ -98,6 +98,31 @@ jobs:
       - name: Run the qemu-nbd image tests
         run: qemu-nbd --version && cargo nextest run -p lode-cli --profile ci --run-ignored only --no-fail-fast -E 'test(/^image_qemu::/)'
 
+  emulators:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: taiki-e/install-action@68a389c788b2cd04016ce8c80ee23b80d2ab3d68
+        with:
+          tool: nextest@0.9.148
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: "24"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: target/test-bin
+          key: emulators-minio-RELEASE.2025-09-07T16-13-09Z-mc-RELEASE.2025-08-13T08-35-41Z-fakegcs-v1.56.1-azurite-3.37.0-${{ hashFiles('scripts/azurite/package-lock.json', 'crates/lodestore-testkit/sshd/*') }}
+      - name: Run the storage emulator tests
+        run: scripts/test-emulators.sh --no-fail-fast
+
   web:
     runs-on: ubuntu-latest
     defaults:

@@ -94,6 +94,10 @@ impl BlobStore for Hooked<'_> {
         }
         Ok(listed)
     }
+
+    fn publishes_atomically(&self) -> bool {
+        true
+    }
 }
 
 impl BlobDelete for Hooked<'_> {
@@ -116,6 +120,10 @@ impl BlobPurge for Hooked<'_> {
         older_than_ms: i64,
     ) -> Result<Vec<String>, BlobError> {
         self.inner.deleted_keys(prefix, older_than_ms).await
+    }
+
+    async fn rewritten_keys(&self, prefix: &str) -> Result<Vec<String>, BlobError> {
+        self.inner.rewritten_keys(prefix).await
     }
 }
 

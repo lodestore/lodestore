@@ -442,7 +442,6 @@ async fn download_cancelled_before_streaming_leaves_no_running_row() {
                         ("endpoint".to_string(), endpoint),
                     ]),
                 },
-                experimental: false,
                 format_repo_id: [1; 16],
                 config_hash: [2; 32],
                 master: MasterKey::from_bytes([3; 32]),

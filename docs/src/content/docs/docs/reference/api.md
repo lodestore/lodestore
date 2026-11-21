@@ -184,6 +184,55 @@ agent_updates:
 
 An agent trusts only the signing key built into it and the keys installed on its host, so an update cannot add a key to an agent or make it run a binary signed with another one. This covers the update path only; see the [threat model](/docs/security/threat-model/#agent-updates).
 
+## Repositories and the storage guarantee
+
+Every route here needs a signed-in administrator session with the CSRF token; no API token can use them.
+
+**Location options.** A draft has `location.backend` and `location.options`:
+
+| `backend` | Options |
+|---|---|
+| `s3` | `bucket`, `endpoint`, `region`, `path_style`, `prefix`, `provider`; the server key and the agent key go in `server_credentials` and `agent_credentials` |
+| `local` | `path` (absolute) |
+| `azblob` | `container`, `root`, `endpoint`, `account_name`, and one of `sas_token` or `account_key` (with `account_name`); `encryption_key`, `encryption_key_sha256` and `encryption_algorithm` for a customer-provided key |
+| `gcs` | `bucket`, `root`, `endpoint`, `credential` (the service account key as JSON) or `token`, `credential_path`, `skip_signature`, `allow_anonymous`, `disable_vm_metadata`, `disable_config_load` |
+| `sftp` | `endpoint` (`host:port`), `user`, `key` (the private key), `host_key`, `root`, `publish` |
+
+`account_key`, `sas_token` and `encryption_key` (`azblob`), `credential` and `token` (`gcs`) and `key` (`sftp`) are secrets: they are sealed on their own and never appear in a response. `publish` is `hardlink` (the default: the file is written under a temporary name and linked into place, so it appears whole or not at all) or `direct` (the final name is created and written, so a cut-off upload leaves a short file). A draft that cannot work answers `422`: an `sftp` location without `host_key` ("Enter the SFTP server's host key: one line of `ssh-keyscan -p <port> <host>` output"), a `gcs` location with only `credential_path` (agents cannot read a file on the server) and none of `credential`, `token`, `skip_signature` or `allow_anonymous`, an `azblob` location without `sas_token` or `account_key` with `account_name`, an unknown `publish` value, and any option not in the table: names are matched exactly, so another spelling (`Token`) or an alias of the storage library (`sas_key`, `azure_storage_account_key`) answers `422` with the name of the option, and nothing is stored.
+
+**Levels.** A check measures what a host can do with the storage and reports one `guarantee_level`:
+
+- `create_only_enforced`: a host can create objects, but can neither replace nor delete them.
+- `overwrite_keeps_old_version`: a host can replace objects, and the storage keeps the earlier version.
+- `host_can_overwrite_or_delete`: a host can change or delete backups.
+- `unchecked`: the check could not measure it (a timeout, an unreachable storage or an answer that settles nothing).
+
+`guarantee_notes` lists why the level is not the strongest one, as codes:
+
+| Code | Meaning |
+|---|---|
+| `agent_can_delete` | A host can delete backups. |
+| `agent_can_overwrite` | A host can replace backups, and the storage keeps no earlier version. |
+| `agent_can_delete_versions` | A host can delete the earlier versions the storage keeps. |
+| `not_enforceable` | Every host that writes to the folder can change or delete its backups. |
+| `no_atomic_publish` | An interrupted upload stays in the storage as a broken file. |
+| `held_handle_rewrite` | A host can keep a file open after publishing it and change it later. |
+| `agent_can_write_server_files` | A host can change files the server wrote. |
+| `no_durable_fsync` | The server does not confirm that uploads reached its disk. |
+| `shared_credentials` | Hosts use the server's own credentials for this storage, so they can do anything the server can. |
+| `lifecycle_deletes` | A lifecycle rule on the bucket deletes objects or their earlier versions. |
+| `lifecycle_unverified` | The bucket's lifecycle rules could not be read. |
+
+The fields are `guarantee_level` (measured by the last check), `guarantee_accepted` (the level the person agreed to), `guarantee_checked_at` and `guarantee_notes`. `POST /api/v1/repositories/check` returns `guarantee_level` and `guarantee_notes` with the checks; a repository summary has the first three, and a repository detail adds `guarantee_notes`.
+
+**Consent.** `POST /api/v1/repositories/wizard` and `POST /api/v1/repositories/connect` answer `409` with the code `weaker_guarantee` and the result of the check in `check` when the level is `host_can_overwrite_or_delete` or `unchecked`, unless the draft has `"accept_weaker_guarantee": true`. Nothing is written to the storage before that. With the field set, the measured level is stored as both the measured and the accepted level.
+
+**Check again.** `POST /api/v1/repositories/{id}/check` measures the storage again with the stored keys, stores the measured level, its notes and the time, and returns the result. The accepted level changes by one rule: it rises when the new level is higher than the accepted one, and otherwise stays. A level of `host_can_overwrite_or_delete` is never accepted by a check; when the accepted level is `unchecked` and the check measures `host_can_overwrite_or_delete`, the accepted level stays `unchecked`. A measured level below the accepted one is the state "the storage got weaker": `guarantee_level` is lower than `guarantee_accepted`. A check that settles nothing (`unchecked`) changes neither level nor the notes, only the check rows, the agent key state and `checked_at`. An accept that lands while a check or a replacement of the agent key runs is never overwritten: the server decides the accepted level again from the new value, and answers `409` if it keeps changing. Nothing runs on a timer: a change in the bucket shows up after the next check.
+
+**Accept the measured level.** `POST /api/v1/repositories/{id}/guarantee/accept` with `{"expected_level": "..."}`, the measured level the person was shown, makes the measured level the accepted one and answers `{"guarantee_level": "...", "guarantee_accepted": "...", "guarantee_checked_at": 0}`. It answers `409` when the measured level is `unchecked` or is no longer `expected_level` (a check ran in between; nothing is changed), `422` without `expected_level`, `404` for an unknown repository, `401` without a session and `403` without the CSRF token.
+
+**Agent key.** `POST /api/v1/repositories/{id}/agent-key/verify` and `PUT /api/v1/repositories/{id}/agent-key` check the new key with the same full probe as the wizard and the check above, including the Object Lock and lifecycle rules of the bucket, so a bucket whose lifecycle rule deletes objects gives `host_can_overwrite_or_delete` with `lifecycle_deletes`. `PUT` stores the level the probe measured for the new key. The accepted level follows the rule above. When the probe settles nothing, the stored level becomes `unchecked` with no notes, because the earlier level was measured with the old key; the accepted level does not change.
+
 ## Integrity checks
 
 Checks of a repository, see [Integrity checks](/docs/guides/checks/). A token needs `jobs:read` to read, `jobs:run` to start or stop a check and `policies:write` to change the settings.

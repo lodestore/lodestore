@@ -33,7 +33,6 @@ impl std::fmt::Debug for AccessKey {
 pub struct NewRepository {
     pub name: String,
     pub location: RepoLocation,
-    pub experimental: bool,
     pub format_repo_id: [u8; 16],
     pub config_hash: [u8; 32],
     pub master: MasterKey,
@@ -91,13 +90,15 @@ fn agent_json(key: &AccessKey) -> anyhow::Result<Zeroizing<Vec<u8>>> {
 }
 
 /// What the wizard knows beyond the plain registration: option values that
-/// are secrets (experimental backends) and the capability probe outcome.
+/// are secrets (Azure Blob, GCS, SFTP) and the capability probe outcome.
 #[derive(Default)]
 pub struct RepoExtras {
     pub secret_options: BTreeMap<String, String>,
     pub checks_json: Option<String>,
     pub agent_key_state: Option<String>,
     pub checked_at: Option<i64>,
+    pub guarantee_level: Option<String>,
+    pub guarantee_notes_json: Option<String>,
 }
 
 pub async fn create_repository(state: &AppState, new: NewRepository) -> anyhow::Result<String> {
@@ -138,18 +139,25 @@ pub async fn create_repository_ext(
         None => None,
     };
     let now = now_ms();
+    let guarantee_level = extras
+        .guarantee_level
+        .unwrap_or_else(|| "unchecked".to_string());
+    let guarantee_notes_json = extras
+        .guarantee_notes_json
+        .unwrap_or_else(|| "[]".to_string());
     sqlx::query(
-        "INSERT INTO repositories (id, name, backend, location_json, experimental, format_repo_id, \
+        "INSERT INTO repositories (id, name, backend, location_json, format_repo_id, \
          config_hash, master_secret_id, server_slot_secret_id, server_creds_secret_id, \
          agent_creds_secret_id, agent_key_state, checks_json, checked_at, created_at, \
-         provenance_backfilled_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
+         provenance_backfilled_at, guarantee_level, guarantee_accepted, guarantee_notes_json, \
+         guarantee_checked_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, \
+         $18, $19)",
     )
     .bind(&id)
     .bind(&new.name)
     .bind(&new.location.backend)
     .bind(serde_json::to_string(&new.location.options)?)
-    .bind(i64::from(new.experimental))
     .bind(new.format_repo_id.to_vec())
     .bind(new.config_hash.to_vec())
     .bind(master)
@@ -165,6 +173,10 @@ pub async fn create_repository_ext(
     .bind(extras.checked_at)
     .bind(now)
     .bind(now)
+    .bind(&guarantee_level)
+    .bind(&guarantee_level)
+    .bind(&guarantee_notes_json)
+    .bind(extras.checked_at)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -186,12 +198,16 @@ pub async fn get_repository(state: &AppState, id: &str) -> anyhow::Result<Option
     .transpose()
 }
 
+/// What an agent needs to write: the writer keys and the location as
+/// [`lodestore_format::store::RepoLocation::for_agent`] shapes it. Backends
+/// other than S3 and a local folder get the server's sealed options too, since
+/// the agent has no credentials of its own there yet.
 pub async fn writer_material(
     state: &AppState,
     repository_id: &str,
 ) -> anyhow::Result<WriterMaterial> {
     let row = sqlx::query(
-        "SELECT backend, location_json, experimental, format_repo_id, config_hash, \
+        "SELECT backend, location_json, format_repo_id, config_hash, \
          master_secret_id, server_creds_secret_id, agent_creds_secret_id, open_error \
          FROM repositories WHERE id = $1",
     )
@@ -206,7 +222,7 @@ pub async fn writer_material(
     let backend: String = row.try_get("backend")?;
     let mut options: BTreeMap<String, String> =
         serde_json::from_str(&row.try_get::<String, _>("location_json")?)?;
-    if row.try_get::<i64, _>("experimental")? != 0
+    if !matches!(backend.as_str(), "s3" | "local")
         && let Some(id) = row.try_get::<Option<String>, _>("server_creds_secret_id")?
     {
         let sealed: SealedAccess = serde_json::from_slice(&state.sealer.get_secret(&id).await?)?;
@@ -239,9 +255,13 @@ pub async fn writer_material(
         )?),
         None => None,
     };
+    let for_agent = lodestore_format::store::RepoLocation { backend, options }.for_agent();
     Ok(WriterMaterial {
         writer_keys_text,
-        location: RepoLocation { backend, options },
+        location: RepoLocation {
+            backend: for_agent.backend,
+            options: for_agent.options,
+        },
         agent_creds,
     })
 }
@@ -252,10 +272,13 @@ pub struct RepoFull {
     pub name: String,
     pub backend: String,
     pub options: BTreeMap<String, String>,
-    pub experimental: bool,
     pub agent_key_state: String,
     pub checks_json: Option<String>,
     pub checked_at: Option<i64>,
+    pub guarantee_level: String,
+    pub guarantee_accepted: String,
+    pub guarantee_notes_json: String,
+    pub guarantee_checked_at: Option<i64>,
     pub open_error: Option<String>,
 }
 
@@ -265,18 +288,22 @@ fn full_row(r: &sqlx::any::AnyRow) -> anyhow::Result<RepoFull> {
         name: r.try_get("name")?,
         backend: r.try_get("backend")?,
         options: serde_json::from_str(&r.try_get::<String, _>("location_json")?)?,
-        experimental: r.try_get::<i64, _>("experimental")? != 0,
         agent_key_state: r.try_get("agent_key_state")?,
         checks_json: r.try_get("checks_json")?,
         checked_at: r.try_get("checked_at")?,
+        guarantee_level: r.try_get("guarantee_level")?,
+        guarantee_accepted: r.try_get("guarantee_accepted")?,
+        guarantee_notes_json: r.try_get("guarantee_notes_json")?,
+        guarantee_checked_at: r.try_get("guarantee_checked_at")?,
         open_error: r.try_get("open_error")?,
     })
 }
 
 pub async fn list_repositories(state: &AppState) -> anyhow::Result<Vec<RepoFull>> {
     sqlx::query(
-        "SELECT id, name, backend, location_json, experimental, agent_key_state, checks_json, \
-         checked_at, open_error FROM repositories ORDER BY created_at, id",
+        "SELECT id, name, backend, location_json, agent_key_state, checks_json, \
+         checked_at, guarantee_level, guarantee_accepted, guarantee_notes_json, \
+         guarantee_checked_at, open_error FROM repositories ORDER BY created_at, id",
     )
     .fetch_all(&state.db.pool)
     .await?
@@ -287,8 +314,9 @@ pub async fn list_repositories(state: &AppState) -> anyhow::Result<Vec<RepoFull>
 
 pub async fn find_repository(state: &AppState, id: &str) -> anyhow::Result<Option<RepoFull>> {
     sqlx::query(
-        "SELECT id, name, backend, location_json, experimental, agent_key_state, checks_json, \
-         checked_at, open_error FROM repositories WHERE id = $1",
+        "SELECT id, name, backend, location_json, agent_key_state, checks_json, \
+         checked_at, guarantee_level, guarantee_accepted, guarantee_notes_json, \
+         guarantee_checked_at, open_error FROM repositories WHERE id = $1",
     )
     .bind(id)
     .fetch_optional(&state.db.pool)
@@ -318,24 +346,77 @@ pub async fn active_hosts(state: &AppState) -> anyhow::Result<HashMap<String, i6
     .collect()
 }
 
+/// A measured level to store, with the accepted level already decided from
+/// `read_accepted`, the accepted level stored when the decision was made.
+pub struct GuaranteeWrite {
+    pub level: String,
+    pub notes_json: String,
+    pub accepted: String,
+    pub read_accepted: String,
+}
+
+/// Stores a check. With a level, nothing is written and false is returned
+/// when the accepted level is no longer `read_accepted`: someone accepted a
+/// level meanwhile, and the caller decides again from the new value.
 pub async fn update_checks(
     state: &AppState,
     id: &str,
     checks_json: &str,
     agent_key_state: &str,
-) -> anyhow::Result<i64> {
+    guarantee: Option<&GuaranteeWrite>,
+) -> anyhow::Result<bool> {
     let at = now_ms();
-    sqlx::query(
-        "UPDATE repositories SET checks_json = $1, agent_key_state = $2, checked_at = $3 \
-         WHERE id = $4",
+    match guarantee {
+        None => {
+            sqlx::query(
+                "UPDATE repositories SET checks_json = $1, agent_key_state = $2, checked_at = $3 \
+                 WHERE id = $4",
+            )
+            .bind(checks_json)
+            .bind(agent_key_state)
+            .bind(at)
+            .bind(id)
+            .execute(&state.db.pool)
+            .await?;
+        }
+        Some(g) => {
+            let done = sqlx::query(
+                "UPDATE repositories SET checks_json = $1, agent_key_state = $2, checked_at = $3, \
+                 guarantee_level = $4, guarantee_notes_json = $5, guarantee_accepted = $6, \
+                 guarantee_checked_at = $3 WHERE id = $7 AND guarantee_accepted = $8",
+            )
+            .bind(checks_json)
+            .bind(agent_key_state)
+            .bind(at)
+            .bind(&g.level)
+            .bind(&g.notes_json)
+            .bind(&g.accepted)
+            .bind(id)
+            .bind(&g.read_accepted)
+            .execute(&state.db.pool)
+            .await?;
+            return Ok(done.rows_affected() > 0);
+        }
+    }
+    Ok(true)
+}
+
+/// Makes the measured level the accepted one when it is still `expected`;
+/// false when there is none to accept or it is another level by now.
+pub async fn accept_measured_guarantee(
+    state: &AppState,
+    id: &str,
+    expected: &str,
+) -> anyhow::Result<bool> {
+    let done = sqlx::query(
+        "UPDATE repositories SET guarantee_accepted = guarantee_level \
+         WHERE id = $1 AND guarantee_level <> 'unchecked' AND guarantee_level = $2",
     )
-    .bind(checks_json)
-    .bind(agent_key_state)
-    .bind(at)
     .bind(id)
+    .bind(expected)
     .execute(&state.db.pool)
     .await?;
-    Ok(at)
+    Ok(done.rows_affected() > 0)
 }
 
 /// Everything the server needs to talk to a repository's storage and to open
@@ -424,14 +505,17 @@ pub async fn server_access(state: &AppState, id: &str) -> anyhow::Result<ServerA
 }
 
 /// Swaps the sealed agent key for a new one in one transaction and records
-/// the outcome of the check that approved it.
+/// the outcome of the check that approved it, including the level it measured.
+/// Changes nothing and returns false when the accepted level is no longer
+/// `read_accepted`, as [`update_checks`] does.
 pub async fn replace_agent_creds(
     state: &AppState,
     id: &str,
     key: &AccessKey,
     agent_key_state: &str,
     checks_json: &str,
-) -> anyhow::Result<()> {
+    guarantee: &GuaranteeWrite,
+) -> anyhow::Result<bool> {
     let mut tx = state.db.pool.begin().await?;
     let old = sqlx::query("SELECT agent_creds_secret_id FROM repositories WHERE id = $1")
         .bind(id)
@@ -443,17 +527,26 @@ pub async fn replace_agent_creds(
         .sealer
         .put_secret_on(&mut tx, "repo-agent-creds", &agent_json(key)?)
         .await?;
-    sqlx::query(
+    let done = sqlx::query(
         "UPDATE repositories SET agent_creds_secret_id = $1, agent_key_state = $2, \
-         checks_json = $3, checked_at = $4 WHERE id = $5",
+         checks_json = $3, checked_at = $4, guarantee_level = $5, guarantee_notes_json = $6, \
+         guarantee_accepted = $7, guarantee_checked_at = $4 WHERE id = $8 \
+         AND guarantee_accepted = $9",
     )
     .bind(new)
     .bind(agent_key_state)
     .bind(checks_json)
     .bind(now_ms())
+    .bind(&guarantee.level)
+    .bind(&guarantee.notes_json)
+    .bind(&guarantee.accepted)
     .bind(id)
+    .bind(&guarantee.read_accepted)
     .execute(&mut *tx)
     .await?;
+    if done.rows_affected() == 0 {
+        return Ok(false);
+    }
     if let Some(old) = old {
         sqlx::query("DELETE FROM secrets WHERE id = $1")
             .bind(old)
@@ -461,5 +554,5 @@ pub async fn replace_agent_creds(
             .await?;
     }
     tx.commit().await?;
-    Ok(())
+    Ok(true)
 }

@@ -55,6 +55,10 @@ impl<S: BlobStore> BlobStore for Swapped<S> {
         }
         Ok(out)
     }
+
+    fn publishes_atomically(&self) -> bool {
+        self.inner.publishes_atomically()
+    }
 }
 
 /// A store whose listing still shows objects that are gone. Like the S3
@@ -89,6 +93,10 @@ impl<S: BlobStore> BlobStore for Stale<S> {
                 .cloned(),
         );
         Ok(out)
+    }
+
+    fn publishes_atomically(&self) -> bool {
+        self.inner.publishes_atomically()
     }
 }
 
@@ -234,6 +242,10 @@ impl<S: BlobStore> BlobStore for Greedy<S> {
 
     async fn list(&self, prefix: &str) -> Result<Vec<ListEntry>, BlobError> {
         self.inner.list(prefix).await
+    }
+
+    fn publishes_atomically(&self) -> bool {
+        self.inner.publishes_atomically()
     }
 }
 

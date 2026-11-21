@@ -192,6 +192,7 @@ async fn disaster_db_deleted_restore_from_bucket_only() {
             },
             "server_credentials": creds(&root),
             "agent_credentials": creds(&agent),
+            "accept_weaker_guarantee": true,
         });
 
         let first = TestServer::start(&backend).await;

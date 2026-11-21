@@ -240,7 +240,6 @@ pub async fn fresh_repo(ts: &TestServer) -> (String, LocalFsStore, PathBuf) {
                 backend: "local".to_string(),
                 options: BTreeMap::from([("path".to_string(), root.display().to_string())]),
             },
-            experimental: false,
             format_repo_id,
             config_hash: hash,
             master,

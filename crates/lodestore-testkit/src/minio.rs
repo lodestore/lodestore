@@ -67,7 +67,7 @@ fn mc_asset() -> Asset {
     }
 }
 
-fn cache_dir() -> PathBuf {
+pub(crate) fn cache_dir() -> PathBuf {
     if let Some(target) = std::env::var_os("CARGO_TARGET_DIR") {
         return PathBuf::from(target).join("test-bin");
     }
@@ -77,7 +77,7 @@ fn cache_dir() -> PathBuf {
         .collect()
 }
 
-fn sha256_of(path: &Path) -> std::io::Result<String> {
+pub(crate) fn sha256_of(path: &Path) -> std::io::Result<String> {
     use std::io::Read as _;
     let mut file = std::fs::File::open(path)?;
     let mut hasher = Sha256::new();
@@ -104,6 +104,18 @@ fn verify(path: &Path, asset: &Asset) {
     }
 }
 
+pub(crate) async fn download(url: &str, dest: &Path) {
+    let mut resp = reqwest::get(url)
+        .await
+        .and_then(|r| r.error_for_status())
+        .unwrap_or_else(|e| panic!("download {url}: {e}"));
+    let mut out = std::fs::File::create(dest).expect("create the temporary file");
+    while let Some(chunk) = resp.chunk().await.expect("download the file") {
+        out.write_all(&chunk).expect("write the file");
+    }
+    out.sync_all().expect("sync the file");
+}
+
 async fn fetch(asset: &Asset) -> PathBuf {
     let dir = cache_dir();
     std::fs::create_dir_all(&dir).expect("create the test-bin cache");
@@ -114,30 +126,21 @@ async fn fetch(asset: &Asset) -> PathBuf {
     }
 
     let tmp = dir.join(format!(".{}.{}.tmp", asset.file, std::process::id()));
-    let mut resp = reqwest::get(&asset.url)
-        .await
-        .and_then(|r| r.error_for_status())
-        .unwrap_or_else(|e| panic!("download {}: {e}", asset.url));
-    let mut out = std::fs::File::create(&tmp).expect("create the temporary binary");
-    while let Some(chunk) = resp.chunk().await.expect("download the binary") {
-        out.write_all(&chunk).expect("write the binary");
-    }
-    out.sync_all().expect("sync the binary");
-    drop(out);
+    download(&asset.url, &tmp).await;
     verify(&tmp, asset);
     std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     std::fs::rename(&tmp, &target).expect("move the binary into the cache");
     target
 }
 
-fn free_port() -> u16 {
+pub fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0")
         .and_then(|l| l.local_addr())
         .expect("find a free port")
         .port()
 }
 
-fn random_hex(bytes: usize) -> String {
+pub(crate) fn random_hex(bytes: usize) -> String {
     let mut buf = vec![0u8; bytes];
     getrandom::fill(&mut buf).expect("os randomness");
     data_encoding::HEXLOWER.encode(&buf)
@@ -253,8 +256,9 @@ impl MinioServer {
         }
     }
 
-    /// Runs `mc` against this server; the error carries stdout and stderr.
-    async fn mc(&self, args: &[&str]) -> Result<String, String> {
+    /// Runs `mc` against this server, whose alias is `lode`; the error carries
+    /// stdout and stderr. For tests that change versioning or lifecycle rules.
+    pub async fn mc(&self, args: &[&str]) -> Result<String, String> {
         let out = tokio::process::Command::new(&self.mc)
             .arg("--config-dir")
             .arg(self.mc_config.path())
@@ -456,6 +460,7 @@ mod tests {
             .lines()
             .filter(|l| !l.is_empty())
             .map(|l| l.split_once('=').expect("KEY=VALUE line"))
+            .filter(|(k, _)| k.starts_with("MINIO_") || k.starts_with("MC_"))
             .collect();
         assert_eq!(
             entries.len(),

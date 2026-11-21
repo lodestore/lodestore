@@ -7,6 +7,10 @@ import { PolicyPanel } from "@/components/policy-panel";
 import { AgentKeyBadge } from "@/components/repos/agent-key-badge";
 import { CatalogCard } from "@/components/repos/catalog-card";
 import { ChecksCard } from "@/components/repos/checks/checks-card";
+import {
+	GuaranteeBanner,
+	guaranteeBannerKind,
+} from "@/components/repos/guarantee-banner";
 import { ReclaimCard } from "@/components/repos/reclaim/reclaim-card";
 import { ReplaceAgentKeyDialog } from "@/components/repos/replace-agent-key-dialog";
 import { StorageChecksCard } from "@/components/repos/storage-checks-card";
@@ -71,7 +75,10 @@ function RepositoryPage() {
 	const options = repository?.location.options;
 	const bucket = options?.bucket;
 	const isS3 = repository?.backend === "s3";
-	const keyWarning = repository && agentKeyWarning(repository);
+	const keyWarning =
+		repository &&
+		!guaranteeBannerKind(repository) &&
+		agentKeyWarning(repository);
 
 	const policy = useAgentPolicy(
 		{ bucket: bucket ?? "", prefix: options?.prefix },
@@ -136,6 +143,8 @@ function RepositoryPage() {
 							<AgentKeyBadge state={repository.agent_key_state} />
 						)}
 					</header>
+
+					<GuaranteeBanner repository={repository} />
 
 					{keyWarning && (
 						<Alert className="text-warning">

@@ -92,6 +92,10 @@ impl<S: BlobStore> BlobStore for Hostile<S> {
     async fn ensure_prefixes(&self, prefixes: &[&str]) -> Result<(), BlobError> {
         self.inner.ensure_prefixes(prefixes).await
     }
+
+    fn publishes_atomically(&self) -> bool {
+        self.inner.publishes_atomically()
+    }
 }
 
 impl<S: BlobDelete> BlobDelete for Hostile<S> {
@@ -111,6 +115,10 @@ impl<S: BlobPurge> BlobPurge for Hostile<S> {
         older_than_ms: i64,
     ) -> Result<Vec<String>, BlobError> {
         self.inner.deleted_keys(prefix, older_than_ms).await
+    }
+
+    async fn rewritten_keys(&self, prefix: &str) -> Result<Vec<String>, BlobError> {
+        self.inner.rewritten_keys(prefix).await
     }
 }
 

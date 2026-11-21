@@ -58,8 +58,14 @@ pub async fn plant_shard<S: BlobStore>(
     id
 }
 
-/// Seals again with fresh entropy until the shard id satisfies `accept`, so a
-/// scenario controls where the shard falls in the sorted listing of `index/`.
+/// Attempts before giving up. A predicate like `< lowest` holds for a share of
+/// ids equal to `lowest / 2^256`, about 1/(n+1) for n random real shards; a cap
+/// of 10_000 failed about 3e-4 of runs, this one about 3e-6.
+const PLANT_ATTEMPTS: u32 = 1_000_000;
+
+/// Seals again with fresh entropy until the shard id satisfies
+/// `accept`, so a scenario controls where the shard falls in the sorted
+/// listing of `index/`.
 pub async fn plant_shard_where<S: BlobStore>(
     store: &S,
     keys: &WriteKeys,
@@ -68,7 +74,7 @@ pub async fn plant_shard_where<S: BlobStore>(
     accept: impl Fn(&BlobId) -> bool,
 ) -> BlobId {
     let mut entropy = Entropy::os();
-    for _ in 0..10_000 {
+    for _ in 0..PLANT_ATTEMPTS {
         let (id, bytes) = seal_shard_superseding(
             &keys.k_idx,
             &keys.repo_id,
@@ -84,7 +90,7 @@ pub async fn plant_shard_where<S: BlobStore>(
             return id;
         }
     }
-    panic!("no shard id satisfied the predicate in 10000 attempts");
+    panic!("no shard id satisfied the predicate in {PLANT_ATTEMPTS} attempts");
 }
 
 /// The same record with every blob placed one byte off its real frame: the

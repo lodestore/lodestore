@@ -9,6 +9,7 @@ use lodestore_format::repo::Repository;
 use lodestore_format::store::{BlobStore, LocalFsStore};
 use lodestore_server::repos::db::server_access;
 use serde_json::{Value, json};
+use sqlx::Row;
 
 const PASSWORD: &str = "correct horse battery";
 
@@ -20,6 +21,7 @@ fn local_draft(root: &std::path::Path, name: &str) -> Value {
     json!({
         "name": name,
         "location": { "backend": "local", "options": { "path": root.display().to_string() } },
+        "accept_weaker_guarantee": true,
     })
 }
 
@@ -220,6 +222,105 @@ async fn wizard_local_creates_repository() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wizard_local_folder_needs_consent() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let mut draft = local_draft(&ts.local_repo_root("main"), "main");
+        draft["accept_weaker_guarantee"] = json!(false);
+
+        let refused = api.post("/api/v1/repositories/wizard", &draft).await;
+        assert_eq!(refused.status(), 409, "[{}]", backend.name());
+        let refused = body(refused).await;
+        assert_eq!(refused["code"], "weaker_guarantee");
+        assert_eq!(
+            refused["check"]["guarantee_level"],
+            "host_can_overwrite_or_delete"
+        );
+        assert!(
+            refused["message"]
+                .as_str()
+                .unwrap()
+                .contains("Every host that writes to this folder"),
+            "{refused}"
+        );
+        let list = body(api.get("/api/v1/repositories").await).await;
+        assert_eq!(list.as_array().unwrap().len(), 0);
+
+        draft["accept_weaker_guarantee"] = json!(true);
+        let started = api.post("/api/v1/repositories/wizard", &draft).await;
+        assert_eq!(started.status(), 201);
+        let started = body(started).await;
+        let key = started["recovery_key"].as_str().unwrap();
+        let committed = api
+            .post(
+                &format!(
+                    "/api/v1/repositories/wizard/{}/commit",
+                    started["wizard_id"].as_str().unwrap()
+                ),
+                &json!({ "password": PASSWORD, "recovery_key_last_group": last_group(key) }),
+            )
+            .await;
+        assert_eq!(committed.status(), 201);
+
+        let list = body(api.get("/api/v1/repositories").await).await;
+        assert_eq!(list[0]["guarantee_level"], "host_can_overwrite_or_delete");
+        assert_eq!(
+            list[0]["guarantee_accepted"],
+            "host_can_overwrite_or_delete"
+        );
+        assert!(list[0]["guarantee_checked_at"].is_i64());
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn connect_existing_needs_consent() {
+    for backend in backends() {
+        let first = TestServer::start(&backend).await;
+        first.create_local_repository("existing").await;
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let mut request = json!({
+            "draft": {
+                "name": "existing",
+                "location": {
+                    "backend": "local",
+                    "options": { "path": first.local_repo_root("existing").display().to_string() },
+                },
+            },
+            "password": "test-password",
+            "recovery_key": null,
+        });
+
+        let refused = api.post("/api/v1/repositories/connect", &request).await;
+        assert_eq!(refused.status(), 409, "[{}]", backend.name());
+        let refused = body(refused).await;
+        assert_eq!(refused["code"], "weaker_guarantee");
+        assert!(
+            refused["message"]
+                .as_str()
+                .unwrap()
+                .contains("connect the repository anyway"),
+            "{refused}"
+        );
+        let list = body(api.get("/api/v1/repositories").await).await;
+        assert_eq!(list.as_array().unwrap().len(), 0);
+
+        request["draft"]["accept_weaker_guarantee"] = json!(true);
+        let connected = api.post("/api/v1/repositories/connect", &request).await;
+        assert_eq!(connected.status(), 201, "[{}]", backend.name());
+        let connected = body(connected).await;
+        assert_eq!(
+            connected["guarantee_accepted"],
+            "host_can_overwrite_or_delete"
+        );
+        ts.stop().await;
+        first.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn repository_get_does_not_touch_storage() {
     for backend in backends() {
         let ts = TestServer::start(&backend).await;
@@ -341,6 +442,211 @@ async fn repos_no_secrets_in_responses() {
             )
             .await;
         assert_eq!(upper.status(), 422);
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn repos_refuse_unknown_location_options() {
+    let ts = TestServer::start(&Backend::Sqlite).await;
+    let api = ts.api().await;
+    let keys = json!({ "access_key_id": "AKID", "secret_access_key": "KEYSECRET" });
+    let cases = [
+        (
+            "azblob",
+            json!({ "container": "c", "account_name": "acct", "account_key": "a2V5", "sas_key": "SECRET" }),
+            "sas_key",
+        ),
+        ("gcs", json!({ "bucket": "b", "Token": "SECRET" }), "Token"),
+        (
+            "s3",
+            json!({ "bucket": "b", "secret_access_key": "SECRET" }),
+            "secret_access_key",
+        ),
+        (
+            "sftp",
+            json!({ "endpoint": "h", "user": "u", "key": "k", "host_key": "h", "password": "SECRET" }),
+            "password",
+        ),
+        (
+            "local",
+            json!({ "path": "/srv/repo", "Path": "/x" }),
+            "Path",
+        ),
+    ];
+    for (backend, options, unknown) in cases {
+        let draft = json!({
+            "name": "unknown",
+            "location": { "backend": backend, "options": options },
+            "server_credentials": keys,
+            "agent_credentials": keys,
+            "accept_weaker_guarantee": true,
+        });
+        let connect = json!({ "draft": draft, "password": PASSWORD, "recovery_key": null });
+        for (path, request) in [
+            ("/api/v1/repositories/check", &draft),
+            ("/api/v1/repositories/wizard", &draft),
+            ("/api/v1/repositories/connect", &connect),
+        ] {
+            let response = api.post(path, request).await;
+            assert_eq!(response.status(), 422, "{backend} {path}");
+            let message = body(response).await["message"].as_str().unwrap().to_owned();
+            assert!(
+                message.contains(&format!("`{unknown}`")),
+                "{backend} {path}: {message}"
+            );
+            assert!(!message.contains("SECRET"), "{message}");
+        }
+    }
+    ts.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn migration_0037_carries_the_current_level_as_accepted() {
+    let cases = [
+        ("loc", "local", "unchecked", "host_can_overwrite_or_delete"),
+        ("ver", "s3", "verified", "create_only_enforced"),
+        ("ovr", "s3", "can_overwrite", "host_can_overwrite_or_delete"),
+        ("unc", "s3", "unchecked", "unchecked"),
+    ];
+    for backend in backends() {
+        let mut ts = TestServer::start(&backend).await;
+        let pool = ts.state().db.pool.clone();
+        let name = backend.name();
+        for (repo, kind, state, _) in cases {
+            ts.create_local_repository(repo).await;
+            sqlx::query(
+                "UPDATE repositories SET backend = $1, agent_key_state = $2 WHERE name = $3",
+            )
+            .bind(kind)
+            .bind(state)
+            .bind(repo)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        for statement in [
+            "ALTER TABLE repositories DROP COLUMN guarantee_level",
+            "ALTER TABLE repositories DROP COLUMN guarantee_accepted",
+            "ALTER TABLE repositories DROP COLUMN guarantee_notes_json",
+            "ALTER TABLE repositories DROP COLUMN guarantee_checked_at",
+            "DELETE FROM _sqlx_migrations WHERE version = 37",
+        ] {
+            sqlx::query(statement).execute(&pool).await.unwrap();
+        }
+
+        ts.restart().await;
+        let pool = ts.state().db.pool.clone();
+
+        for (repo, _, _, accepted) in cases {
+            let row = sqlx::query(
+                "SELECT guarantee_level, guarantee_accepted, guarantee_notes_json, \
+                 guarantee_checked_at FROM repositories WHERE name = $1",
+            )
+            .bind(repo)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                row.try_get::<String, _>("guarantee_accepted").unwrap(),
+                accepted,
+                "[{name}] {repo}"
+            );
+            assert_eq!(
+                row.try_get::<String, _>("guarantee_level").unwrap(),
+                "unchecked",
+                "[{name}] {repo}"
+            );
+            assert_eq!(
+                row.try_get::<String, _>("guarantee_notes_json").unwrap(),
+                "[]",
+                "[{name}] {repo}"
+            );
+            assert_eq!(
+                row.try_get::<Option<i64>, _>("guarantee_checked_at")
+                    .unwrap(),
+                None,
+                "[{name}] {repo}"
+            );
+        }
+        let verified = sqlx::query(
+            "SELECT guarantee_level, guarantee_accepted FROM repositories WHERE name = 'ver'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            verified.try_get::<String, _>("guarantee_level").unwrap(),
+            "unchecked"
+        );
+        assert_eq!(
+            verified.try_get::<String, _>("guarantee_accepted").unwrap(),
+            "create_only_enforced"
+        );
+        ts.stop().await;
+    }
+}
+
+async fn accepted(ts: &TestServer, id: &str) -> String {
+    sqlx::query("SELECT guarantee_accepted FROM repositories WHERE id = $1")
+        .bind(id)
+        .fetch_one(&ts.state().db.pool)
+        .await
+        .unwrap()
+        .try_get("guarantee_accepted")
+        .unwrap()
+}
+
+async fn accept_now(ts: &TestServer, id: &str, level: &str) {
+    sqlx::query("UPDATE repositories SET guarantee_accepted = $1 WHERE id = $2")
+        .bind(level)
+        .bind(id)
+        .execute(&ts.state().db.pool)
+        .await
+        .unwrap();
+}
+
+/// A check reads the accepted level, someone accepts another one, and then
+/// the check stores what it decided from the old value: the accept stays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn guarantee_write_never_overwrites_an_accept_in_between() {
+    use lodestore_server::repos::db::{
+        AccessKey, GuaranteeWrite, replace_agent_creds, update_checks,
+    };
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let id = ts.create_local_repository("raced").await;
+        let decided = || GuaranteeWrite {
+            level: "create_only_enforced".into(),
+            notes_json: "[]".into(),
+            accepted: "create_only_enforced".into(),
+            read_accepted: "overwrite_keeps_old_version".into(),
+        };
+
+        accept_now(&ts, &id, "host_can_overwrite_or_delete").await;
+        let stored = update_checks(ts.state(), &id, "[]", "verified", Some(&decided()))
+            .await
+            .unwrap();
+        assert!(!stored, "[{}]", backend.name());
+        assert_eq!(accepted(&ts, &id).await, "host_can_overwrite_or_delete");
+
+        let key = AccessKey {
+            access_key_id: "new".into(),
+            secret_access_key: "new-secret".into(),
+        };
+        let stored = replace_agent_creds(ts.state(), &id, &key, "verified", "[]", &decided())
+            .await
+            .unwrap();
+        assert!(!stored, "[{}]", backend.name());
+        assert_eq!(accepted(&ts, &id).await, "host_can_overwrite_or_delete");
+
+        accept_now(&ts, &id, "overwrite_keeps_old_version").await;
+        assert!(
+            update_checks(ts.state(), &id, "[]", "verified", Some(&decided()))
+                .await
+                .unwrap()
+        );
+        assert_eq!(accepted(&ts, &id).await, "create_only_enforced");
         ts.stop().await;
     }
 }

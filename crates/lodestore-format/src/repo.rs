@@ -492,6 +492,10 @@ mod tests {
             self.log(format!("prefixes {}", prefixes.join(",")));
             self.inner.ensure_prefixes(prefixes).await
         }
+
+        fn publishes_atomically(&self) -> bool {
+            self.inner.publishes_atomically()
+        }
     }
 
     fn seeded(seed: u8) -> Entropy {
@@ -983,6 +987,10 @@ mod tests {
         async fn ensure_prefixes(&self, prefixes: &[&str]) -> std::result::Result<(), BlobError> {
             self.inner.ensure_prefixes(prefixes).await
         }
+
+        fn publishes_atomically(&self) -> bool {
+            self.inner.publishes_atomically()
+        }
     }
 
     #[tokio::test]
@@ -1036,6 +1044,10 @@ mod tests {
         }
         async fn list(&self, prefix: &str) -> std::result::Result<Vec<ListEntry>, BlobError> {
             self.inner.list(prefix).await
+        }
+
+        fn publishes_atomically(&self) -> bool {
+            true
         }
     }
 

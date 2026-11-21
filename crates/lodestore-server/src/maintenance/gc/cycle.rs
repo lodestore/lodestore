@@ -26,7 +26,7 @@ use lodestore_format::locks::{
     new_lock_id, publish_gc_manifest, read_gc_locks, read_writer_locks, writer_done_key,
 };
 use lodestore_format::pack::pack_object_key;
-use lodestore_format::store::{BlobDelete, BlobPurge, BlobStore, Store, put_named};
+use lodestore_format::store::{BlobDelete, BlobError, BlobPurge, BlobStore, Store, put_named};
 use lodestore_format::verify_snapshot::verify_shard;
 use lodestore_policy::{format_duration, format_size};
 use sqlx::Row;
@@ -49,8 +49,10 @@ use crate::state::AppState;
 const PACKS_PREFIX: &str = "packs/";
 const PROGRESS_PERIOD: Duration = Duration::from_secs(1);
 const CLOCK_TOLERANCE_MS: i64 = 5 * 60 * 1000;
+const TMP_MIN_AGE_MS: i64 = 24 * 60 * 60 * 1000;
 const INDEX_PREFIX: &str = "index/";
-const SWEPT_PREFIXES: [&str; 4] = [PACKS_PREFIX, INDEX_PREFIX, "snapshots/", LOCKS_PREFIX];
+const SNAPSHOTS_PREFIX: &str = "snapshots/";
+const SWEPT_PREFIXES: [&str; 4] = [PACKS_PREFIX, INDEX_PREFIX, SNAPSHOTS_PREFIX, LOCKS_PREFIX];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepOutcome {
@@ -519,6 +521,7 @@ async fn mark_and_repack(
         event(state, &cycle.id, "warning", "quarantined", &error).await;
         bail!(error);
     }
+    refuse_foreign_hidden_snapshots(state, cycle, &source).await?;
 
     let started = cycle.started_at.unwrap_or(now_ms);
     let report = build_report(cycle, &surveyed, now_ms, now_ms - started, None);
@@ -526,7 +529,8 @@ async fn mark_and_repack(
     let oversized = surveyed.shards.oversized.len();
     if plan.delete.is_empty() && plan.repack.is_empty() && oversized == 0 {
         let older_than = now_ms.saturating_sub(cycle.settings.pause_ms);
-        let swept = sweep_deleted(&source.store, older_than).await?;
+        let swept = sweep_hidden(state, &cycle.id, &source.store, older_than).await?;
+        sweep_stale_tmp(state, &cycle.id, &source.store, older_than, now_ms).await?;
         let mut report = report;
         report.summary.bytes_freed = swept.bytes_freed;
         apply_locked(state, cycle, &mut report, &swept).await;
@@ -793,6 +797,7 @@ async fn verifying(state: &AppState, cycle: &CycleRow) -> anyhow::Result<StepOut
     if current.is_none_or(|c| c.state != GcState::Verifying) {
         return finished(state, &cycle.id).await;
     }
+    refuse_foreign_hidden_snapshots(state, cycle, &source).await?;
     refuse_old_shard_readers(
         state,
         &cycle.repository_id,
@@ -1022,6 +1027,137 @@ async fn sweep_deleted<S: BlobStore + BlobDelete + BlobPurge>(
     Ok(swept)
 }
 
+/// [`sweep_deleted`], unless the store's `sweeps_delete_markers()` is false:
+/// on B2 an agent key can hide an object, and sweeping the marker would turn
+/// that into a delete. The packs the server itself decides to delete still go
+/// through `purge`, which removes every version.
+async fn sweep_hidden(
+    state: &AppState,
+    cycle_id: &str,
+    store: &Store,
+    older_than: i64,
+) -> anyhow::Result<SweepOutcome> {
+    if store.sweeps_delete_markers() {
+        return sweep_deleted(store, older_than).await;
+    }
+    event(
+        state,
+        cycle_id,
+        "info",
+        "hidden_not_swept",
+        "Hidden objects are not swept on this storage: the server cannot tell who hid them.",
+    )
+    .await;
+    Ok(SweepOutcome::default())
+}
+
+/// Fails the cycle when, on a store whose hide markers are not swept, a
+/// snapshot manifest the server never forgot has a hide marker or an older
+/// version in its history. The survey and the check before the sweep read only
+/// current versions, so a manifest hidden while they list looks forgotten and
+/// the packs that only it uses would be deleted. Such a hide leaves a marker
+/// that an agent key cannot remove, even when the manifest is put back before
+/// this check reads the history, so running it after each listing of the
+/// snapshots catches every hide that listing could have missed.
+async fn refuse_foreign_hidden_snapshots(
+    state: &AppState,
+    cycle: &CycleRow,
+    source: &OpenRepository,
+) -> anyhow::Result<()> {
+    if source.store.sweeps_delete_markers() {
+        return Ok(());
+    }
+    let hidden = source
+        .store
+        .rewritten_keys(SNAPSHOTS_PREFIX)
+        .await
+        .context("listing hidden snapshots")?;
+    if hidden.is_empty() {
+        return Ok(());
+    }
+    let forgotten: HashSet<String> =
+        sqlx::query("SELECT id FROM forgotten_snapshots WHERE repository_id = $1")
+            .bind(&cycle.repository_id)
+            .fetch_all(&state.db.pool)
+            .await?
+            .iter()
+            .map(|row| row.try_get("id"))
+            .collect::<Result<_, _>>()?;
+    let foreign: Vec<&String> = hidden
+        .iter()
+        .filter(|key| {
+            key.strip_prefix(SNAPSHOTS_PREFIX)
+                .is_none_or(|id| !forgotten.contains(id))
+        })
+        .collect();
+    let Some(first) = foreign.first() else {
+        return Ok(());
+    };
+    let message = format!(
+        "The snapshot {}{} hidden or replaced by someone other than the server. Cleanup would delete the data \
+         that only hidden snapshots still use, so nothing was deleted. Remove its delete markers and older \
+         versions to keep the snapshot, or remove the object with all its versions to forget it, then run \
+         cleanup again.",
+        first,
+        match foreign.len() - 1 {
+            0 => " is".to_string(),
+            more => format!(" and {more} more are"),
+        },
+    );
+    event(
+        state,
+        &cycle.id,
+        "error",
+        "foreign_hidden_snapshot",
+        &message,
+    )
+    .await;
+    bail!(message)
+}
+
+/// Removes the leftovers of interrupted uploads from an SFTP store's `tmp/`.
+/// Their times come from the SFTP server's clock, not ours, so only entries
+/// older than the pause and than a day go: a live upload is never that old.
+/// Only an SFTP clock behind ours by more than both makes a live upload look
+/// old; that upload is then removed and its backup fails, while published
+/// files are never touched.
+async fn sweep_stale_tmp(
+    state: &AppState,
+    cycle_id: &str,
+    store: &Store,
+    pause_start_ms: i64,
+    now_ms: i64,
+) -> anyhow::Result<()> {
+    let Store::Sftp(sftp) = store else {
+        return Ok(());
+    };
+    let cutoff = pause_start_ms.min(now_ms.saturating_sub(TMP_MIN_AGE_MS));
+    let mut removed = 0usize;
+    for key in sftp.stale_tmp(cutoff).await? {
+        match store.delete(&key).await {
+            Ok(()) => removed += 1,
+            Err(BlobError::NotFound) => {}
+            Err(BlobError::Denied { message }) => bail!(
+                "The storage refused to remove the abandoned upload {key}: {message}. \
+                 The server's SFTP user must be allowed to delete files in tmp/."
+            ),
+            Err(error) => return Err(error).with_context(|| format!("removing {key}")),
+        }
+    }
+    if removed > 0 {
+        tracing::info!(removed, "removed abandoned uploads from tmp/");
+        event(
+            state,
+            cycle_id,
+            "info",
+            "tmp_swept",
+            &format!("Removed {removed} abandoned upload(s) from tmp/."),
+        )
+        .await;
+    }
+    Ok(())
+}
+
 async fn sweeping(state: &AppState, cycle: &CycleRow, now_ms: i64) -> anyhow::Result<StepOutcome> {
     let gc_id = cycle_gc_id(cycle)?;
     let source = open_repository(state, &cycle.repository_id).await?;
@@ -1069,7 +1205,8 @@ async fn sweeping(state: &AppState, cycle: &CycleRow, now_ms: i64) -> anyhow::Re
     }
 
     let older_than = now_ms.saturating_sub(cycle.settings.pause_ms);
-    swept.merge(sweep_deleted(store, older_than).await?);
+    swept.merge(sweep_hidden(state, &cycle.id, store, older_than).await?);
+    sweep_stale_tmp(state, &cycle.id, store, older_than, now_ms).await?;
     state.readers.invalidate(&cycle.repository_id);
     if let Some(published) = marker.as_ref().and_then(|m| m.modified_ms) {
         let locks = read_writer_locks(store, source.keys.k_idx(), source.keys.repo_id()).await?;

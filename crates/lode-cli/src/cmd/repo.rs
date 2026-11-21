@@ -9,7 +9,10 @@ use lodestore_format::crypto::Entropy;
 use lodestore_format::index::rebuild_index;
 use lodestore_format::keys::RecoveryKey;
 use lodestore_format::repo::{InitOptions, PendingInit};
-use lodestore_format::store::{BlobError, BlobStore};
+use lodestore_format::store::probe::{
+    AgentProbe, CheckId, CheckStatus, GuaranteeLevel, ProbeReport, probe,
+};
+use lodestore_format::store::{BlobError, BlobStore, Store};
 use serde::Serialize;
 
 use crate::cli::{RepoCommand, SecretArgs, UsageError};
@@ -41,11 +44,18 @@ struct RebuildJson<'a> {
 /// Returns the process exit code: 1 when a rebuild had to skip packs.
 pub async fn run(url: &str, args: &SecretArgs, out: Output, command: RepoCommand) -> Result<u8> {
     match command {
-        RepoCommand::Init { recovery_key_file } => {
-            init(url, args, out, recovery_key_file.as_deref())
-                .await
-                .map(|()| 0)
-        }
+        RepoCommand::Init {
+            recovery_key_file,
+            accept_weaker_guarantee,
+        } => init(
+            url,
+            args,
+            out,
+            recovery_key_file.as_deref(),
+            accept_weaker_guarantee,
+        )
+        .await
+        .map(|()| 0),
         RepoCommand::RebuildIndex => rebuild(url, args, out).await,
     }
 }
@@ -98,6 +108,7 @@ async fn init(
     args: &SecretArgs,
     out: Output,
     recovery_key_file: Option<&Path>,
+    accept_weaker_guarantee: bool,
 ) -> Result<()> {
     if out.json && recovery_key_file.is_none() {
         return Err(UsageError(
@@ -112,6 +123,8 @@ async fn init(
     PendingInit::ensure_uninitialized(&store)
         .await
         .with_context(|| format!("cannot initialize repository {url}"))?;
+    require_key_destination(recovery_key_file)?;
+    let report = measure_guarantee(&store, url, accept_weaker_guarantee).await?;
 
     let mut entropy = Entropy::os();
     let pending = PendingInit::generate(&mut entropy, InitOptions::default())?;
@@ -142,10 +155,78 @@ async fn init(
         return Ok(());
     }
     println!("repository initialized at {url}");
+    println!("storage guarantee: {}", report.guarantee.as_str());
+    for weakness in &report.weaknesses {
+        println!("  {}", weakness.message());
+    }
     if let Some(path) = recovery_key_file {
         eprintln!("recovery key saved to {}", path.display());
     }
     Ok(())
+}
+
+const NO_KEY_DESTINATION: &str = "cannot show the recovery key without a terminal: pass --recovery-key-file <PATH> to save it to a new file";
+
+/// Fails before anything is probed or written when the key would have nowhere to go.
+fn require_key_destination(recovery_key_file: Option<&Path>) -> Result<()> {
+    match recovery_key_file {
+        None if !std::io::stdin().is_terminal() => bail!(NO_KEY_DESTINATION),
+        Some(path) if path.symlink_metadata().is_ok() => {
+            bail!("cannot create {}: the file already exists", path.display())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Writes and removes throwaway objects to measure what the credentials in
+/// `store` can do, and refuses a weak or unmeasured result unless the caller
+/// accepted it. Runs before any key or repository file is written.
+async fn measure_guarantee(store: &Store, url: &str, accepted: bool) -> Result<ProbeReport> {
+    let agent = match store {
+        Store::Local(_) => AgentProbe::NotEnforceable,
+        _ => AgentProbe::Store(store),
+    };
+    let mut report = probe(store, agent).await;
+    // The lifecycle rules of the bucket are not read here, so a level that
+    // rests on kept versions is not trusted.
+    if matches!(store, Store::S3(_) | Store::Opendal(_)) {
+        report.lifecycle_unverified();
+    }
+    if let Some(failed) = report
+        .checks
+        .iter()
+        .find(|c| c.id == CheckId::Write && c.status == CheckStatus::Fail)
+    {
+        bail!(
+            "cannot write to {url}: {}",
+            failed.error.as_deref().unwrap_or("the write check failed")
+        );
+    }
+    let weak = matches!(
+        report.guarantee,
+        GuaranteeLevel::HostCanOverwriteOrDelete | GuaranteeLevel::Unchecked
+    );
+    if weak && !accepted {
+        bail!("{}", refusal(&report));
+    }
+    Ok(report)
+}
+
+fn refusal(report: &ProbeReport) -> String {
+    if report.guarantee == GuaranteeLevel::Unchecked {
+        return "the check could not measure what these credentials can do; run init again, or pass --accept-weaker-guarantee".into();
+    }
+    let mut text = String::from(
+        "whoever holds these credentials can overwrite or delete backups in this repository:",
+    );
+    for weakness in &report.weaknesses {
+        text.push_str("\n  ");
+        text.push_str(weakness.message());
+    }
+    text.push_str(
+        "\nnothing was created; pass --accept-weaker-guarantee to create the repository anyway",
+    );
+    text
 }
 
 /// Returns only once the key is saved or acknowledged. The key goes to the new
@@ -159,9 +240,7 @@ pub(crate) fn confirm_recovery_key(
         return write_key_file(path, key);
     }
     if !std::io::stdin().is_terminal() {
-        bail!(
-            "cannot show the recovery key without a terminal: pass --recovery-key-file <PATH> to save it to a new file"
-        );
+        bail!(NO_KEY_DESTINATION);
     }
     let shown = key.encode();
     let mut err = std::io::stderr().lock();

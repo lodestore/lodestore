@@ -72,7 +72,12 @@ fn recovery_key_file_is_0600_and_exclusive() {
 
     let second = tmp.path().join("second");
     lode(&second)
-        .args(["repo", "init", "--recovery-key-file"])
+        .args([
+            "repo",
+            "init",
+            "--accept-weaker-guarantee",
+            "--recovery-key-file",
+        ])
         .arg(&key_file)
         .assert()
         .failure();
@@ -102,7 +107,12 @@ fn recovery_init_failure_leaves_no_key_file() {
 
     let again = tmp.path().join("again.key");
     lode(&repo)
-        .args(["repo", "init", "--recovery-key-file"])
+        .args([
+            "repo",
+            "init",
+            "--accept-weaker-guarantee",
+            "--recovery-key-file",
+        ])
         .arg(&again)
         .assert()
         .failure();
@@ -146,7 +156,12 @@ fn recovery_key_not_on_stdout() {
     let repo = tmp.path().join("repo");
     let key_file = key_file_of(&repo);
     let out = lode(&repo)
-        .args(["repo", "init", "--recovery-key-file"])
+        .args([
+            "repo",
+            "init",
+            "--accept-weaker-guarantee",
+            "--recovery-key-file",
+        ])
         .arg(&key_file)
         .assert()
         .success();

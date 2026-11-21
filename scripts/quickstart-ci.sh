@@ -174,6 +174,7 @@ start_storage() {
   chmod 0755 "$mc_wrapper"
   wait_for "mc alias" "$mc_wrapper" alias set "$alias_name" http://127.0.0.1:9000 "$minio_root_user" "$minio_root_password"
   "$mc_wrapper" mb "$alias_name/$bucket" >/dev/null
+  "$mc_wrapper" version enable "$alias_name/$bucket" >/dev/null
 }
 
 run_server() {
@@ -227,6 +228,10 @@ wizard() {
   repo_id=$(api POST "/api/v1/repositories/wizard/$wizard_id/commit" \
     "$(jq -n --arg p "$repo_password" --arg k "${key##*-}" '{password: $p, recovery_key_last_group: $k}')" | jq -r .id)
   [ -n "$repo_id" ] && [ "$repo_id" != null ] || fail "the wizard did not return a repository id"
+  local level
+  level=$(api GET "/api/v1/repositories/$repo_id" | jq -r .guarantee_level)
+  [ "$level" = overwrite_keeps_old_version ] ||
+    fail "the versioned bucket was measured as '$level', expected overwrite_keeps_old_version"
 }
 
 host_online() {

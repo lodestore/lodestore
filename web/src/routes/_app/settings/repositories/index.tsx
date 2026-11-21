@@ -56,6 +56,12 @@ export const Route = createFileRoute("/_app/settings/repositories/")({
 	component: RepositoriesPage,
 });
 
+function levelBadge(level: string): string | undefined {
+	return level === "create_only_enforced"
+		? undefined
+		: (copy.guarantee.levels as Record<string, string>)[level];
+}
+
 const COLUMNS = [
 	...Object.entries(copy.repos.columns),
 	["checks", copy.checks.repoColumn],
@@ -329,9 +335,9 @@ function RepositoriesPage() {
 														<Badge variant="secondary">
 															{repository.backend}
 														</Badge>
-														{repository.experimental && (
+														{levelBadge(repository.guarantee_level) && (
 															<Badge variant="outline">
-																{copy.backend.experimental}
+																{levelBadge(repository.guarantee_level)}
 															</Badge>
 														)}
 													</div>

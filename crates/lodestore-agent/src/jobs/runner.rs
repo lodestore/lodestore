@@ -100,6 +100,7 @@ async fn open_writer_with(
         options: repository.options,
     };
     let store = location
+        .for_agent()
         .open(creds)
         .map_err(|e| format!("cannot open the repository: {e}"))?;
     Writer::connect_attested(

@@ -73,6 +73,7 @@ login() {
 prepare_bucket() {
   mc alias set "$alias_name" "$minio" "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null
   mc mb --ignore-existing "$alias_name/$bucket" >/dev/null
+  mc version enable "$alias_name/$bucket" >/dev/null
   if mc quota set --help >/dev/null 2>&1; then
     mc quota set "$alias_name/$bucket" --size "$((DEMO_DISK_LIMIT_GB * 6 / 10))GiB" >/dev/null ||
       echo "note: the bucket quota could not be set; the file system limit still applies" >&2

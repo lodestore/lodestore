@@ -59,6 +59,10 @@ impl BlobStore for Refusing<'_> {
     async fn list(&self, prefix: &str) -> Result<Vec<ListEntry>, BlobError> {
         self.inner.list(prefix).await
     }
+
+    fn publishes_atomically(&self) -> bool {
+        true
+    }
 }
 
 async fn refs(fx: &Fx, snapshot: &BlobId) -> Vec<BlobId> {

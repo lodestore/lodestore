@@ -69,7 +69,7 @@ export function StorageChecksCard({
 			});
 
 	return (
-		<Card>
+		<Card id="storage-checks">
 			<CardHeader>
 				<CardTitle>
 					<h2>{copy.repos.storageChecks}</h2>

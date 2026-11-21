@@ -263,9 +263,56 @@ export const copy = {
 	backend: {
 		s3: "S3-compatible storage such as AWS S3, MinIO or Ceph.",
 		local: "Local folder. A path both the server and the agent can see.",
-		experimental: "Experimental",
 		twoKeys:
 			"Two keys. The server key has full access and manages the repository. The agent key can only write, so a compromised host cannot delete backups.",
+	},
+	guarantee: {
+		levels: {
+			create_only_enforced: "Create-only enforced",
+			overwrite_keeps_old_version: "Overwrite keeps old version",
+			host_can_overwrite_or_delete: "Host can overwrite or delete",
+			unchecked: "Unchecked",
+		},
+		notes: {
+			agent_can_delete: "A host can delete backups.",
+			agent_can_overwrite:
+				"A host can replace backups, and the storage keeps no earlier version.",
+			agent_can_delete_versions:
+				"A host can delete the earlier versions the storage keeps.",
+			not_enforceable:
+				"Every host that writes to this folder can change or delete its backups.",
+			no_atomic_publish:
+				"An interrupted upload stays in the storage as a broken file.",
+			held_handle_rewrite:
+				"A host can keep a file open after publishing it and change it later.",
+			agent_can_write_server_files: "A host can change files the server wrote.",
+			no_durable_fsync:
+				"The server does not confirm that uploads reached its disk.",
+			shared_credentials:
+				"Hosts use the server's own credentials for this storage, so they can do anything the server can.",
+			lifecycle_deletes:
+				"A lifecycle rule on the bucket deletes objects or their earlier versions.",
+			lifecycle_unverified:
+				"The bucket's lifecycle rules could not be read; check that none deletes objects or earlier versions.",
+		},
+		unknownNote: "The check found another limit.",
+		levelLine: (level: string) => `Guarantee level: ${level}.`,
+		consentLabel: "I understand and want to continue",
+		weakTitle: "A host could change or delete backups here",
+		uncheckedTitle: "Lodestore could not measure what a host can do",
+		uncheckedBody:
+			"The check could not tell whether the agent key can change or delete backups, so the level is unknown.",
+		checkAgain: "Check again",
+		notesTitle: "Notes on this storage",
+		downgradeTitle: "This storage protects backups less than you accepted",
+		downgradeBody: (accepted: string, measured: string) =>
+			`Accepted: ${accepted}. Measured by the last check: ${measured}.`,
+		acceptNewLevel: "Accept the new level",
+		accepting: "Accepting…",
+		acceptFailed: "accept the new level",
+		levelChanged:
+			"The level changed while this page was open. Review the new level before you accept it.",
+		seeChecks: "See storage checks",
 	},
 	policy: {
 		title: "Policy for the agent key",

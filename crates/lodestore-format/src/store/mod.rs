@@ -5,6 +5,8 @@ pub mod policy;
 pub mod probe;
 pub mod purge;
 pub mod s3;
+pub mod sftp;
+mod url;
 
 use std::fmt;
 use std::future::Future;
@@ -19,7 +21,8 @@ pub use local::LocalFsStore;
 pub use location::RepoLocation;
 pub use opendal::OpendalStore;
 pub use purge::{BlobPurge, PurgeOutcome, RetainedVersion};
-pub use s3::{S3Options, S3Store, S3Url, StaticCredentials};
+pub use s3::{S3Options, S3Provider, S3Store, S3Url, StaticCredentials};
+pub use sftp::SftpStore;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BlobError {
@@ -31,6 +34,8 @@ pub enum BlobError {
     Denied { message: String },
     #[error("backend error: {message}")]
     Backend { message: String, temporary: bool },
+    #[error("the SFTP server's host key changed: pinned {pinned}, offered {offered}")]
+    HostKeyMismatch { pinned: String, offered: String },
 }
 
 impl BlobError {
@@ -98,6 +103,25 @@ pub trait BlobStore: Send + Sync {
     ) -> impl Future<Output = std::result::Result<(), BlobError>> + Send {
         async { Ok(()) }
     }
+
+    /// The size of the object, `None` when it is not there. The default asks
+    /// the listing for the exact key; a store with a cheaper stat overrides it.
+    fn object_size(
+        &self,
+        key: &str,
+    ) -> impl Future<Output = std::result::Result<Option<u64>, BlobError>> + Send {
+        async move {
+            let listed = self.list(key).await?;
+            Ok(listed.into_iter().find(|e| e.key == key).map(|e| e.size))
+        }
+    }
+
+    /// Whether an object becomes visible only once it is complete. A store
+    /// that can leave a torn object under the final name (a direct SFTP write)
+    /// returns `false`, and then an existing name is trusted only after its
+    /// bytes are compared. No default: a wrapper that forgot to forward the
+    /// answer would trust a torn object on size alone.
+    fn publishes_atomically(&self) -> bool;
 }
 
 /// Deletion, kept apart from [`BlobStore`] so that code which only needs to
@@ -108,11 +132,61 @@ pub trait BlobDelete: Send + Sync {
 }
 
 /// Writes an object whose name is derived from its bytes. `AlreadyExists`
-/// then means the identical object is already there, which is success.
+/// counts as success only when the object under the name is the one written;
+/// otherwise the name is burned and the caller must pick another.
 pub async fn put_named<S: BlobStore>(store: &S, key: &str, bytes: Vec<u8>) -> Result<()> {
-    match store.put_if_absent(key, Bytes::from(bytes)).await {
-        Ok(()) | Err(BlobError::AlreadyExists) => Ok(()),
+    put_named_bytes(store, key, &Bytes::from(bytes)).await
+}
+
+/// [`put_named`] for bytes the caller keeps, so that a burned name can be
+/// retried without a copy.
+pub async fn put_named_bytes<S: BlobStore>(store: &S, key: &str, bytes: &Bytes) -> Result<()> {
+    match store.put_if_absent(key, bytes.clone()).await {
+        Ok(()) => Ok(()),
+        Err(BlobError::AlreadyExists) => match store.object_size(key).await {
+            Ok(Some(size)) => confirm_present(store, key, bytes, size).await,
+            Ok(None) => Err(BlobError::backend(format!(
+                "{key} reported as existing, then not found"
+            ))
+            .into()),
+            // An atomic store never shows an incomplete object, and a
+            // write-only key may not stat what it just created.
+            Err(BlobError::Denied { .. }) if store.publishes_atomically() => Ok(()),
+            Err(e) => Err(e.into()),
+        },
+        // A key that may not overwrite can be refused instead of told the
+        // object exists; that is a presence only if the object is seen.
+        Err(denied @ BlobError::Denied { .. }) => match store.object_size(key).await {
+            Ok(Some(size)) => confirm_present(store, key, bytes, size).await,
+            _ => Err(denied.into()),
+        },
         Err(e) => Err(e.into()),
+    }
+}
+
+/// An object of `size` bytes holds the name. It is the one written when the
+/// size agrees and, on a store that can leave a torn object under the final
+/// name, when the bytes agree too: a direct write arrives out of order, so a
+/// full-size object can still have a hole. The read is capped at one byte
+/// past what was written.
+async fn confirm_present<S: BlobStore>(
+    store: &S,
+    key: &str,
+    bytes: &Bytes,
+    size: u64,
+) -> Result<()> {
+    let len = bytes.len() as u64;
+    if size != len {
+        return Err(Error::NameBurned { key: key.into() });
+    }
+    if store.publishes_atomically() {
+        return Ok(());
+    }
+    let seen = store.get_range(key, 0..len + 1).await?;
+    if seen == *bytes {
+        Ok(())
+    } else {
+        Err(Error::NameBurned { key: key.into() })
     }
 }
 
@@ -181,6 +255,17 @@ impl<T: BlobStore> BlobStore for &T {
     ) -> impl Future<Output = std::result::Result<(), BlobError>> + Send {
         (**self).ensure_prefixes(prefixes)
     }
+
+    fn object_size(
+        &self,
+        key: &str,
+    ) -> impl Future<Output = std::result::Result<Option<u64>, BlobError>> + Send {
+        (**self).object_size(key)
+    }
+
+    fn publishes_atomically(&self) -> bool {
+        (**self).publishes_atomically()
+    }
 }
 
 impl<T: BlobDelete> BlobDelete for &T {
@@ -193,13 +278,25 @@ pub enum Store {
     Local(LocalFsStore),
     S3(S3Store),
     Opendal(OpendalStore),
+    Sftp(SftpStore),
 }
 
 impl Store {
     pub fn conditional_write_supported(&self) -> bool {
         match self {
-            Store::Local(_) | Store::S3(_) => true,
+            Store::Local(_) => true,
+            Store::S3(s) => s.conditional_write_supported(),
             Store::Opendal(s) => s.conditional_write_supported(),
+            Store::Sftp(_) => true,
+        }
+    }
+
+    /// Whether a delete marker may be swept as a removal. False on B2, where a
+    /// host's hide marker is the only trace of its delete.
+    pub fn sweeps_delete_markers(&self) -> bool {
+        match self {
+            Store::S3(s) => s.sweeps_delete_markers(),
+            Store::Local(_) | Store::Opendal(_) | Store::Sftp(_) => true,
         }
     }
 
@@ -215,6 +312,7 @@ impl Store {
             Store::Local(_) => Ok(None),
             Store::S3(s) => s.presign_read(key, ttl).await,
             Store::Opendal(s) => s.presign_read(key, ttl).await,
+            Store::Sftp(_) => Ok(None),
         }
     }
 
@@ -225,6 +323,54 @@ impl Store {
             Store::Local(s) => s.modified_ms(key).await,
             Store::S3(s) => s.modified_ms(key).await,
             Store::Opendal(s) => s.modified_ms(key).await,
+            Store::Sftp(s) => s.modified_ms(key).await,
+        }
+    }
+
+    fn probe_op(&self, key: &str) -> std::result::Result<Option<&::opendal::Operator>, BlobError> {
+        if !probe::is_probe_key(key) {
+            return Err(BlobError::backend(format!("{key:?} is not a probe object")));
+        }
+        Ok(match self {
+            Store::Local(_) => None,
+            Store::S3(s) => Some(&s.op),
+            Store::Opendal(s) => Some(&s.op),
+            Store::Sftp(_) => None,
+        })
+    }
+
+    /// The versions of a probe object as (id, size); `None` when the store
+    /// keeps no versions.
+    async fn versions_for_probe(
+        &self,
+        key: &str,
+    ) -> std::result::Result<Option<Vec<(String, u64)>>, BlobError> {
+        match self.probe_op(key)? {
+            Some(op) => purge::versions_op(op, key).await,
+            None => Ok(None),
+        }
+    }
+
+    async fn read_version_for_probe(
+        &self,
+        key: &str,
+        version: &str,
+        size: u64,
+    ) -> std::result::Result<Bytes, BlobError> {
+        match self.probe_op(key)? {
+            Some(op) => purge::read_version_op(op, key, version, size).await,
+            None => Err(BlobError::backend("not supported on a local folder")),
+        }
+    }
+
+    async fn delete_version_for_probe(
+        &self,
+        key: &str,
+        version: &str,
+    ) -> std::result::Result<(), BlobError> {
+        match self.probe_op(key)? {
+            Some(op) => purge::delete_version_op(op, key, version).await,
+            None => Err(BlobError::backend("not supported on a local folder")),
         }
     }
 
@@ -233,10 +379,14 @@ impl Store {
         key: &str,
         data: Bytes,
     ) -> std::result::Result<(), BlobError> {
+        if !probe::is_probe_key(key) {
+            return Err(BlobError::backend(format!("{key:?} is not a probe object")));
+        }
         match self {
             Store::Local(_) => Err(BlobError::backend("not supported on a local folder")),
             Store::S3(s) => s.overwrite_for_probe(key, data).await,
             Store::Opendal(s) => s.overwrite_for_probe(key, data).await,
+            Store::Sftp(s) => s.overwrite_for_probe(key, data).await,
         }
     }
 }
@@ -247,6 +397,7 @@ impl BlobStore for Store {
             Store::Local(s) => s.put_if_absent(key, data).await,
             Store::S3(s) => s.put_if_absent(key, data).await,
             Store::Opendal(s) => s.put_if_absent(key, data).await,
+            Store::Sftp(s) => s.put_if_absent(key, data).await,
         }
     }
 
@@ -255,6 +406,7 @@ impl BlobStore for Store {
             Store::Local(s) => s.get(key).await,
             Store::S3(s) => s.get(key).await,
             Store::Opendal(s) => s.get(key).await,
+            Store::Sftp(s) => s.get(key).await,
         }
     }
 
@@ -267,6 +419,7 @@ impl BlobStore for Store {
             Store::Local(s) => s.get_range(key, range).await,
             Store::S3(s) => s.get_range(key, range).await,
             Store::Opendal(s) => s.get_range(key, range).await,
+            Store::Sftp(s) => s.get_range(key, range).await,
         }
     }
 
@@ -275,6 +428,7 @@ impl BlobStore for Store {
             Store::Local(s) => s.list(prefix).await,
             Store::S3(s) => s.list(prefix).await,
             Store::Opendal(s) => s.list(prefix).await,
+            Store::Sftp(s) => s.list(prefix).await,
         }
     }
 
@@ -283,6 +437,25 @@ impl BlobStore for Store {
             Store::Local(s) => s.ensure_prefixes(prefixes).await,
             Store::S3(s) => s.ensure_prefixes(prefixes).await,
             Store::Opendal(s) => s.ensure_prefixes(prefixes).await,
+            Store::Sftp(s) => s.ensure_prefixes(prefixes).await,
+        }
+    }
+
+    async fn object_size(&self, key: &str) -> std::result::Result<Option<u64>, BlobError> {
+        match self {
+            Store::Local(s) => s.object_size(key).await,
+            Store::S3(s) => s.object_size(key).await,
+            Store::Opendal(s) => s.object_size(key).await,
+            Store::Sftp(s) => s.object_size(key).await,
+        }
+    }
+
+    fn publishes_atomically(&self) -> bool {
+        match self {
+            Store::Local(s) => s.publishes_atomically(),
+            Store::S3(s) => s.publishes_atomically(),
+            Store::Opendal(s) => s.publishes_atomically(),
+            Store::Sftp(s) => s.publishes_atomically(),
         }
     }
 }
@@ -293,18 +466,25 @@ impl BlobDelete for Store {
             Store::Local(s) => s.delete(key).await,
             Store::S3(s) => s.delete(key).await,
             Store::Opendal(s) => s.delete(key).await,
+            Store::Sftp(s) => s.delete(key).await,
         }
     }
 }
 
 /// Opens a repository location: a folder path, absolute or relative, or
-/// `s3:http(s)://host[:port]/bucket[/prefix]`.
+/// `s3:http(s)://host[:port]/bucket[/prefix]`, `azblob://`, `gcs://` or `sftp://`.
 pub fn open_url(url: &str) -> Result<Store> {
     if url.is_empty() {
         return Err(Error::InvalidInput("repository location is empty".into()));
     }
     if url.starts_with("s3:") {
         return Ok(Store::S3(S3Store::open(url, None)?));
+    }
+    if ["azblob://", "gcs://", "sftp://"]
+        .iter()
+        .any(|scheme| url.starts_with(scheme))
+    {
+        return RepoLocation::from_url(url)?.open(None);
     }
     let root = std::path::absolute(url)?;
     Ok(Store::Local(LocalFsStore::new(root)))
@@ -313,6 +493,33 @@ pub fn open_url(url: &str) -> Result<Store> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sweeps_delete_markers_is_false_only_for_b2() {
+        let s3 = |provider| {
+            Store::S3(
+                S3Store::with_options(
+                    &S3Options {
+                        endpoint: Some("http://127.0.0.1:9".into()),
+                        bucket: "b".into(),
+                        prefix: String::new(),
+                        region: "us-east-1".into(),
+                        virtual_host_style: false,
+                        provider,
+                    },
+                    None,
+                )
+                .unwrap(),
+            )
+        };
+        assert!(s3(S3Provider::Default).sweeps_delete_markers());
+        assert!(s3(S3Provider::Default).conditional_write_supported());
+        assert!(!s3(S3Provider::B2).sweeps_delete_markers());
+        assert!(!s3(S3Provider::B2).conditional_write_supported());
+        let dir = tempfile::tempdir().unwrap();
+        let local = Store::Local(LocalFsStore::new(dir.path().to_path_buf()));
+        assert!(local.sweeps_delete_markers());
+    }
 
     struct Generous(Bytes);
 
@@ -328,6 +535,10 @@ mod tests {
         }
         async fn list(&self, _: &str) -> std::result::Result<Vec<ListEntry>, BlobError> {
             Ok(Vec::new())
+        }
+
+        fn publishes_atomically(&self) -> bool {
+            true
         }
     }
 
@@ -349,6 +560,10 @@ mod tests {
         }
         async fn list(&self, p: &str) -> std::result::Result<Vec<ListEntry>, BlobError> {
             self.0.list(p).await
+        }
+
+        fn publishes_atomically(&self) -> bool {
+            true
         }
     }
 

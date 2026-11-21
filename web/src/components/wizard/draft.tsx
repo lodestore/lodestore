@@ -4,6 +4,7 @@ import {
 	type CheckRow,
 	toCheckRows,
 } from "@/components/capability-checklist";
+import { UNCHECKED_LEVEL, WEAK_LEVEL } from "@/components/guarantee-notes";
 
 export const STEPS = ["storage", "access", "key", "host"] as const;
 export type Step = (typeof STEPS)[number];
@@ -28,6 +29,7 @@ export type Draft = {
 	path: string;
 	serverKey: KeyPair;
 	agentKey: KeyPair;
+	acceptWeakerGuarantee: boolean;
 };
 
 const emptyKey = (): KeyPair => ({ id: "", secret: "" });
@@ -47,6 +49,7 @@ export function newDraft(): Draft {
 		path: "",
 		serverKey: emptyKey(),
 		agentKey: emptyKey(),
+		acceptWeakerGuarantee: false,
 	};
 }
 
@@ -63,6 +66,9 @@ export function resetBackend(draft: Draft, backend: Backend): Draft {
 }
 
 export function toApiDraft(draft: Draft): RepositoryDraft {
+	const accept = draft.acceptWeakerGuarantee
+		? { accept_weaker_guarantee: true }
+		: {};
 	const options: Record<string, string> = {};
 	const put = (key: string, value: string) => {
 		const trimmed = value.trim();
@@ -76,6 +82,7 @@ export function toApiDraft(draft: Draft): RepositoryDraft {
 		if (draft.pathStyle !== null) options.path_style = String(draft.pathStyle);
 		return {
 			name: draft.name,
+			...accept,
 			location: { backend: "s3", options },
 			server_credentials: {
 				access_key_id: draft.serverKey.id.trim(),
@@ -88,7 +95,11 @@ export function toApiDraft(draft: Draft): RepositoryDraft {
 		};
 	}
 	put("path", draft.path);
-	return { name: draft.name, location: { backend: "local", options } };
+	return {
+		name: draft.name,
+		...accept,
+		location: { backend: "local", options },
+	};
 }
 
 export function accessReady(draft: Draft) {
@@ -99,6 +110,13 @@ export function accessReady(draft: Draft) {
 		draft.serverKey.secret !== "" &&
 		draft.agentKey.id.trim() !== "" &&
 		draft.agentKey.secret !== ""
+	);
+}
+
+export function needsConsent(result: CheckResult) {
+	return (
+		result.guarantee_level === WEAK_LEVEL ||
+		result.guarantee_level === UNCHECKED_LEVEL
 	);
 }
 

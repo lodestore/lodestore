@@ -14,6 +14,7 @@ fn snap(id: &str, received_at_ms: i64) -> Candidate {
     Candidate {
         id: id.to_string(),
         received_at_ms,
+        discovered_at_ms: 0,
         suspicious: false,
         incomplete: false,
     }
@@ -289,6 +290,25 @@ fn retention_tie_break_by_id() {
     assert_eq!(ids, ["a", "b", "c"]);
     assert_eq!(held_by(&forward, Rule::Last), ["a"]);
     assert_eq!(kept(&forward), ["a", "b"]);
+}
+
+#[test]
+fn retention_same_storage_second_keeps_the_later_catalogued() {
+    let at = ms("2026-06-01T00:00:00Z");
+    let run = |id: &str, nth: i64| Candidate {
+        discovered_at_ms: at + nth * 300,
+        ..snap(id, at)
+    };
+    let snaps = vec![run("a", 1), run("c", 2), run("b", 3)];
+    let rules = Retention {
+        keep_last: Some(2),
+        ..Retention::default()
+    };
+    let out = evaluate(&rules, &utc(), &snaps);
+    let ids: Vec<_> = out.iter().map(|d| d.id.as_str()).collect();
+    assert_eq!(ids, ["b", "c", "a"]);
+    assert_eq!(held_by(&out, Rule::Last), ["b", "c"]);
+    assert_eq!(kept(&out), ["b", "c"]);
 }
 
 #[test]
