@@ -155,6 +155,12 @@ export const overview = {
 				`${plural(count, "snapshot")} in ${repository} cannot be read; cleanup is stopped`,
 			repositoryUnavailable: (repository: string) =>
 				`Repository ${repository} is unavailable`,
+			guaranteeDowngraded: (repository: string) =>
+				`Storage protection weakened for ${repository}`,
+			guaranteeUnchecked: (repository: string) =>
+				`Storage protection of ${repository} could not be checked`,
+			hostKeyChanged: (repository: string) =>
+				`SFTP host key changed for ${repository}`,
 			agentSessionConflict: (host: string) =>
 				`Two live agent sessions for ${host}`,
 			agentCertificateRejected: (host: string) =>
