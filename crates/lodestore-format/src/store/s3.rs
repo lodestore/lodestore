@@ -638,4 +638,46 @@ mod tests {
             );
         }
     }
+
+    #[tokio::test]
+    async fn b2_put_surfaces_a_failed_stat_and_writes_nothing() {
+        use lodestore_testkit::fault_proxy::{FaultAction, FaultPlan, FaultProxy, FaultRule};
+
+        let rule = |method| FaultRule {
+            method,
+            key_prefix: String::new(),
+            action: FaultAction::NotImplemented,
+            times: u32::MAX,
+        };
+        let proxy = FaultProxy::start(
+            "http://127.0.0.1:1",
+            FaultPlan::none().with(rule("HEAD")).with(rule("PUT")),
+        )
+        .await;
+        let store = S3Store::with_options(
+            &S3Options {
+                endpoint: Some(proxy.endpoint()),
+                bucket: "b".into(),
+                prefix: String::new(),
+                region: "us-east-1".into(),
+                virtual_host_style: false,
+                provider: S3Provider::B2,
+            },
+            Some(StaticCredentials {
+                access_key_id: "AKIDEXAMPLE".into(),
+                secret_access_key: "SECRETEXAMPLE".into(),
+            }),
+        )
+        .unwrap();
+        assert!(!store.conditional_write_supported());
+
+        let err = store
+            .put_if_absent("data/k", Bytes::from_static(b"x"))
+            .await
+            .unwrap_err();
+        assert!(!matches!(err, BlobError::AlreadyExists), "{err}");
+        let counters = proxy.counters();
+        assert!(counters.accepted("HEAD", "data") >= 1);
+        assert_eq!(counters.accepted("PUT", "data"), 0);
+    }
 }

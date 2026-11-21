@@ -370,4 +370,12 @@ mod tests {
         assert!(!is_lock_refusal(&BlobError::backend("connection reset")));
         assert!(!is_lock_refusal(&BlobError::NotFound));
     }
+
+    #[tokio::test]
+    async fn read_version_reads_a_version_at_the_size_limit() {
+        let op = Operator::via_iter("memory", std::iter::empty::<(String, String)>()).unwrap();
+        if let Err(err) = read_version_op(&op, "k", "v1", MAX_PROBE_READ).await {
+            assert!(!err.to_string().contains("too large"), "{err}");
+        }
+    }
 }

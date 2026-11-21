@@ -455,4 +455,18 @@ mod tests {
                 .is_empty()
         );
     }
+
+    #[tokio::test]
+    async fn object_size_tells_missing_from_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalFsStore::new(dir.path().join("repo"));
+        store
+            .put_if_absent("packs/ab/object", Bytes::from_static(b"first"))
+            .await
+            .unwrap();
+
+        assert_eq!(store.object_size("packs/ab/object").await.unwrap(), Some(5));
+        assert_eq!(store.object_size("packs/ab/missing").await.unwrap(), None);
+        assert!(store.object_size("packs/ab/object/child").await.is_err());
+    }
 }

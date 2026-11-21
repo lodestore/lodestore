@@ -782,4 +782,17 @@ mod tests {
         assert!(matches!(loc.open(None), Ok(Store::Local(_))));
         assert_eq!(loc.display(), "/tmp/lode-repo");
     }
+
+    #[test]
+    fn gcs_agent_signs_with_any_one_credential() {
+        for (key, value) in [
+            ("token", "t"),
+            ("skip_signature", "true"),
+            ("allow_anonymous", "true"),
+            ("credential", "c2E="),
+        ] {
+            let loc = RepoLocation::new("gcs", [("bucket", "b"), (key, value)]);
+            assert_eq!(loc.agent_credentials_problem(), None, "{key}");
+        }
+    }
 }

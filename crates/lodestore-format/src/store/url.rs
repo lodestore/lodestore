@@ -173,6 +173,8 @@ mod tests {
             "sftp://u@h/a/../b",
             "sftp://u@h/x\0",
             "sftp://u@h/x?key=1",
+            "sftp://u@:22/x",
+            "sftp://u@a@b/x",
             "s3://bucket",
             "/local/path",
             "",
