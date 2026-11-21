@@ -330,21 +330,23 @@ async fn commit_wizard(
     Ok((StatusCode::CREATED, Json(summary)))
 }
 
-struct Registration {
-    name: String,
-    opened: Opened,
-    master: MasterKey,
-    format_repo_id: [u8; 16],
-    config_hash: [u8; 32],
-    server_secret: Zeroizing<Vec<u8>>,
-    checks: CheckResult,
+/// Also the entry point of the agent location differential test.
+pub struct Registration {
+    pub name: String,
+    pub opened: Opened,
+    pub master: MasterKey,
+    pub format_repo_id: [u8; 16],
+    pub config_hash: [u8; 32],
+    pub server_secret: Zeroizing<Vec<u8>>,
+    pub checks: CheckResult,
 }
 
-async fn register(state: &AppState, r: Registration) -> Result<RepositorySummary, ApiError> {
+pub async fn register(state: &AppState, r: Registration) -> Result<RepositorySummary, ApiError> {
     let Opened {
         location,
         server_creds,
         agent_creds,
+        agent_options,
         ..
     } = r.opened;
     let (public, secret_options) = split_secret_options(&location);
@@ -369,6 +371,7 @@ async fn register(state: &AppState, r: Registration) -> Result<RepositorySummary
         },
         RepoExtras {
             secret_options,
+            agent_options,
             checks_json: Some(checks_json),
             agent_key_state: Some(r.checks.agent_key_state),
             checked_at: Some(now_ms()),

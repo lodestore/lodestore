@@ -103,6 +103,12 @@ pub struct RepositoryDraft {
     pub location: LocationDto,
     pub server_credentials: Option<Credentials>,
     pub agent_credentials: Option<Credentials>,
+    /// Secret options of the agents' own access to the storage: `sas_token`
+    /// for azblob, `credential` for gcs, `user` and `key` for sftp. Sealed on
+    /// their own and never returned.
+    #[serde(default)]
+    #[schema(write_only)]
+    pub agent_options: Option<BTreeMap<String, String>>,
     /// Create the repository even when the storage does not stop a host from
     /// changing or deleting backups, or when the check could not measure it.
     #[serde(default)]

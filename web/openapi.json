@@ -13036,6 +13036,21 @@
               }
             ]
           },
+          "agent_options": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Secret options of the agents' own access to the storage: `sas_token`\nfor azblob, `credential` for gcs, `user` and `key` for sftp. Sealed on\ntheir own and never returned.",
+            "additionalProperties": {
+              "type": "string",
+              "writeOnly": true
+            },
+            "propertyNames": {
+              "type": "string",
+              "writeOnly": true
+            }
+          },
           "location": {
             "$ref": "#/components/schemas/LocationDto"
           },
