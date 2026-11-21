@@ -355,50 +355,116 @@ pub struct GuaranteeWrite {
     pub read_accepted: String,
 }
 
-/// Stores a check. With a level, nothing is written and false is returned
-/// when the accepted level is no longer `read_accepted`: someone accepted a
-/// level meanwhile, and the caller decides again from the new value.
+/// One check to store. `generation` is the access generation read together
+/// with the credentials the probe used; `at_ms` is when the probe started.
+pub struct CheckWrite<'a> {
+    pub generation: i64,
+    pub at_ms: i64,
+    pub checks_json: &'a str,
+    pub agent_key_state: &'a str,
+    pub guarantee: Option<&'a GuaranteeWrite>,
+    pub daily: bool,
+}
+
+/// What [`update_checks`] did with a check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stored {
+    Written,
+    /// The accepted level is no longer the one the write was decided from.
+    AcceptedChanged,
+    Stale,
+    Missing,
+}
+
+/// Stores a check. With a level, nothing is written when the accepted level
+/// is no longer `read_accepted`: someone accepted a level meanwhile, and the
+/// caller decides again from the new value.
 pub async fn update_checks(
     state: &AppState,
     id: &str,
-    checks_json: &str,
-    agent_key_state: &str,
-    guarantee: Option<&GuaranteeWrite>,
-) -> anyhow::Result<bool> {
-    let at = now_ms();
-    match guarantee {
-        None => {
-            sqlx::query(
-                "UPDATE repositories SET checks_json = $1, agent_key_state = $2, checked_at = $3 \
-                 WHERE id = $4",
+    write: &CheckWrite<'_>,
+) -> anyhow::Result<Stored> {
+    let daily = i64::from(write.daily);
+    let done =
+        match write.guarantee {
+            None => sqlx::query(
+                "UPDATE repositories SET checks_json = $1, agent_key_state = $2, checked_at = $3, \
+                 guarantee_tick_at = CASE WHEN $5 = 1 THEN $3 ELSE guarantee_tick_at END, \
+                 guarantee_unchecked_runs = CASE WHEN $5 = 1 \
+                 THEN guarantee_unchecked_runs + 1 ELSE guarantee_unchecked_runs END, \
+                 guarantee_failed_runs = 0 WHERE id = $4 AND access_generation = $6 \
+                 AND (checked_at IS NULL OR checked_at <= $3)",
             )
-            .bind(checks_json)
-            .bind(agent_key_state)
-            .bind(at)
+            .bind(write.checks_json)
+            .bind(write.agent_key_state)
+            .bind(write.at_ms)
             .bind(id)
+            .bind(daily)
+            .bind(write.generation)
             .execute(&state.db.pool)
-            .await?;
-        }
-        Some(g) => {
-            let done = sqlx::query(
+            .await?,
+            Some(g) => sqlx::query(
                 "UPDATE repositories SET checks_json = $1, agent_key_state = $2, checked_at = $3, \
                  guarantee_level = $4, guarantee_notes_json = $5, guarantee_accepted = $6, \
-                 guarantee_checked_at = $3 WHERE id = $7 AND guarantee_accepted = $8",
+                 guarantee_checked_at = $3, \
+                 guarantee_tick_at = CASE WHEN $9 = 1 THEN $3 ELSE guarantee_tick_at END, \
+                 guarantee_unchecked_runs = 0, guarantee_failed_runs = 0 \
+                 WHERE id = $7 AND guarantee_accepted = $8 AND access_generation = $10 \
+                 AND (checked_at IS NULL OR checked_at <= $3)",
             )
-            .bind(checks_json)
-            .bind(agent_key_state)
-            .bind(at)
+            .bind(write.checks_json)
+            .bind(write.agent_key_state)
+            .bind(write.at_ms)
             .bind(&g.level)
             .bind(&g.notes_json)
             .bind(&g.accepted)
             .bind(id)
             .bind(&g.read_accepted)
+            .bind(daily)
+            .bind(write.generation)
             .execute(&state.db.pool)
-            .await?;
-            return Ok(done.rows_affected() > 0);
-        }
+            .await?,
+        };
+    if done.rows_affected() > 0 {
+        return Ok(Stored::Written);
     }
-    Ok(true)
+    let row = sqlx::query("SELECT access_generation, checked_at FROM repositories WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&state.db.pool)
+        .await?;
+    Ok(match row {
+        None => Stored::Missing,
+        Some(row) => {
+            let checked_at: Option<i64> = row.try_get("checked_at")?;
+            if row.try_get::<i64, _>("access_generation")? != write.generation
+                || checked_at.is_some_and(|at| at > write.at_ms)
+            {
+                Stored::Stale
+            } else {
+                Stored::AcceptedChanged
+            }
+        }
+    })
+}
+
+/// Records that the daily recheck ran without storing a result; `failed`
+/// counts it towards `guarantee_failed_runs`.
+pub async fn record_recheck_attempt(
+    state: &AppState,
+    id: &str,
+    at_ms: i64,
+    failed: bool,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE repositories SET guarantee_tick_at = $1, \
+         guarantee_failed_runs = guarantee_failed_runs + $2 WHERE id = $3",
+    )
+    .bind(at_ms)
+    .bind(i64::from(failed))
+    .bind(id)
+    .execute(&state.db.pool)
+    .await?;
+    Ok(())
 }
 
 /// Makes the measured level the accepted one when it is still `expected`;
@@ -430,6 +496,7 @@ pub struct ServerAccess {
     pub master: Zeroizing<Vec<u8>>,
     pub server_slot_secret: Option<Zeroizing<Vec<u8>>>,
     pub open_error: Option<String>,
+    pub generation: i64,
 }
 
 pub(crate) async fn set_open_error(
@@ -457,8 +524,8 @@ pub async fn server_access_checked(state: &AppState, id: &str) -> anyhow::Result
 pub async fn server_access(state: &AppState, id: &str) -> anyhow::Result<ServerAccess> {
     let row = sqlx::query(
         "SELECT backend, location_json, config_hash, format_repo_id, master_secret_id, \
-         server_slot_secret_id, server_creds_secret_id, agent_creds_secret_id, open_error \
-         FROM repositories WHERE id = $1",
+         server_slot_secret_id, server_creds_secret_id, agent_creds_secret_id, open_error, \
+         access_generation FROM repositories WHERE id = $1",
     )
     .bind(id)
     .fetch_optional(&state.db.pool)
@@ -501,6 +568,7 @@ pub async fn server_access(state: &AppState, id: &str) -> anyhow::Result<ServerA
             .await?,
         server_slot_secret,
         open_error: row.try_get("open_error")?,
+        generation: row.try_get("access_generation")?,
     })
 }
 
@@ -530,8 +598,9 @@ pub async fn replace_agent_creds(
     let done = sqlx::query(
         "UPDATE repositories SET agent_creds_secret_id = $1, agent_key_state = $2, \
          checks_json = $3, checked_at = $4, guarantee_level = $5, guarantee_notes_json = $6, \
-         guarantee_accepted = $7, guarantee_checked_at = $4 WHERE id = $8 \
-         AND guarantee_accepted = $9",
+         guarantee_accepted = $7, guarantee_checked_at = $4, \
+         access_generation = access_generation + 1, guarantee_unchecked_runs = 0, \
+         guarantee_failed_runs = 0 WHERE id = $8 AND guarantee_accepted = $9",
     )
     .bind(new)
     .bind(agent_key_state)

@@ -18,6 +18,7 @@ pub fn alertname(kind: AlertType) -> &'static str {
         AlertType::AgentSessionConflict => "LodestoreAgentSessionConflict",
         AlertType::AgentCertificateRejected => "LodestoreAgentCertificateRejected",
         AlertType::SourceInstanceGone => "LodestoreSourceInstanceGone",
+        AlertType::GuaranteeDowngraded => "LodestoreGuaranteeDowngraded",
     }
 }
 
@@ -58,6 +59,15 @@ pub fn title(c: &Candidate, now_ms: i64) -> String {
             "Repository {} is unavailable",
             c.repository_name.as_deref().unwrap_or("unknown repository"),
         ),
+        AlertType::GuaranteeDowngraded => {
+            let repository = c.repository_name.as_deref().unwrap_or("unknown repository");
+            match c.facts.guarantee_reason.as_deref() {
+                Some("inconclusive" | "recheck_failing" | "recheck_not_running") => {
+                    format!("Storage protection of {repository} could not be checked")
+                }
+                _ => format!("Storage protection weakened for {repository}"),
+            }
+        }
         AlertType::CertificateExpiring => {
             let name = match c.cert {
                 Some(CertKind::Grpc) => "Server gRPC certificate".to_string(),
@@ -157,6 +167,27 @@ pub fn detail(c: &Candidate) -> String {
                 .unwrap_or("unknown")
                 .trim_end_matches('.'),
         ),
+        AlertType::GuaranteeDowngraded => {
+            let level = level_words(c.facts.guarantee_level.as_deref());
+            let accepted = level_words(c.facts.guarantee_accepted.as_deref());
+            match c.facts.guarantee_reason.as_deref() {
+                Some("weak_unaccepted") => format!(
+                    "Measured: {level}; no level was accepted for this repository. Backups continue. Change the storage settings, or accept the level on the repository page."
+                ),
+                Some("inconclusive") => format!(
+                    "The daily check could not measure the storage {} times in a row. Backups continue. Check the repository again from its page.",
+                    c.facts.unchecked_runs.unwrap_or(0)
+                ),
+                Some("recheck_failing") => format!(
+                    "The daily check failed {} times in a row before it measured anything. Open the repository page and check the storage again.",
+                    c.facts.failed_runs.unwrap_or(0)
+                ),
+                Some("recheck_not_running") => "The daily storage check has not run for more than two days. Restart the Lodestore server; if this repeats, look for errors of the daily check in the server log.".to_string(),
+                _ => format!(
+                    "Measured: {level}. Accepted: {accepted}. Backups continue. Restore the storage settings, or accept the new level on the repository page."
+                ),
+            }
+        }
         AlertType::CertificateExpiring => match (c.cert, c.facts.external) {
             (Some(CertKind::Grpc), Some(true)) => {
                 "The certificate comes from grpc.tls_cert_file. Replace it before it expires."
@@ -177,6 +208,16 @@ fn level_label(level: Option<&str>) -> &'static str {
         Some("packs") => "Pack reading",
         Some("restore") => "Test restore",
         _ => "Integrity",
+    }
+}
+
+fn level_words(level: Option<&str>) -> &'static str {
+    match level {
+        Some("create_only_enforced") => "create-only enforced",
+        Some("overwrite_keeps_old_version") => "overwrite keeps old version",
+        Some("host_can_overwrite_or_delete") => "host can overwrite or delete",
+        Some("unchecked") => "unchecked",
+        _ => "unknown",
     }
 }
 
@@ -270,6 +311,45 @@ mod tests {
             alertname(AlertType::AgentCertificateRejected),
             "LodestoreAgentCertificateRejected"
         );
+        assert_eq!(
+            alertname(AlertType::GuaranteeDowngraded),
+            "LodestoreGuaranteeDowngraded"
+        );
+    }
+
+    #[test]
+    fn guarantee_texts_hold_levels_and_numbers_only() {
+        let facts = |reason: &str| AlertFacts {
+            guarantee_level: Some("host_can_overwrite_or_delete".into()),
+            guarantee_accepted: Some("overwrite_keeps_old_version".into()),
+            guarantee_reason: Some(reason.into()),
+            unchecked_runs: Some(3),
+            failed_runs: Some(3),
+            ..AlertFacts::default()
+        };
+        let (title, detail) = text(AlertType::GuaranteeDowngraded, facts("lower"));
+        assert!(
+            title.starts_with("Storage protection weakened for"),
+            "{title}"
+        );
+        assert!(
+            detail.contains("Measured: host can overwrite or delete."),
+            "{detail}"
+        );
+        assert!(
+            detail.contains("Accepted: overwrite keeps old version."),
+            "{detail}"
+        );
+        let (title, detail) = text(AlertType::GuaranteeDowngraded, facts("inconclusive"));
+        assert!(title.ends_with("could not be checked"), "{title}");
+        assert!(detail.contains("3 times in a row"), "{detail}");
+        let (_, detail) = text(AlertType::GuaranteeDowngraded, facts("recheck_failing"));
+        assert!(detail.contains("failed 3 times in a row"), "{detail}");
+        let (title, detail) = text(AlertType::GuaranteeDowngraded, facts("recheck_not_running"));
+        assert!(title.ends_with("could not be checked"), "{title}");
+        assert!(detail.contains("more than two days"), "{detail}");
+        let (_, detail) = text(AlertType::GuaranteeDowngraded, facts("weak_unaccepted"));
+        assert!(detail.contains("no level was accepted"), "{detail}");
     }
 
     #[test]
