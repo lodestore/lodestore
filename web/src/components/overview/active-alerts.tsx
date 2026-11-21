@@ -31,6 +31,11 @@ const MAX = 50;
 const DAY_MS = 86_400_000;
 const SLOT = "\u0000";
 const text = copy.overview.alerts;
+const UNCHECKED_REASONS = new Set([
+	"inconclusive",
+	"recheck_failing",
+	"recheck_not_running",
+]);
 const linkClass =
 	"rounded-sm text-primary-strong underline-offset-4 hover:underline";
 
@@ -54,7 +59,7 @@ function titleOf(alert: AlertDto, now: number) {
 		hostname
 	);
 	const repository = alert.repository?.name ?? text.unknownRepository;
-	const linkTo = (hash: string) =>
+	const linkTo = (hash: string | undefined) =>
 		alert.repository ? (
 			<Link
 				to="/settings/repositories/$id"
@@ -68,6 +73,7 @@ function titleOf(alert: AlertDto, now: number) {
 			repository
 		);
 	const repositoryLink = linkTo("checks");
+	const repositoryPage = linkTo(undefined);
 	const titles = text.titles;
 
 	switch (alert.type) {
@@ -107,6 +113,19 @@ function titleOf(alert: AlertDto, now: number) {
 				link: linkTo(RECLAIM_ANCHOR),
 			};
 		}
+		case "guarantee_downgraded": {
+			const unchecked = UNCHECKED_REASONS.has(
+				alert.facts.guarantee_reason ?? "",
+			);
+			return {
+				build: unchecked
+					? titles.guaranteeUnchecked
+					: titles.guaranteeDowngraded,
+				link: repositoryPage,
+			};
+		}
+		case "host_key_changed":
+			return { build: titles.hostKeyChanged, link: repositoryPage };
 		case "repository_unavailable":
 			return { build: titles.repositoryUnavailable, link: repositoryLink };
 		case "certificate_expiring": {

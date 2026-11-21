@@ -340,6 +340,74 @@ describe("overview states", () => {
 		expect(screen.getByText(copy.overview.empty.heading)).toBeInTheDocument();
 	});
 
+	it("shows a weakened storage protection alert and links the repository", async () => {
+		useAlerts([
+			alertFixture("g1", {
+				type: "guarantee_downgraded",
+				severity: "warning",
+				host: null,
+				policy: null,
+				repository: { id: "r1", name: "main" },
+				detail: "Object Lock is no longer enforced.",
+				facts: { guarantee_reason: "lower" },
+			}),
+			alertFixture("g2", {
+				type: "guarantee_downgraded",
+				severity: "warning",
+				host: null,
+				policy: null,
+				repository: { id: "r2", name: "offsite" },
+				facts: { guarantee_reason: "recheck_failing" },
+			}),
+		]);
+		renderApp("/overview");
+		expect(await screen.findByRole("link", { name: "main" })).toHaveAttribute(
+			"href",
+			"/settings/repositories/r1",
+		);
+		expect(rows(STRIP).map(titleOf)).toEqual(
+			expect.arrayContaining([
+				"Storage protection weakened for main",
+				"Storage protection of offsite could not be checked",
+			]),
+		);
+		expect(
+			screen.getByText("Object Lock is no longer enforced."),
+		).toBeInTheDocument();
+	});
+
+	it("shows a changed SFTP host key as critical and links the repository", async () => {
+		useAlerts([
+			alertFixture("k1", {
+				type: "host_key_changed",
+				severity: "critical",
+				host: null,
+				policy: null,
+				repository: { id: "r1", name: "main" },
+				detail: "Pinned SHA256:aaa, presented SHA256:bbb.",
+			}),
+			alertFixture("k2", {
+				type: "guarantee_downgraded",
+				severity: "warning",
+				host: null,
+				policy: null,
+				repository: { id: "r2", name: "offsite" },
+				facts: { guarantee_reason: "lower" },
+			}),
+		]);
+		renderApp("/overview");
+		expect(await screen.findByRole("link", { name: "main" })).toHaveAttribute(
+			"href",
+			"/settings/repositories/r1",
+		);
+		const titles = rows(STRIP).map(titleOf);
+		expect(titles[0]).toBe("SFTP host key changed for main");
+		expect(titles[1]).toBe("Storage protection weakened for offsite");
+		expect(
+			screen.getByText("Pinned SHA256:aaa, presented SHA256:bbb."),
+		).toBeInTheDocument();
+	});
+
 	it("shows the loading summary", async () => {
 		server.use(
 			http.get("/api/v1/fleet", async () => {
