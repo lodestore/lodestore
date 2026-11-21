@@ -5533,6 +5533,174 @@
         ]
       }
     },
+    "/api/v1/repositories/{id}/host-key": {
+      "put": {
+        "tags": [
+          "Repositories"
+        ],
+        "summary": "Pin a new SFTP host key",
+        "description": "Needs the password entered in the last 15 minutes. Pins the key only after a full check with it reached the storage, then sends it to the online agents. Nothing changes when the check fails.",
+        "operationId": "replace_host_key",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Repository id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HostKeyUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The key was pinned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostKeyReplaced"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`step_up_required`: the password was not entered in the last 15 minutes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown repository",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The repository is not on SFTP, or its storage access changed during the check",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The key is malformed or the server does not present it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/repositories/{id}/host-key/check": {
+      "post": {
+        "tags": [
+          "Repositories"
+        ],
+        "summary": "Show the host key an SFTP server presents",
+        "description": "Runs the SSH handshake only and compares the key the server presents now with the pinned one. Nothing is authenticated, written or changed.",
+        "operationId": "check_host_key",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Repository id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The presented key and whether it is the pinned one",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostKeyOffer"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown repository",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The repository is not on SFTP",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The stored endpoint is malformed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The server could not be reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      }
+    },
     "/api/v1/restore/hosts": {
       "get": {
         "tags": [
@@ -10660,6 +10828,75 @@
             }
           }
         ]
+      },
+      "HostKeyOffer": {
+        "type": "object",
+        "required": [
+          "key",
+          "fingerprint",
+          "pinned_fingerprint",
+          "matches"
+        ],
+        "properties": {
+          "fingerprint": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string",
+            "description": "The host key the server presents now, one OpenSSH public key line."
+          },
+          "matches": {
+            "type": "boolean"
+          },
+          "pinned_fingerprint": {
+            "type": "string",
+            "description": "The fingerprint of the pinned key, `unknown` when it cannot be read."
+          }
+        }
+      },
+      "HostKeyReplaced": {
+        "type": "object",
+        "required": [
+          "fingerprint",
+          "online_notified",
+          "needs_update",
+          "offline"
+        ],
+        "properties": {
+          "fingerprint": {
+            "type": "string"
+          },
+          "needs_update": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Online agents too old to take the key; update them.",
+            "minimum": 0
+          },
+          "offline": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Active agents that are not online and get the key when they connect.",
+            "minimum": 0
+          },
+          "online_notified": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Online agents that were sent the key.",
+            "minimum": 0
+          }
+        }
+      },
+      "HostKeyUpdate": {
+        "type": "object",
+        "required": [
+          "host_key"
+        ],
+        "properties": {
+          "host_key": {
+            "type": "string",
+            "description": "The new host key, one OpenSSH public key line."
+          }
+        }
       },
       "HostMount": {
         "type": "object",

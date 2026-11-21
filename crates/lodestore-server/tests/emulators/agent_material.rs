@@ -363,9 +363,13 @@ async fn agent_material_sftp_changed_host_key_is_a_distinct_error() {
     ts.stop().await;
 }
 
-const HOUR: i64 = 3_600_000;
+pub(crate) const HOUR: i64 = 3_600_000;
 
-async fn alerts_of(ts: &TestServer, kind: &str, state: &str) -> Vec<(String, String, Value)> {
+pub(crate) async fn alerts_of(
+    ts: &TestServer,
+    kind: &str,
+    state: &str,
+) -> Vec<(String, String, Value)> {
     sqlx::query("SELECT key, severity, facts_json FROM alerts WHERE type = $1 AND state = $2")
         .bind(kind)
         .bind(state)
