@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use anyhow::Context;
 use lodestore_format::keys::{MasterKey, ReadKeys};
+use lodestore_format::store::probe::HostKeyChange;
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use zeroize::Zeroizing;
@@ -447,6 +448,43 @@ pub async fn update_checks(
     })
 }
 
+/// What a probe says about the host key mismatch column: `None` leaves it,
+/// `Some(None)` clears it, `Some(Some(json))` records the two fingerprints.
+/// The column clears only when the server answered a write again, so a probe
+/// that failed for another reason keeps a standing alert.
+fn mismatch_update(change: Option<&HostKeyChange>, reached: bool) -> Option<Option<String>> {
+    match change {
+        Some(c) => Some(Some(
+            serde_json::json!({ "pinned": c.pinned, "offered": c.offered }).to_string(),
+        )),
+        None => reached.then_some(None),
+    }
+}
+
+/// Stores or clears the host key mismatch of an SFTP repository under the
+/// same access generation the probe was measured with. Returns whether the
+/// row was written.
+pub async fn record_host_key_check(
+    state: &AppState,
+    id: &str,
+    generation: i64,
+    change: Option<&HostKeyChange>,
+    reached: bool,
+) -> anyhow::Result<bool> {
+    let Some(value) = mismatch_update(change, reached) else {
+        return Ok(false);
+    };
+    let done = sqlx::query(
+        "UPDATE repositories SET host_key_mismatch_json = $1 WHERE id = $2 AND access_generation = $3",
+    )
+    .bind(value)
+    .bind(id)
+    .bind(generation)
+    .execute(&state.db.pool)
+    .await?;
+    Ok(done.rows_affected() > 0)
+}
+
 /// Records that the daily recheck ran without storing a result; `failed`
 /// counts it towards `guarantee_failed_runs`.
 pub async fn record_recheck_attempt(
@@ -624,4 +662,26 @@ pub async fn replace_agent_creds(
     }
     tx.commit().await?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mismatch_update_follows_the_table() {
+        let change = HostKeyChange {
+            pinned: "SHA256:old".into(),
+            offered: "SHA256:new".into(),
+        };
+        let json = r#"{"offered":"SHA256:new","pinned":"SHA256:old"}"#;
+        for reached in [true, false] {
+            assert_eq!(
+                mismatch_update(Some(&change), reached),
+                Some(Some(json.to_string()))
+            );
+        }
+        assert_eq!(mismatch_update(None, true), Some(None));
+        assert_eq!(mismatch_update(None, false), None);
+    }
 }

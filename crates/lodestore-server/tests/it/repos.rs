@@ -661,3 +661,69 @@ async fn guarantee_write_never_overwrites_an_accept_in_between() {
         ts.stop().await;
     }
 }
+
+/// The host key mismatch of a probe is written only under the access
+/// generation the probe was measured with.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn host_key_mismatch_write_needs_the_same_access_generation() {
+    use lodestore_format::store::probe::HostKeyChange;
+    use lodestore_server::repos::db::record_host_key_check;
+    let change = HostKeyChange {
+        pinned: "SHA256:old".into(),
+        offered: "SHA256:new".into(),
+    };
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let id = ts.create_local_repository("keyed").await;
+        let column = || async {
+            sqlx::query("SELECT host_key_mismatch_json FROM repositories WHERE id = $1")
+                .bind(&id)
+                .fetch_one(&ts.state().db.pool)
+                .await
+                .unwrap()
+                .try_get::<Option<String>, _>("host_key_mismatch_json")
+                .unwrap()
+        };
+        sqlx::query("UPDATE repositories SET access_generation = 1 WHERE id = $1")
+            .bind(&id)
+            .execute(&ts.state().db.pool)
+            .await
+            .unwrap();
+
+        let stored = record_host_key_check(ts.state(), &id, 0, Some(&change), false)
+            .await
+            .unwrap();
+        assert!(!stored, "[{}]", backend.name());
+        assert_eq!(column().await, None);
+
+        let stored = record_host_key_check(ts.state(), &id, 1, Some(&change), false)
+            .await
+            .unwrap();
+        assert!(stored, "[{}]", backend.name());
+        let json: Value = serde_json::from_str(&column().await.unwrap()).unwrap();
+        assert_eq!(
+            json,
+            json!({ "pinned": "SHA256:old", "offered": "SHA256:new" })
+        );
+
+        assert!(
+            !record_host_key_check(ts.state(), &id, 0, None, true)
+                .await
+                .unwrap()
+        );
+        assert!(column().await.is_some());
+        assert!(
+            !record_host_key_check(ts.state(), &id, 1, None, false)
+                .await
+                .unwrap()
+        );
+        assert!(column().await.is_some());
+        assert!(
+            record_host_key_check(ts.state(), &id, 1, None, true)
+                .await
+                .unwrap()
+        );
+        assert_eq!(column().await, None);
+        ts.stop().await;
+    }
+}

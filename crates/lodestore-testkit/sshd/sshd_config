@@ -6,6 +6,7 @@ PubkeyAuthentication yes
 UsePAM no
 AuthorizedKeysFile /etc/ssh/authorized/%u
 LogLevel VERBOSE
+PerSourcePenalties no
 Subsystem sftp internal-sftp
 
 Match User agent
