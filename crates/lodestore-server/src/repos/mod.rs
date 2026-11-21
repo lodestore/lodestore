@@ -116,6 +116,15 @@ pub struct CheckDto {
     pub error: Option<String>,
 }
 
+/// The host key an SFTP server presented on first contact.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct OfferedHostKeyDto {
+    /// One OpenSSH public key line.
+    pub key: String,
+    /// The SHA256 fingerprint of the key, as `ssh-keygen -l` prints it.
+    pub fingerprint: String,
+}
+
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct CheckResult {
     pub existing_repository: bool,
@@ -127,6 +136,9 @@ pub struct CheckResult {
     /// Why the level is not the strongest one, as weakness codes.
     pub guarantee_notes: Vec<String>,
     pub checks: Vec<CheckDto>,
+    /// The SFTP server's host key, when the draft had none: confirm it and send it back as the `host_key` option.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_key: Option<OfferedHostKeyDto>,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]

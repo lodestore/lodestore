@@ -56,11 +56,11 @@ pub(crate) async fn open_session(
     .await
 }
 
-fn capabilities_vec(capabilities: &[&str]) -> Vec<String> {
+pub(crate) fn capabilities_vec(capabilities: &[&str]) -> Vec<String> {
     capabilities.iter().map(|c| c.to_string()).collect()
 }
 
-async fn open_session_at(
+pub(crate) async fn open_session_at(
     grpc_address: String,
     paths: Paths,
     capabilities: Vec<String>,
@@ -126,7 +126,7 @@ async fn setup(sshd: &SshdServer) -> (TestServer, Api, String) {
     (ts, api, id)
 }
 
-fn host_key_of(message: ServerMessage) -> String {
+pub(crate) fn host_key_of(message: ServerMessage) -> String {
     match message.body {
         Some(ServerBody::UpdateHostKey(update)) => update.host_key,
         other => panic!("expected UpdateHostKey, got {other:?}"),

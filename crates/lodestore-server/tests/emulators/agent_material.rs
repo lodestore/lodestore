@@ -16,7 +16,7 @@ use sqlx::Row;
 
 pub(crate) const PASSWORD: &str = "correct horse battery";
 
-async fn body(response: reqwest::Response) -> Value {
+pub(crate) async fn body(response: reqwest::Response) -> Value {
     response.json().await.expect("a JSON body")
 }
 
@@ -88,7 +88,7 @@ pub(crate) async fn create(api: &Api, draft: &Value) -> String {
     body(committed).await["id"].as_str().unwrap().to_string()
 }
 
-async fn stored_location(ts: &TestServer, id: &str) -> Value {
+pub(crate) async fn stored_location(ts: &TestServer, id: &str) -> Value {
     let row = sqlx::query("SELECT location_json FROM repositories WHERE id = $1")
         .bind(id)
         .fetch_one(&ts.state().db.pool)
@@ -124,7 +124,7 @@ async fn agent_material_sftp_host_key_reaches_the_agent() {
         .as_object_mut()
         .unwrap()
         .remove("host_key");
-    let refused = api.post("/api/v1/repositories/check", &unpinned).await;
+    let refused = api.post("/api/v1/repositories/wizard", &unpinned).await;
     assert_eq!(refused.status(), 422);
     let refused = body(refused).await;
     assert!(
@@ -363,9 +363,13 @@ async fn agent_material_sftp_changed_host_key_is_a_distinct_error() {
     ts.stop().await;
 }
 
-const HOUR: i64 = 3_600_000;
+pub(crate) const HOUR: i64 = 3_600_000;
 
-async fn alerts_of(ts: &TestServer, kind: &str, state: &str) -> Vec<(String, String, Value)> {
+pub(crate) async fn alerts_of(
+    ts: &TestServer,
+    kind: &str,
+    state: &str,
+) -> Vec<(String, String, Value)> {
     sqlx::query("SELECT key, severity, facts_json FROM alerts WHERE type = $1 AND state = $2")
         .bind(kind)
         .bind(state)

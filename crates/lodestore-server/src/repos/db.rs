@@ -664,6 +664,67 @@ pub async fn replace_agent_creds(
     Ok(true)
 }
 
+/// Pins a new host key after a probe with it reached the storage. The write
+/// needs the access generation the probe read with its credentials and the
+/// accepted level `guarantee` was decided from; it clears the host key
+/// mismatch and bumps the generation, so a probe that started with the old key
+/// stores nothing.
+pub async fn replace_host_key(
+    state: &AppState,
+    id: &str,
+    generation: i64,
+    host_key: &str,
+    agent_key_state: &str,
+    checks_json: &str,
+    guarantee: &GuaranteeWrite,
+) -> anyhow::Result<Stored> {
+    let mut tx = state.db.pool.begin().await?;
+    let Some(row) = sqlx::query("SELECT location_json FROM repositories WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?
+    else {
+        return Ok(Stored::Missing);
+    };
+    let mut options: BTreeMap<String, String> =
+        serde_json::from_str(&row.try_get::<String, _>("location_json")?)?;
+    options.insert("host_key".to_string(), host_key.to_string());
+    let done = sqlx::query(
+        "UPDATE repositories SET location_json = $1, agent_key_state = $2, checks_json = $3, \
+         checked_at = $4, guarantee_level = $5, guarantee_notes_json = $6, \
+         guarantee_accepted = $7, guarantee_checked_at = $4, guarantee_unchecked_runs = 0, \
+         guarantee_failed_runs = 0, host_key_mismatch_json = NULL, \
+         access_generation = access_generation + 1 \
+         WHERE id = $8 AND guarantee_accepted = $9 AND access_generation = $10",
+    )
+    .bind(serde_json::to_string(&options)?)
+    .bind(agent_key_state)
+    .bind(checks_json)
+    .bind(now_ms())
+    .bind(&guarantee.level)
+    .bind(&guarantee.notes_json)
+    .bind(&guarantee.accepted)
+    .bind(id)
+    .bind(&guarantee.read_accepted)
+    .bind(generation)
+    .execute(&mut *tx)
+    .await?;
+    if done.rows_affected() > 0 {
+        tx.commit().await?;
+        return Ok(Stored::Written);
+    }
+    let current: i64 = sqlx::query("SELECT access_generation FROM repositories WHERE id = $1")
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?
+        .try_get("access_generation")?;
+    Ok(if current == generation {
+        Stored::AcceptedChanged
+    } else {
+        Stored::Stale
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
