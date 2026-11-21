@@ -389,8 +389,10 @@ pub async fn update_checks(
         match write.guarantee {
             None => sqlx::query(
                 "UPDATE repositories SET checks_json = $1, agent_key_state = $2, checked_at = $3, \
-                 guarantee_tick_at = CASE WHEN $5 = 1 THEN $3 ELSE guarantee_tick_at END \
-                 WHERE id = $4",
+                 guarantee_tick_at = CASE WHEN $5 = 1 THEN $3 ELSE guarantee_tick_at END, \
+                 guarantee_unchecked_runs = CASE WHEN $5 = 1 \
+                 THEN guarantee_unchecked_runs + 1 ELSE guarantee_unchecked_runs END, \
+                 guarantee_failed_runs = 0 WHERE id = $4",
             )
             .bind(write.checks_json)
             .bind(write.agent_key_state)
@@ -403,7 +405,8 @@ pub async fn update_checks(
                 "UPDATE repositories SET checks_json = $1, agent_key_state = $2, checked_at = $3, \
                  guarantee_level = $4, guarantee_notes_json = $5, guarantee_accepted = $6, \
                  guarantee_checked_at = $3, \
-                 guarantee_tick_at = CASE WHEN $9 = 1 THEN $3 ELSE guarantee_tick_at END \
+                 guarantee_tick_at = CASE WHEN $9 = 1 THEN $3 ELSE guarantee_tick_at END, \
+                 guarantee_unchecked_runs = 0, guarantee_failed_runs = 0 \
                  WHERE id = $7 AND guarantee_accepted = $8",
             )
             .bind(write.checks_json)
@@ -576,8 +579,8 @@ pub async fn replace_agent_creds(
     let done = sqlx::query(
         "UPDATE repositories SET agent_creds_secret_id = $1, agent_key_state = $2, \
          checks_json = $3, checked_at = $4, guarantee_level = $5, guarantee_notes_json = $6, \
-         guarantee_accepted = $7, guarantee_checked_at = $4 WHERE id = $8 \
-         AND guarantee_accepted = $9",
+         guarantee_accepted = $7, guarantee_checked_at = $4, guarantee_unchecked_runs = 0, \
+         guarantee_failed_runs = 0 WHERE id = $8 AND guarantee_accepted = $9",
     )
     .bind(new)
     .bind(agent_key_state)

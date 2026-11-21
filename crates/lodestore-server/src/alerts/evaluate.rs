@@ -259,7 +259,8 @@ pub fn evaluate(
         });
     }
     for g in &inputs.guarantees {
-        let Some(reason) = guarantee_reason(g) else {
+        let Some(reason) = guarantee_reason(g, now_ms, process_started_ms, inputs.daily_recheck)
+        else {
             continue;
         };
         out.push(Candidate {
@@ -289,11 +290,38 @@ fn rank(level: &str) -> Option<u8> {
         .rank()
 }
 
-/// Why a repository's storage protection deserves an alert, if it does.
-pub fn guarantee_reason(g: &RepositoryGuarantee) -> Option<&'static str> {
-    match (rank(&g.level), rank(&g.accepted)) {
-        (Some(measured), Some(accepted)) if measured < accepted => Some("lower"),
-        _ => None,
+/// Daily rechecks in a row that measured nothing before the alert opens.
+pub const INCONCLUSIVE_RUNS: u64 = 3;
+/// Daily rechecks in a row that failed before storing a result before the alert opens.
+pub const FAILED_RUNS: u64 = 3;
+pub const NOT_RUNNING_AFTER_MS: i64 = 2 * DAY_MS;
+
+/// Why a repository's storage protection deserves an alert, if it does. The
+/// first match wins: `lower`, `weak_unaccepted`, `inconclusive`,
+/// `recheck_failing`, `recheck_not_running`.
+pub fn guarantee_reason(
+    g: &RepositoryGuarantee,
+    now_ms: i64,
+    process_started_ms: i64,
+    daily_recheck: bool,
+) -> Option<&'static str> {
+    let (measured, accepted) = (rank(&g.level), rank(&g.accepted));
+    if matches!((measured, accepted), (Some(m), Some(a)) if m < a) {
+        Some("lower")
+    } else if accepted.is_none() && measured == Some(0) {
+        Some("weak_unaccepted")
+    } else if g.unchecked_runs >= INCONCLUSIVE_RUNS {
+        Some("inconclusive")
+    } else if g.failed_runs >= FAILED_RUNS {
+        Some("recheck_failing")
+    } else {
+        let alive_since = g
+            .tick_at_ms
+            .unwrap_or(i64::MIN)
+            .max(g.measured_at_ms)
+            .max(process_started_ms);
+        (daily_recheck && now_ms - alive_since > NOT_RUNNING_AFTER_MS)
+            .then_some("recheck_not_running")
     }
 }
 
@@ -677,5 +705,116 @@ mod tests {
         assert_eq!(keys(&later), ["agent_session_conflict:h1"]);
         let much_later = evaluate(&inputs, NOW + 25 * HOUR, 0, &T);
         assert!(much_later.is_empty());
+    }
+
+    const LEVELS: [&str; 4] = [
+        "create_only_enforced",
+        "overwrite_keeps_old_version",
+        "host_can_overwrite_or_delete",
+        "unchecked",
+    ];
+
+    fn guarantee(level: &str, accepted: &str, unchecked: u64, failed: u64) -> RepositoryGuarantee {
+        RepositoryGuarantee {
+            repository_id: "r1".into(),
+            repository: "main".into(),
+            level: level.into(),
+            accepted: accepted.into(),
+            unchecked_runs: unchecked,
+            failed_runs: failed,
+            measured_at_ms: NOW,
+            tick_at_ms: Some(NOW),
+        }
+    }
+
+    #[test]
+    fn guarantee_reason_follows_the_table() {
+        // rows: measured level, columns: accepted level, both in `LEVELS` order
+        let base: [[Option<&str>; 4]; 4] = [
+            [None, None, None, None],
+            [Some("lower"), None, None, None],
+            [Some("lower"), Some("lower"), None, Some("weak_unaccepted")],
+            [None, None, None, None],
+        ];
+        let mut rows = 0;
+        for (m, level) in LEVELS.iter().enumerate() {
+            for (a, accepted) in LEVELS.iter().enumerate() {
+                for unchecked in [0, 2, 3] {
+                    for failed in [0, 2, 3] {
+                        let expected = base[m][a].or(if unchecked == 3 {
+                            Some("inconclusive")
+                        } else if failed == 3 {
+                            Some("recheck_failing")
+                        } else {
+                            None
+                        });
+                        let g = guarantee(level, accepted, unchecked, failed);
+                        assert_eq!(
+                            guarantee_reason(&g, NOW, 0, true),
+                            expected,
+                            "{level} {accepted} {unchecked} {failed}"
+                        );
+                        rows += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(rows, 144);
+    }
+
+    #[test]
+    fn recheck_not_running_follows_the_clock() {
+        let level = "overwrite_keeps_old_version";
+        let g = |measured: i64, tick: Option<i64>| RepositoryGuarantee {
+            measured_at_ms: measured,
+            tick_at_ms: tick,
+            ..guarantee(level, level, 0, 0)
+        };
+        let reason = |g: &RepositoryGuarantee, now: i64, started: i64, daily: bool| {
+            guarantee_reason(g, now, started, daily)
+        };
+        let ran = g(NOW, Some(NOW));
+        assert_eq!(reason(&ran, NOW + 48 * HOUR, 0, false), None);
+        assert_eq!(reason(&ran, NOW + 48 * HOUR, 0, true), None);
+        assert_eq!(
+            reason(&ran, NOW + 48 * HOUR + 1, 0, true),
+            Some("recheck_not_running")
+        );
+        assert_eq!(reason(&ran, NOW + 48 * HOUR + 1, 0, false), None);
+
+        let old = g(NOW - 8760 * HOUR, None);
+        assert_eq!(reason(&old, NOW, NOW - HOUR, true), None);
+        assert_eq!(
+            reason(&old, NOW + 48 * HOUR, NOW - HOUR, true),
+            Some("recheck_not_running")
+        );
+        assert_eq!(reason(&old, NOW + 47 * HOUR, NOW - HOUR, true), None);
+
+        let fresh_tick = g(NOW - 100 * HOUR, Some(NOW - HOUR));
+        assert_eq!(reason(&fresh_tick, NOW, 0, true), None);
+
+        let lowered = RepositoryGuarantee {
+            level: "host_can_overwrite_or_delete".into(),
+            ..g(NOW - 100 * HOUR, None)
+        };
+        assert_eq!(reason(&lowered, NOW, 0, true), Some("lower"));
+    }
+
+    #[test]
+    fn guarantee_alerts_are_warnings_keyed_by_repository() {
+        let inputs = Inputs {
+            guarantees: vec![guarantee(
+                "host_can_overwrite_or_delete",
+                "overwrite_keeps_old_version",
+                0,
+                0,
+            )],
+            ..Inputs::default()
+        };
+        let out = evaluate(&inputs, NOW, 0, &T);
+        assert_eq!(keys(&out), ["guarantee_downgraded:r1"]);
+        assert_eq!(out[0].severity, Severity::Warning);
+        assert_eq!(out[0].facts.guarantee_reason.as_deref(), Some("lower"));
+        assert_eq!(out[0].facts.error, None);
     }
 }
