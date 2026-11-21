@@ -37,6 +37,7 @@ pub(crate) struct WizardEntry {
 pub(crate) struct Inner {
     pub wizards: HashMap<String, WizardEntry>,
     pub unlocked: HashMap<String, bool>,
+    pub access: HashMap<String, Arc<tokio::sync::Mutex<()>>>,
 }
 
 impl Inner {
@@ -54,6 +55,16 @@ pub struct ReposState {
 impl ReposState {
     pub(crate) fn lock(&self) -> MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Serialises a change of a repository's storage access with what a starting agent session reads and sends.
+    /// Held from the database write to the last send, never across a storage probe.
+    pub fn access_lock(&self, repository_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.lock()
+            .access
+            .entry(repository_id.to_string())
+            .or_default()
+            .clone()
     }
 }
 

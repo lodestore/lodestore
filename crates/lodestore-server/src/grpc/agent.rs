@@ -9,7 +9,7 @@ use lodestore_proto::agent::v1::{
     AgentMessage, Disconnect, DisconnectReason, FetchAgentUpdateRequest, Heartbeat, HelloAck,
     PackBytes, ReadPackRangeRequest, RefreshPackAccessRequest, RefreshPackAccessResponse,
     RenewRequest, RenewResponse, RestorePlanBatch, RestorePlanRequest, S3Credentials,
-    ServerMessage, UpdateChunk, UpdateS3Credentials,
+    ServerMessage, UpdateChunk, UpdateHostKey, UpdateS3Credentials,
 };
 use lodestore_proto::{ERROR_CERT_STALE, ERROR_REVOKED, ERROR_VERSION_UNSUPPORTED};
 use sqlx::Row;
@@ -30,6 +30,15 @@ const MAX_CAPABILITY_LEN: usize = 32;
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 const PREV_CERT_GRACE_MS: i64 = 24 * 60 * 60 * 1000;
 const PREV_CERT_DRAIN_MS: i64 = 2 * 60 * 1000;
+pub(crate) const CAP_HOST_KEY: &str = "host_key_v1";
+
+pub(crate) fn host_key_message(host_key: &str) -> ServerMessage {
+    ServerMessage {
+        body: Some(ServerBody::UpdateHostKey(UpdateHostKey {
+            host_key: host_key.to_string(),
+        })),
+    }
+}
 
 pub struct AgentService {
     pub state: AppState,
@@ -369,6 +378,8 @@ impl Agent for AgentService {
                 })),
             },
         );
+        let access = state.repos.access_lock(&repository_id);
+        let held = access.lock().await;
         match writer_material(&state, &repository_id).await {
             Ok(material) => {
                 if let Some(key) = material.agent_creds {
@@ -384,9 +395,22 @@ impl Agent for AgentService {
                         },
                     );
                 }
+                if material.location.backend == "sftp"
+                    && state.registry.supports(&agent_id, CAP_HOST_KEY)
+                    && let Some(host_key) = material
+                        .location
+                        .options
+                        .get("host_key")
+                        .filter(|k| !k.is_empty())
+                {
+                    state.registry.send(&agent_id, host_key_message(host_key));
+                }
             }
-            Err(error) => tracing::warn!(%error, %agent_id, "could not load the agent S3 key"),
+            Err(error) => {
+                tracing::warn!(%error, %agent_id, "could not load the agent storage material")
+            }
         }
+        drop(held);
         crate::grpc::dispatch::messages::session_started(&state, &agent_id, &hello.jobs).await;
         crate::agent_update::rollout::kick(&state);
         tracing::info!(agent_id = %agent_id, cert_serial = %cert_serial, "agent session started");

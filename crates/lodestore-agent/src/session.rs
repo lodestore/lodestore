@@ -34,13 +34,14 @@ const STABLE_STREAM: Duration = Duration::from_secs(60);
 const RENEW_RETRY: Duration = Duration::from_secs(60);
 const MAX_SKEW_SECS: i64 = 300;
 const JOBS_DRAIN: Duration = Duration::from_secs(30);
-pub const CAPABILITIES: [&str; 6] = [
+pub const CAPABILITIES: [&str; 7] = [
     "restore_v1",
     "limits_v1",
     "gc_v1",
     "restore_roots_v1",
     "shard_limit_v1",
     "source:files",
+    "host_key_v1",
 ];
 const CAP_UPDATE: &str = "update_v1";
 
@@ -238,6 +239,42 @@ fn store_s3_credentials(paths: &Paths, key: &S3Credentials) -> Result<(), AgentE
     }
     write_json_file(&paths.s3_credentials(), &value)?;
     tracing::info!("agent S3 key updated");
+    Ok(())
+}
+
+fn apply_host_key(paths: &Paths, host_key: &str) {
+    if let Err(error) = store_host_key(paths, host_key) {
+        tracing::warn!(%error, "could not store the SFTP host key");
+    }
+}
+
+fn store_host_key(paths: &Paths, host_key: &str) -> Result<(), AgentError> {
+    let path = paths.repository_json();
+    let Some(mut file) = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+    else {
+        tracing::warn!("repository.json is unreadable; SFTP host key not stored");
+        return Ok(());
+    };
+    if file.get("backend").and_then(|b| b.as_str()) != Some("sftp") {
+        tracing::warn!("SFTP host key received for a repository that is not SFTP; ignored");
+        return Ok(());
+    }
+    let Some(options) = file.get_mut("options").and_then(|o| o.as_object_mut()) else {
+        tracing::warn!("repository.json has no options; SFTP host key not stored");
+        return Ok(());
+    };
+    if options.get("host_key").and_then(|k| k.as_str()) == Some(host_key) {
+        return Ok(());
+    }
+    if lodestore_format::store::SftpStore::host_key_fingerprint(host_key).is_err() {
+        tracing::warn!("SFTP host key from the server is not a usable ed25519/ECDSA key; ignored");
+        return Ok(());
+    }
+    options.insert("host_key".into(), host_key.into());
+    write_json_file(&path, &file)?;
+    tracing::info!("SFTP host key updated");
     Ok(())
 }
 
@@ -499,6 +536,9 @@ async fn session_once(
                         if let Some(key) = update.credentials {
                             store_s3_credentials(paths, &key)?;
                         }
+                    }
+                    Some(ServerBody::UpdateHostKey(update)) => {
+                        apply_host_key(paths, &update.host_key);
                     }
                     Some(body) => hub.handle(body),
                     None => {}
