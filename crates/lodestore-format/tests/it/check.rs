@@ -309,6 +309,10 @@ impl BlobStore for Interleaved<'_> {
         }
         listed
     }
+
+    fn publishes_atomically(&self) -> bool {
+        true
+    }
 }
 
 #[tokio::test]
@@ -508,6 +512,10 @@ impl BlobStore for Refusing {
 
     async fn list(&self, prefix: &str) -> Result<Vec<ListEntry>, BlobError> {
         self.inner.list(prefix).await
+    }
+
+    fn publishes_atomically(&self) -> bool {
+        true
     }
 }
 

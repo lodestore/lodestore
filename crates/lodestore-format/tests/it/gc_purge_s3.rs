@@ -289,6 +289,34 @@ async fn gc_purge_s3_deleted_keys() {
 }
 
 #[tokio::test]
+async fn gc_purge_s3_rewritten_keys() {
+    let minio = MinioServer::start().await;
+    minio.create_versioned_bucket("history").await;
+    let store = open_store(&minio, "history");
+    for key in ["snapshots/back", "snapshots/hidden", "snapshots/plain"] {
+        store
+            .put_if_absent(key, Bytes::from_static(b"x"))
+            .await
+            .unwrap();
+    }
+    store.delete("snapshots/back").await.unwrap();
+    store
+        .put_if_absent("snapshots/back", Bytes::from_static(b"y"))
+        .await
+        .unwrap();
+    store.delete("snapshots/hidden").await.unwrap();
+
+    assert_eq!(
+        store.rewritten_keys("snapshots/").await.unwrap(),
+        vec!["snapshots/back".to_owned(), "snapshots/hidden".to_owned()]
+    );
+    assert_eq!(
+        store.deleted_keys("snapshots/", i64::MAX).await.unwrap(),
+        vec!["snapshots/hidden".to_owned()]
+    );
+}
+
+#[tokio::test]
 async fn gc_purge_s3_agent_key_denied() {
     let minio = MinioServer::start().await;
     minio.create_versioned_bucket("agent").await;

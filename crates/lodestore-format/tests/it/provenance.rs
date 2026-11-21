@@ -407,6 +407,10 @@ impl BlobStore for Vanishing<'_> {
         }
         Ok(listed)
     }
+
+    fn publishes_atomically(&self) -> bool {
+        true
+    }
 }
 
 #[tokio::test]

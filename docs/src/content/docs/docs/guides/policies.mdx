@@ -183,7 +183,7 @@ A snapshot made with `lode backup --stdin --policy NAME` is outside retention by
 Details that matter:
 
 - Days, weeks and months are counted in the schedule's `timezone`, or in UTC when the policy has no schedule. Changing the time zone of a policy with retention moves the boundaries, so it needs `snapshots:delete` for a token.
-- The time of a snapshot is the time the server received it (the storage object's modification time), not the time the backup started. This survives a catalog rebuild.
+- The time of a snapshot is the time the server received it (the storage object's modification time), not the time the backup started. This survives a catalog rebuild. S3 keeps this time in whole seconds, so snapshots stored within the same second are ordered by when the server catalogued them, and never by the time the host wrote into the snapshot.
 - Two snapshots with the same time are ordered by id.
 - The two newest good snapshots of each pool of each source instance on a host are always kept, whatever the rules say, so a bad rule or a run of failed backups cannot empty a host. A good snapshot is one that is neither suspicious nor incomplete. Incomplete snapshots take part in the rules like any other, but do not count towards these two.
 - Suspicious snapshots (flagged by the anomaly detector or by an administrator) take no slot in any rule and are never forgotten. The good snapshots around them are counted as if they were not there.

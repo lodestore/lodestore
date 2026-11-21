@@ -3849,7 +3849,7 @@
             }
           },
           "409": {
-            "description": "The storage failed a check or holds no repository",
+            "description": "The storage failed a check, holds no repository, or needs `accept_weaker_guarantee` (code `weaker_guarantee`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -3906,7 +3906,7 @@
             }
           },
           "409": {
-            "description": "The storage failed a check or already holds a repository",
+            "description": "The storage failed a check, already holds a repository, or needs `accept_weaker_guarantee` (code `weaker_guarantee`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -4312,6 +4312,7 @@
           "Repositories"
         ],
         "summary": "Check a repository again",
+        "description": "Measures the storage again with the stored keys and stores the measured level. The accepted level rises when a higher level is measured and stays put otherwise; a check that could not measure anything changes neither level.",
         "operationId": "recheck",
         "parameters": [
           {
@@ -5453,6 +5454,75 @@
         ]
       }
     },
+    "/api/v1/repositories/{id}/guarantee/accept": {
+      "post": {
+        "tags": [
+          "Repositories"
+        ],
+        "summary": "Accept the measured level",
+        "description": "Makes the level the last check measured the accepted one, provided it is still `expected_level`, the level the user was shown.",
+        "operationId": "accept_guarantee",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Repository id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AcceptGuarantee"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The measured level is now the accepted one",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GuaranteeState"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown repository",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "No level was measured, or the measured level is no longer `expected_level`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      }
+    },
     "/api/v1/restore/hosts": {
       "get": {
         "tags": [
@@ -6548,6 +6618,18 @@
   },
   "components": {
     "schemas": {
+      "AcceptGuarantee": {
+        "type": "object",
+        "required": [
+          "expected_level"
+        ],
+        "properties": {
+          "expected_level": {
+            "type": "string",
+            "description": "The measured level the user was shown; the accept is refused when the\nstored level is another one by now."
+          }
+        }
+      },
       "Account": {
         "type": "object",
         "required": [
@@ -7998,6 +8080,8 @@
           "existing_repository",
           "blocking",
           "agent_key_state",
+          "guarantee_level",
+          "guarantee_notes",
           "checks"
         ],
         "properties": {
@@ -8015,6 +8099,17 @@
           },
           "existing_repository": {
             "type": "boolean"
+          },
+          "guarantee_level": {
+            "type": "string",
+            "description": "What a host can do with this storage: `create_only_enforced`,\n`overwrite_keeps_old_version`, `host_can_overwrite_or_delete` or `unchecked`."
+          },
+          "guarantee_notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Why the level is not the strongest one, as weakness codes."
           }
         }
       },
@@ -10222,6 +10317,30 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          }
+        }
+      },
+      "GuaranteeState": {
+        "type": "object",
+        "required": [
+          "guarantee_level",
+          "guarantee_accepted"
+        ],
+        "properties": {
+          "guarantee_accepted": {
+            "type": "string",
+            "description": "The level the user accepted; it rises on its own only when a check measures a higher one."
+          },
+          "guarantee_checked_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "guarantee_level": {
+            "type": "string",
+            "description": "The level the last check measured."
           }
         }
       },
@@ -12472,10 +12591,11 @@
           "id",
           "name",
           "backend",
-          "experimental",
           "location_display",
           "hosts_count",
           "agent_key_state",
+          "guarantee_level",
+          "guarantee_accepted",
           "cleanup"
         ],
         "properties": {
@@ -12495,8 +12615,20 @@
           "cleanup": {
             "$ref": "#/components/schemas/CleanupSummary"
           },
-          "experimental": {
-            "type": "boolean"
+          "guarantee_accepted": {
+            "type": "string",
+            "description": "The level the user agreed to when creating or connecting the repository."
+          },
+          "guarantee_checked_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "guarantee_level": {
+            "type": "string",
+            "description": "The level the last check measured."
           },
           "hosts_count": {
             "type": "integer",
@@ -12535,7 +12667,8 @@
             "type": "object",
             "required": [
               "location",
-              "checks"
+              "checks",
+              "guarantee_notes"
             ],
             "properties": {
               "checks": {
@@ -12544,6 +12677,13 @@
                   "$ref": "#/components/schemas/CheckDto"
                 },
                 "description": "What the storage checks of the connection found."
+              },
+              "guarantee_notes": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Why the measured level is not the strongest one, as weakness codes."
               },
               "location": {
                 "$ref": "#/components/schemas/LocationDto"
@@ -12558,6 +12698,10 @@
           "location"
         ],
         "properties": {
+          "accept_weaker_guarantee": {
+            "type": "boolean",
+            "description": "Create the repository even when the storage does not stop a host from\nchanging or deleting backups, or when the check could not measure it."
+          },
           "agent_credentials": {
             "oneOf": [
               {

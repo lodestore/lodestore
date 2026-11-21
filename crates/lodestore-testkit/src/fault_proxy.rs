@@ -1,6 +1,6 @@
-//! An HTTP proxy in front of an S3 server that fails requests on purpose and
-//! counts what passes through. The client signs requests for the proxy's
-//! address, so the `Host` header is forwarded untouched.
+//! An HTTP proxy in front of a storage server that fails requests on purpose,
+//! counts what passes through and records every request. The client signs
+//! requests for the proxy's address, so the `Host` header is forwarded untouched.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -12,6 +12,7 @@ use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::{HeaderName, StatusCode, header};
 use axum::response::Response;
+use tokio::sync::oneshot;
 
 const SLOW_DOWN: &str =
     "<Error><Code>SlowDown</Code><Message>Please reduce your request rate.</Message></Error>";
@@ -103,16 +104,47 @@ impl Counters {
     }
 }
 
+/// One request as it reached the proxy; the `authorization` header is left out
+/// and the `sig` query parameter is replaced, so a log never carries a signature.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordedRequest {
+    pub method: String,
+    pub path: String,
+    pub query: Option<String>,
+    pub headers: Vec<(String, String)>,
+}
+
+fn redact_query(query: &str) -> String {
+    query
+        .split('&')
+        .map(|p| match p.split_once('=') {
+            Some(("sig", _)) => "sig=REDACTED".to_owned(),
+            _ => p.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+struct Hold {
+    method: &'static str,
+    query_parts: Vec<String>,
+    reached: oneshot::Sender<()>,
+    resume: oneshot::Receiver<()>,
+}
+
 struct Inner {
     upstream: String,
     client: reqwest::Client,
     rules: Mutex<Vec<(FaultRule, u32)>>,
     counters: Arc<Counters>,
+    requests: Mutex<Vec<RecordedRequest>>,
+    holds: Mutex<Vec<Hold>>,
 }
 
 pub struct FaultProxy {
     addr: SocketAddr,
     counters: Arc<Counters>,
+    inner: Arc<Inner>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -134,18 +166,23 @@ impl FaultProxy {
                     .collect(),
             ),
             counters: Arc::clone(&counters),
+            requests: Mutex::default(),
+            holds: Mutex::default(),
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind the proxy");
         let addr = listener.local_addr().expect("proxy address");
-        let app = Router::new().fallback(handle).with_state(inner);
+        let app = Router::new()
+            .fallback(handle)
+            .with_state(Arc::clone(&inner));
         let task = tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
         FaultProxy {
             addr,
             counters,
+            inner,
             task,
         }
     }
@@ -156,6 +193,32 @@ impl FaultProxy {
 
     pub fn counters(&self) -> Arc<Counters> {
         Arc::clone(&self.counters)
+    }
+
+    /// Holds the next `method` request whose query contains every one of
+    /// `query_parts`
+    /// before it reaches the upstream. The returned receiver fires when it
+    /// arrives; the request goes on once the returned sender fires or drops.
+    pub fn hold(
+        &self,
+        method: &'static str,
+        query_parts: &[&str],
+    ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (reached, arrived) = oneshot::channel();
+        let (release, resume) = oneshot::channel();
+        self.inner.holds.lock().unwrap().push(Hold {
+            method,
+            query_parts: query_parts.iter().map(|q| (*q).to_owned()).collect(),
+            reached,
+            resume,
+        });
+        (arrived, release)
+    }
+
+    /// Every request received so far, in arrival order, whatever the rules did
+    /// with it.
+    pub fn requests(&self) -> Vec<RecordedRequest> {
+        self.inner.requests.lock().unwrap().clone()
     }
 }
 
@@ -192,6 +255,22 @@ async fn handle(State(st): State<Arc<Inner>>, req: Request) -> Response {
     let verb = parts.method.as_str();
     let query = parts.uri.query().unwrap_or("");
 
+    st.requests.lock().unwrap().push(RecordedRequest {
+        method: verb.to_owned(),
+        path: parts.uri.path().to_owned(),
+        query: parts.uri.query().map(redact_query),
+        headers: parts
+            .headers
+            .iter()
+            .filter(|(name, _)| *name != header::AUTHORIZATION)
+            .map(|(name, value)| {
+                (
+                    name.as_str().to_owned(),
+                    String::from_utf8_lossy(value.as_bytes()).into_owned(),
+                )
+            })
+            .collect(),
+    });
     Counters::bump(&st.counters.accepted, verb, segment);
     if query.split('&').any(|p| {
         let name = p.split('=').next().unwrap_or("");
@@ -227,6 +306,18 @@ async fn handle(State(st): State<Arc<Inner>>, req: Request) -> Response {
         return xml(StatusCode::FORBIDDEN, ACCESS_DENIED);
     }
 
+    let hold = {
+        let mut holds = st.holds.lock().unwrap();
+        holds
+            .iter()
+            .position(|h| h.method == verb && h.query_parts.iter().all(|q| query.contains(q)))
+            .map(|i| holds.remove(i))
+    };
+    if let Some(hold) = hold {
+        let _ = hold.reached.send(());
+        let _ = hold.resume.await;
+    }
+
     let url = format!(
         "{}{}",
         st.upstream,
@@ -260,4 +351,17 @@ async fn handle(State(st): State<Arc<Inner>>, req: Request) -> Response {
         }
     }
     resp.body(Body::from(bytes)).unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redact_query;
+
+    #[test]
+    fn signatures_never_reach_the_log() {
+        assert_eq!(
+            redact_query("sv=2022-11-02&sp=rcl&sig=abc%2Bdef&se=2030"),
+            "sv=2022-11-02&sp=rcl&sig=REDACTED&se=2030"
+        );
+    }
 }

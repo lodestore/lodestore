@@ -194,9 +194,9 @@ async fn seal_pack<S: BlobStore>(
     out: &mut RepackOutcome,
     records: &mut Vec<pb::PackRecord>,
 ) -> Result<()> {
-    let done = builder.finish(entropy)?;
-    out.bytes_written += done.bytes.len() as u64;
-    put_named(store, &pack_object_key(&done.pack_id), done.bytes).await?;
+    let mut done = builder.finish(entropy)?;
+    crate::writer::upload_pack(store, &mut done, entropy).await?;
+    out.bytes_written += done.record.pack_size;
     out.new_packs.push(done.pack_id);
     records.push(done.record);
     Ok(())

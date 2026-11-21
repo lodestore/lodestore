@@ -51,7 +51,7 @@ fn lowest_shard_id(shards: &[(BlobId, pb::IndexShard)]) -> BlobId {
 /// supersedes every real one and moves every record one byte off its frame,
 /// or into another real pack. Its id sorts before all others.
 async fn forged_fleet() -> Fx {
-    let fx = Fx::new().await;
+    let fx = Fx::seeded(1).await;
     let a = fx
         .backup(
             "host-a",

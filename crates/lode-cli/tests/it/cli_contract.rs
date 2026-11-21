@@ -176,6 +176,33 @@ fn cli_exit_usage_2() {
 }
 
 #[test]
+fn cli_refuses_query_options_in_the_url() {
+    let tmp = tempfile::tempdir().unwrap();
+    for url in [
+        "azblob://c?sas_key=SECRET",
+        "azblob://c/r?account_name=a",
+        "gcs://b?Token=SECRET",
+        "sftp://u@h/x?password=SECRET",
+        "s3:http://127.0.0.1:9/b?secret_access_key=SECRET",
+    ] {
+        let assert = bare(tmp.path())
+            .env("LODE_PASSWORD", PASSWORD)
+            .args(["-r", url, "repo", "init", "--accept-weaker-guarantee"])
+            .arg("--recovery-key-file")
+            .arg(tmp.path().join("r.key"))
+            .assert()
+            .failure();
+        let err = stderr_of(&assert);
+        assert!(
+            err.contains("not allowed") || err.contains("in the environment"),
+            "{url}: {err}"
+        );
+        assert!(!err.contains("SECRET"), "{url}: {err}");
+        assert!(!tmp.path().join("r.key").exists(), "{url}");
+    }
+}
+
+#[test]
 fn cli_exit_repo_not_found_10() {
     let tmp = tempfile::tempdir().unwrap();
     let empty = tmp.path().join("empty");
@@ -193,10 +220,52 @@ fn cli_exit_already_initialized_11() {
     let repo = tmp.path().join("repo");
     init_repo(&repo);
     lode(&repo)
-        .args(["repo", "init", "--recovery-key-file"])
+        .args([
+            "repo",
+            "init",
+            "--accept-weaker-guarantee",
+            "--recovery-key-file",
+        ])
         .arg(tmp.path().join("second.key"))
         .assert()
         .code(11);
+}
+
+#[test]
+fn cli_local_init_needs_consent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let key_file = common::key_file_of(&repo);
+    let refused = lode(&repo)
+        .args(["repo", "init", "--recovery-key-file"])
+        .arg(&key_file)
+        .assert()
+        .failure();
+    let err = stderr_of(&refused);
+    assert!(err.contains("--accept-weaker-guarantee"), "{err}");
+    assert!(
+        err.contains("Every host that writes to this folder can change or delete its backups"),
+        "{err}"
+    );
+    assert!(!repo.join("config").exists());
+    assert!(!key_file.exists());
+
+    let accepted = lode(&repo)
+        .args([
+            "repo",
+            "init",
+            "--accept-weaker-guarantee",
+            "--recovery-key-file",
+        ])
+        .arg(&key_file)
+        .assert()
+        .success();
+    let out = String::from_utf8(accepted.get_output().stdout.clone()).unwrap();
+    assert!(
+        out.contains("storage guarantee: host_can_overwrite_or_delete"),
+        "{out}"
+    );
+    assert!(repo.join("config").exists());
 }
 
 #[test]
@@ -285,7 +354,13 @@ fn cli_init_json_requires_recovery_key_file() {
 
     let key_file = tmp.path().join("repo.key");
     let assert = lode(&repo)
-        .args(["repo", "init", "--json", "--recovery-key-file"])
+        .args([
+            "repo",
+            "init",
+            "--json",
+            "--accept-weaker-guarantee",
+            "--recovery-key-file",
+        ])
         .arg(&key_file)
         .assert()
         .success();

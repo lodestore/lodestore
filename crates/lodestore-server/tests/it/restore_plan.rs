@@ -778,7 +778,6 @@ async fn restore_plan_presigned_range_minio() {
                     backend: "s3".to_string(),
                     options: options.clone(),
                 },
-                experimental: false,
                 format_repo_id,
                 config_hash,
                 master: master.clone(),

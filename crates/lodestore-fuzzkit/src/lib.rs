@@ -41,6 +41,7 @@ use lodestore_format::pack::{PACK_PREFIX_LEN, parse_entries, parse_prefix, parse
 use lodestore_format::pb;
 use lodestore_format::snapshot::{ENVELOPE_VERSION, open_snapshot};
 use lodestore_format::source::{self, SourceKey};
+use lodestore_format::store::sftp::{RawEntry, RawKind, check_listing};
 use lodestore_format::tree::{decode_tree, hooks};
 use lodestore_nbd::{Client, Limits as NbdLimits, MemExport, NbdSource, serve};
 use prost::Message;
@@ -572,6 +573,66 @@ pub fn nbd_server(data: &[u8]) {
     });
 }
 
+fn take<'a>(rest: &mut &'a [u8], len: usize) -> Option<&'a [u8]> {
+    let (head, tail) = rest.split_at_checked(len)?;
+    *rest = tail;
+    Some(head)
+}
+
+fn take_text(rest: &mut &[u8]) -> Option<String> {
+    let len = usize::from(take(rest, 1)?[0]);
+    let bytes = take(rest, len.min(rest.len()))?;
+    Some(String::from_utf8_lossy(bytes).into_owned())
+}
+
+/// Input: prefix and directory (a length byte, then that many bytes each),
+/// then entries of a flags byte (bits 0-1 the kind: 0 file, 1 directory,
+/// otherwise other; bit 2 a size follows; bit 3 a modification time
+/// follows), the size as 8 little-endian bytes, the time as 4, and the name
+/// like the prefix.
+fn take_raw_entry(rest: &mut &[u8]) -> Option<RawEntry> {
+    let flags = take(rest, 1)?[0];
+    let size = if flags & 4 != 0 {
+        Some(u64::from_le_bytes(take(rest, 8)?.try_into().ok()?))
+    } else {
+        None
+    };
+    let mtime_s = if flags & 8 != 0 {
+        Some(u32::from_le_bytes(take(rest, 4)?.try_into().ok()?))
+    } else {
+        None
+    };
+    Some(RawEntry {
+        name: take_text(rest)?,
+        size,
+        mtime_s,
+        kind: match flags & 3 {
+            0 => RawKind::File,
+            1 => RawKind::Dir,
+            _ => RawKind::Other,
+        },
+    })
+}
+
+/// A directory listing from a hostile SFTP server: every key that comes out
+/// is a sound key under the directory.
+pub fn sftp_listing(data: &[u8]) {
+    let mut rest = data;
+    let (Some(prefix), Some(dir)) = (take_text(&mut rest), take_text(&mut rest)) else {
+        return;
+    };
+    let mut raw = Vec::new();
+    while raw.len() < 256 {
+        let Some(entry) = take_raw_entry(&mut rest) else {
+            break;
+        };
+        raw.push(entry);
+    }
+    if let Err(violation) = check_listing(&prefix, &dir, &raw) {
+        panic!("{violation}");
+    }
+}
+
 pub use restore_plan::restore_plan;
 pub use stores::{snapshot_resolves, verify_shard};
 
@@ -603,4 +664,5 @@ pub const TARGETS: &[(&str, Target)] = &[
     ("recovery_key", recovery_key),
     ("minisign_signature", minisign_signature),
     ("snapshot_open", snapshot_open),
+    ("sftp_listing", sftp_listing),
 ];

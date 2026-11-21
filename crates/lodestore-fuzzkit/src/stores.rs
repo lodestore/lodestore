@@ -154,6 +154,10 @@ impl BlobStore for Overlay<'_> {
         }
         Ok(out)
     }
+
+    fn publishes_atomically(&self) -> bool {
+        true
+    }
 }
 
 fn pick<T>(items: &[T], byte: u8) -> Option<&T> {

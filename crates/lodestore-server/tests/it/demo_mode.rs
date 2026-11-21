@@ -1159,6 +1159,7 @@ async fn seed_everything(ts: &TestServer, minio: Option<&MinioServer>) -> Seeded
         &json!({
             "name": "main",
             "location": { "backend": "local", "options": { "path": ts.local_repo_root("main").display().to_string() } },
+            "accept_weaker_guarantee": true,
         }),
     )
     .await;
@@ -1350,6 +1351,7 @@ async fn seed_everything(ts: &TestServer, minio: Option<&MinioServer>) -> Seeded
                 },
                 "server_credentials": creds(&server),
                 "agent_credentials": creds(&agent),
+                "accept_weaker_guarantee": true,
             }),
         )
         .await;

@@ -18,7 +18,7 @@ use lodestore_format::locks::{
 use lodestore_format::provenance::{ATTESTATIONS_MISSING, ProvenanceSet};
 use lodestore_format::reader::Reader;
 use lodestore_format::repo::Repository;
-use lodestore_format::store::{BlobError, Store, open_url, read_bounded};
+use lodestore_format::store::{BlobError, RepoLocation, Store, open_url, read_bounded};
 use lodestore_format::writer::{Deadline, Writer};
 
 use crate::cli::{SecretArgs, UnlockError, UsageError};
@@ -44,7 +44,174 @@ pub fn resolve_repository(flag: Option<String>, profile: Option<&Profile>) -> Re
     })
 }
 
+fn is_remote_scheme(url: &str) -> bool {
+    ["azblob://", "gcs://", "sftp://"]
+        .iter()
+        .any(|scheme| url.starts_with(scheme))
+}
+
+/// A non-empty environment variable, kept out of plain `String`s that outlive
+/// the call.
+fn env_secret(name: &str) -> Option<Zeroizing<String>> {
+    std::env::var(name)
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(Zeroizing::new)
+}
+
+fn env_required(name: &str, what: &str) -> Result<Zeroizing<String>> {
+    env_secret(name).ok_or_else(|| anyhow::anyhow!("set {name} to {what}"))
+}
+
+fn azblob_options(location: &mut RepoLocation) -> Result<()> {
+    let account = env_required("LODE_AZBLOB_ACCOUNT_NAME", "the storage account name")?;
+    if !account.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        anyhow::bail!("LODE_AZBLOB_ACCOUNT_NAME must be letters and digits only");
+    }
+    match (
+        env_secret("LODE_AZBLOB_ACCOUNT_KEY"),
+        env_secret("LODE_AZBLOB_SAS_TOKEN"),
+    ) {
+        (Some(key), None) => location
+            .options
+            .insert("account_key".into(), key.to_string()),
+        (None, Some(sas)) => location.options.insert("sas_token".into(), sas.to_string()),
+        (Some(_), Some(_)) => {
+            anyhow::bail!("set only one of LODE_AZBLOB_ACCOUNT_KEY and LODE_AZBLOB_SAS_TOKEN")
+        }
+        (None, None) => anyhow::bail!(
+            "set LODE_AZBLOB_ACCOUNT_KEY or LODE_AZBLOB_SAS_TOKEN to authenticate to Azure Blob Storage"
+        ),
+    };
+    let endpoint = env_secret("LODE_AZBLOB_ENDPOINT").map_or_else(
+        || format!("https://{}.blob.core.windows.net", *account),
+        |e| e.to_string(),
+    );
+    location.options.insert("endpoint".into(), endpoint);
+    location
+        .options
+        .insert("account_name".into(), account.to_string());
+    Ok(())
+}
+
+fn read_secret_file(var: &str, path: &str) -> Result<Zeroizing<String>> {
+    std::fs::read_to_string(path)
+        .map(Zeroizing::new)
+        .with_context(|| format!("cannot read the file named by {var}: {path}"))
+}
+
+fn gcs_options(location: &mut RepoLocation) -> Result<()> {
+    let credential_file = env_secret("LODE_GCS_CREDENTIAL_FILE");
+    if let Some(path) = &credential_file {
+        let json = read_secret_file("LODE_GCS_CREDENTIAL_FILE", path)?;
+        let encoded = data_encoding::BASE64.encode(json.as_bytes());
+        location.options.insert("credential".into(), encoded);
+    }
+    if let Some(endpoint) = env_secret("LODE_GCS_ENDPOINT") {
+        location
+            .options
+            .insert("endpoint".into(), endpoint.to_string());
+        if credential_file.is_none() {
+            // An emulator needs no credentials; the standard chain is skipped
+            // only when an endpoint is set and no key file is.
+            for flag in [
+                "skip_signature",
+                "disable_vm_metadata",
+                "disable_config_load",
+            ] {
+                location.options.insert(flag.into(), "true".into());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `host` and `port` of an `endpoint` option, for the `ssh-keyscan` hint.
+fn host_and_port(endpoint: &str) -> (&str, &str) {
+    if let Some(rest) = endpoint.strip_prefix('[')
+        && let Some((host, tail)) = rest.split_once(']')
+    {
+        return (host, tail.strip_prefix(':').unwrap_or("22"));
+    }
+    match endpoint.split_once(':') {
+        Some((host, port)) if !port.contains(':') => (host, port),
+        _ => (endpoint, "22"),
+    }
+}
+
+/// The one key line to pin. An `ssh-keyscan` line (`host ssh-ed25519 AAAA...`)
+/// is accepted as it is printed.
+fn host_key_line(text: &str) -> Result<String> {
+    let mut lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'));
+    let (Some(line), None) = (lines.next(), lines.next()) else {
+        anyhow::bail!("LODE_SFTP_HOST_KEY must hold exactly one host key line");
+    };
+    let fields: Vec<&str> = line.split_whitespace().collect();
+    let algorithm_first = fields
+        .first()
+        .is_some_and(|f| f.starts_with("ssh-") || f.starts_with("ecdsa-") || f.starts_with("sk-"));
+    let key = if algorithm_first {
+        &fields[..]
+    } else {
+        fields.get(1..).unwrap_or_default()
+    };
+    Ok(key.join(" "))
+}
+
+fn sftp_options(location: &mut RepoLocation) -> Result<()> {
+    let endpoint = location
+        .options
+        .get("endpoint")
+        .cloned()
+        .unwrap_or_default();
+    let host_key = env_secret("LODE_SFTP_HOST_KEY").ok_or_else(|| {
+        let (host, port) = host_and_port(&endpoint);
+        anyhow::anyhow!(
+            "set LODE_SFTP_HOST_KEY to the server's host key, for example the matching line of `ssh-keyscan -p {port} {host}`; lode does not trust a host key on first use"
+        )
+    })?;
+    let key_file = env_required("LODE_SFTP_KEY_FILE", "the path of the OpenSSH private key")?;
+    let key = read_secret_file("LODE_SFTP_KEY_FILE", &key_file)?;
+    location
+        .options
+        .insert("host_key".into(), host_key_line(&host_key)?);
+    location.options.insert("key".into(), key.to_string());
+    if let Some(publish) = env_secret("LODE_SFTP_PUBLISH") {
+        location
+            .options
+            .insert("publish".into(), publish.to_string());
+    }
+    Ok(())
+}
+
+/// Secrets come from the environment only; the URL carries none.
+fn remote_location(url: &str) -> Result<RepoLocation> {
+    let mut location = RepoLocation::from_url(url)?;
+    match location.backend.as_str() {
+        "azblob" => azblob_options(&mut location)?,
+        "gcs" => gcs_options(&mut location)?,
+        "sftp" => sftp_options(&mut location)?,
+        _ => {}
+    }
+    location.validate_new()?;
+    Ok(location)
+}
+
 pub fn open_store(url: &str) -> Result<Store> {
+    if is_remote_scheme(url) {
+        // The URL is not echoed here: a mistake in it may sit next to a secret.
+        let location = remote_location(url)?;
+        return location
+            .open(None)
+            .with_context(|| format!("cannot open repository {}", location.display()));
+    }
+    if url.starts_with("s3:") && url.contains(['?', '#', '@']) {
+        // Refused by the parser; the URL is not echoed: it may carry a secret.
+        return open_url(url).context("cannot open repository");
+    }
     open_url(url).with_context(|| format!("cannot open repository {url}"))
 }
 
@@ -445,6 +612,28 @@ fn writer_keys_refusal(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_key_line_takes_an_ssh_keyscan_line() {
+        assert_eq!(
+            host_key_line("# h:22 SSH-2.0\n[h]:22 ssh-ed25519 AAAA\n").unwrap(),
+            "ssh-ed25519 AAAA"
+        );
+        assert_eq!(
+            host_key_line("ssh-ed25519 AAAA comment").unwrap(),
+            "ssh-ed25519 AAAA comment"
+        );
+        assert!(host_key_line("").is_err());
+        assert!(host_key_line("h ssh-ed25519 AAAA\nh ecdsa-sha2-nistp256 BBBB").is_err());
+    }
+
+    #[test]
+    fn host_and_port_of_an_endpoint() {
+        assert_eq!(host_and_port("h"), ("h", "22"));
+        assert_eq!(host_and_port("h:2222"), ("h", "2222"));
+        assert_eq!(host_and_port("[::1]:2200"), ("::1", "2200"));
+        assert_eq!(host_and_port("[::1]"), ("::1", "22"));
+    }
 
     #[test]
     fn writer_keys_refuse_when_locks_cannot_be_read() {

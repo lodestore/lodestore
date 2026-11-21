@@ -192,3 +192,10 @@ path = "fuzz_targets/nbd_server.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "sftp_listing"
+path = "fuzz_targets/sftp_listing.rs"
+test = false
+doc = false
+bench = false

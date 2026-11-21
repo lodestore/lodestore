@@ -634,6 +634,10 @@ pub enum RepoCommand {
         /// there is no terminal to show the key on
         #[arg(long, value_name = "PATH")]
         recovery_key_file: Option<PathBuf>,
+        /// Create the repository even if a host holding these credentials
+        /// could overwrite or delete backups
+        #[arg(long)]
+        accept_weaker_guarantee: bool,
     },
     /// Rebuild the index from the packs; needed after index/ objects were lost
     RebuildIndex,

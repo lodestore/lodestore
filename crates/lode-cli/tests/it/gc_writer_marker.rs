@@ -143,10 +143,15 @@ async fn s3_case(policy: impl Fn(&str) -> String) -> S3Case {
     for (k, v) in root_env {
         init.env(k, v);
     }
-    init.args(["repo", "init", "--recovery-key-file"])
-        .arg(&key_file)
-        .assert()
-        .success();
+    init.args([
+        "repo",
+        "init",
+        "--accept-weaker-guarantee",
+        "--recovery-key-file",
+    ])
+    .arg(&key_file)
+    .assert()
+    .success();
     let keys = tmp.path().join("writer-keys");
     export_writer_keys(&url, &root_env, &keys);
     let user = minio

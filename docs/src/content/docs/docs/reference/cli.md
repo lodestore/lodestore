@@ -298,6 +298,51 @@ Lists print a table with the same columns and status words as the web interface.
 
 `lode backup`, `lode snapshots`, `lode ls`, `lode dump` and `lode restore` work straight against a repository, with its password or recovery key and no server. See [Restoring without the server](/docs/recipes/restore-without-server/). This section covers what changed with snapshot signatures; [Snapshot provenance and `latest`](/docs/security/threat-model/#snapshot-provenance-and-latest) explains what they protect and where they stop.
 
+### Repository location
+
+`-r`, `--repo` (or `LODE_REPOSITORY`, or the `repository` of a profile) names the repository:
+
+| Form | Storage |
+|------|---------|
+| `/path/to/folder` | A local folder |
+| `s3:https://host/bucket[/folder]` | S3 or an S3-compatible storage |
+| `azblob://<container>[/<root>]` | Azure Blob Storage |
+| `gcs://<bucket>[/<root>]` | Google Cloud Storage |
+| `sftp://<user>@<host>[:<port>][/<path>]` | An SFTP server; the path is the repository folder on the server, an empty path is the login folder |
+
+A location carries no secrets. `lode` refuses a URL with a query string or a fragment, or one that has `user:secret@` in front of the name, and its error does not repeat the URL. Secrets come from the environment:
+
+| Variable | Used for | Meaning |
+|----------|----------|---------|
+| `LODE_AZBLOB_ACCOUNT_NAME` | `azblob://` | The storage account name. Required |
+| `LODE_AZBLOB_ACCOUNT_KEY`, `LODE_AZBLOB_SAS_TOKEN` | `azblob://` | The account key or a SAS token. Exactly one is required |
+| `LODE_AZBLOB_ENDPOINT` | `azblob://` | The service address. Default `https://<account>.blob.core.windows.net` |
+| `LODE_GCS_CREDENTIAL_FILE` | `gcs://` | A service account key file (JSON). Without it, and without `LODE_GCS_ENDPOINT`, `lode` uses the standard Google credential chain |
+| `LODE_GCS_ENDPOINT` | `gcs://` | The service address, for an emulator or a private endpoint. Without a key file it also turns off request signing and the credential chain |
+| `LODE_SFTP_KEY_FILE` | `sftp://` | The OpenSSH private key of the user, without a passphrase. Required |
+| `LODE_SFTP_HOST_KEY` | `sftp://` | The server's host key, one line: `ssh-ed25519 AAAA...`, or the matching line of `ssh-keyscan -p <port> <host>`. Required |
+| `LODE_SFTP_PUBLISH` | `sftp://` | `hardlink` (default) or `direct`. `lode` never changes it by itself |
+
+`lode` does not trust an SFTP host key on first use. Without `LODE_SFTP_HOST_KEY` it stops before it connects and says how to get the key. A key that differs from the pinned one stops the connection.
+
+S3 credentials come from the standard AWS environment variables and shared config files, as before.
+
+### Creating a repository
+
+```sh
+lode -r azblob://backups repo init --recovery-key-file ./repository.key
+```
+
+`lode repo init` first checks the password, the recovery key destination and that the repository does not exist yet; these errors and their exit codes are unchanged. It then writes and removes small probe objects to measure what the credentials it runs with can do to the backups, on every storage including a local folder. The result is printed after a successful init as `storage guarantee: <level>`, one of `create_only_enforced`, `overwrite_keeps_old_version`, `host_can_overwrite_or_delete` or `unchecked`, followed by the reasons.
+
+If the credentials can overwrite or delete backups (`host_can_overwrite_or_delete`), or the check could not measure it (`unchecked`), `lode repo init` stops, says what a holder of these credentials can do, and creates nothing. A local folder always gives `host_can_overwrite_or_delete`, because every host that can write to it can also change it. To create the repository anyway, pass the flag:
+
+| Option | Meaning |
+|--------|---------|
+| `--accept-weaker-guarantee` | Create the repository although a holder of these credentials could overwrite or delete backups, or although this could not be measured |
+
+`lode` does not read the lifecycle rules of a bucket. On S3, Azure Blob and GCS it therefore shows a bucket that keeps earlier versions of overwritten objects as `host_can_overwrite_or_delete` with the reason that its lifecycle rules could not be read, and asks for the flag; on a bucket with a create-only key it prints the same reason as a note. The server reads the rules and applies them. `--json` output is unchanged.
+
 ### Restoring a very large directory
 
 `lode restore` holds a directory in memory whole and stops at a directory of more than 2^23 entries or 1 GiB of tree data (the decoded length of its pieces), or at more than 2^24 entries or 2 GiB of tree data held at once across the directories it has open, each directory counted at its full length. The error names the limit: `entries in one directory`, `bytes in one directory`, `entries held at once` or `bytes held at once`. `lode backup` refuses such a tree and writes no snapshot, so a snapshot made by this version never needs more. A snapshot written before backups refused them can. The error names the limit and the flag:

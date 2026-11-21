@@ -507,7 +507,6 @@ async fn snapshot_actions_delete_denied_keeps_out() {
                 backend: "s3".to_string(),
                 options,
             },
-            experimental: false,
             format_repo_id,
             config_hash,
             master,

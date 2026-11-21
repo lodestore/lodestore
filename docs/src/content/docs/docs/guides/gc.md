@@ -83,6 +83,11 @@ On a bucket with versioning or Object Lock a plain delete only adds a delete mar
 - The delete marker of an object is kept until its last real version is gone, otherwise the object would show up in listings again.
 - Removing a delete marker by hand brings the object back, but the data it pointed to may have been deleted by then.
 
+## SFTP and Backblaze B2
+
+- **SFTP.** An upload that was cut off leaves its temporary file in `tmp/` of the repository. A real cleanup cycle (never a dry run) removes the files there that are older than the pause and older than 24 hours, after it has deleted the marked packs. The age is the modification time the SFTP server gives the file, so the margin of a day keeps a running upload safe while that server's clock is less than a day (and less than the pause) behind the Lodestore server's. A clock further behind makes a running upload look old: cleanup removes its temporary file and that backup fails and has to run again. Published packs, index files and snapshots are never in `tmp/` and are not touched. The server's SFTP user needs the right to delete files in `tmp/`; if the storage refuses, the cycle fails and names the file. The number of files removed is in the cycle log.
+- **Backblaze B2** (`provider = b2`). A key that may write can hide an object by writing a delete marker, and the storage cannot tell such a marker from the server's own. Cleanup therefore never removes objects that are only hidden: it leaves them and their versions in the bucket, and the cycle log says so. Packs the server itself decides to delete are still removed with all their versions. The server records every snapshot it forgets. When a snapshot the server did not forget has a delete marker or an older version anywhere in its history, for instance because a host with the agent key hid it, possibly put it back and hid it again, cleanup could read it as gone and delete the data that only this snapshot uses; instead the cycle fails, both after it lists the snapshots to plan and again right before it deletes, and names the snapshot. Remove its delete markers and older versions to keep the snapshot, or remove the object with all its versions to forget it, then run cleanup again.
+
 ## Backups that run outside the server
 
 `lode backup` writes into the repository directly, with no server involved, so it follows the same protocol:

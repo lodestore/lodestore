@@ -7,6 +7,7 @@ use lodestore_format::config::config_hash;
 use lodestore_format::crypto::Entropy;
 use lodestore_format::keys::{MasterKey, RecoveryKey};
 use lodestore_format::repo::{InitOptions, PendingInit, Repository};
+use lodestore_format::store::BlobStore;
 use lodestore_format::store::policy::{agent_iam_policy_json, agent_minio_commands};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
@@ -20,7 +21,8 @@ use crate::error::{ApiError, ErrorBody};
 use crate::maintenance::check::db::repo_checks_summary;
 use crate::maintenance::gc::api::CleanupSummary;
 use crate::repos::checks::{
-    Opened, open_draft, run_checks, run_probe, split_secret_options, to_result,
+    Opened, consent_message, needs_consent, open_draft, run_checks, run_probe,
+    split_secret_options, to_result,
 };
 use crate::repos::db::{self, NewRepository, RepoExtras, RepoLocation};
 use crate::repos::{
@@ -52,10 +54,14 @@ pub struct ConflictBody {
 }
 
 fn conflict_with(message: &str, check: CheckResult) -> Response {
+    conflict_coded("conflict", message, check)
+}
+
+fn conflict_coded(code: &str, message: &str, check: CheckResult) -> Response {
     (
         StatusCode::CONFLICT,
         Json(ConflictBody {
-            code: "conflict".to_string(),
+            code: code.to_string(),
             message: message.to_string(),
             check,
         }),
@@ -134,7 +140,7 @@ async fn check_storage(
     request_body = RepositoryDraft,
     responses(
         (status = 201, description = "A new recovery key; nothing is written to the storage yet", body = WizardStarted),
-        (status = 409, description = "The storage failed a check or already holds a repository", body = ConflictBody),
+        (status = 409, description = "The storage failed a check, already holds a repository, or needs `accept_weaker_guarantee` (code `weaker_guarantee`)", body = ConflictBody),
         (status = 422, description = "The draft is malformed", body = ErrorBody),
     )
 )]
@@ -156,6 +162,13 @@ async fn start_wizard(
     if report.existing_repository {
         return Ok(conflict_with(
             "This storage already holds a Lodestore repository. Connect to it instead.",
+            result,
+        ));
+    }
+    if needs_consent(&result) && !draft.accept_weaker_guarantee {
+        return Ok(conflict_coded(
+            "weaker_guarantee",
+            &consent_message(&result, "create"),
             result,
         ));
     }
@@ -248,6 +261,11 @@ async fn commit_wizard(
     let hash = config_hash(pending.config_bytes());
 
     let mut entropy = Entropy::os();
+    opened
+        .server
+        .ensure_prefixes(&[])
+        .await
+        .map_err(|e| storage_error(e.into()))?;
     pending
         .commit(&opened.server, password.as_bytes(), &mut entropy)
         .await
@@ -294,10 +312,11 @@ async fn register(state: &AppState, r: Registration) -> Result<RepositorySummary
         agent_creds,
         ..
     } = r.opened;
-    let experimental = location.is_experimental();
     let (public, secret_options) = split_secret_options(&location);
     let checks_json =
         serde_json::to_string(&r.checks.checks).map_err(|e| ApiError::Internal(e.into()))?;
+    let guarantee_notes_json = serde_json::to_string(&r.checks.guarantee_notes)
+        .map_err(|e| ApiError::Internal(e.into()))?;
     let id = db::create_repository_ext(
         state,
         NewRepository {
@@ -306,7 +325,6 @@ async fn register(state: &AppState, r: Registration) -> Result<RepositorySummary
                 backend: public.backend,
                 options: public.options,
             },
-            experimental,
             format_repo_id: r.format_repo_id,
             config_hash: r.config_hash,
             master: r.master,
@@ -319,6 +337,8 @@ async fn register(state: &AppState, r: Registration) -> Result<RepositorySummary
             checks_json: Some(checks_json),
             agent_key_state: Some(r.checks.agent_key_state),
             checked_at: Some(now_ms()),
+            guarantee_level: Some(r.checks.guarantee_level),
+            guarantee_notes_json: Some(guarantee_notes_json),
         },
     )
     .await?;
@@ -354,7 +374,7 @@ const CONNECT_REFUSED: &str =
     request_body = ConnectRequest,
     responses(
         (status = 201, description = "The existing repository was connected", body = RepositorySummary),
-        (status = 409, description = "The storage failed a check or holds no repository", body = ConflictBody),
+        (status = 409, description = "The storage failed a check, holds no repository, or needs `accept_weaker_guarantee` (code `weaker_guarantee`)", body = ConflictBody),
         (status = 422, description = "The secret does not open the repository", body = ErrorBody),
     )
 )]
@@ -389,6 +409,13 @@ async fn connect_repository(
     if !report.existing_repository {
         return Ok(conflict_with(
             "There is no Lodestore repository in this storage.",
+            checks,
+        ));
+    }
+    if needs_consent(&checks) && !draft.accept_weaker_guarantee {
+        return Ok(conflict_coded(
+            "weaker_guarantee",
+            &consent_message(&checks, "connect"),
             checks,
         ));
     }

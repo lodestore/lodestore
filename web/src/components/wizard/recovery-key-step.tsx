@@ -2,7 +2,7 @@ import { Check, CircleAlert, CircleCheck, Copy, Download } from "lucide-react";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { ApiError } from "@/api/fetcher";
 import { commitWizard, startWizard } from "@/api/gen/endpoints";
-import type { RepositorySummary } from "@/api/gen/model";
+import type { CheckResult, RepositorySummary } from "@/api/gen/model";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -81,10 +81,12 @@ function tidy(message: string) {
 export function RecoveryKeyStep({
 	draft,
 	onBack,
+	onWeaker,
 	onCreated,
 }: {
 	draft: Draft;
 	onBack: () => void;
+	onWeaker: (check: CheckResult) => void;
 	onCreated: (repository: RepositorySummary) => void;
 }) {
 	const [started, setStarted] = useState<Started>();
@@ -118,6 +120,14 @@ export function RecoveryKeyStep({
 			},
 			(error: unknown) => {
 				if (cancelled) return;
+				if (
+					error instanceof ApiError &&
+					error.code === "weaker_guarantee" &&
+					error.check
+				) {
+					onWeaker(error.check);
+					return;
+				}
 				setStartError(
 					copy.errors.submit(
 						text.keyAction,

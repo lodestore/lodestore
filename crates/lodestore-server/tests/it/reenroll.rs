@@ -157,6 +157,7 @@ async fn reenroll_keeps_agent_id_and_rebinds_snapshots() {
                             "backend": "local",
                             "options": { "path": first.local_repo_root("main").display().to_string() },
                         },
+                        "accept_weaker_guarantee": true,
                     },
                     "password": "test-password",
                     "recovery_key": null,

@@ -7,7 +7,7 @@ use opendal::layers::{RetryLayer, TimeoutLayer};
 use opendal::{ErrorKind, Operator, services};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use super::purge::{BlobPurge, PurgeOutcome, deleted_keys_op, purge_op};
+use super::purge::{BlobPurge, PurgeOutcome, deleted_keys_op, purge_op, rewritten_keys_op};
 use super::{BlobDelete, BlobError, BlobStore, ListEntry, Presigned};
 use crate::error::{Error, Result};
 
@@ -81,10 +81,21 @@ impl fmt::Debug for StaticCredentials {
     }
 }
 
+/// Which S3-compatible service the bucket lives on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum S3Provider {
+    Default,
+    B2,
+}
+
 /// Repository in an S3 bucket, path-style addressing. Every write carries
-/// `If-None-Match: *`; there is no unconditional write and no delete.
+/// `If-None-Match: *` except on the B2 preset, which first checks that the
+/// object is absent because B2 does not apply that header; there is no
+/// delete on the write path.
 pub struct S3Store {
     pub(super) op: Operator,
+    conditional: bool,
+    sweeps_delete_markers: bool,
 }
 
 impl fmt::Debug for S3Store {
@@ -100,14 +111,125 @@ fn region_from_env() -> String {
         .unwrap_or_else(|| DEFAULT_REGION.to_owned())
 }
 
+/// Query parameters whose value is a credential, lowercase.
+const SECRET_PARAMS: [&str; 8] = [
+    "sig",
+    "x-amz-signature",
+    "x-amz-security-token",
+    "x-amz-credential",
+    "x-goog-signature",
+    "x-goog-credential",
+    "access_token",
+    "token",
+];
+
+/// Drops every URL query string from `text`, then blanks the value of every
+/// credential parameter left anywhere in it, plain or URL-encoded: SAS
+/// tokens, S3 presigned parameters and GCS signatures travel there, and a
+/// transport error carries the full request URL. A query ends at whitespace
+/// or at the `, name:` that separates OpenDAL's context fields, never at a
+/// bare comma, because an Azure SAS holds `spr=https,http`.
+pub(super) fn redact_query_strings(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find('?') {
+        out.push_str(&rest[..=i]);
+        let tail = &rest[i + 1..];
+        let end = query_end(tail);
+        if end > 0 {
+            out.push_str("<redacted>");
+        }
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    blank_secret_params(&out)
+}
+
+fn query_end(tail: &str) -> usize {
+    for (i, c) in tail.char_indices() {
+        if c.is_whitespace() {
+            return i;
+        }
+        if c == ',' && starts_context_field(&tail[i + 1..]) {
+            return i;
+        }
+    }
+    tail.len()
+}
+
+/// Whether `text` starts with ` name:`, the next field of an OpenDAL context.
+fn starts_context_field(text: &str) -> bool {
+    let Some(text) = text.strip_prefix(' ') else {
+        return false;
+    };
+    let name = text
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .unwrap_or(text.len());
+    name > 0 && text[name..].starts_with(':')
+}
+
+fn blank_secret_params(text: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let mut cut: Vec<(usize, usize)> = Vec::new();
+    for name in SECRET_PARAMS {
+        for (at, _) in lower.match_indices(name) {
+            let before = &lower[..at];
+            let bounded = before
+                .bytes()
+                .next_back()
+                .is_none_or(|b| !(b.is_ascii_alphanumeric() || b == b'_' || b == b'-'))
+                || before.ends_with("%26")
+                || before.ends_with("%3f");
+            let after = at + name.len();
+            let value = if lower[after..].starts_with('=') {
+                after + 1
+            } else if lower[after..].starts_with("%3d") {
+                after + 3
+            } else {
+                continue;
+            };
+            if !bounded {
+                continue;
+            }
+            let mut end = value;
+            while end < bytes.len()
+                && !matches!(
+                    bytes[end],
+                    b'&' | b'"' | b'\'' | b')' | b'}' | b'>' | b'<' | b',' | b';'
+                )
+                && !bytes[end].is_ascii_whitespace()
+                && !bytes[end..].starts_with(b"%26")
+            {
+                end += 1;
+            }
+            if end > value {
+                cut.push((value, end));
+            }
+        }
+    }
+    cut.sort_unstable();
+    let mut out = String::with_capacity(text.len());
+    let mut pos = 0;
+    for (from, to) in cut {
+        if to <= pos {
+            continue;
+        }
+        out.push_str(&text[pos..from.max(pos)]);
+        out.push_str("<redacted>");
+        pos = to;
+    }
+    out.push_str(&text[pos..]);
+    out
+}
+
 pub(super) fn map_err(e: opendal::Error) -> BlobError {
+    let message = redact_query_strings(&e.to_string());
     match e.kind() {
         ErrorKind::NotFound => BlobError::NotFound,
-        ErrorKind::PermissionDenied => BlobError::Denied {
-            message: e.to_string(),
-        },
+        ErrorKind::PermissionDenied => BlobError::Denied { message },
         _ => BlobError::Backend {
-            message: e.to_string(),
+            message,
             temporary: e.is_temporary(),
         },
     }
@@ -173,6 +295,7 @@ pub struct S3Options {
     pub prefix: String,
     pub region: String,
     pub virtual_host_style: bool,
+    pub provider: S3Provider,
 }
 
 /// The timeout sits inside the retry, so a timed-out attempt is retried.
@@ -266,6 +389,7 @@ impl S3Store {
                 prefix: url.prefix,
                 region: region_from_env(),
                 virtual_host_style: false,
+                provider: S3Provider::Default,
             },
             creds,
         )
@@ -298,7 +422,23 @@ impl S3Store {
         }
         let op = Operator::new(builder)
             .map_err(|e| Error::InvalidInput(format!("cannot configure the s3 backend: {e}")))?;
-        Ok(S3Store { op: layered(op) })
+        let b2 = opts.provider == S3Provider::B2;
+        Ok(S3Store {
+            op: layered(op),
+            conditional: !b2,
+            sweeps_delete_markers: !b2,
+        })
+    }
+
+    pub fn conditional_write_supported(&self) -> bool {
+        self.conditional
+    }
+
+    /// Whether a delete marker left by a host may be swept by the server's
+    /// garbage collection. On B2 the host's hide marker is the only trace of
+    /// a delete, so it must not be turned into a removal.
+    pub fn sweeps_delete_markers(&self) -> bool {
+        self.sweeps_delete_markers
     }
 }
 
@@ -333,6 +473,16 @@ impl S3Store {
 impl BlobStore for S3Store {
     async fn put_if_absent(&self, key: &str, data: Bytes) -> std::result::Result<(), BlobError> {
         check_key(key)?;
+        if !self.conditional {
+            // A write-only key may not stat; its write goes through and on B2 a repeat only adds a version of the same bytes.
+            match self.op.stat(key).await {
+                Ok(_) => return Err(BlobError::AlreadyExists),
+                Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::PermissionDenied) => {
+                }
+                Err(e) => return Err(map_err(e)),
+            }
+            return self.op.write(key, data).await.map(|_| ()).map_err(map_err);
+        }
         match self.op.write_with(key, data).if_not_exists(true).await {
             Ok(_) => Ok(()),
             Err(e) if e.kind() == ErrorKind::ConditionNotMatch => Err(BlobError::AlreadyExists),
@@ -357,6 +507,10 @@ impl BlobStore for S3Store {
     async fn list(&self, prefix: &str) -> std::result::Result<Vec<ListEntry>, BlobError> {
         list_op(&self.op, prefix).await
     }
+
+    fn publishes_atomically(&self) -> bool {
+        true
+    }
 }
 
 impl BlobDelete for S3Store {
@@ -378,11 +532,81 @@ impl BlobPurge for S3Store {
     ) -> std::result::Result<Vec<String>, BlobError> {
         deleted_keys_op(&self.op, prefix, older_than_ms).await
     }
+
+    async fn rewritten_keys(&self, prefix: &str) -> std::result::Result<Vec<String>, BlobError> {
+        rewritten_keys_op(&self.op, prefix).await
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redacts_signed_query_strings() {
+        for (secret, text) in [
+            (
+                "SECRETSIG",
+                "context: { url: http://h/c/k?sv=1&sig=SECRETSIG, called: x }",
+            ),
+            (
+                "SECRETSIG",
+                "url: https://b.s3.amazonaws.com/k?X-Amz-Credential=a&X-Amz-Signature=SECRETSIG&X-Amz-Security-Token=SECRETSIG",
+            ),
+            (
+                "SECRETSIG",
+                "GET \"https://storage.googleapis.com/b/o?X-Goog-Signature=SECRETSIG\" failed",
+            ),
+        ] {
+            let out = redact_query_strings(text);
+            assert!(!out.contains(secret), "{out}");
+        }
+        let azure = "sv=2022-11-02&ss=b&srt=sco&sp=rwdlac&se=2030-01-01T00:00:00Z&st=2024-01-01T00:00:00Z&spr=https,http";
+        for text in [
+            format!(
+                "Unexpected (temporary) at write, context: {{ url: http://127.0.0.1:1/c/k?{azure}&sig=SECRETSIG, called: http_util::Client::send, service: azblob }} => send http request, source: error sending request for url (http://127.0.0.1:1/c/k?{azure}&sig=SECRETSIG)"
+            ),
+            format!("context: {{ url: http://h/c/k?sv=1&sig=SECRETSIG&{azure}, called: x }}"),
+            format!("context: {{ url: http://h/c/k?{azure}&sig=SECRETSIG }}"),
+            format!("url: http://h/c/k?{azure}&sig=SECRETSIG"),
+            "uri: http://h/k?spr=https,http&SIG=SECRETSIG".to_string(),
+            "body: sv=1&spr=https,http&sig=SECRETSIG".to_string(),
+            "body: sv%3D1%26spr%3Dhttps%2Chttp%26sig%3DSECRETSIG%26se%3D2030".to_string(),
+            "token=SECRETSIG; X-Amz-Security-Token=SECRETSIG x-goog-credential=SECRETSIG"
+                .to_string(),
+            r#"{"q":"access_token=SECRETSIG"}"#.to_string(),
+        ] {
+            let out = redact_query_strings(&text);
+            assert!(!out.contains("SECRETSIG"), "{out}");
+        }
+        assert_eq!(
+            redact_query_strings("context: { url: http://h/c/k?a=1, called: x, service: s }"),
+            "context: { url: http://h/c/k?<redacted>, called: x, service: s }"
+        );
+        assert_eq!(
+            redact_query_strings("a tokenizer=1 and mytoken=2"),
+            "a tokenizer=1 and mytoken=2"
+        );
+        assert_eq!(
+            redact_query_strings("url: http://h/k?a=1, :b"),
+            "url: http://h/k?<redacted> :b"
+        );
+        assert_eq!(
+            redact_query_strings("url: http://h/k?a=1, b"),
+            "url: http://h/k?<redacted> b"
+        );
+        assert_eq!(
+            redact_query_strings("a%26sig%3DSECRET x"),
+            "a%26sig%3D<redacted> x"
+        );
+        assert_eq!(redact_query_strings("sig= x"), "sig= x");
+        assert_eq!(
+            redact_query_strings("sig=SECRETü x ü?ü token%3Dü"),
+            "sig=<redacted> x ü?<redacted> token%3D<redacted>"
+        );
+        assert_eq!(redact_query_strings("what? no"), "what? no");
+        assert_eq!(redact_query_strings("plain"), "plain");
+    }
 
     #[test]
     fn store_s3_url_parsing() {
@@ -413,5 +637,47 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn b2_put_surfaces_a_failed_stat_and_writes_nothing() {
+        use lodestore_testkit::fault_proxy::{FaultAction, FaultPlan, FaultProxy, FaultRule};
+
+        let rule = |method| FaultRule {
+            method,
+            key_prefix: String::new(),
+            action: FaultAction::NotImplemented,
+            times: u32::MAX,
+        };
+        let proxy = FaultProxy::start(
+            "http://127.0.0.1:1",
+            FaultPlan::none().with(rule("HEAD")).with(rule("PUT")),
+        )
+        .await;
+        let store = S3Store::with_options(
+            &S3Options {
+                endpoint: Some(proxy.endpoint()),
+                bucket: "b".into(),
+                prefix: String::new(),
+                region: "us-east-1".into(),
+                virtual_host_style: false,
+                provider: S3Provider::B2,
+            },
+            Some(StaticCredentials {
+                access_key_id: "AKIDEXAMPLE".into(),
+                secret_access_key: "SECRETEXAMPLE".into(),
+            }),
+        )
+        .unwrap();
+        assert!(!store.conditional_write_supported());
+
+        let err = store
+            .put_if_absent("data/k", Bytes::from_static(b"x"))
+            .await
+            .unwrap_err();
+        assert!(!matches!(err, BlobError::AlreadyExists), "{err}");
+        let counters = proxy.counters();
+        assert!(counters.accepted("HEAD", "data") >= 1);
+        assert_eq!(counters.accepted("PUT", "data"), 0);
     }
 }

@@ -19,9 +19,9 @@ limits:
     note: Today, API tokens carry scopes that limit what each token can do.
   - title: Windows and macOS agents
     status: Later
-  - title: SFTP, WebDAV and other storage
+  - title: WebDAV and other storage
     status: Later
-    note: Today, S3-compatible storage or a local or network folder.
+    note: Azure Blob Storage, Google Cloud Storage and SFTP come with the next release. Today, S3-compatible storage or a local or network folder.
   - title: Single sign-on
     status: Later
 ---

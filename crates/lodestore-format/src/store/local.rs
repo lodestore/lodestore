@@ -240,6 +240,18 @@ impl BlobStore for LocalFsStore {
         .map_err(|e: std::io::Error| io_err(e))
     }
 
+    async fn object_size(&self, key: &str) -> Result<Option<u64>, BlobError> {
+        let path = self.path_of(key)?;
+        match tokio::task::spawn_blocking(move || std::fs::metadata(path))
+            .await
+            .map_err(io_err)?
+        {
+            Ok(meta) => Ok(Some(meta.len())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(io_err(e)),
+        }
+    }
+
     async fn ensure_prefixes(&self, prefixes: &[&str]) -> Result<(), BlobError> {
         for p in prefixes {
             let path = self.path_of(p.trim_end_matches('/'))?;
@@ -249,6 +261,10 @@ impl BlobStore for LocalFsStore {
                 .map_err(io_err)?;
         }
         Ok(())
+    }
+
+    fn publishes_atomically(&self) -> bool {
+        true
     }
 }
 
@@ -280,6 +296,10 @@ impl BlobPurge for LocalFsStore {
         _prefix: &str,
         _older_than_ms: i64,
     ) -> Result<Vec<String>, BlobError> {
+        Ok(Vec::new())
+    }
+
+    async fn rewritten_keys(&self, _prefix: &str) -> Result<Vec<String>, BlobError> {
         Ok(Vec::new())
     }
 }
@@ -434,5 +454,19 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn object_size_tells_missing_from_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalFsStore::new(dir.path().join("repo"));
+        store
+            .put_if_absent("packs/ab/object", Bytes::from_static(b"first"))
+            .await
+            .unwrap();
+
+        assert_eq!(store.object_size("packs/ab/object").await.unwrap(), Some(5));
+        assert_eq!(store.object_size("packs/ab/missing").await.unwrap(), None);
+        assert!(store.object_size("packs/ab/object/child").await.is_err());
     }
 }

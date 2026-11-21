@@ -44,6 +44,14 @@ pub trait BlobPurge: Send + Sync {
         prefix: &str,
         older_than_ms: i64,
     ) -> impl Future<Output = Result<Vec<String>, BlobError>> + Send;
+
+    /// Keys under `prefix` whose version history holds anything besides one
+    /// live current version: a delete marker, current or not, or an older
+    /// version. Empty on stores without versions.
+    fn rewritten_keys(
+        &self,
+        prefix: &str,
+    ) -> impl Future<Output = Result<Vec<String>, BlobError>> + Send;
 }
 
 impl<T: BlobPurge> BlobPurge for &T {
@@ -58,6 +66,13 @@ impl<T: BlobPurge> BlobPurge for &T {
     ) -> impl Future<Output = Result<Vec<String>, BlobError>> + Send {
         (**self).deleted_keys(prefix, older_than_ms)
     }
+
+    fn rewritten_keys(
+        &self,
+        prefix: &str,
+    ) -> impl Future<Output = Result<Vec<String>, BlobError>> + Send {
+        (**self).rewritten_keys(prefix)
+    }
 }
 
 impl BlobPurge for Store {
@@ -66,6 +81,7 @@ impl BlobPurge for Store {
             Store::Local(s) => s.purge(key).await,
             Store::S3(s) => s.purge(key).await,
             Store::Opendal(s) => s.purge(key).await,
+            Store::Sftp(s) => s.purge(key).await,
         }
     }
 
@@ -78,6 +94,16 @@ impl BlobPurge for Store {
             Store::Local(s) => s.deleted_keys(prefix, older_than_ms).await,
             Store::S3(s) => s.deleted_keys(prefix, older_than_ms).await,
             Store::Opendal(s) => s.deleted_keys(prefix, older_than_ms).await,
+            Store::Sftp(s) => s.deleted_keys(prefix, older_than_ms).await,
+        }
+    }
+
+    async fn rewritten_keys(&self, prefix: &str) -> Result<Vec<String>, BlobError> {
+        match self {
+            Store::Local(s) => s.rewritten_keys(prefix).await,
+            Store::S3(s) => s.rewritten_keys(prefix).await,
+            Store::Opendal(s) => s.rewritten_keys(prefix).await,
+            Store::Sftp(s) => s.rewritten_keys(prefix).await,
         }
     }
 }
@@ -92,7 +118,9 @@ pub fn is_lock_refusal(error: &BlobError) -> bool {
         BlobError::Denied { message } | BlobError::Backend { message, .. } => {
             message.to_ascii_lowercase()
         }
-        BlobError::AlreadyExists | BlobError::NotFound => return false,
+        BlobError::AlreadyExists | BlobError::NotFound | BlobError::HostKeyMismatch { .. } => {
+            return false;
+        }
     };
     ["worm", "objectlocked", "object lock"]
         .iter()
@@ -102,6 +130,67 @@ pub fn is_lock_refusal(error: &BlobError) -> bool {
 fn versioned(op: &Operator) -> bool {
     let cap = op.info().capability();
     cap.list_with_versions && cap.list_with_deleted && cap.delete_with_version
+}
+
+/// The stored versions of `key` as (version id, size), as the backend lists
+/// them; `None` when the store keeps no versions.
+pub(super) async fn versions_op(
+    op: &Operator,
+    key: &str,
+) -> Result<Option<Vec<(String, u64)>>, BlobError> {
+    check_key(key)?;
+    if !versioned(op) {
+        return Ok(None);
+    }
+    let entries = op.list_with(key).versions(true).await.map_err(map_err)?;
+    Ok(Some(
+        entries
+            .iter()
+            .filter(|e| e.path().trim_start_matches('/') == key)
+            .filter(|e| !e.metadata().is_deleted())
+            .filter_map(|e| {
+                let meta = e.metadata();
+                Some((meta.version()?.to_owned(), meta.content_length()))
+            })
+            .collect(),
+    ))
+}
+
+/// A probe object is a few dozen bytes; a version far beyond that is foreign.
+const MAX_PROBE_READ: u64 = 4096;
+
+/// `size` is the length the listing reported for this version.
+pub(super) async fn read_version_op(
+    op: &Operator,
+    key: &str,
+    version: &str,
+    size: u64,
+) -> Result<bytes::Bytes, BlobError> {
+    check_key(key)?;
+    if size > MAX_PROBE_READ {
+        return Err(BlobError::backend(format!(
+            "version of {key} is too large to be a probe object"
+        )));
+    }
+    if size == 0 {
+        return Ok(bytes::Bytes::new());
+    }
+    let buf = op
+        .read_with(key)
+        .version(version)
+        .range(0..size)
+        .await
+        .map_err(map_err)?;
+    Ok(buf.to_bytes())
+}
+
+pub(super) async fn delete_version_op(
+    op: &Operator,
+    key: &str,
+    version: &str,
+) -> Result<(), BlobError> {
+    check_key(key)?;
+    op.delete_with(key).version(version).await.map_err(map_err)
 }
 
 pub(super) async fn purge_op(op: &Operator, key: &str) -> PurgeOutcome {
@@ -187,6 +276,21 @@ async fn plain_delete(op: &Operator, key: &str) -> PurgeOutcome {
 
 // ponytail: materialises every version under the prefix; stream the lister
 // if a bucket's version listing stops fitting in memory.
+async fn list_versions(op: &Operator, prefix: &str) -> Result<Vec<opendal::Entry>, BlobError> {
+    let dir = prefix.rsplit_once('/').map_or("", |(d, _)| d);
+    let dir = if dir.is_empty() {
+        "/".to_owned()
+    } else {
+        format!("{dir}/")
+    };
+    op.list_with(&dir)
+        .recursive(true)
+        .versions(true)
+        .deleted(true)
+        .await
+        .map_err(map_err)
+}
+
 pub(super) async fn deleted_keys_op(
     op: &Operator,
     prefix: &str,
@@ -195,19 +299,7 @@ pub(super) async fn deleted_keys_op(
     if !versioned(op) {
         return Ok(Vec::new());
     }
-    let dir = prefix.rsplit_once('/').map_or("", |(d, _)| d);
-    let dir = if dir.is_empty() {
-        "/".to_owned()
-    } else {
-        format!("{dir}/")
-    };
-    let entries = op
-        .list_with(&dir)
-        .recursive(true)
-        .versions(true)
-        .deleted(true)
-        .await
-        .map_err(map_err)?;
+    let entries = list_versions(op, prefix).await?;
     let mut out: Vec<String> = entries
         .iter()
         .filter(|e| {
@@ -226,9 +318,40 @@ pub(super) async fn deleted_keys_op(
     Ok(out)
 }
 
+pub(super) async fn rewritten_keys_op(
+    op: &Operator,
+    prefix: &str,
+) -> Result<Vec<String>, BlobError> {
+    if !versioned(op) {
+        return Ok(Vec::new());
+    }
+    let mut out: Vec<String> = list_versions(op, prefix)
+        .await?
+        .iter()
+        .filter(|e| {
+            let meta = e.metadata();
+            meta.is_deleted() || meta.is_current() != Some(true)
+        })
+        .map(|e| e.path().trim_start_matches('/').to_owned())
+        .filter(|k| k.starts_with(prefix))
+        .collect();
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn read_version_refuses_an_oversized_version_without_reading() {
+        let op = Operator::via_iter("memory", std::iter::empty::<(String, String)>()).unwrap();
+        let err = read_version_op(&op, "k", "v1", MAX_PROBE_READ + 1)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("too large"), "{err}");
+    }
 
     #[test]
     fn is_lock_refusal_classifies() {
@@ -246,5 +369,13 @@ mod tests {
         )));
         assert!(!is_lock_refusal(&BlobError::backend("connection reset")));
         assert!(!is_lock_refusal(&BlobError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn read_version_reads_a_version_at_the_size_limit() {
+        let op = Operator::via_iter("memory", std::iter::empty::<(String, String)>()).unwrap();
+        if let Err(err) = read_version_op(&op, "k", "v1", MAX_PROBE_READ).await {
+            assert!(!err.to_string().contains("too large"), "{err}");
+        }
     }
 }

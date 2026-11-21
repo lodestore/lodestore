@@ -141,7 +141,6 @@ async fn adv_upgrade_signed_forged_shard_server_gc_keeps_every_snapshot() {
                 backend: "local".to_string(),
                 options: BTreeMap::from([("path".to_string(), root.display().to_string())]),
             },
-            experimental: false,
             format_repo_id,
             config_hash: hash,
             master,

@@ -37,6 +37,51 @@ const MAX_SEED_LEN: usize = 1 << 20;
 
 const TRAILER_LEN: usize = 4 + PACK_MAGIC.len();
 
+type ListingSeedEntry<'a> = (u8, Option<u64>, Option<u32>, &'a [u8]);
+
+fn listing_seed(prefix: &[u8], dir: &[u8], entries: &[ListingSeedEntry]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for text in [prefix, dir] {
+        out.push(text.len() as u8);
+        out.extend_from_slice(text);
+    }
+    for (kind, size, mtime, name) in entries {
+        let has = |present: bool, bit: u8| if present { bit } else { 0 };
+        out.push(kind | has(size.is_some(), 4) | has(mtime.is_some(), 8));
+        out.extend(size.map(u64::to_le_bytes).into_iter().flatten());
+        out.extend(mtime.map(u32::to_le_bytes).into_iter().flatten());
+        out.push(name.len() as u8);
+        out.extend_from_slice(name);
+    }
+    out
+}
+
+fn listing_seeds() -> Seeds {
+    let entries: [ListingSeedEntry; 9] = [
+        (0, Some(1 << 20), Some(1_700_000_000), b"obj"),
+        (0, None, None, b"bare"),
+        (1, Some(0), Some(7), b"ab"),
+        (2, Some(3), Some(7), b"link"),
+        (0, Some(u64::MAX), Some(u32::MAX), b"max"),
+        (0, Some(1), Some(1), b".."),
+        (0, Some(1), Some(1), b"a/b"),
+        (0, Some(1), Some(1), b"a\0b"),
+        (1, Some(0), Some(1), b"."),
+    ];
+    vec![
+        ("sftp_listing", listing_seed(b"packs/", b"packs/", &entries)),
+        ("sftp_listing", listing_seed(b"", b"", &entries)),
+        (
+            "sftp_listing",
+            listing_seed(b"tmp/", b"tmp/", &entries[..2]),
+        ),
+        (
+            "sftp_listing",
+            listing_seed(b"", b"a/", &[(0, None, None, b"")]),
+        ),
+    ]
+}
+
 pub(crate) fn unhex(text: &str) -> Option<Vec<u8>> {
     if !text.len().is_multiple_of(2) {
         return None;
@@ -515,6 +560,7 @@ pub fn try_seeds(fixtures: &Path) -> Result<Seeds, String> {
         "minisign_signature",
         b"lodestore-agent 1.2.3 x86_64".to_vec(),
     ));
+    out.extend(listing_seeds());
     out.extend(nbd_transcripts()?);
     out.extend(
         restore_plan_seeds()
