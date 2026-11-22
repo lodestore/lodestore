@@ -31,6 +31,9 @@ impl std::fmt::Debug for AccessKey {
     }
 }
 
+/// The agents' own secret options of a backend; never printed or returned.
+pub type AgentOptions = BTreeMap<String, Zeroizing<String>>;
+
 pub struct NewRepository {
     pub name: String,
     pub location: RepoLocation,
@@ -72,6 +75,13 @@ impl SealedAccess {
             secret_access_key: self.secret_access_key.clone(),
         })
     }
+
+    fn agent_options(self) -> AgentOptions {
+        self.options
+            .into_iter()
+            .map(|(k, v)| (k, Zeroizing::new(v)))
+            .collect()
+    }
 }
 
 fn sealed_json(
@@ -95,6 +105,7 @@ fn agent_json(key: &AccessKey) -> anyhow::Result<Zeroizing<Vec<u8>>> {
 #[derive(Default)]
 pub struct RepoExtras {
     pub secret_options: BTreeMap<String, String>,
+    pub agent_options: AgentOptions,
     pub checks_json: Option<String>,
     pub agent_key_state: Option<String>,
     pub checked_at: Option<i64>,
@@ -131,13 +142,20 @@ pub async fn create_repository_ext(
     } else {
         None
     };
-    let agent_creds = match &new.agent_creds {
-        Some(k) => Some(
+    let agent_creds = if new.agent_creds.is_some() || !extras.agent_options.is_empty() {
+        let options = extras
+            .agent_options
+            .iter()
+            .map(|(k, v)| (k.clone(), v.to_string()))
+            .collect();
+        let blob = sealed_json(new.agent_creds.as_ref(), &options)?;
+        Some(
             sealer
-                .put_secret_on(&mut tx, "repo-agent-creds", &agent_json(k)?)
+                .put_secret_on(&mut tx, "repo-agent-creds", &blob)
                 .await?,
-        ),
-        None => None,
+        )
+    } else {
+        None
     };
     let now = now_ms();
     let guarantee_level = extras
@@ -200,9 +218,9 @@ pub async fn get_repository(state: &AppState, id: &str) -> anyhow::Result<Option
 }
 
 /// What an agent needs to write: the writer keys and the location as
-/// [`lodestore_format::store::RepoLocation::for_agent`] shapes it. Backends
-/// other than S3 and a local folder get the server's sealed options too, since
-/// the agent has no credentials of its own there yet.
+/// [`crate::repos::checks::agent_location`] shapes it. Backends other than S3
+/// and a local folder get the server's sealed options too, unless the agent has
+/// credentials of its own there, which then take their place.
 pub async fn writer_material(
     state: &AppState,
     repository_id: &str,
@@ -250,13 +268,17 @@ pub async fn writer_material(
         .write_keys(config_hash)
         .to_file_text();
 
-    let agent_creds = match row.try_get::<Option<String>, _>("agent_creds_secret_id")? {
-        Some(id) => Some(serde_json::from_slice(
-            &state.sealer.get_secret(&id).await?,
-        )?),
-        None => None,
-    };
-    let for_agent = lodestore_format::store::RepoLocation { backend, options }.for_agent();
+    let (agent_creds, agent_options) =
+        match row.try_get::<Option<String>, _>("agent_creds_secret_id")? {
+            Some(id) => {
+                let sealed: SealedAccess =
+                    serde_json::from_slice(&state.sealer.get_secret(&id).await?)?;
+                (sealed.key(), sealed.agent_options())
+            }
+            None => (None, AgentOptions::new()),
+        };
+    let full = lodestore_format::store::RepoLocation { backend, options };
+    let for_agent = crate::repos::checks::agent_location(&full, &agent_options);
     Ok(WriterMaterial {
         writer_keys_text,
         location: RepoLocation {
@@ -529,6 +551,7 @@ pub struct ServerAccess {
     pub location: lodestore_format::store::RepoLocation,
     pub server_creds: Option<AccessKey>,
     pub agent_creds: Option<AccessKey>,
+    pub agent_options: AgentOptions,
     pub config_hash: [u8; 32],
     pub format_repo_id: [u8; 16],
     pub master: Zeroizing<Vec<u8>>,
@@ -578,12 +601,15 @@ pub async fn server_access(state: &AppState, id: &str) -> anyhow::Result<ServerA
         server_creds = sealed.key();
         options.extend(sealed.options);
     }
-    let agent_creds = match row.try_get::<Option<String>, _>("agent_creds_secret_id")? {
-        Some(sid) => Some(serde_json::from_slice(
-            &state.sealer.get_secret(&sid).await?,
-        )?),
-        None => None,
-    };
+    let (agent_creds, agent_options) =
+        match row.try_get::<Option<String>, _>("agent_creds_secret_id")? {
+            Some(sid) => {
+                let sealed: SealedAccess =
+                    serde_json::from_slice(&state.sealer.get_secret(&sid).await?)?;
+                (sealed.key(), sealed.agent_options())
+            }
+            None => (None, AgentOptions::new()),
+        };
     let server_slot_secret = match row.try_get::<Option<String>, _>("server_slot_secret_id")? {
         Some(sid) => Some(state.sealer.get_secret(&sid).await?),
         None => None,
@@ -592,6 +618,7 @@ pub async fn server_access(state: &AppState, id: &str) -> anyhow::Result<ServerA
         location: lodestore_format::store::RepoLocation { backend, options },
         server_creds,
         agent_creds,
+        agent_options,
         config_hash: row
             .try_get::<Vec<u8>, _>("config_hash")?
             .try_into()
@@ -744,5 +771,27 @@ mod tests {
         }
         assert_eq!(mismatch_update(None, true), Some(None));
         assert_eq!(mismatch_update(None, false), None);
+    }
+
+    #[test]
+    fn sealed_access_reads_a_legacy_agent_key() {
+        let legacy = serde_json::to_vec(&AccessKey {
+            access_key_id: "a".into(),
+            secret_access_key: "b".into(),
+        })
+        .unwrap();
+        let sealed: SealedAccess = serde_json::from_slice(&legacy).unwrap();
+        let key = sealed.key().unwrap();
+        assert_eq!(
+            (key.access_key_id.as_str(), key.secret_access_key.as_str()),
+            ("a", "b")
+        );
+        assert!(sealed.agent_options().is_empty());
+
+        let only_options =
+            sealed_json(None, &BTreeMap::from([("key".into(), "k".into())])).unwrap();
+        let sealed: SealedAccess = serde_json::from_slice(&only_options).unwrap();
+        assert!(sealed.key().is_none());
+        assert_eq!(sealed.agent_options()["key"].as_str(), "k");
     }
 }

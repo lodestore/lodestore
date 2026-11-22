@@ -17,7 +17,7 @@ use crate::grpc::agent::{CAP_HOST_KEY, host_key_message};
 use crate::repos::checks::{
     PROBE_TIMEOUT, agent_key_state_name, invalid, open_parts, run_probe, to_result,
 };
-use crate::repos::db::{self, AccessKey, ServerAccess};
+use crate::repos::db::{self, AccessKey, AgentOptions, ServerAccess};
 use crate::repos::{CheckDto, CheckResult, Credentials, unlock_with_server_slot};
 use crate::state::AppState;
 
@@ -196,6 +196,7 @@ async fn probe_new_key(
         access.location.clone(),
         access.server_creds.clone(),
         Some(key),
+        AgentOptions::new(),
     )?;
     let report = run_probe(&opened)
         .instrument(tracing::info_span!("agent_key_probe", repository_id = %id))
@@ -250,6 +251,7 @@ pub async fn recheck_repository_at(
         access.location.clone(),
         access.server_creds.clone(),
         access.agent_creds.clone(),
+        access.agent_options.clone(),
     )?;
     let report = run_probe(&opened)
         .instrument(tracing::info_span!("recheck", repository_id = %id))
@@ -543,6 +545,7 @@ async fn replace_host_key(
         candidate,
         access.server_creds.clone(),
         access.agent_creds.clone(),
+        access.agent_options.clone(),
     )?;
     let report = run_probe(&opened)
         .instrument(tracing::info_span!("host_key_probe", repository_id = %id))
