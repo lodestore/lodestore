@@ -180,23 +180,40 @@ pub fn detail(c: &Candidate) -> String {
         AlertType::GuaranteeDowngraded => {
             let level = level_words(c.facts.guarantee_level.as_deref());
             let accepted = level_words(c.facts.guarantee_accepted.as_deref());
-            match c.facts.guarantee_reason.as_deref() {
-                Some("weak_unaccepted") => format!(
-                    "Measured: {level}; no level was accepted for this repository. Backups continue. Change the storage settings, or accept the level on the repository page."
+            let (lead, tail) = match c.facts.guarantee_reason.as_deref() {
+                Some("weak_unaccepted") => (
+                    format!("Measured: {level}; no level was accepted for this repository."),
+                    "Backups continue. Change the storage settings, or accept the level on the repository page.",
                 ),
-                Some("inconclusive") => format!(
-                    "The daily check could not measure the storage {} times in a row. Backups continue. Check the repository again from its page.",
-                    c.facts.unchecked_runs.unwrap_or(0)
+                Some("inconclusive") => (
+                    format!(
+                        "The daily check could not measure the storage {} times in a row.",
+                        c.facts.unchecked_runs.unwrap_or(0)
+                    ),
+                    "Backups continue. Check the repository again from its page.",
                 ),
-                Some("recheck_failing") => format!(
-                    "The daily check failed {} times in a row before it measured anything. Open the repository page and check the storage again.",
-                    c.facts.failed_runs.unwrap_or(0)
+                Some("recheck_failing") => (
+                    format!(
+                        "The daily check failed {} times in a row before it measured anything.",
+                        c.facts.failed_runs.unwrap_or(0)
+                    ),
+                    "Open the repository page and check the storage again.",
                 ),
-                Some("recheck_not_running") => "The daily storage check has not run for more than two days. Restart the Lodestore server; if this repeats, look for errors of the daily check in the server log.".to_string(),
-                _ => format!(
-                    "Measured: {level}. Accepted: {accepted}. Backups continue. Restore the storage settings, or accept the new level on the repository page."
+                Some("recheck_not_running") => (
+                    "The daily storage check has not run for more than two days.".to_string(),
+                    "Restart the Lodestore server; if this repeats, look for errors of the daily check in the server log.",
                 ),
-            }
+                _ => (
+                    format!("Measured: {level}. Accepted: {accepted}."),
+                    "Backups continue. Restore the storage settings, or accept the new level on the repository page.",
+                ),
+            };
+            let tail = if c.facts.agent_cannot_write == Some(true) {
+                "The agents' credentials cannot write to the storage, so backups from the agents fail. Replace them through the API: agent-key for S3, agent-options for Azure, GCS and SFTP."
+            } else {
+                tail
+            };
+            format!("{lead} {tail}")
         }
         AlertType::CertificateExpiring => match (c.cert, c.facts.external) {
             (Some(CertKind::Grpc), Some(true)) => {
@@ -377,6 +394,49 @@ mod tests {
         assert!(detail.contains("more than two days"), "{detail}");
         let (_, detail) = text(AlertType::GuaranteeDowngraded, facts("weak_unaccepted"));
         assert!(detail.contains("no level was accepted"), "{detail}");
+    }
+
+    #[test]
+    fn guarantee_detail_names_failing_agent_credentials() {
+        let facts = |reason: &str, failing: Option<bool>| AlertFacts {
+            guarantee_level: Some("host_can_overwrite_or_delete".into()),
+            guarantee_accepted: Some("overwrite_keeps_old_version".into()),
+            guarantee_reason: Some(reason.into()),
+            agent_cannot_write: failing,
+            unchecked_runs: Some(3),
+            failed_runs: Some(4),
+            ..AlertFacts::default()
+        };
+        for reason in [
+            "lower",
+            "weak_unaccepted",
+            "inconclusive",
+            "recheck_failing",
+            "recheck_not_running",
+        ] {
+            let (_, plain) = text(AlertType::GuaranteeDowngraded, facts(reason, None));
+            let (_, same) = text(AlertType::GuaranteeDowngraded, facts(reason, Some(false)));
+            assert_eq!(plain, same, "{reason}");
+            let (_, detail) = text(AlertType::GuaranteeDowngraded, facts(reason, Some(true)));
+            assert!(
+                detail.contains("The agents' credentials cannot write to the storage"),
+                "{reason}: {detail}"
+            );
+            assert!(detail.contains("agent-options"), "{reason}: {detail}");
+            assert!(!detail.contains("Backups continue"), "{reason}: {detail}");
+            let lead = plain.split(". ").next().unwrap();
+            assert!(detail.starts_with(lead), "{reason}: {detail}");
+        }
+        let (_, detail) = text(AlertType::GuaranteeDowngraded, facts("lower", Some(true)));
+        assert!(
+            detail.contains("Measured: host can overwrite or delete."),
+            "{detail}"
+        );
+        let (_, detail) = text(
+            AlertType::GuaranteeDowngraded,
+            facts("inconclusive", Some(true)),
+        );
+        assert!(detail.contains("3 times in a row"), "{detail}");
     }
 
     #[test]

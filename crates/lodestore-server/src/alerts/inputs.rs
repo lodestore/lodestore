@@ -45,6 +45,8 @@ pub struct RepositoryGuarantee {
     pub tick_at_ms: Option<i64>,
     /// The pinned and the offered SFTP host key fingerprints while the server presents another key.
     pub host_key_mismatch: Option<(String, String)>,
+    /// The last stored checks show the agents' credentials failing to write.
+    pub agent_cannot_write: bool,
 }
 
 /// The last verdict of a check level in a repository, when it was a failure.
@@ -316,6 +318,32 @@ pub async fn gather_with(
     })
 }
 
+#[cfg(test)]
+mod agent_write_tests {
+    use super::agent_cannot_write;
+
+    #[test]
+    fn agent_cannot_write_is_read_from_the_checks() {
+        let check = |status: &str| {
+            format!(
+                r#"[{{"id":"write","status":"pass"}},{{"id":"agent_delete","status":"{status}"}}]"#
+            )
+        };
+        assert!(agent_cannot_write(Some(&check("fail"))));
+        for json in [
+            Some(check("pass")),
+            Some(check("neutral")),
+            Some(r#"[{"id":"write","status":"fail"}]"#.to_string()),
+            Some("[]".to_string()),
+            Some("not json".to_string()),
+            Some(r#"{"id":"agent_delete","status":"fail"}"#.to_string()),
+            None,
+        ] {
+            assert!(!agent_cannot_write(json.as_deref()), "{json:?}");
+        }
+    }
+}
+
 fn parse_mismatch(json: &str) -> (String, String) {
     let field = |v: &serde_json::Value, k: &str| {
         v.get(k)
@@ -327,11 +355,23 @@ fn parse_mismatch(json: &str) -> (String, String) {
     (field(&v, "pinned"), field(&v, "offered"))
 }
 
+fn agent_cannot_write(checks_json: Option<&str>) -> bool {
+    checks_json
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+        .and_then(|v| v.as_array().cloned())
+        .is_some_and(|checks| {
+            checks.iter().any(|c| {
+                c.get("id").and_then(|v| v.as_str()) == Some("agent_delete")
+                    && c.get("status").and_then(|v| v.as_str()) == Some("fail")
+            })
+        })
+}
+
 async fn guarantees(state: &AppState) -> anyhow::Result<Vec<RepositoryGuarantee>> {
     let rows = sqlx::query(
         "SELECT id, name, guarantee_level, guarantee_accepted, guarantee_unchecked_runs, \
-         guarantee_failed_runs, guarantee_checked_at, guarantee_tick_at, created_at, host_key_mismatch_json \
-         FROM repositories ORDER BY name, id",
+         guarantee_failed_runs, guarantee_checked_at, guarantee_tick_at, created_at, \
+         host_key_mismatch_json, checks_json FROM repositories ORDER BY name, id",
     )
     .fetch_all(&state.db.pool)
     .await
@@ -356,6 +396,9 @@ async fn guarantees(state: &AppState) -> anyhow::Result<Vec<RepositoryGuarantee>
                 host_key_mismatch: row
                     .try_get::<Option<String>, _>("host_key_mismatch_json")?
                     .map(|json| parse_mismatch(&json)),
+                agent_cannot_write: agent_cannot_write(
+                    row.try_get::<Option<String>, _>("checks_json")?.as_deref(),
+                ),
             })
         })
         .collect()

@@ -7244,6 +7244,13 @@
       "AlertFacts": {
         "type": "object",
         "properties": {
+          "agent_cannot_write": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "The last check found that the agents' credentials cannot write to the storage."
+          },
           "error": {
             "type": [
               "string",

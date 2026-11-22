@@ -284,6 +284,7 @@ pub fn evaluate(
                 guarantee_level: Some(g.level.clone()),
                 guarantee_accepted: Some(g.accepted.clone()),
                 guarantee_reason: Some(reason.into()),
+                agent_cannot_write: g.agent_cannot_write.then_some(true),
                 unchecked_runs: Some(g.unchecked_runs),
                 failed_runs: Some(g.failed_runs),
                 ..AlertFacts::default()
@@ -741,6 +742,7 @@ mod tests {
             measured_at_ms: NOW,
             tick_at_ms: Some(NOW),
             host_key_mismatch: None,
+            agent_cannot_write: false,
         }
     }
 
@@ -900,5 +902,16 @@ mod tests {
         assert_eq!(out[0].severity, Severity::Warning);
         assert_eq!(out[0].facts.guarantee_reason.as_deref(), Some("lower"));
         assert_eq!(out[0].facts.error, None);
+        assert_eq!(out[0].facts.agent_cannot_write, None);
+
+        let inputs = Inputs {
+            guarantees: vec![RepositoryGuarantee {
+                agent_cannot_write: true,
+                ..inputs.guarantees[0].clone()
+            }],
+            ..Inputs::default()
+        };
+        let out = evaluate(&inputs, NOW, 0, &T);
+        assert_eq!(out[0].facts.agent_cannot_write, Some(true));
     }
 }
