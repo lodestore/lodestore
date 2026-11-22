@@ -299,6 +299,9 @@ pub struct AlertFacts {
     pub guarantee_accepted: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guarantee_reason: Option<String>,
+    /// The last check found that the agents' credentials cannot write to the storage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_cannot_write: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unchecked_runs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

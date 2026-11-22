@@ -4190,6 +4190,95 @@
         ]
       }
     },
+    "/api/v1/repositories/{id}/agent-options": {
+      "put": {
+        "tags": [
+          "Repositories"
+        ],
+        "summary": "Replace the agents' own credentials",
+        "description": "For Azure Blob, GCS and SFTP repositories. Needs the password entered in the last 15 minutes. Replaces the whole set of agent options after a full check with them reached the storage, then sends the new location to the online agents; offline agents get it when they connect. Nothing changes when the check fails. The values are never returned.",
+        "operationId": "replace_agent_options",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Repository id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentOptionsUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The options were replaced",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentOptionsReplaced"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`step_up_required`: the password was not entered in the last 15 minutes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown repository",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The repository is on S3 or local storage, or its storage access changed during the check",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An option is not allowed or empty, or the new options could not be verified",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      }
+    },
     "/api/v1/repositories/{id}/catalog/rebuild": {
       "post": {
         "tags": [
@@ -6885,6 +6974,60 @@
           }
         }
       },
+      "AgentOptionsReplaced": {
+        "type": "object",
+        "required": [
+          "agent_key_state",
+          "guarantee_level",
+          "online_notified",
+          "needs_update",
+          "offline"
+        ],
+        "properties": {
+          "agent_key_state": {
+            "type": "string"
+          },
+          "guarantee_level": {
+            "type": "string"
+          },
+          "needs_update": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Online agents too old to take it; update them.",
+            "minimum": 0
+          },
+          "offline": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Active agents that are not online and get it when they connect.",
+            "minimum": 0
+          },
+          "online_notified": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Online agents that were sent the new location.",
+            "minimum": 0
+          }
+        }
+      },
+      "AgentOptionsUpdate": {
+        "type": "object",
+        "required": [
+          "agent_options"
+        ],
+        "properties": {
+          "agent_options": {
+            "type": "object",
+            "description": "The whole new set of the agents' own credentials; it replaces the old set.\nAzure Blob: `sas_token`; GCS: `credential`; SFTP: `user`, `key`. Never returned.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
       "AgentPolicy": {
         "type": "object",
         "required": [
@@ -7101,6 +7244,13 @@
       "AlertFacts": {
         "type": "object",
         "properties": {
+          "agent_cannot_write": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "The last check found that the agents' credentials cannot write to the storage."
+          },
           "error": {
             "type": [
               "string",

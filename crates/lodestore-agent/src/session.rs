@@ -34,7 +34,7 @@ const STABLE_STREAM: Duration = Duration::from_secs(60);
 const RENEW_RETRY: Duration = Duration::from_secs(60);
 const MAX_SKEW_SECS: i64 = 300;
 const JOBS_DRAIN: Duration = Duration::from_secs(30);
-pub const CAPABILITIES: [&str; 7] = [
+pub const CAPABILITIES: [&str; 8] = [
     "restore_v1",
     "limits_v1",
     "gc_v1",
@@ -42,6 +42,7 @@ pub const CAPABILITIES: [&str; 7] = [
     "shard_limit_v1",
     "source:files",
     "host_key_v1",
+    "location_v1",
 ];
 const CAP_UPDATE: &str = "update_v1";
 
@@ -275,6 +276,76 @@ fn store_host_key(paths: &Paths, host_key: &str) -> Result<(), AgentError> {
     options.insert("host_key".into(), host_key.into());
     write_json_file(&path, &file)?;
     tracing::info!("SFTP host key updated");
+    Ok(())
+}
+
+fn apply_location(paths: &Paths, location: &lodestore_proto::agent::v1::RepoLocation) {
+    if let Err(error) = store_location(paths, location) {
+        tracing::warn!(%error, "could not store the agent storage credentials");
+    }
+}
+
+fn store_location(
+    paths: &Paths,
+    new: &lodestore_proto::agent::v1::RepoLocation,
+) -> Result<(), AgentError> {
+    let path = paths.repository_json();
+    let Some(mut file) = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+    else {
+        tracing::warn!("repository.json is unreadable; agent storage credentials not stored");
+        return Ok(());
+    };
+    if file.get("repository_id").and_then(|v| v.as_str()) != Some(new.repository_id.as_str())
+        || file.get("backend").and_then(|v| v.as_str()) != Some(new.backend.as_str())
+    {
+        tracing::warn!("storage location is for another repository or backend; ignored");
+        return Ok(());
+    }
+    let proposed = lodestore_format::store::RepoLocation {
+        backend: new.backend.clone(),
+        options: new.options.clone().into_iter().collect(),
+    };
+    if let Err(error) = proposed.validate() {
+        tracing::warn!(%error, "storage location from the server is not valid; ignored");
+        return Ok(());
+    }
+    let Some(current) = file.get("options").and_then(|o| o.as_object()).cloned() else {
+        tracing::warn!("repository.json has no options; agent storage credentials not stored");
+        return Ok(());
+    };
+    let mut credentials = lodestore_format::store::location::secret_option_names(&new.backend);
+    if new.backend == "sftp" {
+        credentials.push("user");
+    }
+    let names = current
+        .keys()
+        .map(String::as_str)
+        .chain(new.options.keys().map(String::as_str));
+    for name in names {
+        if credentials.contains(&name) {
+            continue;
+        }
+        if current.get(name).and_then(|v| v.as_str()) != new.options.get(name).map(String::as_str) {
+            tracing::warn!(
+                option = name,
+                "server tried to change a non-credential option; ignored"
+            );
+            return Ok(());
+        }
+    }
+    let options: serde_json::Map<String, serde_json::Value> = new
+        .options
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone().into()))
+        .collect();
+    if options == current {
+        return Ok(());
+    }
+    file["options"] = options.into();
+    write_json_file(&path, &file)?;
+    tracing::info!("agent storage credentials updated");
     Ok(())
 }
 
@@ -540,6 +611,11 @@ async fn session_once(
                     Some(ServerBody::UpdateHostKey(update)) => {
                         apply_host_key(paths, &update.host_key);
                     }
+                    Some(ServerBody::UpdateLocation(update)) => {
+                        if let Some(location) = update.location {
+                            apply_location(paths, &location);
+                        }
+                    }
                     Some(body) => hub.handle(body),
                     None => {}
                 },
@@ -633,6 +709,160 @@ mod tests {
             store_host_key(&paths, bad).unwrap();
             assert_eq!(std::fs::read(paths.repository_json()).unwrap(), before);
         }
+    }
+
+    fn proposed(
+        repository_id: &str,
+        backend: &str,
+        options: &[(&str, &str)],
+    ) -> lodestore_proto::agent::v1::RepoLocation {
+        lodestore_proto::agent::v1::RepoLocation {
+            backend: backend.into(),
+            repository_id: repository_id.into(),
+            options: options
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    fn write_azure(paths: &Paths) -> Vec<u8> {
+        let value = serde_json::json!({
+            "repository_id": "r1",
+            "backend": "azblob",
+            "options": {
+                "container": "c",
+                "endpoint": "http://127.0.0.1:1/acct",
+                "account_name": "acct",
+                "account_key": "old-account-key",
+            },
+        });
+        write_json_file(&paths.repository_json(), &value).unwrap();
+        std::fs::read(paths.repository_json()).unwrap()
+    }
+
+    const AZURE: [(&str, &str); 3] = [
+        ("container", "c"),
+        ("endpoint", "http://127.0.0.1:1/acct"),
+        ("account_name", "acct"),
+    ];
+
+    #[test]
+    fn store_location_changes_only_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths(&dir);
+        write_azure(&paths);
+        let mut options = AZURE.to_vec();
+        options.push(("sas_token", "sv=1&sig=new"));
+        store_location(&paths, &proposed("r1", "azblob", &options)).unwrap();
+        let file = stored(&paths);
+        assert_eq!(file["options"]["sas_token"], "sv=1&sig=new");
+        assert!(file["options"].get("account_key").is_none());
+        assert_eq!(file["options"]["container"], "c");
+        assert_eq!(file["repository_id"], "r1");
+
+        let bytes = std::fs::read(paths.repository_json()).unwrap();
+        let mtime = std::fs::metadata(paths.repository_json())
+            .unwrap()
+            .modified()
+            .unwrap();
+        store_location(&paths, &proposed("r1", "azblob", &options)).unwrap();
+        assert_eq!(std::fs::read(paths.repository_json()).unwrap(), bytes);
+        let after = std::fs::metadata(paths.repository_json())
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert_eq!(after, mtime);
+
+        write_repository(&paths, "sftp", KEY_A);
+        let mut expected = stored(&paths);
+        let sftp = [
+            ("endpoint", "127.0.0.1:22"),
+            ("host_key", KEY_A),
+            ("root", "/srv/repo"),
+            ("user", "agent"),
+            ("key", "new-private-key"),
+        ];
+        store_location(&paths, &proposed("r1", "sftp", &sftp)).unwrap();
+        expected["options"]["user"] = "agent".into();
+        expected["options"]["key"] = "new-private-key".into();
+        assert_eq!(stored(&paths), expected);
+    }
+
+    #[test]
+    fn store_location_refuses_another_repository_or_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths(&dir);
+        let before = write_azure(&paths);
+        let mut with_sas = AZURE.to_vec();
+        with_sas.push(("sas_token", "sv=1&sig=new"));
+        let moved = |name: &str, value: &'static str| {
+            let mut o = with_sas.clone();
+            o.iter_mut().for_each(|(k, v)| {
+                if *k == name {
+                    *v = value;
+                }
+            });
+            o
+        };
+        let mut without_container = with_sas.clone();
+        without_container.retain(|(k, _)| *k != "container");
+        let mut extra = with_sas.clone();
+        extra.push(("publish", "x"));
+        for refused in [
+            proposed("other", "azblob", &with_sas),
+            proposed("r1", "gcs", &[("bucket", "b"), ("credential", "c")]),
+            proposed("r1", "azblob", &moved("endpoint", "http://evil/acct")),
+            proposed("r1", "azblob", &moved("container", "other")),
+            proposed("r1", "azblob", &moved("account_name", "other")),
+            proposed("r1", "azblob", &without_container),
+            proposed("r1", "azblob", &extra),
+            proposed("r1", "azblob", &[]),
+        ] {
+            store_location(&paths, &refused).unwrap();
+            assert_eq!(std::fs::read(paths.repository_json()).unwrap(), before);
+        }
+
+        write_repository(&paths, "sftp", KEY_A);
+        let before = std::fs::read(paths.repository_json()).unwrap();
+        for (name, value) in [
+            ("endpoint", "elsewhere:22"),
+            ("root", "/other"),
+            ("host_key", KEY_B),
+        ] {
+            let mut o = vec![
+                ("endpoint", "127.0.0.1:22"),
+                ("host_key", KEY_A),
+                ("root", "/srv/repo"),
+                ("user", "agent"),
+                ("key", "k"),
+            ];
+            o.iter_mut().for_each(|(k, v)| {
+                if *k == name {
+                    *v = value;
+                }
+            });
+            store_location(&paths, &proposed("r1", "sftp", &o)).unwrap();
+            assert_eq!(
+                std::fs::read(paths.repository_json()).unwrap(),
+                before,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn store_location_keeps_going_when_the_file_cannot_be_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths(&dir);
+        let before = write_azure(&paths);
+        let mut options = AZURE.to_vec();
+        options.push(("sas_token", "sv=1&sig=new"));
+        std::fs::create_dir(paths.state_dir.join(".repository.json.tmp")).unwrap();
+        let location = proposed("r1", "azblob", &options);
+        assert!(store_location(&paths, &location).is_err());
+        apply_location(&paths, &location);
+        assert_eq!(std::fs::read(paths.repository_json()).unwrap(), before);
     }
 
     #[test]
