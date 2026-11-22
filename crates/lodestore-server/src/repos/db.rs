@@ -706,14 +706,21 @@ pub async fn replace_agent_options(
     guarantee: &GuaranteeWrite,
 ) -> anyhow::Result<Stored> {
     let mut tx = state.db.pool.begin().await?;
-    let Some(row) = sqlx::query("SELECT agent_creds_secret_id FROM repositories WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&mut *tx)
-        .await?
-    else {
+    // Takes the write lock before the first read: a read first would fail with
+    // "database is locked" on SQLite when another connection commits in between.
+    let touched =
+        sqlx::query("UPDATE repositories SET access_generation = access_generation WHERE id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+    if touched.rows_affected() == 0 {
         return Ok(Stored::Missing);
-    };
-    let old = row.try_get::<Option<String>, _>("agent_creds_secret_id")?;
+    }
+    let old = sqlx::query("SELECT agent_creds_secret_id FROM repositories WHERE id = $1")
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?
+        .try_get::<Option<String>, _>("agent_creds_secret_id")?;
     let key = match &old {
         Some(sid) => {
             let sealed: SealedAccess =
