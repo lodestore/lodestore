@@ -318,32 +318,6 @@ pub async fn gather_with(
     })
 }
 
-#[cfg(test)]
-mod agent_write_tests {
-    use super::agent_cannot_write;
-
-    #[test]
-    fn agent_cannot_write_is_read_from_the_checks() {
-        let check = |status: &str| {
-            format!(
-                r#"[{{"id":"write","status":"pass"}},{{"id":"agent_delete","status":"{status}"}}]"#
-            )
-        };
-        assert!(agent_cannot_write(Some(&check("fail"))));
-        for json in [
-            Some(check("pass")),
-            Some(check("neutral")),
-            Some(r#"[{"id":"write","status":"fail"}]"#.to_string()),
-            Some("[]".to_string()),
-            Some("not json".to_string()),
-            Some(r#"{"id":"agent_delete","status":"fail"}"#.to_string()),
-            None,
-        ] {
-            assert!(!agent_cannot_write(json.as_deref()), "{json:?}");
-        }
-    }
-}
-
 fn parse_mismatch(json: &str) -> (String, String) {
     let field = |v: &serde_json::Value, k: &str| {
         v.get(k)
@@ -802,4 +776,30 @@ async fn last_snapshots(state: &AppState) -> anyhow::Result<HashMap<String, Snap
         });
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::agent_cannot_write;
+
+    #[test]
+    fn agent_cannot_write_is_read_from_the_checks() {
+        let check = |status: &str| {
+            format!(
+                r#"[{{"id":"write","status":"pass"}},{{"id":"agent_delete","status":"{status}"}}]"#
+            )
+        };
+        assert!(agent_cannot_write(Some(&check("fail"))));
+        for json in [
+            Some(check("pass")),
+            Some(check("neutral")),
+            Some(r#"[{"id":"write","status":"fail"}]"#.to_string()),
+            Some("[]".to_string()),
+            Some("not json".to_string()),
+            Some(r#"{"id":"agent_delete","status":"fail"}"#.to_string()),
+            None,
+        ] {
+            assert!(!agent_cannot_write(json.as_deref()), "{json:?}");
+        }
+    }
 }
