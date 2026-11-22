@@ -691,6 +691,92 @@ pub async fn replace_agent_creds(
     Ok(true)
 }
 
+/// Replaces the sealed agent options after a probe with them reached the
+/// storage. The write needs the access generation the probe read with its
+/// credentials and the accepted level `guarantee` was decided from; it bumps
+/// the generation, so a probe that started with the old options stores nothing.
+/// The agent's S3 key, if any, is kept.
+pub async fn replace_agent_options(
+    state: &AppState,
+    id: &str,
+    generation: i64,
+    options: &AgentOptions,
+    agent_key_state: &str,
+    checks_json: &str,
+    guarantee: &GuaranteeWrite,
+) -> anyhow::Result<Stored> {
+    let mut tx = state.db.pool.begin().await?;
+    let Some(row) = sqlx::query("SELECT agent_creds_secret_id FROM repositories WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?
+    else {
+        return Ok(Stored::Missing);
+    };
+    let old = row.try_get::<Option<String>, _>("agent_creds_secret_id")?;
+    let key = match &old {
+        Some(sid) => {
+            let sealed: SealedAccess =
+                serde_json::from_slice(&state.sealer.get_secret(sid).await?)?;
+            sealed.key()
+        }
+        None => None,
+    };
+    let plain: BTreeMap<String, String> = options
+        .iter()
+        .map(|(k, v)| (k.clone(), v.to_string()))
+        .collect();
+    let new = state
+        .sealer
+        .put_secret_on(
+            &mut tx,
+            "repo-agent-creds",
+            &sealed_json(key.as_ref(), &plain)?,
+        )
+        .await?;
+    let done = sqlx::query(
+        "UPDATE repositories SET agent_creds_secret_id = $1, agent_key_state = $2, \
+         checks_json = $3, checked_at = $4, guarantee_level = $5, guarantee_notes_json = $6, \
+         guarantee_accepted = $7, guarantee_checked_at = $4, guarantee_unchecked_runs = 0, \
+         guarantee_failed_runs = 0, access_generation = access_generation + 1 \
+         WHERE id = $8 AND guarantee_accepted = $9 AND access_generation = $10",
+    )
+    .bind(new)
+    .bind(agent_key_state)
+    .bind(checks_json)
+    .bind(now_ms())
+    .bind(&guarantee.level)
+    .bind(&guarantee.notes_json)
+    .bind(&guarantee.accepted)
+    .bind(id)
+    .bind(&guarantee.read_accepted)
+    .bind(generation)
+    .execute(&mut *tx)
+    .await?;
+    if done.rows_affected() == 0 {
+        let current: Option<i64> =
+            sqlx::query("SELECT access_generation FROM repositories WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .map(|r| r.try_get("access_generation"))
+                .transpose()?;
+        return Ok(match current {
+            None => Stored::Missing,
+            Some(c) if c == generation => Stored::AcceptedChanged,
+            Some(_) => Stored::Stale,
+        });
+    }
+    if let Some(old) = old {
+        sqlx::query("DELETE FROM secrets WHERE id = $1")
+            .bind(old)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(Stored::Written)
+}
+
 /// Pins a new host key after a probe with it reached the storage. The write
 /// needs the access generation the probe read with its credentials and the
 /// accepted level `guarantee` was decided from; it clears the host key

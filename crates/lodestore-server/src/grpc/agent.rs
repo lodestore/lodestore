@@ -8,8 +8,8 @@ use lodestore_proto::agent::v1::server_message::Body as ServerBody;
 use lodestore_proto::agent::v1::{
     AgentMessage, Disconnect, DisconnectReason, FetchAgentUpdateRequest, Heartbeat, HelloAck,
     PackBytes, ReadPackRangeRequest, RefreshPackAccessRequest, RefreshPackAccessResponse,
-    RenewRequest, RenewResponse, RestorePlanBatch, RestorePlanRequest, S3Credentials,
-    ServerMessage, UpdateChunk, UpdateHostKey, UpdateS3Credentials,
+    RenewRequest, RenewResponse, RepoLocation, RestorePlanBatch, RestorePlanRequest, S3Credentials,
+    ServerMessage, UpdateChunk, UpdateHostKey, UpdateLocation, UpdateS3Credentials,
 };
 use lodestore_proto::{ERROR_CERT_STALE, ERROR_REVOKED, ERROR_VERSION_UNSUPPORTED};
 use sqlx::Row;
@@ -31,6 +31,22 @@ const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 const PREV_CERT_GRACE_MS: i64 = 24 * 60 * 60 * 1000;
 const PREV_CERT_DRAIN_MS: i64 = 2 * 60 * 1000;
 pub(crate) const CAP_HOST_KEY: &str = "host_key_v1";
+pub(crate) const CAP_LOCATION: &str = "location_v1";
+
+pub(crate) fn location_message(
+    location: &crate::repos::db::RepoLocation,
+    repository_id: &str,
+) -> ServerMessage {
+    ServerMessage {
+        body: Some(ServerBody::UpdateLocation(UpdateLocation {
+            location: Some(RepoLocation {
+                backend: location.backend.clone(),
+                options: location.options.clone().into_iter().collect(),
+                repository_id: repository_id.to_string(),
+            }),
+        })),
+    }
+}
 
 pub(crate) fn host_key_message(host_key: &str) -> ServerMessage {
     ServerMessage {
@@ -404,6 +420,16 @@ impl Agent for AgentService {
                         .filter(|k| !k.is_empty())
                 {
                     state.registry.send(&agent_id, host_key_message(host_key));
+                }
+                if matches!(
+                    material.location.backend.as_str(),
+                    "azblob" | "gcs" | "sftp"
+                ) && state.registry.supports(&agent_id, CAP_LOCATION)
+                {
+                    state.registry.send(
+                        &agent_id,
+                        location_message(&material.location, &repository_id),
+                    );
                 }
             }
             Err(error) => {

@@ -13,9 +13,10 @@ use utoipa_axum::routes;
 use crate::auth::AuthUser;
 use crate::db::now_ms;
 use crate::error::{ApiError, ErrorBody};
-use crate::grpc::agent::{CAP_HOST_KEY, host_key_message};
+use crate::grpc::agent::{CAP_HOST_KEY, CAP_LOCATION, host_key_message, location_message};
 use crate::repos::checks::{
-    PROBE_TIMEOUT, agent_key_state_name, invalid, open_parts, run_probe, to_result,
+    PROBE_TIMEOUT, agent_key_state_name, check_agent_options, invalid, open_parts, run_probe,
+    to_result,
 };
 use crate::repos::db::{self, AccessKey, AgentOptions, ServerAccess};
 use crate::repos::{CheckDto, CheckResult, Credentials, unlock_with_server_slot};
@@ -74,6 +75,31 @@ pub struct HostKeyReplaced {
     /// Online agents too old to take the key; update them.
     pub needs_update: u32,
     /// Active agents that are not online and get the key when they connect.
+    pub offline: u32,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct AgentOptionsUpdate {
+    /// The whole new set of the agents' own credentials; it replaces the old set.
+    /// Azure Blob: `sas_token`; GCS: `credential`; SFTP: `user`, `key`. Never returned.
+    pub agent_options: std::collections::BTreeMap<String, String>,
+}
+
+impl std::fmt::Debug for AgentOptionsUpdate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentOptionsUpdate").finish_non_exhaustive()
+    }
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct AgentOptionsReplaced {
+    pub agent_key_state: String,
+    pub guarantee_level: String,
+    /// Online agents that were sent the new location.
+    pub online_notified: u32,
+    /// Online agents too old to take it; update them.
+    pub needs_update: u32,
+    /// Active agents that are not online and get it when they connect.
     pub offline: u32,
 }
 
@@ -629,6 +655,158 @@ async fn replace_host_key(
 }
 
 #[utoipa::path(
+    put,
+    tag = "Repositories",
+    summary = "Replace the agents' own credentials",
+    description = "For Azure Blob, GCS and SFTP repositories. Needs the password entered in the last \
+        15 minutes. Replaces the whole set of agent options after a full check with them reached the \
+        storage, then sends the new location to the online agents; offline agents get it when they \
+        connect. Nothing changes when the check fails. The values are never returned.",
+    security(("session" = [], "csrf" = [])),
+    path = "/api/v1/repositories/{id}/agent-options",
+    params(("id" = String, Path, description = "Repository id")),
+    request_body = AgentOptionsUpdate,
+    responses(
+        (status = 200, description = "The options were replaced", body = AgentOptionsReplaced),
+        (status = 403, description = "`step_up_required`: the password was not entered in the last 15 minutes", body = ErrorBody),
+        (status = 404, description = "Unknown repository", body = ErrorBody),
+        (status = 409, description = "The repository is on S3 or local storage, or its storage access changed during the check", body = ErrorBody),
+        (status = 422, description = "An option is not allowed or empty, or the new options could not be verified", body = ErrorBody),
+    )
+)]
+async fn replace_agent_options(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<String>,
+    Json(update): Json<AgentOptionsUpdate>,
+) -> Result<Json<AgentOptionsReplaced>, ApiError> {
+    crate::auth::require_recent_password(&user)?;
+    let access = load(&state, &id).await?;
+    let backend = access.location.backend.clone();
+    if matches!(backend.as_str(), "s3" | "local") {
+        return Err(ApiError::Conflict(
+            "Only Azure, GCS and SFTP repositories take agent options; an S3 repository takes PUT \
+             /api/v1/repositories/{id}/agent-key."
+                .into(),
+        ));
+    }
+    if update.agent_options.is_empty() {
+        return Err(ApiError::Validation(
+            "Send at least one agent option.".into(),
+        ));
+    }
+    check_agent_options(&backend, &update.agent_options)?;
+    let new: AgentOptions = update
+        .agent_options
+        .into_iter()
+        .map(|(k, v)| (k, zeroize::Zeroizing::new(v)))
+        .collect();
+    let opened = open_parts(
+        access.location.clone(),
+        access.server_creds.clone(),
+        access.agent_creds.clone(),
+        new.clone(),
+    )?;
+    let report = run_probe(&opened)
+        .instrument(tracing::info_span!("agent_options_probe", repository_id = %id))
+        .await;
+    let write = report.check(CheckId::Write);
+    if write.status == CheckStatus::Fail {
+        return Err(ApiError::Validation(format!(
+            "The server credentials cannot write to the storage ({}), so the new agent options could not be checked. The current agent options are unchanged.",
+            write.error.as_deref().unwrap_or("unknown error")
+        )));
+    }
+    if let Some(reason) = rejection(&report) {
+        return Err(ApiError::Validation(format!(
+            "The new agent options could not be verified: {reason}. The current agent options are unchanged."
+        )));
+    }
+
+    let result = to_result(&report);
+    let checks_json =
+        serde_json::to_string(&result.checks).map_err(|e| ApiError::Internal(e.into()))?;
+    let access_lock = state.repos.access_lock(&id);
+    let held = access_lock.lock().await;
+    let mut accepted = accepted_now(&state, &id).await?;
+    let mut stored = false;
+    let mut level = result.guarantee_level.clone();
+    for _ in 0..GUARANTEE_ATTEMPTS {
+        let guarantee = guarantee_write(&result, &accepted, true)?
+            .expect("a credential change always writes a level");
+        level = guarantee.level.clone();
+        match db::replace_agent_options(
+            &state,
+            &id,
+            access.generation,
+            &new,
+            &result.agent_key_state,
+            &checks_json,
+            &guarantee,
+        )
+        .await?
+        {
+            db::Stored::Written => {
+                stored = true;
+                break;
+            }
+            db::Stored::AcceptedChanged => accepted = accepted_now(&state, &id).await?,
+            db::Stored::Stale => {
+                return Err(ApiError::Conflict(
+                    "The storage access changed while the new agent options were checked. Try again."
+                        .into(),
+                ));
+            }
+            db::Stored::Missing => {
+                return Err(ApiError::NotFound("repository not found".into()));
+            }
+        }
+    }
+    if !stored {
+        return Err(accept_race());
+    }
+
+    let unavailable = matches!(
+        crate::catalog::open_repository(&state, &id).await,
+        Err(error) if error.downcast_ref::<crate::catalog::RepositoryUnavailable>().is_some()
+    );
+    let (mut online_notified, mut needs_update) = (0u32, 0u32);
+    if !unavailable {
+        match db::writer_material(&state, &id).await {
+            Ok(material) => {
+                for agent in state.registry.online_in_repository(&id) {
+                    if !state.registry.supports(&agent, CAP_LOCATION) {
+                        needs_update += 1;
+                    } else if state
+                        .registry
+                        .send(&agent, location_message(&material.location, &id))
+                    {
+                        online_notified += 1;
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(repository_id = %id, error = %format!("{error:#}"), "could not load the new agent location")
+            }
+        }
+    }
+    drop(held);
+    let active = db::active_hosts(&state)
+        .await?
+        .get(&id)
+        .copied()
+        .unwrap_or(0)
+        .max(0) as u32;
+    Ok(Json(AgentOptionsReplaced {
+        agent_key_state: result.agent_key_state,
+        guarantee_level: level,
+        online_notified,
+        needs_update,
+        offline: active.saturating_sub(online_notified + needs_update),
+    }))
+}
+
+#[utoipa::path(
     post,
     tag = "Repositories",
     summary = "Accept the measured level",
@@ -682,6 +860,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(replace_key))
         .routes(routes!(check_host_key))
         .routes(routes!(replace_host_key))
+        .routes(routes!(replace_agent_options))
 }
 
 #[cfg(test)]

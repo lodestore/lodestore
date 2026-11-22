@@ -34,7 +34,7 @@ const STABLE_STREAM: Duration = Duration::from_secs(60);
 const RENEW_RETRY: Duration = Duration::from_secs(60);
 const MAX_SKEW_SECS: i64 = 300;
 const JOBS_DRAIN: Duration = Duration::from_secs(30);
-pub const CAPABILITIES: [&str; 7] = [
+pub const CAPABILITIES: [&str; 8] = [
     "restore_v1",
     "limits_v1",
     "gc_v1",
@@ -42,6 +42,7 @@ pub const CAPABILITIES: [&str; 7] = [
     "shard_limit_v1",
     "source:files",
     "host_key_v1",
+    "location_v1",
 ];
 const CAP_UPDATE: &str = "update_v1";
 
@@ -275,6 +276,76 @@ fn store_host_key(paths: &Paths, host_key: &str) -> Result<(), AgentError> {
     options.insert("host_key".into(), host_key.into());
     write_json_file(&path, &file)?;
     tracing::info!("SFTP host key updated");
+    Ok(())
+}
+
+fn apply_location(paths: &Paths, location: &lodestore_proto::agent::v1::RepoLocation) {
+    if let Err(error) = store_location(paths, location) {
+        tracing::warn!(%error, "could not store the agent storage credentials");
+    }
+}
+
+fn store_location(
+    paths: &Paths,
+    new: &lodestore_proto::agent::v1::RepoLocation,
+) -> Result<(), AgentError> {
+    let path = paths.repository_json();
+    let Some(mut file) = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+    else {
+        tracing::warn!("repository.json is unreadable; agent storage credentials not stored");
+        return Ok(());
+    };
+    if file.get("repository_id").and_then(|v| v.as_str()) != Some(new.repository_id.as_str())
+        || file.get("backend").and_then(|v| v.as_str()) != Some(new.backend.as_str())
+    {
+        tracing::warn!("storage location is for another repository or backend; ignored");
+        return Ok(());
+    }
+    let proposed = lodestore_format::store::RepoLocation {
+        backend: new.backend.clone(),
+        options: new.options.clone().into_iter().collect(),
+    };
+    if let Err(error) = proposed.validate() {
+        tracing::warn!(%error, "storage location from the server is not valid; ignored");
+        return Ok(());
+    }
+    let Some(current) = file.get("options").and_then(|o| o.as_object()).cloned() else {
+        tracing::warn!("repository.json has no options; agent storage credentials not stored");
+        return Ok(());
+    };
+    let mut credentials = lodestore_format::store::location::secret_option_names(&new.backend);
+    if new.backend == "sftp" {
+        credentials.push("user");
+    }
+    let names = current
+        .keys()
+        .map(String::as_str)
+        .chain(new.options.keys().map(String::as_str));
+    for name in names {
+        if credentials.contains(&name) {
+            continue;
+        }
+        if current.get(name).and_then(|v| v.as_str()) != new.options.get(name).map(String::as_str) {
+            tracing::warn!(
+                option = name,
+                "server tried to change a non-credential option; ignored"
+            );
+            return Ok(());
+        }
+    }
+    let options: serde_json::Map<String, serde_json::Value> = new
+        .options
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone().into()))
+        .collect();
+    if options == current {
+        return Ok(());
+    }
+    file["options"] = options.into();
+    write_json_file(&path, &file)?;
+    tracing::info!("agent storage credentials updated");
     Ok(())
 }
 
@@ -539,6 +610,11 @@ async fn session_once(
                     }
                     Some(ServerBody::UpdateHostKey(update)) => {
                         apply_host_key(paths, &update.host_key);
+                    }
+                    Some(ServerBody::UpdateLocation(update)) => {
+                        if let Some(location) = update.location {
+                            apply_location(paths, &location);
+                        }
                     }
                     Some(body) => hub.handle(body),
                     None => {}

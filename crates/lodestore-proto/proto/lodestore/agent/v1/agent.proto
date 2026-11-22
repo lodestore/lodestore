@@ -114,6 +114,7 @@ message ServerMessage {
     UpdateAssign update_assign = 9;
     UpdateStatusAck update_status_ack = 10;
     UpdateHostKey update_host_key = 11;
+    UpdateLocation update_location = 12;
   }
 }
 
@@ -132,6 +133,11 @@ message UpdateS3Credentials {
 // The SFTP host key the server pinned for the agent's repository.
 message UpdateHostKey {
   string host_key = 1;
+}
+
+// The agent's storage location after its credentials were replaced.
+message UpdateLocation {
+  RepoLocation location = 1;
 }
 
 enum DisconnectReason {
