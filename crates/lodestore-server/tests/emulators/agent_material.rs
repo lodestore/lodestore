@@ -34,7 +34,7 @@ pub(crate) fn sftp_draft(sshd: &SshdServer, name: &str) -> Value {
     })
 }
 
-fn gcs_draft(gcs: &FakeGcsServer, bucket: &str, extra: Value) -> Value {
+pub(crate) fn gcs_draft(gcs: &FakeGcsServer, bucket: &str, extra: Value) -> Value {
     let mut options = json!({
         "bucket": bucket,
         "endpoint": gcs.endpoint(),
@@ -52,7 +52,7 @@ fn gcs_draft(gcs: &FakeGcsServer, bucket: &str, extra: Value) -> Value {
     })
 }
 
-fn azure_draft(az: &AzuriteServer, container: &str) -> Value {
+pub(crate) fn azure_draft(az: &AzuriteServer, container: &str) -> Value {
     json!({
         "name": "azure-repo",
         "location": { "backend": "azblob", "options": {
@@ -97,7 +97,7 @@ pub(crate) async fn stored_location(ts: &TestServer, id: &str) -> Value {
     serde_json::from_str(&row.get::<String, _>("location_json")).unwrap()
 }
 
-fn check_row<'a>(result: &'a Value, id: &str) -> &'a Value {
+pub(crate) fn check_row<'a>(result: &'a Value, id: &str) -> &'a Value {
     result["checks"]
         .as_array()
         .unwrap()
