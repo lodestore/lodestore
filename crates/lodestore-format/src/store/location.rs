@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
+use std::time::Duration;
 
+use super::opendal::SasSource;
 use super::s3::{DEFAULT_REGION, S3Options, S3Provider, S3Store, StaticCredentials};
 use super::sftp::Publish;
 use super::{LocalFsStore, OpendalStore, SftpStore, Store};
@@ -373,6 +375,22 @@ impl RepoLocation {
         }
     }
 
+    /// An azblob store whose SAS token is re-read from `source` while the
+    /// store is open. Other backends and key-based azblob use [`Self::open`].
+    pub fn open_refreshing(&self, source: SasSource, refresh: Duration) -> Result<Store> {
+        self.validate()?;
+        if self.backend != "azblob" || self.opt("sas_token").is_none() {
+            return Err(Error::InvalidInput(
+                "refreshing credentials are for azblob with sas_token".into(),
+            ));
+        }
+        Ok(Store::Opendal(OpendalStore::open_azblob_refreshing(
+            &self.options,
+            source,
+            refresh,
+        )?))
+    }
+
     pub fn open(&self, creds: Option<StaticCredentials>) -> Result<Store> {
         self.validate()?;
         match self.backend.as_str() {
@@ -400,6 +418,43 @@ mod tests {
 
     fn outcome(r: Result<()>) -> std::result::Result<(), String> {
         r.map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn open_refreshing_refuses_other_backends() {
+        let source: SasSource = std::sync::Arc::new(|| None);
+        for location in [
+            RepoLocation::new("s3", [("bucket", "b")]),
+            RepoLocation::new("gcs", [("bucket", "b"), ("credential", "c")]),
+            RepoLocation::new(
+                "sftp",
+                [
+                    ("endpoint", "h:22"),
+                    ("user", "u"),
+                    ("key", "k"),
+                    ("host_key", KEY),
+                ],
+            ),
+            RepoLocation::new(
+                "azblob",
+                [
+                    ("container", "c"),
+                    ("account_name", "a"),
+                    ("account_key", "k"),
+                ],
+            ),
+        ] {
+            location.validate().unwrap();
+            let Err(err) = location.open_refreshing(source.clone(), Duration::from_secs(300))
+            else {
+                panic!("{} opened a refreshing store", location.backend);
+            };
+            assert!(
+                err.to_string().contains("refreshing credentials"),
+                "{}: {err}",
+                location.backend
+            );
+        }
     }
 
     #[test]

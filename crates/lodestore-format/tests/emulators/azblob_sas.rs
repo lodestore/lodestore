@@ -1,12 +1,16 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
 use lodestore_format::store::azure_sas::{sas_https_only, sign_container_sas};
+use lodestore_format::store::opendal::SasSource;
 use lodestore_format::store::probe::{AgentProbe, GuaranteeLevel, ProbeKeys, probe_keep};
 use lodestore_format::store::{BlobStore, RepoLocation, Store, put_named_bytes};
 use lodestore_testkit::azurite::AzuriteServer;
 use rand_chacha::ChaCha20Rng;
 use rand_chacha::rand_core::{Rng, SeedableRng};
+use zeroize::Zeroizing;
 
 use super::azblob::account_store;
 
@@ -212,4 +216,84 @@ async fn azblob_vended_sas_probe_is_create_only() {
         .await
         .unwrap();
     assert_eq!(agent.object_size("packs/fresh").await.unwrap(), Some(2048));
+}
+
+fn refreshing_store(az: &AzuriteServer, container: &str, source: SasSource) -> Store {
+    RepoLocation::new(
+        "azblob",
+        [
+            ("container", container),
+            ("endpoint", az.endpoint().as_str()),
+            ("sas_token", "placeholder"),
+        ],
+    )
+    .open_refreshing(source, Duration::from_secs(1))
+    .unwrap()
+}
+
+#[tokio::test]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn azblob_refreshing_store_picks_up_a_new_sas() {
+    let az = AzuriteServer::start().await;
+    az.create_container("refresh").await;
+    let server = account_store(&az, "refresh").await;
+    let good = now_token(&az, "refresh");
+    let at = good.find("sig=").unwrap() + 4;
+    let flipped = if good.as_bytes()[at] == b'A' {
+        'B'
+    } else {
+        'A'
+    };
+    let bad = format!("{}{flipped}{}", &good[..at], &good[at + 1..]);
+
+    let current = Arc::new(Mutex::new(Zeroizing::new(good.clone())));
+    let asked = Arc::new(AtomicUsize::new(0));
+    let source: SasSource = {
+        let (current, asked) = (current.clone(), asked.clone());
+        Arc::new(move || {
+            asked.fetch_add(1, Ordering::SeqCst);
+            Some(current.lock().unwrap().clone())
+        })
+    };
+    let agent = refreshing_store(&az, "refresh", source);
+    let put = |name: &'static str| {
+        let agent = &agent;
+        async move {
+            put_named_bytes(agent, name, &Bytes::from(vec![5u8; 128]))
+                .await
+                .is_ok()
+        }
+    };
+
+    assert!(put("packs/first").await);
+    let after_first = asked.load(Ordering::SeqCst);
+    assert!(after_first >= 1);
+
+    *current.lock().unwrap() = Zeroizing::new(bad);
+    assert!(!put("packs/second").await);
+    let after_bad = asked.load(Ordering::SeqCst);
+    assert!(after_bad > after_first);
+
+    *current.lock().unwrap() = Zeroizing::new(good);
+    assert!(put("packs/third").await);
+    assert!(asked.load(Ordering::SeqCst) > after_bad);
+
+    assert_eq!(server.object_size("packs/first").await.unwrap(), Some(128));
+    assert_eq!(server.object_size("packs/second").await.unwrap(), None);
+    assert_eq!(server.object_size("packs/third").await.unwrap(), Some(128));
+}
+
+#[tokio::test]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn azblob_refreshing_store_without_a_token_writes_nothing() {
+    let az = AzuriteServer::start().await;
+    az.create_container("notoken").await;
+    let server = account_store(&az, "notoken").await;
+    let agent = refreshing_store(&az, "notoken", Arc::new(|| None));
+    assert!(
+        put_named_bytes(&agent, "packs/n", &Bytes::from(vec![1u8; 64]))
+            .await
+            .is_err()
+    );
+    assert_eq!(server.object_size("packs/n").await.unwrap(), None);
 }
