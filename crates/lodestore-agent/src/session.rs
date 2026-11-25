@@ -285,6 +285,18 @@ fn apply_location(paths: &Paths, location: &lodestore_proto::agent::v1::RepoLoca
     }
 }
 
+/// The options a pushed location may change: the agent's own credentials and
+/// the server credentials they take the place of. Every other option, a
+/// secret one such as an Azure encryption key included, must stay as it is.
+fn credential_names(backend: &str) -> &'static [&'static str] {
+    match backend {
+        "azblob" => &["sas_token", "account_key"],
+        "gcs" => &["credential", "token"],
+        "sftp" => &["user", "key"],
+        _ => &[],
+    }
+}
+
 fn store_location(
     paths: &Paths,
     new: &lodestore_proto::agent::v1::RepoLocation,
@@ -315,10 +327,7 @@ fn store_location(
         tracing::warn!("repository.json has no options; agent storage credentials not stored");
         return Ok(());
     };
-    let mut credentials = lodestore_format::store::location::secret_option_names(&new.backend);
-    if new.backend == "sftp" {
-        credentials.push("user");
-    }
+    let credentials = credential_names(&new.backend);
     let names = current
         .keys()
         .map(String::as_str)
@@ -848,6 +857,24 @@ mod tests {
                 before,
                 "{name}"
             );
+        }
+    }
+
+    #[test]
+    fn store_location_keeps_the_encryption_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths(&dir);
+        let mut file = serde_json::from_slice::<serde_json::Value>(&write_azure(&paths)).unwrap();
+        file["options"]["encryption_key"] = "old-cpk".into();
+        write_json_file(&paths.repository_json(), &file).unwrap();
+        let before = std::fs::read(paths.repository_json()).unwrap();
+        let mut options = AZURE.to_vec();
+        options.push(("sas_token", "sv=1&sig=new"));
+        let mut changed = options.clone();
+        changed.push(("encryption_key", "attacker-cpk"));
+        for refused in [changed, options] {
+            store_location(&paths, &proposed("r1", "azblob", &refused)).unwrap();
+            assert_eq!(std::fs::read(paths.repository_json()).unwrap(), before);
         }
     }
 
