@@ -184,13 +184,29 @@
           {
             "name": "bucket",
             "in": "query",
-            "required": true,
+            "required": false,
             "schema": {
               "type": "string"
             }
           },
           {
             "name": "prefix",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "preset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "user",
             "in": "query",
             "required": false,
             "schema": {
@@ -210,7 +226,7 @@
             }
           },
           "422": {
-            "description": "No bucket given",
+            "description": "Unsafe or missing bucket, prefix or user, or unknown preset",
             "content": {
               "application/json": {
                 "schema": {
@@ -7040,6 +7056,49 @@
           },
           "minio_commands": {
             "type": "string"
+          },
+          "rights": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AgentRightsDto"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "AgentRightsDto": {
+        "type": "object",
+        "required": [
+          "preset",
+          "mechanism",
+          "text",
+          "verified",
+          "note"
+        ],
+        "properties": {
+          "mechanism": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string"
+          },
+          "preset": {
+            "type": "string"
+          },
+          "server_text": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
+            "type": "string"
+          },
+          "verified": {
+            "type": "boolean"
           }
         }
       },

@@ -107,3 +107,107 @@ pub fn agent_minio_commands(bucket: &str, prefix: &str) -> String {
         agent_minio_policy_json(bucket, prefix)
     )
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RightsMechanism {
+    Policy,
+    Commands,
+    Instruction,
+    ServerIssued,
+}
+
+impl RightsMechanism {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Policy => "policy",
+            Self::Commands => "commands",
+            Self::Instruction => "instruction",
+            Self::ServerIssued => "server_issued",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentRights {
+    pub mechanism: RightsMechanism,
+    pub text: String,
+    pub server_text: Option<String>,
+    pub verified: bool,
+    pub note: &'static str,
+}
+
+fn invalid(field: &str, why: &str) -> crate::Error {
+    crate::Error::InvalidInput(format!("{field}: {why}"))
+}
+
+fn check_bucket(bucket: &str) -> crate::Result<()> {
+    let ok = (3..=63).contains(&bucket.len())
+        && bucket.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && bucket
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    if ok {
+        Ok(())
+    } else {
+        Err(invalid(
+            "bucket",
+            "3 to 63 characters from A-Z a-z 0-9 . _ -, starting with a letter or digit",
+        ))
+    }
+}
+
+fn check_prefix(prefix: &str) -> crate::Result<()> {
+    let ok = prefix.len() <= 512
+        && !prefix.starts_with('-')
+        && prefix
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '-'))
+        && !prefix.split('/').any(|segment| segment == "..");
+    if ok {
+        Ok(())
+    } else {
+        Err(invalid(
+            "prefix",
+            "up to 512 characters from A-Z a-z 0-9 . _ / -, without \"..\" and a leading \"-\"",
+        ))
+    }
+}
+
+/// Rights text for one storage preset. Pure text over validated input: no
+/// network calls and no server credentials; project and key ids stay
+/// placeholders.
+pub fn agent_rights(
+    preset: &str,
+    bucket: &str,
+    prefix: &str,
+    user: &str,
+) -> crate::Result<AgentRights> {
+    check_bucket(bucket)?;
+    check_prefix(prefix)?;
+    let _ = user;
+    match preset {
+        "google-cloud-storage" => Ok(gcs_rights(bucket)),
+        _ => Err(crate::Error::InvalidInput("unknown preset".into())),
+    }
+}
+
+fn gcs_rights(bucket: &str) -> AgentRights {
+    let text = format!(
+        "gcloud iam roles create lodestoreAgent --project=PROJECT_ID --title=\"Lodestore agent\" --permissions=storage.objects.create,storage.objects.get,storage.objects.list\n\
+         gcloud iam service-accounts create lodestore-agent --project=PROJECT_ID\n\
+         gcloud storage buckets add-iam-policy-binding gs://{bucket} --member=serviceAccount:lodestore-agent@PROJECT_ID.iam.gserviceaccount.com --role=projects/PROJECT_ID/roles/lodestoreAgent\n\
+         gcloud iam service-accounts keys create agent.json --iam-account=lodestore-agent@PROJECT_ID.iam.gserviceaccount.com\n\
+         base64 -w0 agent.json\n\
+         # The base64 output is the value of agent_options.credential.\n"
+    );
+    let server_text = format!(
+        "gcloud storage buckets add-iam-policy-binding gs://{bucket} --member=serviceAccount:SERVER_SA_EMAIL --role=roles/storage.legacyBucketReader\n"
+    );
+    AgentRights {
+        mechanism: RightsMechanism::Commands,
+        text,
+        server_text: Some(server_text),
+        verified: false,
+        note: "Overwriting on GCS needs the delete permission, which this role lacks; checked only on an emulator without IAM.",
+    }
+}
