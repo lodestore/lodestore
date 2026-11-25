@@ -2230,6 +2230,52 @@ async fn guarantee_tick_skips_a_row_it_cannot_read() {
     ts.stop().await;
 }
 
+/// A slow storage must not hold the access lock that every starting agent
+/// session of the repository waits for.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agent_key_replacement_reads_no_storage_under_the_access_lock() {
+    let minio = MinioServer::start().await;
+    minio.create_versioned_bucket(BUCKET).await;
+    let root = minio.root_credentials();
+    let agent = agent_user(&minio, BUCKET).await;
+    let ts = quiet_server(&Backend::Sqlite).await;
+    let http = std::sync::Arc::new(Http::login(&ts).await);
+    let created = create_s3(&http, &s3_draft(&minio, BUCKET, "cloud", &root, &agent)).await;
+    let id = created["id"].as_str().unwrap().to_string();
+    let proxy = FaultProxy::start(minio.endpoint(), FaultPlan::none()).await;
+    point_at(&ts, &id, &proxy.endpoint()).await;
+    let lock = ts.state().repos.access_lock(&id);
+
+    let held = lock.lock().await;
+    let put = tokio::spawn({
+        let (http, path, body) = (
+            http.clone(),
+            format!("/api/v1/repositories/{id}/agent-key"),
+            creds(&agent),
+        );
+        async move { http.put(&path, &body).await.status() }
+    });
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::sync::Arc::strong_count(&lock) < 3 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the replacement never waited"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let (_arrived, release) = proxy.hold("GET", &[]);
+    drop(held);
+    let next = tokio::time::timeout(std::time::Duration::from_secs(5), lock.lock()).await;
+    drop(release);
+    assert!(
+        next.is_ok(),
+        "the replacement read the storage under the lock"
+    );
+    drop(next);
+    assert_eq!(put.await.unwrap(), 200);
+    ts.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn guarantee_tick_dates_each_repository_by_its_own_probe() {
     let minio = MinioServer::start().await;

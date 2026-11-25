@@ -130,6 +130,16 @@ fn require_sftp(access: &ServerAccess) -> Result<(), ApiError> {
     }
 }
 
+/// Whether the repository's config no longer matches the recorded one, so
+/// nothing is sent to its agents. Read before taking the access lock: it
+/// reads the storage, and a slow storage must not stall starting sessions.
+fn unavailable(opened: anyhow::Result<crate::catalog::OpenRepository>) -> bool {
+    matches!(
+        opened,
+        Err(error) if error.downcast_ref::<crate::catalog::RepositoryUnavailable>().is_some()
+    )
+}
+
 fn agent_check(report: &ProbeReport) -> CheckDto {
     to_result(report)
         .checks
@@ -405,6 +415,7 @@ async fn replace_key(
             "The new key could not be verified: {reason}. The current key is unchanged."
         )));
     }
+    let unavailable = unavailable(crate::catalog::open_repository(&state, &id).await);
 
     let access_lock = state.repos.access_lock(&id);
     let held = access_lock.lock().await;
@@ -441,10 +452,6 @@ async fn replace_key(
         return Err(accept_race());
     }
 
-    let unavailable = matches!(
-        crate::catalog::open_repository(&state, &id).await,
-        Err(error) if error.downcast_ref::<crate::catalog::RepositoryUnavailable>().is_some()
-    );
     let online = if unavailable {
         Vec::new()
     } else {
@@ -565,7 +572,7 @@ async fn replace_host_key(
         .options
         .insert("host_key".to_string(), host_key.clone());
     let opened = open_parts(
-        candidate,
+        candidate.clone(),
         access.server_creds.clone(),
         access.agent_creds.clone(),
         access.agent_options.clone(),
@@ -584,6 +591,18 @@ async fn replace_host_key(
     let result = to_result(&report);
     let checks_json =
         serde_json::to_string(&result.checks).map_err(|e| ApiError::Internal(e.into()))?;
+    let generation = access.generation;
+    let unavailable = unavailable(
+        crate::catalog::open_with_access(
+            &state,
+            &id,
+            ServerAccess {
+                location: candidate,
+                ..access
+            },
+        )
+        .await,
+    );
     let access_lock = state.repos.access_lock(&id);
     let held = access_lock.lock().await;
     let mut accepted = accepted_now(&state, &id).await?;
@@ -594,7 +613,7 @@ async fn replace_host_key(
         match db::replace_host_key(
             &state,
             &id,
-            access.generation,
+            generation,
             &host_key,
             &result.agent_key_state,
             &checks_json,
@@ -622,10 +641,6 @@ async fn replace_host_key(
         return Err(accept_race());
     }
 
-    let unavailable = matches!(
-        crate::catalog::open_repository(&state, &id).await,
-        Err(error) if error.downcast_ref::<crate::catalog::RepositoryUnavailable>().is_some()
-    );
     let (mut online_notified, mut needs_update) = (0u32, 0u32);
     if !unavailable {
         for agent in state.registry.online_in_repository(&id) {
@@ -723,6 +738,7 @@ async fn replace_agent_options(
     let result = to_result(&report);
     let checks_json =
         serde_json::to_string(&result.checks).map_err(|e| ApiError::Internal(e.into()))?;
+    let unavailable = unavailable(crate::catalog::open_repository(&state, &id).await);
     let access_lock = state.repos.access_lock(&id);
     let held = access_lock.lock().await;
     let mut accepted = accepted_now(&state, &id).await?;
@@ -763,10 +779,6 @@ async fn replace_agent_options(
         return Err(accept_race());
     }
 
-    let unavailable = matches!(
-        crate::catalog::open_repository(&state, &id).await,
-        Err(error) if error.downcast_ref::<crate::catalog::RepositoryUnavailable>().is_some()
-    );
     let (mut online_notified, mut needs_update) = (0u32, 0u32);
     if !unavailable {
         match db::writer_material(&state, &id).await {

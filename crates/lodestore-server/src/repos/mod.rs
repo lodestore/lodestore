@@ -58,7 +58,8 @@ impl ReposState {
     }
 
     /// Serialises a change of a repository's storage access with what a starting agent session reads and sends.
-    /// Held from the database write to the last send, never across a storage probe.
+    /// Held from the database write to the last send; under it only the database and the sealer are read,
+    /// never the storage.
     pub fn access_lock(&self, repository_id: &str) -> Arc<tokio::sync::Mutex<()>> {
         self.lock()
             .access
