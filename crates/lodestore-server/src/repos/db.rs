@@ -499,20 +499,13 @@ pub fn mismatch_update(change: Option<&HostKeyChange>, reached: bool) -> Option<
     }
 }
 
-/// Records that the daily recheck ran without storing a result; `failed`
-/// counts it towards `guarantee_failed_runs`.
-pub async fn record_recheck_attempt(
-    state: &AppState,
-    id: &str,
-    at_ms: i64,
-    failed: bool,
-) -> anyhow::Result<()> {
+/// Records that the daily recheck failed before storing a result.
+pub async fn record_failed_recheck(state: &AppState, id: &str, at_ms: i64) -> anyhow::Result<()> {
     sqlx::query(
         "UPDATE repositories SET guarantee_tick_at = $1, \
-         guarantee_failed_runs = guarantee_failed_runs + $2 WHERE id = $3",
+         guarantee_failed_runs = guarantee_failed_runs + 1 WHERE id = $2",
     )
     .bind(at_ms)
-    .bind(i64::from(failed))
     .bind(id)
     .execute(&state.db.pool)
     .await?;
