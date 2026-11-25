@@ -389,7 +389,15 @@ async fn revoke_host(
         state.registry.live.remove(&job_id);
         state.registry.clear_issued(&job_id);
     }
+    let repository_id: String = sqlx::query("SELECT repository_id FROM agents WHERE id = $1")
+        .bind(&id)
+        .fetch_one(&state.db.pool)
+        .await?
+        .try_get("repository_id")?;
+    let access = state.repos.access_lock(&repository_id);
+    let held = access.lock().await;
     state.registry.revoke(&id);
+    drop(held);
     crate::agent_update::rollout::kick(&state);
     Ok(StatusCode::NO_CONTENT)
 }

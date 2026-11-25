@@ -396,6 +396,9 @@ impl Agent for AgentService {
         );
         let access = state.repos.access_lock(&repository_id);
         let held = access.lock().await;
+        if state.registry.is_revoked(&agent_id) {
+            return Err(revoked());
+        }
         match writer_material(&state, &repository_id).await {
             Ok(material) => {
                 if let Some(key) = material.agent_creds {
@@ -421,14 +424,38 @@ impl Agent for AgentService {
                 {
                     state.registry.send(&agent_id, host_key_message(host_key));
                 }
+                let can_update = state.registry.supports(&agent_id, CAP_LOCATION);
                 if matches!(
                     material.location.backend.as_str(),
                     "azblob" | "gcs" | "sftp"
-                ) && state.registry.supports(&agent_id, CAP_LOCATION)
+                ) && can_update
                 {
-                    state.registry.send(
-                        &agent_id,
-                        location_message(&material.location, &repository_id),
+                    let recorded = match material.sas_expires_at_ms {
+                        Some(expires_at_ms) => {
+                            crate::repos::db::record_sas_issued(&state, &agent_id, expires_at_ms)
+                                .await
+                        }
+                        None => Ok(()),
+                    };
+                    match recorded {
+                        Ok(()) => {
+                            state.registry.send(
+                                &agent_id,
+                                location_message(&material.location, &repository_id),
+                            );
+                        }
+                        Err(error) => tracing::warn!(
+                            %agent_id,
+                            error = %format!("{error:#}"),
+                            "could not record the expiry of a storage token; it was not sent"
+                        ),
+                    }
+                }
+                if material.sas_expires_at_ms.is_some() && !can_update {
+                    tracing::warn!(
+                        %agent_id,
+                        %repository_id,
+                        "this agent cannot receive renewed storage tokens and stops writing about a day after enrolment; update the agent"
                     );
                 }
             }
