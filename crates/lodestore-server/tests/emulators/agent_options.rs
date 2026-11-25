@@ -610,6 +610,25 @@ async fn agent_options_replace_refuses_without_step_up_or_a_working_probe() {
     let local = ts.create_local_repository("local-repo").await;
     let (status, refused) = put_options(&api, &local, json!({ "sas_token": good })).await;
     assert_eq!(status, 409, "{refused}");
+    az.create_container("refuse-shared").await;
+    let mut shared = azure_draft(&az, "refuse-shared");
+    shared["name"] = json!("shared");
+    shared["accept_weaker_guarantee"] = json!(true);
+    let shared = create(&api, &shared).await;
+    let before_shared = marks(&ts, &shared).await;
+    let shared_sas = sas_with(&az, "refuse-shared", "rcl", 30);
+    let (status, refused) = put_options(&api, &shared, json!({ "sas_token": shared_sas })).await;
+    assert_eq!(status, 409, "{refused}");
+    assert!(
+        refused.to_string().contains("shared credentials"),
+        "{refused}"
+    );
+    let after_shared = marks(&ts, &shared).await;
+    assert_eq!(generation(&after_shared), generation(&before_shared));
+    assert_eq!(
+        after_shared.get::<Option<String>, _>("agent_creds_secret_id"),
+        None
+    );
     let (status, _) = put_options(&api, "no-such-repository", json!({ "sas_token": good })).await;
     assert_eq!(status, 404);
     unchanged(marks(&ts, &id).await);

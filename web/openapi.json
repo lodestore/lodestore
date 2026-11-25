@@ -4196,7 +4196,7 @@
           "Repositories"
         ],
         "summary": "Replace the agents' own credentials",
-        "description": "For Azure Blob, GCS and SFTP repositories. Needs the password entered in the last 15 minutes. Replaces the whole set of agent options after a full check with them reached the storage, then sends the new location to the online agents; offline agents get it when they connect. Nothing changes when the check fails. The values are never returned.",
+        "description": "For Azure Blob, GCS and SFTP repositories created with separate agent credentials. Needs the password entered in the last 15 minutes. Replaces the whole set of agent options after a full check with them reached the storage, then sends the new location to the online agents; offline agents get it when they connect. Nothing changes when the check fails. The values are never returned.",
         "operationId": "replace_agent_options",
         "parameters": [
           {
@@ -4251,7 +4251,7 @@
             }
           },
           "409": {
-            "description": "The repository is on S3 or local storage, or its storage access changed during the check",
+            "description": "The repository is on S3 or local storage, was created with shared credentials, or its storage access changed during the check",
             "content": {
               "application/json": {
                 "schema": {

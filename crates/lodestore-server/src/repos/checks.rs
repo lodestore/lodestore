@@ -274,12 +274,16 @@ pub async fn run_storage_probe(opened: &Opened) -> ProbeReport {
 
 /// Hides the value of every `sig=` (an Azure SAS signature) in an error text.
 fn redact_signatures(text: &str) -> String {
-    const MARK: &str = "sig=";
+    const MARKS: [&str; 2] = ["sig=", "sig%3d"];
     let lower = text.to_ascii_lowercase();
     let mut out = String::with_capacity(text.len());
     let mut at = 0;
-    while let Some(found) = lower[at..].find(MARK) {
-        let start = at + found + MARK.len();
+    while let Some((found, mark)) = MARKS
+        .iter()
+        .filter_map(|mark| lower[at..].find(mark).map(|found| (found, mark.len())))
+        .min()
+    {
+        let start = at + found + mark;
         out.push_str(&text[at..start]);
         out.push_str("<redacted>");
         at = text[start..]
@@ -516,6 +520,18 @@ mod tests {
             "a?sig=<redacted>&b sig=<redacted>\""
         );
         assert_eq!(redact_signatures("nothing here"), "nothing here");
+    }
+
+    #[test]
+    fn redact_signatures_hides_a_percent_encoded_sig() {
+        assert_eq!(
+            redact_signatures("u=https%3A%2F%2Fa%3Fsv%3D1%26sig%3DAbC%252F%26se%3D2 x"),
+            "u=https%3A%2F%2Fa%3Fsv%3D1%26sig%3D<redacted> x"
+        );
+        assert_eq!(
+            redact_signatures("Sig%3dabc&SIG=def"),
+            "Sig%3d<redacted>&SIG=<redacted>"
+        );
     }
 
     mod allow_list {

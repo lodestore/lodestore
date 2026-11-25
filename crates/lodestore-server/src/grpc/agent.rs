@@ -33,7 +33,7 @@ const PREV_CERT_DRAIN_MS: i64 = 2 * 60 * 1000;
 pub(crate) const CAP_HOST_KEY: &str = "host_key_v1";
 pub(crate) const CAP_LOCATION: &str = "location_v1";
 
-pub(crate) fn location_message(
+pub fn location_message(
     location: &crate::repos::db::RepoLocation,
     repository_id: &str,
 ) -> ServerMessage {

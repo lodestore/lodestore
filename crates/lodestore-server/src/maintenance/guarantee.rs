@@ -22,10 +22,11 @@ const RECHECK_TIMEOUT: Duration = Duration::from_secs(120);
 /// A repository is due when the later of its last written level and its last
 /// daily attempt is a day old or missing. Both marks are written by the
 /// guarantee code only; a manual check that measured nothing moves neither.
+/// A mark in the future was written by a wrong clock and does not count.
 fn due(now_ms: i64, tick_at: Option<i64>, guarantee_checked_at: Option<i64>) -> bool {
     tick_at
         .max(guarantee_checked_at)
-        .is_none_or(|last| now_ms - last >= RECHECK_AFTER_MS)
+        .is_none_or(|last| last > now_ms || now_ms - last >= RECHECK_AFTER_MS)
 }
 
 #[derive(Debug)]
@@ -59,6 +60,8 @@ pub async fn guarded<T: Send + 'static>(
 }
 
 /// Rechecks the repositories that are due, one at a time, and returns their ids.
+/// `now_ms` is the clock at the start; each repository is dated by that clock
+/// when its own probe starts.
 /// A failure of one is logged and does not stop the others.
 pub async fn tick(
     state: &AppState,
@@ -71,54 +74,77 @@ pub async fn tick(
     )
     .fetch_all(&state.db.pool)
     .await?;
+    let started = std::time::Instant::now();
     let mut checked = Vec::new();
     for row in &rows {
         if stop.is_cancelled() {
             break;
         }
-        let id: String = row.try_get("id")?;
-        let measured: Option<i64> = row.try_get("guarantee_checked_at")?;
-        let tick_at: Option<i64> = row.try_get("guarantee_tick_at")?;
-        if !due(now_ms, tick_at, measured) {
+        let read = || -> Result<(String, Option<i64>, Option<i64>), sqlx::Error> {
+            Ok((
+                row.try_get("id")?,
+                row.try_get("guarantee_checked_at")?,
+                row.try_get("guarantee_tick_at")?,
+            ))
+        };
+        let (id, measured, tick_at) = match read() {
+            Ok(read) => read,
+            Err(error) => {
+                tracing::warn!(%error, "a repository could not be read for the daily recheck");
+                continue;
+            }
+        };
+        let at_ms = now_ms.saturating_add(started.elapsed().as_millis() as i64);
+        if !due(at_ms, tick_at, measured) {
             continue;
         }
         let work = tokio::spawn({
             let (state, id) = (state.clone(), id.clone());
-            async move { recheck_repository_at(&state, &id, now_ms, true).await }
+            async move { recheck_repository_at(&state, &id, at_ms, true).await }
         });
         let outcome = guarded(work, RECHECK_TIMEOUT, stop).await;
-        let failed = match outcome {
-            Outcome::Done(Ok(_)) => None,
-            Outcome::Done(Err(ApiError::NotFound(_))) => {
-                tracing::debug!(repository_id = %id, "the repository was deleted during the daily recheck");
-                continue;
-            }
-            Outcome::Done(Err(ApiError::Conflict(reason))) => {
-                tracing::debug!(repository_id = %id, %reason, "the daily recheck result was discarded");
-                Some(false)
-            }
-            Outcome::Done(Err(error)) => {
-                tracing::warn!(repository_id = %id, %error, "the daily recheck failed");
-                Some(true)
-            }
-            Outcome::Panicked => {
-                tracing::warn!(repository_id = %id, "the daily recheck panicked");
-                Some(true)
-            }
-            Outcome::TimedOut => {
-                tracing::warn!(repository_id = %id, "the daily recheck timed out");
-                Some(true)
-            }
-            Outcome::Stopped => Some(false),
-        };
-        if let Some(failed) = failed
-            && let Err(error) = db::record_recheck_attempt(state, &id, now_ms, failed).await
+        if failed_attempt(&id, &outcome)
+            && let Err(error) = db::record_failed_recheck(state, &id, at_ms).await
         {
             tracing::warn!(repository_id = %id, error = %format!("{error:#}"), "recording the daily recheck attempt failed");
         }
-        checked.push(id);
+        if !matches!(
+            outcome,
+            Outcome::Stopped | Outcome::Done(Err(ApiError::NotFound(_)))
+        ) {
+            checked.push(id);
+        }
     }
     Ok(checked)
+}
+
+/// Whether an outcome is a failed daily attempt, recorded on its own because
+/// no check was stored. A stored check records itself; a stop, a deleted
+/// repository and a discarded result are no attempt and record nothing.
+fn failed_attempt<T>(id: &str, outcome: &Outcome<Result<T, ApiError>>) -> bool {
+    match outcome {
+        Outcome::Done(Ok(_)) | Outcome::Stopped => false,
+        Outcome::Done(Err(ApiError::NotFound(_))) => {
+            tracing::debug!(repository_id = %id, "the repository was deleted during the daily recheck");
+            false
+        }
+        Outcome::Done(Err(ApiError::Conflict(reason))) => {
+            tracing::debug!(repository_id = %id, %reason, "the daily recheck result was discarded");
+            false
+        }
+        Outcome::Done(Err(error)) => {
+            tracing::warn!(repository_id = %id, %error, "the daily recheck failed");
+            true
+        }
+        Outcome::Panicked => {
+            tracing::warn!(repository_id = %id, "the daily recheck panicked");
+            true
+        }
+        Outcome::TimedOut => {
+            tracing::warn!(repository_id = %id, "the daily recheck timed out");
+            true
+        }
+    }
 }
 
 pub async fn run(state: AppState, stop: CancellationToken) -> anyhow::Result<()> {
@@ -152,6 +178,24 @@ mod tests {
         assert!(due(30 * HOUR, Some(0), Some(0)));
         assert!(!due(30 * HOUR, Some(10 * HOUR), Some(0)));
         assert!(!due(30 * HOUR, Some(0), Some(10 * HOUR)));
+        assert!(due(30 * HOUR, Some(31 * HOUR), None));
+        assert!(due(30 * HOUR, None, Some(31 * HOUR)));
+    }
+
+    #[test]
+    fn only_a_failure_is_recorded_as_an_attempt() {
+        let failed = |outcome: Outcome<Result<(), ApiError>>| failed_attempt("r1", &outcome);
+        assert!(!failed(Outcome::Stopped));
+        assert!(!failed(Outcome::Done(Ok(()))));
+        assert!(!failed(Outcome::Done(Err(ApiError::NotFound(
+            "gone".into()
+        )))));
+        assert!(!failed(Outcome::Done(Err(ApiError::Conflict(
+            "raced".into()
+        )))));
+        assert!(failed(Outcome::Done(Err(ApiError::Backend("down".into())))));
+        assert!(failed(Outcome::Panicked));
+        assert!(failed(Outcome::TimedOut));
     }
 
     async fn dropped(rx: tokio::sync::oneshot::Receiver<()>) -> bool {

@@ -6,12 +6,18 @@ use std::collections::BTreeMap;
 use std::process::Command;
 use std::sync::OnceLock;
 
+use lodestore_agent::session::store_location;
 use lodestore_format::keys::MasterKey;
 use lodestore_format::store::RepoLocation;
+use lodestore_proto::agent::v1::server_message::Body as ServerBody;
+use lodestore_server::grpc::agent::location_message;
 use lodestore_server::repos::checks::{
-    agent_option_names, open_draft, open_parts, server_credential_names,
+    agent_option_names, check_agent_options, open_draft, open_parts, server_credential_names,
 };
-use lodestore_server::repos::db::{find_repository, server_access, writer_material};
+use lodestore_server::repos::db::{
+    AgentOptions, GuaranteeWrite, Stored, find_repository, replace_agent_options, server_access,
+    writer_material,
+};
 use lodestore_server::repos::wizard::{Registration, register};
 use lodestore_server::repos::{CheckResult, RepositoryDraft};
 use proptest::prelude::*;
@@ -38,13 +44,15 @@ struct Case {
     public: BTreeMap<String, String>,
     server_secrets: BTreeMap<String, String>,
     agent: BTreeMap<String, String>,
+    /// The set a later `PUT agent-options` sends; used only when `agent` is not empty.
+    replacement: BTreeMap<String, String>,
 }
 
-fn private_keys() -> &'static [String; 2] {
-    static KEYS: OnceLock<[String; 2]> = OnceLock::new();
+fn private_keys() -> &'static [String; 3] {
+    static KEYS: OnceLock<[String; 3]> = OnceLock::new();
     KEYS.get_or_init(|| {
         let dir = tempfile::tempdir().unwrap();
-        ["server", "agent"].map(|name| {
+        ["server", "agent", "rotated"].map(|name| {
             let path = dir.path().join(name);
             let status = Command::new("ssh-keygen")
                 .args(["-q", "-t", "ed25519", "-N", "", "-f"])
@@ -125,6 +133,7 @@ fn azblob() -> impl Strategy<Value = Case> {
                 public: map(public),
                 server_secrets: map(secrets),
                 agent: map(agent),
+                replacement: map(vec![("sas_token", "sv=2&sig=new-sas".to_string())]),
             }
         })
 }
@@ -161,6 +170,7 @@ fn gcs() -> impl Strategy<Value = Case> {
                 public: map(public),
                 server_secrets: map(secrets),
                 agent: map(agent),
+                replacement: map(vec![("credential", "new-credential".to_string())]),
             }
         })
 }
@@ -173,10 +183,11 @@ fn sftp() -> impl Strategy<Value = Case> {
         prop::sample::select(vec!["hardlink", "direct"]),
         any::<bool>(),
         any::<bool>(),
+        any::<bool>(),
     )
         .prop_map(
-            |(user, root, publish_set, publish, agent_user, agent_key)| {
-                let [server_key, agent_key_text] = private_keys();
+            |(user, root, publish_set, publish, agent_user, agent_key, new_user)| {
+                let [server_key, agent_key_text, rotated_key] = private_keys();
                 let mut public = vec![
                     ("endpoint", "127.0.0.1:9".to_string()),
                     ("user", format!("pub-{user}")),
@@ -193,11 +204,16 @@ fn sftp() -> impl Strategy<Value = Case> {
                         agent.push(("user", "agt-user".to_string()));
                     }
                 }
+                let mut replacement = vec![("key", rotated_key.clone())];
+                if new_user {
+                    replacement.push(("user", "rotated-user".to_string()));
+                }
                 Case {
                     backend: "sftp",
                     public: map(public),
                     server_secrets: map(vec![("key", server_key.clone())]),
                     agent: map(agent),
+                    replacement: map(replacement),
                 }
             },
         )
@@ -302,6 +318,83 @@ async fn run_case(ts: &TestServer, n: usize, case: Case) {
             );
         }
     }
+
+    if !case.agent.is_empty() {
+        replace_and_push(state, &id, &case).await;
+    }
+}
+
+/// The agent enrolls with the material, the options are replaced as `PUT
+/// agent-options` does it, and the pushed location reaches the agent's file:
+/// the file must hold exactly the location the approving probe measured.
+async fn replace_and_push(state: &lodestore_server::state::AppState, id: &str, case: &Case) {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = lodestore_agent::Paths {
+        config_dir: dir.path().join("etc"),
+        state_dir: dir.path().join("var"),
+    };
+    std::fs::create_dir_all(&paths.state_dir).unwrap();
+    let enrolled = writer_material(state, id).await.unwrap().location;
+    std::fs::write(
+        paths.repository_json(),
+        serde_json::to_vec(&json!({
+            "repository_id": id,
+            "backend": enrolled.backend,
+            "options": enrolled.options,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let access = server_access(state, id).await.unwrap();
+    let new: AgentOptions = case
+        .replacement
+        .iter()
+        .map(|(k, v)| (k.clone(), Zeroizing::new(v.clone())))
+        .collect();
+    check_agent_options(case.backend, &case.replacement).unwrap();
+    let probed = open_parts(
+        access.location.clone(),
+        access.server_creds.clone(),
+        access.agent_creds.clone(),
+        new.clone(),
+    )
+    .unwrap()
+    .agent_location
+    .expect("the agent store of this backend has a location");
+    let accepted = find_repository(state, id)
+        .await
+        .unwrap()
+        .unwrap()
+        .guarantee_accepted;
+    let guarantee = GuaranteeWrite {
+        level: "unchecked".into(),
+        notes_json: "[]".into(),
+        accepted: accepted.clone(),
+        read_accepted: accepted,
+    };
+    let stored = replace_agent_options(
+        state,
+        id,
+        access.generation,
+        &new,
+        "unchecked",
+        "[]",
+        &guarantee,
+    )
+    .await
+    .unwrap();
+    assert_eq!(stored, Stored::Written, "{case:?}");
+
+    let pushed = location_message(&writer_material(state, id).await.unwrap().location, id);
+    let Some(ServerBody::UpdateLocation(update)) = pushed.body else {
+        panic!("expected UpdateLocation");
+    };
+    store_location(&paths, &update.location.expect("a location")).unwrap();
+    let file: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(paths.repository_json()).unwrap()).unwrap();
+    assert_eq!(file["options"], json!(probed.options), "{case:?}");
+    assert_eq!(file["repository_id"], id);
 }
 
 #[test]
@@ -331,7 +424,7 @@ fn probe_and_agent_locations_agree() {
 
 #[test]
 fn sftp_agent_user_without_a_key_is_refused() {
-    let [server_key, _] = private_keys();
+    let [server_key, _, _] = private_keys();
     let draft: RepositoryDraft = serde_json::from_value(json!({
         "name": "user-only",
         "location": { "backend": "sftp", "options": {

@@ -130,6 +130,16 @@ fn require_sftp(access: &ServerAccess) -> Result<(), ApiError> {
     }
 }
 
+/// Whether the repository's config no longer matches the recorded one, so
+/// nothing is sent to its agents. Read before taking the access lock: it
+/// reads the storage, and a slow storage must not stall starting sessions.
+fn unavailable(opened: anyhow::Result<crate::catalog::OpenRepository>) -> bool {
+    matches!(
+        opened,
+        Err(error) if error.downcast_ref::<crate::catalog::RepositoryUnavailable>().is_some()
+    )
+}
+
 fn agent_check(report: &ProbeReport) -> CheckDto {
     to_result(report)
         .checks
@@ -272,6 +282,7 @@ pub async fn recheck_repository_at(
     at_ms: i64,
     daily: bool,
 ) -> Result<CheckResult, ApiError> {
+    let started = std::time::Instant::now();
     let access = load(state, id).await?;
     let opened = open_parts(
         access.location.clone(),
@@ -293,6 +304,14 @@ pub async fn recheck_repository_at(
     let result = to_result(&report);
     let checks_json =
         serde_json::to_string(&result.checks).map_err(|e| ApiError::Internal(e.into()))?;
+    let host_key_mismatch = (access.location.backend == "sftp")
+        .then(|| {
+            db::mismatch_update(
+                report.host_key_changed.as_ref(),
+                report.check(CheckId::Write).status != CheckStatus::Fail,
+            )
+        })
+        .flatten();
     let mut stored = false;
     for _ in 0..GUARANTEE_ATTEMPTS {
         let write = guarantee_write(&result, &accepted_now(state, id).await?, false)?;
@@ -302,29 +321,17 @@ pub async fn recheck_repository_at(
             &db::CheckWrite {
                 generation: access.generation,
                 at_ms,
+                now_ms: at_ms.saturating_add(started.elapsed().as_millis() as i64),
                 checks_json: &checks_json,
                 agent_key_state: &result.agent_key_state,
                 guarantee: write.as_ref(),
                 daily,
+                host_key_mismatch: host_key_mismatch.clone(),
             },
         )
         .await?;
         match outcome {
             db::Stored::Written => {
-                if access.location.backend == "sftp" {
-                    let reached = report.check(CheckId::Write).status != CheckStatus::Fail;
-                    if let Err(error) = db::record_host_key_check(
-                        state,
-                        id,
-                        access.generation,
-                        report.host_key_changed.as_ref(),
-                        reached,
-                    )
-                    .await
-                    {
-                        tracing::warn!(repository_id = %id, error = %format!("{error:#}"), "could not record the host key check");
-                    }
-                }
                 stored = true;
                 break;
             }
@@ -408,6 +415,7 @@ async fn replace_key(
             "The new key could not be verified: {reason}. The current key is unchanged."
         )));
     }
+    let unavailable = unavailable(crate::catalog::open_repository(&state, &id).await);
 
     let access_lock = state.repos.access_lock(&id);
     let held = access_lock.lock().await;
@@ -444,10 +452,6 @@ async fn replace_key(
         return Err(accept_race());
     }
 
-    let unavailable = matches!(
-        crate::catalog::open_repository(&state, &id).await,
-        Err(error) if error.downcast_ref::<crate::catalog::RepositoryUnavailable>().is_some()
-    );
     let online = if unavailable {
         Vec::new()
     } else {
@@ -568,7 +572,7 @@ async fn replace_host_key(
         .options
         .insert("host_key".to_string(), host_key.clone());
     let opened = open_parts(
-        candidate,
+        candidate.clone(),
         access.server_creds.clone(),
         access.agent_creds.clone(),
         access.agent_options.clone(),
@@ -587,6 +591,18 @@ async fn replace_host_key(
     let result = to_result(&report);
     let checks_json =
         serde_json::to_string(&result.checks).map_err(|e| ApiError::Internal(e.into()))?;
+    let generation = access.generation;
+    let unavailable = unavailable(
+        crate::catalog::open_with_access(
+            &state,
+            &id,
+            ServerAccess {
+                location: candidate,
+                ..access
+            },
+        )
+        .await,
+    );
     let access_lock = state.repos.access_lock(&id);
     let held = access_lock.lock().await;
     let mut accepted = accepted_now(&state, &id).await?;
@@ -597,7 +613,7 @@ async fn replace_host_key(
         match db::replace_host_key(
             &state,
             &id,
-            access.generation,
+            generation,
             &host_key,
             &result.agent_key_state,
             &checks_json,
@@ -625,10 +641,6 @@ async fn replace_host_key(
         return Err(accept_race());
     }
 
-    let unavailable = matches!(
-        crate::catalog::open_repository(&state, &id).await,
-        Err(error) if error.downcast_ref::<crate::catalog::RepositoryUnavailable>().is_some()
-    );
     let (mut online_notified, mut needs_update) = (0u32, 0u32);
     if !unavailable {
         for agent in state.registry.online_in_repository(&id) {
@@ -658,7 +670,7 @@ async fn replace_host_key(
     put,
     tag = "Repositories",
     summary = "Replace the agents' own credentials",
-    description = "For Azure Blob, GCS and SFTP repositories. Needs the password entered in the last \
+    description = "For Azure Blob, GCS and SFTP repositories created with separate agent credentials. Needs the password entered in the last \
         15 minutes. Replaces the whole set of agent options after a full check with them reached the \
         storage, then sends the new location to the online agents; offline agents get it when they \
         connect. Nothing changes when the check fails. The values are never returned.",
@@ -670,7 +682,7 @@ async fn replace_host_key(
         (status = 200, description = "The options were replaced", body = AgentOptionsReplaced),
         (status = 403, description = "`step_up_required`: the password was not entered in the last 15 minutes", body = ErrorBody),
         (status = 404, description = "Unknown repository", body = ErrorBody),
-        (status = 409, description = "The repository is on S3 or local storage, or its storage access changed during the check", body = ErrorBody),
+        (status = 409, description = "The repository is on S3 or local storage, was created with shared credentials, or its storage access changed during the check", body = ErrorBody),
         (status = 422, description = "An option is not allowed or empty, or the new options could not be verified", body = ErrorBody),
     )
 )]
@@ -687,6 +699,14 @@ async fn replace_agent_options(
         return Err(ApiError::Conflict(
             "Only Azure, GCS and SFTP repositories take agent options; an S3 repository takes PUT \
              /api/v1/repositories/{id}/agent-key."
+                .into(),
+        ));
+    }
+    if access.agent_options.is_empty() {
+        return Err(ApiError::Conflict(
+            "This repository was created with shared credentials, so every enrolled host already \
+             holds the server's credentials. Create a new repository with separate agent \
+             credentials."
                 .into(),
         ));
     }
@@ -726,6 +746,7 @@ async fn replace_agent_options(
     let result = to_result(&report);
     let checks_json =
         serde_json::to_string(&result.checks).map_err(|e| ApiError::Internal(e.into()))?;
+    let unavailable = unavailable(crate::catalog::open_repository(&state, &id).await);
     let access_lock = state.repos.access_lock(&id);
     let held = access_lock.lock().await;
     let mut accepted = accepted_now(&state, &id).await?;
@@ -766,10 +787,6 @@ async fn replace_agent_options(
         return Err(accept_race());
     }
 
-    let unavailable = matches!(
-        crate::catalog::open_repository(&state, &id).await,
-        Err(error) if error.downcast_ref::<crate::catalog::RepositoryUnavailable>().is_some()
-    );
     let (mut online_notified, mut needs_update) = (0u32, 0u32);
     if !unavailable {
         match db::writer_material(&state, &id).await {
