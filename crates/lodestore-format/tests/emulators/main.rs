@@ -18,6 +18,7 @@ mod adv_storage_azblob;
 mod adv_storage_gcs;
 mod adv_storage_sftp;
 mod azblob;
+mod azblob_sas;
 mod gcs;
 mod sftp;
 

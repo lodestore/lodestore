@@ -1,3 +1,4 @@
+pub mod azure_sas;
 mod local;
 pub mod location;
 pub mod opendal;
