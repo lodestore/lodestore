@@ -9,6 +9,7 @@ use zeroize::Zeroizing;
 
 use crate::catalog::RepositoryUnavailable;
 use crate::db::now_ms;
+use crate::repos::agent_key::CAP_SAS_REFRESH;
 use crate::state::AppState;
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -984,29 +985,38 @@ pub async fn storage_access_facts(
         agent_key_is_server_key =
             !agent.access_key_id.is_empty() && agent.access_key_id == server.access_key_id;
     }
-    let revoked = sqlx::query(
-        "SELECT revoked_at, sas_expires_at FROM agents \
-         WHERE repository_id = $1 AND status = 'revoked'",
+    let sas_vending = row.try_get::<i64, _>("agent_sas_vending")? != 0;
+    let mut revoked = Vec::new();
+    let mut outdated = 0;
+    for r in sqlx::query(
+        "SELECT status, revoked_at, sas_expires_at, capabilities_json FROM agents \
+         WHERE repository_id = $1",
     )
     .bind(id)
     .fetch_all(&state.db.pool)
     .await?
-    .iter()
-    .map(|r| {
-        Ok((
-            r.try_get::<Option<i64>, _>("revoked_at")?.unwrap_or(0),
-            r.try_get::<Option<i64>, _>("sas_expires_at")?,
-        ))
-    })
-    .collect::<Result<_, sqlx::Error>>()?;
+    {
+        if r.try_get::<String, _>("status")? == "revoked" {
+            revoked.push((
+                r.try_get::<Option<i64>, _>("revoked_at")?.unwrap_or(0),
+                r.try_get::<Option<i64>, _>("sas_expires_at")?,
+            ));
+        } else if sas_vending {
+            let can_refresh = r
+                .try_get::<Option<String>, _>("capabilities_json")?
+                .and_then(|j| serde_json::from_str::<Vec<String>>(&j).ok())
+                .is_some_and(|caps| caps.iter().any(|c| c == CAP_SAS_REFRESH));
+            outdated += u32::from(!can_refresh);
+        }
+    }
     Ok(Some(StorageAccessFacts {
         backend,
-        sas_vending: row.try_get::<i64, _>("agent_sas_vending")? != 0,
+        sas_vending,
         has_agent_creds: agent_sid.is_some(),
         agent_key_is_server_key,
         changed_at: row.try_get("agent_access_changed_at")?,
         revoked,
-        outdated: 0,
+        outdated,
     }))
 }
 

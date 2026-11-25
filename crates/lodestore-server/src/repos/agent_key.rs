@@ -103,6 +103,9 @@ pub struct AgentOptionsReplaced {
     pub offline: u32,
 }
 
+/// Announced by agents that can pick up a reissued SAS in a running session.
+pub(crate) const CAP_SAS_REFRESH: &str = "sas_refresh_v1";
+
 #[derive(Serialize, ToSchema)]
 pub struct StorageAccess {
     /// What happens to the access of revoked hosts: `expires` (the issued SAS runs out),
@@ -1064,6 +1067,118 @@ mod tests {
         assert!(
             !message.contains("new key could not be verified"),
             "{message}"
+        );
+    }
+
+    const NOW: i64 = 1_000_000;
+
+    fn facts(backend: &str) -> db::StorageAccessFacts {
+        db::StorageAccessFacts {
+            backend: backend.into(),
+            sas_vending: false,
+            has_agent_creds: false,
+            agent_key_is_server_key: false,
+            changed_at: None,
+            revoked: vec![(10, None), (20, None)],
+            outdated: 0,
+        }
+    }
+
+    fn mode(f: &db::StorageAccessFacts) -> (String, Option<String>, u32) {
+        let a = storage_access_of(f, NOW);
+        (a.after_revoke, a.rotate_via, a.revoked_hosts_since_rotation)
+    }
+
+    #[test]
+    fn storage_access_follows_the_backend_and_mode() {
+        let with = |backend: &str, f: &dyn Fn(&mut db::StorageAccessFacts)| {
+            let mut x = facts(backend);
+            f(&mut x);
+            mode(&x)
+        };
+        let s = |a: &str, v: Option<&str>| (a.to_string(), v.map(String::from), 2);
+        assert_eq!(
+            with("s3", &|_| {}),
+            ("until_rotation".into(), Some("agent-key".into()), 2)
+        );
+        assert_eq!(
+            with("s3", &|f| f.agent_key_is_server_key = true),
+            s("server_key_shared", None)
+        );
+        for backend in ["azblob", "gcs", "sftp"] {
+            assert_eq!(
+                with(backend, &|f| f.has_agent_creds = true),
+                s("until_rotation", Some("agent-options")),
+                "{backend}"
+            );
+            assert_eq!(
+                with(backend, &|_| {}),
+                s("new_repository", None),
+                "{backend}"
+            );
+        }
+        assert_eq!(
+            with("azblob", &|f| {
+                f.sas_vending = true;
+                f.revoked = vec![(10, Some(NOW + 1))];
+            }),
+            ("expires".into(), None, 1)
+        );
+        assert_eq!(with("local", &|_| {}), s("outside_lodestore", None));
+        let mut shared = facts("s3");
+        shared.agent_key_is_server_key = true;
+        shared.changed_at = Some(100);
+        assert_eq!(
+            storage_access_of(&shared, NOW).revoked_hosts_before_rotation,
+            0
+        );
+    }
+
+    #[test]
+    fn storage_access_vending_ends_at_the_last_issued_expiry() {
+        let mut f = facts("azblob");
+        f.sas_vending = true;
+        f.revoked = vec![(10, Some(NOW + 3 * 3_600_000)), (20, Some(NOW + 1_000))];
+        let a = storage_access_of(&f, NOW);
+        assert_eq!(a.status, "access_expires");
+        assert_eq!(a.access_ends_by, Some(NOW + 3 * 3_600_000));
+        assert_eq!(a.revoked_hosts_since_rotation, 2);
+
+        f.revoked = vec![(10, Some(NOW - 5)), (20, Some(NOW - 1))];
+        let a = storage_access_of(&f, NOW);
+        assert_eq!(a.status, "access_expired");
+        assert_eq!(a.access_ends_by, None);
+        assert_eq!(
+            (
+                a.revoked_hosts_since_rotation,
+                a.revoked_hosts_before_rotation
+            ),
+            (0, 0)
+        );
+
+        f.revoked = vec![(10, None)];
+        let a = storage_access_of(&f, NOW);
+        assert_eq!(a.status, "no_revoked_hosts");
+        assert_eq!(a.revoked_hosts_since_rotation, 0);
+    }
+
+    #[test]
+    fn storage_access_revoked_before_upgrade_counts_until_rotation() {
+        let mut f = facts("s3");
+        f.revoked = vec![(50, None)];
+        let a = storage_access_of(&f, NOW);
+        assert_eq!(a.status, "revoked_hosts_hold_access");
+        assert_eq!(a.revoked_hosts_since_rotation, 1);
+
+        f.changed_at = Some(100);
+        let a = storage_access_of(&f, NOW);
+        assert_eq!(a.status, "rotated_disable_old_key_at_provider");
+        assert_eq!(
+            (
+                a.revoked_hosts_since_rotation,
+                a.revoked_hosts_before_rotation
+            ),
+            (0, 1)
         );
     }
 }
