@@ -405,7 +405,7 @@ export function BackToNotifications() {
 	return (
 		<Link
 			to="/settings/notifications"
-			className={buttonVariants({ variant: "outline" })}
+			className={cn(buttonVariants({ variant: "outline" }))}
 		>
 			{text.back}
 		</Link>
