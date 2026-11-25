@@ -167,6 +167,50 @@ fn iso8601(unix: u64) -> String {
     )
 }
 
+pub fn iso8601_utc(unix_secs: u64) -> String {
+    iso8601(unix_secs)
+}
+
+/// The base64 signature of a container service SAS, built from the
+/// documented string-to-sign without the code under test: sp, st, se,
+/// canonicalized resource, si, sip, spr, sv, sr, snapshot, scope, rscc, rscd,
+/// rsce, rscl, rsct.
+#[allow(clippy::too_many_arguments)]
+pub fn container_sas_signature(
+    account_name: &str,
+    account_key_b64: &str,
+    container: &str,
+    permissions: &str,
+    start: Option<&str>,
+    expiry: &str,
+    protocol: Option<&str>,
+    version: &str,
+) -> String {
+    let to_sign = [
+        permissions,
+        start.unwrap_or(""),
+        expiry,
+        &format!("/blob/{account_name}/{container}"),
+        "",
+        "",
+        protocol.unwrap_or(""),
+        version,
+        "c",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+    ]
+    .join("\n");
+    let key = BASE64
+        .decode(account_key_b64.as_bytes())
+        .expect("account key is base64");
+    hmac_base64(&key, &to_sign)
+}
+
 pub struct AzuriteServer {
     child: Child,
     port: u16,
@@ -358,10 +402,16 @@ impl AzuriteServer {
     /// without the leading `?`.
     pub fn container_sas(&self, container: &str, permissions: &str, ttl: Duration) -> String {
         let expiry = iso8601(now_unix() + ttl.as_secs());
-        let to_sign = format!(
-            "{permissions}\n\n{expiry}\n/blob/{ACCOUNT_NAME}/{container}\n\n\n\n{API_VERSION}\nc\n\n\n\n\n\n\n"
-        );
-        let signature = percent_encode_signature(&hmac_base64(&account_key(), &to_sign));
+        let signature = percent_encode_signature(&container_sas_signature(
+            ACCOUNT_NAME,
+            ACCOUNT_KEY,
+            container,
+            permissions,
+            None,
+            &expiry,
+            None,
+            API_VERSION,
+        ));
         format!("sv={API_VERSION}&sr=c&sp={permissions}&se={expiry}&sig={signature}")
     }
 }
