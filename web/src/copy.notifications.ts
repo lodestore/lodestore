@@ -21,6 +21,8 @@ export const notifications = {
 		agent_session_conflict: "Agent session conflict",
 		agent_certificate_rejected: "Agent certificate rejected",
 		source_instance_gone: "Source no longer selected",
+		guarantee_downgraded: "Storage protection weakened",
+		host_key_changed: "SFTP host key changed",
 	},
 	kinds: {
 		telegram: "Telegram",

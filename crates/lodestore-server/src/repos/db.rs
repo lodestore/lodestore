@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use anyhow::Context;
 use lodestore_format::keys::{MasterKey, ReadKeys};
+use lodestore_format::store::probe::HostKeyChange;
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use zeroize::Zeroizing;
@@ -29,6 +30,9 @@ impl std::fmt::Debug for AccessKey {
             .finish_non_exhaustive()
     }
 }
+
+/// The agents' own secret options of a backend; never printed or returned.
+pub type AgentOptions = BTreeMap<String, Zeroizing<String>>;
 
 pub struct NewRepository {
     pub name: String,
@@ -71,6 +75,13 @@ impl SealedAccess {
             secret_access_key: self.secret_access_key.clone(),
         })
     }
+
+    fn agent_options(self) -> AgentOptions {
+        self.options
+            .into_iter()
+            .map(|(k, v)| (k, Zeroizing::new(v)))
+            .collect()
+    }
 }
 
 fn sealed_json(
@@ -94,6 +105,7 @@ fn agent_json(key: &AccessKey) -> anyhow::Result<Zeroizing<Vec<u8>>> {
 #[derive(Default)]
 pub struct RepoExtras {
     pub secret_options: BTreeMap<String, String>,
+    pub agent_options: AgentOptions,
     pub checks_json: Option<String>,
     pub agent_key_state: Option<String>,
     pub checked_at: Option<i64>,
@@ -130,13 +142,20 @@ pub async fn create_repository_ext(
     } else {
         None
     };
-    let agent_creds = match &new.agent_creds {
-        Some(k) => Some(
+    let agent_creds = if new.agent_creds.is_some() || !extras.agent_options.is_empty() {
+        let options = extras
+            .agent_options
+            .iter()
+            .map(|(k, v)| (k.clone(), v.to_string()))
+            .collect();
+        let blob = sealed_json(new.agent_creds.as_ref(), &options)?;
+        Some(
             sealer
-                .put_secret_on(&mut tx, "repo-agent-creds", &agent_json(k)?)
+                .put_secret_on(&mut tx, "repo-agent-creds", &blob)
                 .await?,
-        ),
-        None => None,
+        )
+    } else {
+        None
     };
     let now = now_ms();
     let guarantee_level = extras
@@ -199,9 +218,9 @@ pub async fn get_repository(state: &AppState, id: &str) -> anyhow::Result<Option
 }
 
 /// What an agent needs to write: the writer keys and the location as
-/// [`lodestore_format::store::RepoLocation::for_agent`] shapes it. Backends
-/// other than S3 and a local folder get the server's sealed options too, since
-/// the agent has no credentials of its own there yet.
+/// [`crate::repos::checks::agent_location`] shapes it. Backends other than S3
+/// and a local folder get the server's sealed options too, unless the agent has
+/// credentials of its own there, which then take their place.
 pub async fn writer_material(
     state: &AppState,
     repository_id: &str,
@@ -249,13 +268,17 @@ pub async fn writer_material(
         .write_keys(config_hash)
         .to_file_text();
 
-    let agent_creds = match row.try_get::<Option<String>, _>("agent_creds_secret_id")? {
-        Some(id) => Some(serde_json::from_slice(
-            &state.sealer.get_secret(&id).await?,
-        )?),
-        None => None,
-    };
-    let for_agent = lodestore_format::store::RepoLocation { backend, options }.for_agent();
+    let (agent_creds, agent_options) =
+        match row.try_get::<Option<String>, _>("agent_creds_secret_id")? {
+            Some(id) => {
+                let sealed: SealedAccess =
+                    serde_json::from_slice(&state.sealer.get_secret(&id).await?)?;
+                (sealed.key(), sealed.agent_options())
+            }
+            None => (None, AgentOptions::new()),
+        };
+    let full = lodestore_format::store::RepoLocation { backend, options };
+    let for_agent = crate::repos::checks::agent_location(&full, &agent_options);
     Ok(WriterMaterial {
         writer_keys_text,
         location: RepoLocation {
@@ -355,50 +378,138 @@ pub struct GuaranteeWrite {
     pub read_accepted: String,
 }
 
-/// Stores a check. With a level, nothing is written and false is returned
-/// when the accepted level is no longer `read_accepted`: someone accepted a
-/// level meanwhile, and the caller decides again from the new value.
+/// One check to store. `generation` is the access generation read together
+/// with the credentials the probe used; `at_ms` is when the probe started and
+/// `now_ms` is the same clock at the write. A stored check later than `now_ms`
+/// was written by a wrong clock and does not block this one.
+pub struct CheckWrite<'a> {
+    pub generation: i64,
+    pub at_ms: i64,
+    pub now_ms: i64,
+    pub checks_json: &'a str,
+    pub agent_key_state: &'a str,
+    pub guarantee: Option<&'a GuaranteeWrite>,
+    pub daily: bool,
+    /// The host key mismatch column, as [`mismatch_update`] decides it.
+    pub host_key_mismatch: Option<Option<String>>,
+}
+
+/// What [`update_checks`] did with a check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stored {
+    Written,
+    /// The accepted level is no longer the one the write was decided from.
+    AcceptedChanged,
+    Stale,
+    Missing,
+}
+
+/// Stores a check. With a level, nothing is written when the accepted level
+/// is no longer `read_accepted`: someone accepted a level meanwhile, and the
+/// caller decides again from the new value.
 pub async fn update_checks(
     state: &AppState,
     id: &str,
-    checks_json: &str,
-    agent_key_state: &str,
-    guarantee: Option<&GuaranteeWrite>,
-) -> anyhow::Result<bool> {
-    let at = now_ms();
-    match guarantee {
-        None => {
-            sqlx::query(
-                "UPDATE repositories SET checks_json = $1, agent_key_state = $2, checked_at = $3 \
-                 WHERE id = $4",
+    write: &CheckWrite<'_>,
+) -> anyhow::Result<Stored> {
+    let daily = i64::from(write.daily);
+    let set_mismatch = i64::from(write.host_key_mismatch.is_some());
+    let mismatch = write.host_key_mismatch.clone().flatten();
+    let done =
+        match write.guarantee {
+            None => sqlx::query(
+                "UPDATE repositories SET checks_json = $1, agent_key_state = $2, checked_at = $3, \
+                 guarantee_tick_at = CASE WHEN $5 = 1 THEN $3 ELSE guarantee_tick_at END, \
+                 guarantee_unchecked_runs = CASE WHEN $5 = 1 \
+                 THEN guarantee_unchecked_runs + 1 ELSE guarantee_unchecked_runs END, \
+                 guarantee_failed_runs = CASE WHEN $5 = 1 THEN 0 ELSE guarantee_failed_runs END, \
+                 host_key_mismatch_json = CASE WHEN $8 = 1 THEN $9 ELSE host_key_mismatch_json END \
+                 WHERE id = $4 AND access_generation = $6 \
+                 AND (checked_at IS NULL OR checked_at <= $3 OR checked_at > $7)",
             )
-            .bind(checks_json)
-            .bind(agent_key_state)
-            .bind(at)
+            .bind(write.checks_json)
+            .bind(write.agent_key_state)
+            .bind(write.at_ms)
             .bind(id)
+            .bind(daily)
+            .bind(write.generation)
+            .bind(write.now_ms)
+            .bind(set_mismatch)
+            .bind(mismatch)
             .execute(&state.db.pool)
-            .await?;
-        }
-        Some(g) => {
-            let done = sqlx::query(
+            .await?,
+            Some(g) => sqlx::query(
                 "UPDATE repositories SET checks_json = $1, agent_key_state = $2, checked_at = $3, \
                  guarantee_level = $4, guarantee_notes_json = $5, guarantee_accepted = $6, \
-                 guarantee_checked_at = $3 WHERE id = $7 AND guarantee_accepted = $8",
+                 guarantee_checked_at = $3, \
+                 guarantee_tick_at = CASE WHEN $9 = 1 THEN $3 ELSE guarantee_tick_at END, \
+                 guarantee_unchecked_runs = 0, guarantee_failed_runs = 0, \
+                 host_key_mismatch_json = CASE WHEN $12 = 1 THEN $13 ELSE host_key_mismatch_json END \
+                 WHERE id = $7 AND guarantee_accepted = $8 AND access_generation = $10 \
+                 AND (checked_at IS NULL OR checked_at <= $3 OR checked_at > $11)",
             )
-            .bind(checks_json)
-            .bind(agent_key_state)
-            .bind(at)
+            .bind(write.checks_json)
+            .bind(write.agent_key_state)
+            .bind(write.at_ms)
             .bind(&g.level)
             .bind(&g.notes_json)
             .bind(&g.accepted)
             .bind(id)
             .bind(&g.read_accepted)
+            .bind(daily)
+            .bind(write.generation)
+            .bind(write.now_ms)
+            .bind(set_mismatch)
+            .bind(mismatch)
             .execute(&state.db.pool)
-            .await?;
-            return Ok(done.rows_affected() > 0);
-        }
+            .await?,
+        };
+    if done.rows_affected() > 0 {
+        return Ok(Stored::Written);
     }
-    Ok(true)
+    let row = sqlx::query("SELECT access_generation, checked_at FROM repositories WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&state.db.pool)
+        .await?;
+    Ok(match row {
+        None => Stored::Missing,
+        Some(row) => {
+            let checked_at: Option<i64> = row.try_get("checked_at")?;
+            if row.try_get::<i64, _>("access_generation")? != write.generation
+                || checked_at.is_some_and(|at| at > write.at_ms && at <= write.now_ms)
+            {
+                Stored::Stale
+            } else {
+                Stored::AcceptedChanged
+            }
+        }
+    })
+}
+
+/// What a probe says about the host key mismatch column: `None` leaves it,
+/// `Some(None)` clears it, `Some(Some(json))` records the two fingerprints.
+/// The column clears only when the server answered a write again, so a probe
+/// that failed for another reason keeps a standing alert.
+pub fn mismatch_update(change: Option<&HostKeyChange>, reached: bool) -> Option<Option<String>> {
+    match change {
+        Some(c) => Some(Some(
+            serde_json::json!({ "pinned": c.pinned, "offered": c.offered }).to_string(),
+        )),
+        None => reached.then_some(None),
+    }
+}
+
+/// Records that the daily recheck failed before storing a result.
+pub async fn record_failed_recheck(state: &AppState, id: &str, at_ms: i64) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE repositories SET guarantee_tick_at = $1, \
+         guarantee_failed_runs = guarantee_failed_runs + 1 WHERE id = $2",
+    )
+    .bind(at_ms)
+    .bind(id)
+    .execute(&state.db.pool)
+    .await?;
+    Ok(())
 }
 
 /// Makes the measured level the accepted one when it is still `expected`;
@@ -425,11 +536,13 @@ pub struct ServerAccess {
     pub location: lodestore_format::store::RepoLocation,
     pub server_creds: Option<AccessKey>,
     pub agent_creds: Option<AccessKey>,
+    pub agent_options: AgentOptions,
     pub config_hash: [u8; 32],
     pub format_repo_id: [u8; 16],
     pub master: Zeroizing<Vec<u8>>,
     pub server_slot_secret: Option<Zeroizing<Vec<u8>>>,
     pub open_error: Option<String>,
+    pub generation: i64,
 }
 
 pub(crate) async fn set_open_error(
@@ -457,8 +570,8 @@ pub async fn server_access_checked(state: &AppState, id: &str) -> anyhow::Result
 pub async fn server_access(state: &AppState, id: &str) -> anyhow::Result<ServerAccess> {
     let row = sqlx::query(
         "SELECT backend, location_json, config_hash, format_repo_id, master_secret_id, \
-         server_slot_secret_id, server_creds_secret_id, agent_creds_secret_id, open_error \
-         FROM repositories WHERE id = $1",
+         server_slot_secret_id, server_creds_secret_id, agent_creds_secret_id, open_error, \
+         access_generation FROM repositories WHERE id = $1",
     )
     .bind(id)
     .fetch_optional(&state.db.pool)
@@ -473,12 +586,15 @@ pub async fn server_access(state: &AppState, id: &str) -> anyhow::Result<ServerA
         server_creds = sealed.key();
         options.extend(sealed.options);
     }
-    let agent_creds = match row.try_get::<Option<String>, _>("agent_creds_secret_id")? {
-        Some(sid) => Some(serde_json::from_slice(
-            &state.sealer.get_secret(&sid).await?,
-        )?),
-        None => None,
-    };
+    let (agent_creds, agent_options) =
+        match row.try_get::<Option<String>, _>("agent_creds_secret_id")? {
+            Some(sid) => {
+                let sealed: SealedAccess =
+                    serde_json::from_slice(&state.sealer.get_secret(&sid).await?)?;
+                (sealed.key(), sealed.agent_options())
+            }
+            None => (None, AgentOptions::new()),
+        };
     let server_slot_secret = match row.try_get::<Option<String>, _>("server_slot_secret_id")? {
         Some(sid) => Some(state.sealer.get_secret(&sid).await?),
         None => None,
@@ -487,6 +603,7 @@ pub async fn server_access(state: &AppState, id: &str) -> anyhow::Result<ServerA
         location: lodestore_format::store::RepoLocation { backend, options },
         server_creds,
         agent_creds,
+        agent_options,
         config_hash: row
             .try_get::<Vec<u8>, _>("config_hash")?
             .try_into()
@@ -501,7 +618,24 @@ pub async fn server_access(state: &AppState, id: &str) -> anyhow::Result<ServerA
             .await?,
         server_slot_secret,
         open_error: row.try_get("open_error")?,
+        generation: row.try_get("access_generation")?,
     })
+}
+
+/// Takes the write lock before the first read of a transaction: a read first
+/// fails with "database is locked" on SQLite when another connection commits
+/// in between. Returns the rows touched, 0 when the repository is missing.
+async fn take_write_lock(
+    tx: &mut sqlx::Transaction<'_, sqlx::Any>,
+    id: &str,
+) -> anyhow::Result<u64> {
+    Ok(
+        sqlx::query("UPDATE repositories SET access_generation = access_generation WHERE id = $1")
+            .bind(id)
+            .execute(&mut **tx)
+            .await?
+            .rows_affected(),
+    )
 }
 
 /// Swaps the sealed agent key for a new one in one transaction and records
@@ -517,11 +651,13 @@ pub async fn replace_agent_creds(
     guarantee: &GuaranteeWrite,
 ) -> anyhow::Result<bool> {
     let mut tx = state.db.pool.begin().await?;
+    if take_write_lock(&mut tx, id).await? == 0 {
+        anyhow::bail!("repository {id} is missing");
+    }
     let old = sqlx::query("SELECT agent_creds_secret_id FROM repositories WHERE id = $1")
         .bind(id)
-        .fetch_optional(&mut *tx)
+        .fetch_one(&mut *tx)
         .await?
-        .with_context(|| format!("repository {id} is missing"))?
         .try_get::<Option<String>, _>("agent_creds_secret_id")?;
     let new = state
         .sealer
@@ -530,8 +666,9 @@ pub async fn replace_agent_creds(
     let done = sqlx::query(
         "UPDATE repositories SET agent_creds_secret_id = $1, agent_key_state = $2, \
          checks_json = $3, checked_at = $4, guarantee_level = $5, guarantee_notes_json = $6, \
-         guarantee_accepted = $7, guarantee_checked_at = $4 WHERE id = $8 \
-         AND guarantee_accepted = $9",
+         guarantee_accepted = $7, guarantee_checked_at = $4, \
+         access_generation = access_generation + 1, guarantee_unchecked_runs = 0, \
+         guarantee_failed_runs = 0 WHERE id = $8 AND guarantee_accepted = $9",
     )
     .bind(new)
     .bind(agent_key_state)
@@ -555,4 +692,195 @@ pub async fn replace_agent_creds(
     }
     tx.commit().await?;
     Ok(true)
+}
+
+/// Replaces the sealed agent options after a probe with them reached the
+/// storage. The write needs the access generation the probe read with its
+/// credentials and the accepted level `guarantee` was decided from; it bumps
+/// the generation, so a probe that started with the old options stores nothing.
+/// The agent's S3 key, if any, is kept.
+pub async fn replace_agent_options(
+    state: &AppState,
+    id: &str,
+    generation: i64,
+    options: &AgentOptions,
+    agent_key_state: &str,
+    checks_json: &str,
+    guarantee: &GuaranteeWrite,
+) -> anyhow::Result<Stored> {
+    let mut tx = state.db.pool.begin().await?;
+    if take_write_lock(&mut tx, id).await? == 0 {
+        return Ok(Stored::Missing);
+    }
+    let old = sqlx::query("SELECT agent_creds_secret_id FROM repositories WHERE id = $1")
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?
+        .try_get::<Option<String>, _>("agent_creds_secret_id")?;
+    let key = match &old {
+        Some(sid) => {
+            let sealed: SealedAccess =
+                serde_json::from_slice(&state.sealer.get_secret(sid).await?)?;
+            sealed.key()
+        }
+        None => None,
+    };
+    let plain: BTreeMap<String, String> = options
+        .iter()
+        .map(|(k, v)| (k.clone(), v.to_string()))
+        .collect();
+    let new = state
+        .sealer
+        .put_secret_on(
+            &mut tx,
+            "repo-agent-creds",
+            &sealed_json(key.as_ref(), &plain)?,
+        )
+        .await?;
+    let done = sqlx::query(
+        "UPDATE repositories SET agent_creds_secret_id = $1, agent_key_state = $2, \
+         checks_json = $3, checked_at = $4, guarantee_level = $5, guarantee_notes_json = $6, \
+         guarantee_accepted = $7, guarantee_checked_at = $4, guarantee_unchecked_runs = 0, \
+         guarantee_failed_runs = 0, access_generation = access_generation + 1 \
+         WHERE id = $8 AND guarantee_accepted = $9 AND access_generation = $10",
+    )
+    .bind(new)
+    .bind(agent_key_state)
+    .bind(checks_json)
+    .bind(now_ms())
+    .bind(&guarantee.level)
+    .bind(&guarantee.notes_json)
+    .bind(&guarantee.accepted)
+    .bind(id)
+    .bind(&guarantee.read_accepted)
+    .bind(generation)
+    .execute(&mut *tx)
+    .await?;
+    if done.rows_affected() == 0 {
+        let current: Option<i64> =
+            sqlx::query("SELECT access_generation FROM repositories WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .map(|r| r.try_get("access_generation"))
+                .transpose()?;
+        return Ok(match current {
+            None => Stored::Missing,
+            Some(c) if c == generation => Stored::AcceptedChanged,
+            Some(_) => Stored::Stale,
+        });
+    }
+    if let Some(old) = old {
+        sqlx::query("DELETE FROM secrets WHERE id = $1")
+            .bind(old)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(Stored::Written)
+}
+
+/// Pins a new host key after a probe with it reached the storage. The write
+/// needs the access generation the probe read with its credentials and the
+/// accepted level `guarantee` was decided from; it clears the host key
+/// mismatch and bumps the generation, so a probe that started with the old key
+/// stores nothing.
+pub async fn replace_host_key(
+    state: &AppState,
+    id: &str,
+    generation: i64,
+    host_key: &str,
+    agent_key_state: &str,
+    checks_json: &str,
+    guarantee: &GuaranteeWrite,
+) -> anyhow::Result<Stored> {
+    let mut tx = state.db.pool.begin().await?;
+    if take_write_lock(&mut tx, id).await? == 0 {
+        return Ok(Stored::Missing);
+    }
+    let row = sqlx::query("SELECT location_json FROM repositories WHERE id = $1")
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+    let mut options: BTreeMap<String, String> =
+        serde_json::from_str(&row.try_get::<String, _>("location_json")?)?;
+    options.insert("host_key".to_string(), host_key.to_string());
+    let done = sqlx::query(
+        "UPDATE repositories SET location_json = $1, agent_key_state = $2, checks_json = $3, \
+         checked_at = $4, guarantee_level = $5, guarantee_notes_json = $6, \
+         guarantee_accepted = $7, guarantee_checked_at = $4, guarantee_unchecked_runs = 0, \
+         guarantee_failed_runs = 0, host_key_mismatch_json = NULL, \
+         access_generation = access_generation + 1 \
+         WHERE id = $8 AND guarantee_accepted = $9 AND access_generation = $10",
+    )
+    .bind(serde_json::to_string(&options)?)
+    .bind(agent_key_state)
+    .bind(checks_json)
+    .bind(now_ms())
+    .bind(&guarantee.level)
+    .bind(&guarantee.notes_json)
+    .bind(&guarantee.accepted)
+    .bind(id)
+    .bind(&guarantee.read_accepted)
+    .bind(generation)
+    .execute(&mut *tx)
+    .await?;
+    if done.rows_affected() > 0 {
+        tx.commit().await?;
+        return Ok(Stored::Written);
+    }
+    let current: i64 = sqlx::query("SELECT access_generation FROM repositories WHERE id = $1")
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?
+        .try_get("access_generation")?;
+    Ok(if current == generation {
+        Stored::AcceptedChanged
+    } else {
+        Stored::Stale
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mismatch_update_follows_the_table() {
+        let change = HostKeyChange {
+            pinned: "SHA256:old".into(),
+            offered: "SHA256:new".into(),
+        };
+        let json = r#"{"offered":"SHA256:new","pinned":"SHA256:old"}"#;
+        for reached in [true, false] {
+            assert_eq!(
+                mismatch_update(Some(&change), reached),
+                Some(Some(json.to_string()))
+            );
+        }
+        assert_eq!(mismatch_update(None, true), Some(None));
+        assert_eq!(mismatch_update(None, false), None);
+    }
+
+    #[test]
+    fn sealed_access_reads_a_legacy_agent_key() {
+        let legacy = serde_json::to_vec(&AccessKey {
+            access_key_id: "a".into(),
+            secret_access_key: "b".into(),
+        })
+        .unwrap();
+        let sealed: SealedAccess = serde_json::from_slice(&legacy).unwrap();
+        let key = sealed.key().unwrap();
+        assert_eq!(
+            (key.access_key_id.as_str(), key.secret_access_key.as_str()),
+            ("a", "b")
+        );
+        assert!(sealed.agent_options().is_empty());
+
+        let only_options =
+            sealed_json(None, &BTreeMap::from([("key".into(), "k".into())])).unwrap();
+        let sealed: SealedAccess = serde_json::from_slice(&only_options).unwrap();
+        assert!(sealed.key().is_none());
+        assert_eq!(sealed.agent_options()["key"].as_str(), "k");
+    }
 }

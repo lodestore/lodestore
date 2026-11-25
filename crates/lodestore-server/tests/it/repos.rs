@@ -611,8 +611,20 @@ async fn accept_now(ts: &TestServer, id: &str, level: &str) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn guarantee_write_never_overwrites_an_accept_in_between() {
     use lodestore_server::repos::db::{
-        AccessKey, GuaranteeWrite, replace_agent_creds, update_checks,
+        AccessKey, CheckWrite, GuaranteeWrite, Stored, replace_agent_creds, update_checks,
     };
+    fn write(g: &GuaranteeWrite) -> CheckWrite<'_> {
+        CheckWrite {
+            generation: 0,
+            at_ms: lodestore_server::db::now_ms(),
+            now_ms: lodestore_server::db::now_ms(),
+            checks_json: "[]",
+            agent_key_state: "verified",
+            guarantee: Some(g),
+            daily: false,
+            host_key_mismatch: None,
+        }
+    }
     for backend in backends() {
         let ts = TestServer::start(&backend).await;
         let id = ts.create_local_repository("raced").await;
@@ -624,10 +636,10 @@ async fn guarantee_write_never_overwrites_an_accept_in_between() {
         };
 
         accept_now(&ts, &id, "host_can_overwrite_or_delete").await;
-        let stored = update_checks(ts.state(), &id, "[]", "verified", Some(&decided()))
+        let stored = update_checks(ts.state(), &id, &write(&decided()))
             .await
             .unwrap();
-        assert!(!stored, "[{}]", backend.name());
+        assert_eq!(stored, Stored::AcceptedChanged, "[{}]", backend.name());
         assert_eq!(accepted(&ts, &id).await, "host_can_overwrite_or_delete");
 
         let key = AccessKey {
@@ -641,12 +653,165 @@ async fn guarantee_write_never_overwrites_an_accept_in_between() {
         assert_eq!(accepted(&ts, &id).await, "host_can_overwrite_or_delete");
 
         accept_now(&ts, &id, "overwrite_keeps_old_version").await;
-        assert!(
-            update_checks(ts.state(), &id, "[]", "verified", Some(&decided()))
+        assert_eq!(
+            update_checks(ts.state(), &id, &write(&decided()))
                 .await
-                .unwrap()
+                .unwrap(),
+            Stored::Written
         );
         assert_eq!(accepted(&ts, &id).await, "create_only_enforced");
         ts.stop().await;
     }
+}
+
+/// The host key mismatch of a probe is written together with the check, under
+/// the access generation it was measured with and only when no newer check
+/// was stored.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn host_key_mismatch_is_written_with_its_check() {
+    use lodestore_format::store::probe::HostKeyChange;
+    use lodestore_server::repos::db::{CheckWrite, Stored, mismatch_update, update_checks};
+    let change = HostKeyChange {
+        pinned: "SHA256:old".into(),
+        offered: "SHA256:new".into(),
+    };
+    let write = |generation: i64, at_ms: i64, mismatch: Option<Option<String>>| CheckWrite {
+        generation,
+        at_ms,
+        now_ms: lodestore_server::db::now_ms(),
+        checks_json: "[]",
+        agent_key_state: "unchecked",
+        guarantee: None,
+        daily: false,
+        host_key_mismatch: mismatch,
+    };
+    let now = lodestore_server::db::now_ms();
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let id = ts.create_local_repository("keyed").await;
+        let column = || async {
+            sqlx::query("SELECT host_key_mismatch_json FROM repositories WHERE id = $1")
+                .bind(&id)
+                .fetch_one(&ts.state().db.pool)
+                .await
+                .unwrap()
+                .try_get::<Option<String>, _>("host_key_mismatch_json")
+                .unwrap()
+        };
+        let store = |w: CheckWrite<'static>| {
+            let (state, id) = (ts.state(), id.clone());
+            async move { update_checks(state, &id, &w).await.unwrap() }
+        };
+        sqlx::query(
+            "UPDATE repositories SET access_generation = 1, checked_at = NULL WHERE id = $1",
+        )
+        .bind(&id)
+        .execute(&ts.state().db.pool)
+        .await
+        .unwrap();
+        let seen = mismatch_update(Some(&change), false);
+
+        assert_eq!(
+            store(write(0, now, seen.clone())).await,
+            Stored::Stale,
+            "[{}]",
+            backend.name()
+        );
+        assert_eq!(column().await, None);
+
+        assert_eq!(store(write(1, now, seen.clone())).await, Stored::Written);
+        let json: Value = serde_json::from_str(&column().await.unwrap()).unwrap();
+        assert_eq!(
+            json,
+            json!({ "pinned": "SHA256:old", "offered": "SHA256:new" })
+        );
+
+        let cleared = mismatch_update(None, true);
+        assert_eq!(cleared, Some(None));
+        assert_eq!(
+            store(write(1, now - 1, cleared.clone())).await,
+            Stored::Stale
+        );
+        assert!(column().await.is_some(), "an older probe cleared it");
+        assert_eq!(
+            store(write(1, now + 1, mismatch_update(None, false))).await,
+            Stored::Written
+        );
+        assert!(column().await.is_some());
+        assert_eq!(store(write(1, now + 2, cleared)).await, Stored::Written);
+        assert_eq!(column().await, None);
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn access_replacements_survive_concurrent_writes() {
+    use lodestore_server::repos::db::{
+        AccessKey, GuaranteeWrite, Stored, replace_agent_creds, replace_host_key,
+    };
+    let ts = TestServer::start(&Backend::Sqlite).await;
+    let id = ts.create_local_repository("busy").await;
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let writers: Vec<_> = (0..2)
+        .map(|_| {
+            let (pool, stop) = (ts.state().db.pool.clone(), stop.clone());
+            tokio::spawn(async move {
+                let mut n = 0i64;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    n += 1;
+                    sqlx::query(
+                        "INSERT INTO settings (key, value) VALUES ('busy-test', $1) \
+                         ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                    )
+                    .bind(n.to_string())
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                }
+            })
+        })
+        .collect();
+    let key = AccessKey {
+        access_key_id: "a".into(),
+        secret_access_key: "b".into(),
+    };
+    for round in 0..1000 {
+        let row = sqlx::query(
+            "SELECT access_generation, guarantee_accepted FROM repositories WHERE id = $1",
+        )
+        .bind(&id)
+        .fetch_one(&ts.state().db.pool)
+        .await
+        .unwrap();
+        let accepted: String = row.get("guarantee_accepted");
+        let guarantee = GuaranteeWrite {
+            level: accepted.clone(),
+            notes_json: "[]".into(),
+            accepted: accepted.clone(),
+            read_accepted: accepted,
+        };
+        let generation: i64 = row.get("access_generation");
+        let pinned = replace_host_key(
+            ts.state(),
+            &id,
+            generation,
+            "ssh-ed25519 AAAA",
+            "unchecked",
+            "[]",
+            &guarantee,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("round {round}: {e:#}"));
+        assert_eq!(pinned, Stored::Written);
+        assert!(
+            replace_agent_creds(ts.state(), &id, &key, "unchecked", "[]", &guarantee)
+                .await
+                .unwrap_or_else(|e| panic!("round {round}: {e:#}"))
+        );
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    for writer in writers {
+        writer.await.unwrap();
+    }
+    ts.stop().await;
 }

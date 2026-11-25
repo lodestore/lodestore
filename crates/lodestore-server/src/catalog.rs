@@ -83,7 +83,20 @@ pub async fn open_repository(
     state: &AppState,
     repository_id: &str,
 ) -> anyhow::Result<OpenRepository> {
-    let access = server_access(state, repository_id).await?;
+    open_with_access(
+        state,
+        repository_id,
+        server_access(state, repository_id).await?,
+    )
+    .await
+}
+
+/// [`open_repository`] with access that the caller read, or is about to store.
+pub async fn open_with_access(
+    state: &AppState,
+    repository_id: &str,
+    access: crate::repos::db::ServerAccess,
+) -> anyhow::Result<OpenRepository> {
     let master: [u8; 32] = access
         .master
         .as_slice()

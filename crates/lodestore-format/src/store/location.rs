@@ -236,6 +236,10 @@ impl RepoLocation {
     }
 
     pub fn validate(&self) -> Result<()> {
+        self.validate_inner(true)
+    }
+
+    fn validate_inner(&self, need_host_key: bool) -> Result<()> {
         match self.backend.as_str() {
             "s3" => {
                 self.require("bucket")?;
@@ -272,7 +276,7 @@ impl RepoLocation {
                 for option in ["endpoint", "user", "key"] {
                     self.require(option)?;
                 }
-                if self.opt("host_key").is_none() {
+                if need_host_key && self.opt("host_key").is_none() {
                     return Err(Error::InvalidInput(
                         "Enter the SFTP server's host key: one line of `ssh-keyscan -p <port> <host>` output"
                             .into(),
@@ -291,7 +295,18 @@ impl RepoLocation {
     /// Lodestore supports for the backend, spelled exactly. A stored location
     /// is opened without this check, so an older one keeps working.
     pub fn validate_new(&self) -> Result<()> {
-        self.validate()?;
+        self.validate_inner(true)?;
+        self.check_option_names()
+    }
+
+    /// For the first contact of a TOFU check: everything [`Self::validate_new`]
+    /// checks except the host key.
+    pub fn validate_new_without_host_key(&self) -> Result<()> {
+        self.validate_inner(false)?;
+        self.check_option_names()
+    }
+
+    fn check_option_names(&self) -> Result<()> {
         if let Some(unknown) = self
             .options
             .keys()
@@ -378,6 +393,77 @@ impl RepoLocation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    const KEY: &str =
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl";
+
+    fn outcome(r: Result<()>) -> std::result::Result<(), String> {
+        r.map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn validate_new_without_host_key_accepts_only_the_missing_key() {
+        let draft = |extra: &[(&'static str, &'static str)]| {
+            let mut options = vec![("endpoint", "h:22"), ("user", "u"), ("key", "k")];
+            options.extend_from_slice(extra);
+            RepoLocation::new("sftp", options)
+        };
+        draft(&[]).validate_new_without_host_key().unwrap();
+        assert!(draft(&[]).validate_new().is_err());
+        for bad in [
+            RepoLocation::new("sftp", [("user", "u"), ("key", "k")]),
+            RepoLocation::new("sftp", [("endpoint", "h"), ("key", "k")]),
+            RepoLocation::new("sftp", [("endpoint", "h"), ("user", "u")]),
+            draft(&[("publish", "rename")]),
+            draft(&[("foo", "x")]),
+        ] {
+            let with_key = {
+                let mut loc = bad.clone();
+                loc.options.insert("host_key".into(), KEY.into());
+                loc
+            };
+            assert_eq!(
+                outcome(bad.validate_new_without_host_key()),
+                outcome(with_key.validate_new())
+            );
+            assert!(bad.validate_new_without_host_key().is_err());
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn validate_new_without_host_key_differs_only_in_host_key(
+            backend in prop::sample::select(vec!["s3", "azblob", "gcs", "sftp", "local"]),
+            picks in prop::collection::vec(
+                prop::option::of(prop::sample::select(vec![
+                    "", "x", "rename", "hardlink", "direct", "127.0.0.1:22", "/srv", KEY,
+                ])),
+                16,
+            ),
+        ) {
+            let mut names: Vec<&str> =
+                backend_options(backend).iter().map(|(k, _)| *k).collect();
+            names.extend(["Host_Key", "endpoint_url", "foo", "publish"]);
+            if backend != "sftp" {
+                names.push("host_key");
+            }
+            let mut draft = RepoLocation::new(backend, []);
+            for (name, value) in names.iter().zip(&picks) {
+                if let Some(value) = value {
+                    draft.options.insert((*name).to_owned(), (*value).to_owned());
+                }
+            }
+            let strict = if backend == "sftp" {
+                let mut with_key = draft.clone();
+                with_key.options.insert("host_key".into(), KEY.into());
+                with_key.validate_new()
+            } else {
+                draft.validate_new()
+            };
+            prop_assert_eq!(outcome(strict), outcome(draft.validate_new_without_host_key()));
+        }
+    }
 
     #[test]
     fn location_aws_defaults_to_virtual_host() {

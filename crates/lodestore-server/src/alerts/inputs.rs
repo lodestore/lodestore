@@ -26,6 +26,27 @@ pub struct Inputs {
     pub unavailable: Vec<UnavailableRepository>,
     pub security: Vec<SecurityAlert>,
     pub unreadable_policies: Vec<String>,
+    pub guarantees: Vec<RepositoryGuarantee>,
+    /// Whether the daily guarantee recheck runs at all.
+    pub daily_recheck: bool,
+}
+
+/// What the guarantee alert needs to know about a repository.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryGuarantee {
+    pub repository_id: String,
+    pub repository: String,
+    pub level: String,
+    pub accepted: String,
+    pub unchecked_runs: u64,
+    pub failed_runs: u64,
+    /// When a level was last written; the creation time before that was recorded.
+    pub measured_at_ms: i64,
+    pub tick_at_ms: Option<i64>,
+    /// The pinned and the offered SFTP host key fingerprints while the server presents another key.
+    pub host_key_mismatch: Option<(String, String)>,
+    /// The last stored checks show the agents' credentials failing to write.
+    pub agent_cannot_write: bool,
 }
 
 /// The last verdict of a check level in a repository, when it was a failure.
@@ -282,6 +303,7 @@ pub async fn gather_with(
     let quarantines = quarantines(state).await?;
     let unavailable = unavailable_repositories(state).await?;
     let security = security_alerts(state).await?;
+    let guarantees = guarantees(state).await?;
     Ok(Inputs {
         hosts,
         server_cert,
@@ -291,7 +313,69 @@ pub async fn gather_with(
         unavailable,
         security,
         unreadable_policies,
+        guarantees,
+        daily_recheck: state.config.schedule_tick_secs > 0,
     })
+}
+
+fn parse_mismatch(json: &str) -> (String, String) {
+    let field = |v: &serde_json::Value, k: &str| {
+        v.get(k)
+            .and_then(|x| x.as_str())
+            .unwrap_or("unknown")
+            .to_string()
+    };
+    let v = serde_json::from_str::<serde_json::Value>(json).unwrap_or_default();
+    (field(&v, "pinned"), field(&v, "offered"))
+}
+
+fn agent_cannot_write(checks_json: Option<&str>) -> bool {
+    checks_json
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+        .and_then(|v| v.as_array().cloned())
+        .is_some_and(|checks| {
+            checks.iter().any(|c| {
+                c.get("id").and_then(|v| v.as_str()) == Some("agent_delete")
+                    && c.get("status").and_then(|v| v.as_str()) == Some("fail")
+            })
+        })
+}
+
+async fn guarantees(state: &AppState) -> anyhow::Result<Vec<RepositoryGuarantee>> {
+    let rows = sqlx::query(
+        "SELECT id, name, guarantee_level, guarantee_accepted, guarantee_unchecked_runs, \
+         guarantee_failed_runs, guarantee_checked_at, guarantee_tick_at, created_at, \
+         host_key_mismatch_json, checks_json FROM repositories ORDER BY name, id",
+    )
+    .fetch_all(&state.db.pool)
+    .await
+    .context("reading repository guarantees")?;
+    rows.iter()
+        .map(|row| {
+            let checked: Option<i64> = row.try_get("guarantee_checked_at")?;
+            Ok(RepositoryGuarantee {
+                repository_id: row.try_get("id")?,
+                repository: row.try_get("name")?,
+                level: row.try_get("guarantee_level")?,
+                accepted: row.try_get("guarantee_accepted")?,
+                unchecked_runs: u64::try_from(row.try_get::<i64, _>("guarantee_unchecked_runs")?)
+                    .unwrap_or(0),
+                failed_runs: u64::try_from(row.try_get::<i64, _>("guarantee_failed_runs")?)
+                    .unwrap_or(0),
+                measured_at_ms: match checked {
+                    Some(at) => at,
+                    None => row.try_get("created_at")?,
+                },
+                tick_at_ms: row.try_get("guarantee_tick_at")?,
+                host_key_mismatch: row
+                    .try_get::<Option<String>, _>("host_key_mismatch_json")?
+                    .map(|json| parse_mismatch(&json)),
+                agent_cannot_write: agent_cannot_write(
+                    row.try_get::<Option<String>, _>("checks_json")?.as_deref(),
+                ),
+            })
+        })
+        .collect()
 }
 
 /// Events live in memory; the still-open alert rows keep a security alert across a restart until their own 24 hours are over.
@@ -692,4 +776,30 @@ async fn last_snapshots(state: &AppState) -> anyhow::Result<HashMap<String, Snap
         });
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::agent_cannot_write;
+
+    #[test]
+    fn agent_cannot_write_is_read_from_the_checks() {
+        let check = |status: &str| {
+            format!(
+                r#"[{{"id":"write","status":"pass"}},{{"id":"agent_delete","status":"{status}"}}]"#
+            )
+        };
+        assert!(agent_cannot_write(Some(&check("fail"))));
+        for json in [
+            Some(check("pass")),
+            Some(check("neutral")),
+            Some(r#"[{"id":"write","status":"fail"}]"#.to_string()),
+            Some("[]".to_string()),
+            Some("not json".to_string()),
+            Some(r#"{"id":"agent_delete","status":"fail"}"#.to_string()),
+            None,
+        ] {
+            assert!(!agent_cannot_write(json.as_deref()), "{json:?}");
+        }
+    }
 }

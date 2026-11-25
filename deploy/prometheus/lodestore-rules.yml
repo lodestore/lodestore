@@ -76,6 +76,20 @@ groups:
         annotations:
           summary: "A repository is unavailable"
           description: "The server does not open a repository whose configuration in storage does not match what it recorded. See Storage checks on the repository page."
+      - alert: LodestoreGuaranteeDowngraded
+        expr: lodestore_alerts_active{type="guarantee_downgraded"} > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Storage protection of a repository weakened"
+          description: "The daily storage check measured a weaker guarantee level than the accepted one, measured a weak level nobody accepted, could not measure the storage three days in a row, failed three times in a row, or stopped running. The repository and the reason are in the alert in Lodestore."
+      - alert: LodestoreHostKeyChanged
+        expr: lodestore_alerts_active{type="host_key_changed"} > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "The SFTP host key of a repository changed"
+          description: "The SFTP server presented a host key other than the pinned one, so backups to that repository fail. Both fingerprints are in the alert in Lodestore. Confirm the new key only if the server was reinstalled or its key was rotated."
   - name: lodestore-certificates
     rules:
       - alert: LodestoreCertificateExpiring

@@ -4190,6 +4190,95 @@
         ]
       }
     },
+    "/api/v1/repositories/{id}/agent-options": {
+      "put": {
+        "tags": [
+          "Repositories"
+        ],
+        "summary": "Replace the agents' own credentials",
+        "description": "For Azure Blob, GCS and SFTP repositories created with separate agent credentials. Needs the password entered in the last 15 minutes. Replaces the whole set of agent options after a full check with them reached the storage, then sends the new location to the online agents; offline agents get it when they connect. Nothing changes when the check fails. The values are never returned.",
+        "operationId": "replace_agent_options",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Repository id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentOptionsUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The options were replaced",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentOptionsReplaced"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`step_up_required`: the password was not entered in the last 15 minutes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown repository",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The repository is on S3 or local storage, was created with shared credentials, or its storage access changed during the check",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An option is not allowed or empty, or the new options could not be verified",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      }
+    },
     "/api/v1/repositories/{id}/catalog/rebuild": {
       "post": {
         "tags": [
@@ -4338,6 +4427,16 @@
           },
           "404": {
             "description": "Unknown repository",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The storage access changed, or a newer check was stored, while this one ran",
             "content": {
               "application/json": {
                 "schema": {
@@ -5506,6 +5605,174 @@
           },
           "409": {
             "description": "No level was measured, or the measured level is no longer `expected_level`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/repositories/{id}/host-key": {
+      "put": {
+        "tags": [
+          "Repositories"
+        ],
+        "summary": "Pin a new SFTP host key",
+        "description": "Needs the password entered in the last 15 minutes. Pins the key only after a full check with it reached the storage, then sends it to the online agents. Nothing changes when the check fails.",
+        "operationId": "replace_host_key",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Repository id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HostKeyUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The key was pinned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostKeyReplaced"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`step_up_required`: the password was not entered in the last 15 minutes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown repository",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The repository is not on SFTP, or its storage access changed during the check",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The key is malformed or the server does not present it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/repositories/{id}/host-key/check": {
+      "post": {
+        "tags": [
+          "Repositories"
+        ],
+        "summary": "Show the host key an SFTP server presents",
+        "description": "Runs the SSH handshake only and compares the key the server presents now with the pinned one. Nothing is authenticated, written or changed.",
+        "operationId": "check_host_key",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Repository id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The presented key and whether it is the pinned one",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostKeyOffer"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown repository",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The repository is not on SFTP",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The stored endpoint is malformed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The server could not be reached",
             "content": {
               "application/json": {
                 "schema": {
@@ -6707,6 +6974,60 @@
           }
         }
       },
+      "AgentOptionsReplaced": {
+        "type": "object",
+        "required": [
+          "agent_key_state",
+          "guarantee_level",
+          "online_notified",
+          "needs_update",
+          "offline"
+        ],
+        "properties": {
+          "agent_key_state": {
+            "type": "string"
+          },
+          "guarantee_level": {
+            "type": "string"
+          },
+          "needs_update": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Online agents too old to take it; update them.",
+            "minimum": 0
+          },
+          "offline": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Active agents that are not online and get it when they connect.",
+            "minimum": 0
+          },
+          "online_notified": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Online agents that were sent the new location.",
+            "minimum": 0
+          }
+        }
+      },
+      "AgentOptionsUpdate": {
+        "type": "object",
+        "required": [
+          "agent_options"
+        ],
+        "properties": {
+          "agent_options": {
+            "type": "object",
+            "description": "The whole new set of the agents' own credentials; it replaces the old set.\nAzure Blob: `sas_token`; GCS: `credential`; SFTP: `user`, `key`. Never returned.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
       "AgentPolicy": {
         "type": "object",
         "required": [
@@ -6923,6 +7244,13 @@
       "AlertFacts": {
         "type": "object",
         "properties": {
+          "agent_cannot_write": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "The last check found that the agents' credentials cannot write to the storage."
+          },
           "error": {
             "type": [
               "string",
@@ -6935,6 +7263,14 @@
               "null"
             ]
           },
+          "failed_runs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
           "findings": {
             "type": [
               "integer",
@@ -6942,6 +7278,24 @@
             ],
             "format": "int64",
             "minimum": 0
+          },
+          "guarantee_accepted": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "guarantee_level": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "guarantee_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "ip": {
             "type": [
@@ -6978,6 +7332,18 @@
             ],
             "format": "int64"
           },
+          "offered_fingerprint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pinned_fingerprint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "previous_ip": {
             "type": [
               "string",
@@ -6995,6 +7361,14 @@
               "string",
               "null"
             ]
+          },
+          "unchecked_runs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
           }
         }
       },
@@ -7088,7 +7462,9 @@
           "repository_unavailable",
           "agent_session_conflict",
           "agent_certificate_rejected",
-          "source_instance_gone"
+          "source_instance_gone",
+          "guarantee_downgraded",
+          "host_key_changed"
         ]
       },
       "Alerts": {
@@ -8110,6 +8486,17 @@
               "type": "string"
             },
             "description": "Why the level is not the strongest one, as weakness codes."
+          },
+          "host_key": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/OfferedHostKeyDto",
+                "description": "The SFTP server's host key, when the draft had none: confirm it and send it back as the `host_key` option."
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         }
       },
@@ -10592,6 +10979,75 @@
           }
         ]
       },
+      "HostKeyOffer": {
+        "type": "object",
+        "required": [
+          "key",
+          "fingerprint",
+          "pinned_fingerprint",
+          "matches"
+        ],
+        "properties": {
+          "fingerprint": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string",
+            "description": "The host key the server presents now, one OpenSSH public key line."
+          },
+          "matches": {
+            "type": "boolean"
+          },
+          "pinned_fingerprint": {
+            "type": "string",
+            "description": "The fingerprint of the pinned key, `unknown` when it cannot be read."
+          }
+        }
+      },
+      "HostKeyReplaced": {
+        "type": "object",
+        "required": [
+          "fingerprint",
+          "online_notified",
+          "needs_update",
+          "offline"
+        ],
+        "properties": {
+          "fingerprint": {
+            "type": "string"
+          },
+          "needs_update": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Online agents too old to take the key; update them.",
+            "minimum": 0
+          },
+          "offline": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Active agents that are not online and get the key when they connect.",
+            "minimum": 0
+          },
+          "online_notified": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Online agents that were sent the key.",
+            "minimum": 0
+          }
+        }
+      },
+      "HostKeyUpdate": {
+        "type": "object",
+        "required": [
+          "host_key"
+        ],
+        "properties": {
+          "host_key": {
+            "type": "string",
+            "description": "The new host key, one OpenSSH public key line."
+          }
+        }
+      },
       "HostMount": {
         "type": "object",
         "required": [
@@ -11936,6 +12392,24 @@
           }
         }
       },
+      "OfferedHostKeyDto": {
+        "type": "object",
+        "description": "The host key an SFTP server presented on first contact.",
+        "required": [
+          "key",
+          "fingerprint"
+        ],
+        "properties": {
+          "fingerprint": {
+            "type": "string",
+            "description": "The SHA256 fingerprint of the key, as `ssh-keygen -l` prints it."
+          },
+          "key": {
+            "type": "string",
+            "description": "One OpenSSH public key line."
+          }
+        }
+      },
       "PackCoverage": {
         "type": "object",
         "required": [
@@ -12711,6 +13185,21 @@
                 "type": "null"
               }
             ]
+          },
+          "agent_options": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Secret options of the agents' own access to the storage: `sas_token`\nfor azblob, `credential` for gcs, `user` and `key` for sftp. Sealed on\ntheir own and never returned.",
+            "additionalProperties": {
+              "type": "string",
+              "writeOnly": true
+            },
+            "propertyNames": {
+              "type": "string",
+              "writeOnly": true
+            }
           },
           "location": {
             "$ref": "#/components/schemas/LocationDto"

@@ -7,8 +7,8 @@ use lodestore_format::config::config_hash;
 use lodestore_format::crypto::Entropy;
 use lodestore_format::keys::{MasterKey, RecoveryKey};
 use lodestore_format::repo::{InitOptions, PendingInit, Repository};
-use lodestore_format::store::BlobStore;
 use lodestore_format::store::policy::{agent_iam_policy_json, agent_minio_commands};
+use lodestore_format::store::{BlobStore, SftpStore};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use utoipa_axum::router::OpenApiRouter;
@@ -21,15 +21,18 @@ use crate::error::{ApiError, ErrorBody};
 use crate::maintenance::check::db::repo_checks_summary;
 use crate::maintenance::gc::api::CleanupSummary;
 use crate::repos::checks::{
-    Opened, consent_message, needs_consent, open_draft, run_checks, run_probe,
-    split_secret_options, to_result,
+    Opened, PROBE_TIMEOUT, consent_message, format_location, invalid, needs_consent, open_draft,
+    run_checks, run_probe, split_secret_options, timed_out_report, to_result, unchecked_report,
 };
 use crate::repos::db::{self, NewRepository, RepoExtras, RepoLocation};
 use crate::repos::{
-    CheckResult, RepositoryDraft, RepositorySummary, WIZARD_TTL_MS, WizardEntry, base_of,
+    CheckResult, OfferedHostKeyDto, RepositoryDraft, RepositorySummary, WIZARD_TTL_MS, WizardEntry,
+    base_of,
 };
 use crate::state::AppState;
 
+const TOFU_MESSAGE: &str =
+    "Confirm the SFTP server's host key and send it back as the host_key option.";
 const MIN_PASSWORD_CHARS: usize = 12;
 const MAX_NAME_CHARS: usize = 48;
 
@@ -128,7 +131,39 @@ async fn check_storage(
     _user: AuthUser,
     Json(draft): Json<RepositoryDraft>,
 ) -> Result<Json<CheckResult>, ApiError> {
+    let pinned = draft
+        .location
+        .options
+        .get("host_key")
+        .is_some_and(|k| !k.trim().is_empty());
+    if draft.location.backend == "sftp" && !pinned {
+        return offer_host_key(&draft).await.map(Json);
+    }
     Ok(Json(to_result(&run_checks(&draft).await?)))
+}
+
+/// First contact with an SFTP server: only the handshake runs, so nothing is
+/// authenticated or written; the client confirms the key and sends it back.
+async fn offer_host_key(draft: &RepositoryDraft) -> Result<CheckResult, ApiError> {
+    let location = format_location(&draft.location);
+    location.validate_new_without_host_key().map_err(invalid)?;
+    let endpoint = location.options.get("endpoint").map_or("", String::as_str);
+    let offered = tokio::time::timeout(PROBE_TIMEOUT, SftpStore::offered_host_key(endpoint)).await;
+    let report = match offered {
+        Ok(Ok(offered)) => {
+            return Ok(CheckResult {
+                host_key: Some(OfferedHostKeyDto {
+                    key: offered.openssh,
+                    fingerprint: offered.fingerprint,
+                }),
+                ..to_result(&unchecked_report(TOFU_MESSAGE))
+            });
+        }
+        Ok(Err(lodestore_format::Error::InvalidInput(message))) => return Err(invalid(message)),
+        Ok(Err(error)) => unchecked_report(&error.to_string()),
+        Err(_) => timed_out_report(),
+    };
+    Ok(to_result(&report))
 }
 
 #[utoipa::path(
@@ -295,21 +330,23 @@ async fn commit_wizard(
     Ok((StatusCode::CREATED, Json(summary)))
 }
 
-struct Registration {
-    name: String,
-    opened: Opened,
-    master: MasterKey,
-    format_repo_id: [u8; 16],
-    config_hash: [u8; 32],
-    server_secret: Zeroizing<Vec<u8>>,
-    checks: CheckResult,
+/// Also the entry point of the agent location differential test.
+pub struct Registration {
+    pub name: String,
+    pub opened: Opened,
+    pub master: MasterKey,
+    pub format_repo_id: [u8; 16],
+    pub config_hash: [u8; 32],
+    pub server_secret: Zeroizing<Vec<u8>>,
+    pub checks: CheckResult,
 }
 
-async fn register(state: &AppState, r: Registration) -> Result<RepositorySummary, ApiError> {
+pub async fn register(state: &AppState, r: Registration) -> Result<RepositorySummary, ApiError> {
     let Opened {
         location,
         server_creds,
         agent_creds,
+        agent_options,
         ..
     } = r.opened;
     let (public, secret_options) = split_secret_options(&location);
@@ -334,6 +371,7 @@ async fn register(state: &AppState, r: Registration) -> Result<RepositorySummary
         },
         RepoExtras {
             secret_options,
+            agent_options,
             checks_json: Some(checks_json),
             agent_key_state: Some(r.checks.agent_key_state),
             checked_at: Some(now_ms()),

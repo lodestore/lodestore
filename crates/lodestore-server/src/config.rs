@@ -190,7 +190,7 @@ fn smtp_port() -> u16 {
     587
 }
 
-const ALL_ALERT_TYPES: [AlertType; 11] = [
+const ALL_ALERT_TYPES: [AlertType; 13] = [
     AlertType::BackupFailed,
     AlertType::NoRecentBackup,
     AlertType::AgentOffline,
@@ -202,6 +202,8 @@ const ALL_ALERT_TYPES: [AlertType; 11] = [
     AlertType::AgentSessionConflict,
     AlertType::AgentCertificateRejected,
     AlertType::SourceInstanceGone,
+    AlertType::GuaranteeDowngraded,
+    AlertType::HostKeyChanged,
 ];
 
 fn nodename() -> String {

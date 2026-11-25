@@ -1,6 +1,6 @@
 ---
 title: "Alerts and notifications"
-description: "Lodestore alerts for failed or missing backups, offline agents and failed checks, sent to Telegram, Slack, email or a webhook before you need a restore."
+description: "Lodestore alerts for failed or missing backups, offline agents, failed checks and weakened storage protection, sent to Telegram, Slack, email or a webhook before you need a restore."
 ---
 Lodestore watches the fleet and raises an alert when something needs a person. Alerts show on the Overview page and on the host page. Notifications send them out to Telegram, Slack, email or a webhook, so you hear about a failed backup before you need the restore.
 
@@ -19,6 +19,8 @@ Lodestore watches the fleet and raises an alert when something needs a person. A
 | Repository unavailable | critical | The server does not open a repository because the configuration stored in the bucket does not match what the server recorded. One alert per repository. | The configuration matches again and the repository opens. |
 | Agent session conflict | warning | Two live sessions of one agent from different addresses (for IPv6, different /56 prefixes), or five live sessions of one agent replaced within ten minutes. The alert shows both addresses. | No such conflict for 24 hours. A revoked host raises none. |
 | Agent certificate rejected | critical | The server refused a certificate of an agent because it is not the one the server issued last. The alert shows the serial and the address of the caller. | No such refusal for 24 hours. A revoked host raises none. |
+| Storage protection weakened | warning | The daily storage check of a repository finds one of five causes (`guarantee_reason`): `lower`, the measured level is below the accepted one; `weak_unaccepted`, the accepted level is `unchecked` and the measured one is "host can overwrite or delete"; `inconclusive`, the probe ran but measured nothing three times in a row; `recheck_failing`, the check failed three times in a row before it recorded a result (for example before it reached the storage); `recheck_not_running`, the check has not run for more than two days. One alert per repository. | The measured level is back at or above the accepted one, you accept the new level on the repository page, the next recorded result clears `inconclusive` and `recheck_failing`, or the next run of the check clears `recheck_not_running`. |
+| SFTP host key changed | critical | The daily or a manual check of an SFTP repository met a host key other than the pinned one. One alert per repository. | The server presents the pinned key again, or a new key is pinned. |
 
 `source_instance_gone` is raised once for each source that a policy used to back up on a host and no longer expects. It does not depend on when the last backup of that source succeeded or on the limit of the policy. It does not appear for a policy of files, whose source is the host. See [below](#source-no-longer-selected).
 
@@ -31,6 +33,10 @@ Lodestore watches the fleet and raises an alert when something needs a person. A
 `agent_certificate_rejected` means a certificate that the server replaced, or never issued, was used: the host came back from an old image or snapshot, a copy of an old certificate is in use, or the server database was restored from a backup older than the host's last renewal. The agent logs the error and keeps retrying. If the host is legitimate, enrol it again with `install.sh --force` and a new join token; there is no way to trust the old serial. See [Agent credentials](/docs/security/threat-model/#agent-credentials).
 
 Both alerts are built from events that the server keeps in memory for 24 hours. After a restart an alert that was open stays open until 24 hours after it first opened, and an event that had not raised an alert yet is forgotten; the alert appears again at the next attempt of the agent.
+
+`guarantee_downgraded` comes from a check the server runs by itself once a day for every repository, with the same probe as **Check storage again** on the repository page. One failed check, one inconclusive probe or one temporary error changes nothing and raises nothing: the alert needs the repeats listed in the table. The alert names the repository and the cause, with the measured and the accepted level where they apply. Fix the storage settings so the level is back, or accept the measured level on the repository page if you chose it on purpose. Backups go on as long as the agents' credentials can still write. When the last check shows that they cannot, the alert says so and that backups from the agents fail; replace the credentials through the API: `PUT /api/v1/repositories/{id}/agent-key` for S3, `PUT /api/v1/repositories/{id}/agent-options` for an Azure Blob Storage, Google Cloud Storage or SFTP repository with separate agent credentials (see [the API reference](/docs/reference/api/#repositories-and-the-storage-guarantee)).
+
+`host_key_changed` means the SFTP server presented a host key other than the one pinned for the repository, so backups of agents to that repository fail until it is resolved. The alert shows the pinned and the offered fingerprint. If the server was reinstalled or its key was rotated, confirm the new key through the API (`POST /api/v1/repositories/{id}/host-key/check` shows it, `PUT /api/v1/repositories/{id}/host-key` pins it after you compare the fingerprint, see the [API reference](/docs/reference/api/#repositories-and-the-storage-guarantee)). Agents of an older version cannot take the new key and are listed as `needs_update` in the answer. If nobody changed the key, treat it as an interception attempt and do not confirm it.
 
 An alert is one object per cause, not per evaluation: it fires once, may remind, and resolves once. Resolved alerts stay in the history.
 
@@ -81,7 +87,7 @@ The durations are `hour`, `day`, `week` and `forever`. The token needs `alerts:w
 
 ## Channels
 
-A channel is a place alerts are sent to. Add them under Settings, Notifications, or define them in the server configuration. Every channel has a list of alert types it receives (all ten by default) and an on/off switch. There is no routing by host, label or policy: an alert goes to every enabled channel that has its type checked.
+A channel is a place alerts are sent to. Add them under Settings, Notifications, or define them in the server configuration. Every channel has a list of alert types it receives (all of them by default) and an on/off switch. There is no routing by host, label or policy: an alert goes to every enabled channel that has its type checked.
 
 | Type | What it needs |
 |------|---------------|
@@ -90,7 +96,7 @@ A channel is a place alerts are sent to. Add them under Settings, Notifications,
 | Email | SMTP host, port, security (`starttls` or `tls`), optional user name and password, a `from` address and the recipients. Without recipients the message goes to the administrator's email (Settings, User). Plain SMTP without TLS is not supported. |
 | Webhook | A URL and an optional secret. See [the webhook payload](#the-webhook-payload). |
 
-A channel created in the web interface before 0.2 with every alert type checked also receives `snapshot_quarantined`, `repository_unavailable`, `agent_session_conflict` and `agent_certificate_rejected` after the update. A channel created in the web interface with every alert type checked also receives `source_instance_gone`. A channel with a chosen list is left as it is; check the new types yourself if you want them.
+A channel created in the web interface before 0.2 with every alert type checked also receives `snapshot_quarantined`, `repository_unavailable`, `agent_session_conflict` and `agent_certificate_rejected` after the update. A channel created in the web interface with every alert type checked also receives `source_instance_gone`, `guarantee_downgraded` and `host_key_changed`. A channel with a chosen list is left as it is; check the new types yourself if you want them.
 
 Use **Send test message** on a channel to check it end to end. The result of the last delivery is shown in the channel list. Secrets entered in the web interface are encrypted in the server database and are never shown again; leaving a secret field empty on edit keeps the saved one.
 
@@ -133,7 +139,7 @@ notifications:
 | `name` | Required, unique. |
 | `type` | `telegram`, `slack`, `email` or `webhook`. |
 | `enabled` | `true` by default. |
-| `alerts` | List of `backup_failed`, `no_recent_backup`, `agent_offline`, `check_failed`, `certificate_expiring`, `agent_update_failed`, `snapshot_quarantined`, `repository_unavailable`, `agent_session_conflict`, `agent_certificate_rejected`, `source_instance_gone`. All when left out; an empty list is an error. |
+| `alerts` | List of `backup_failed`, `no_recent_backup`, `agent_offline`, `check_failed`, `certificate_expiring`, `agent_update_failed`, `snapshot_quarantined`, `repository_unavailable`, `agent_session_conflict`, `agent_certificate_rejected`, `source_instance_gone`, `guarantee_downgraded`, `host_key_changed`. All when left out; an empty list is an error. |
 | `bot_token_file`, `chat_id` | Telegram. |
 | `webhook_url_file` | Slack. |
 | `smtp_host`, `port`, `security`, `username`, `password_file`, `from`, `to` | Email. `port` is `587` by default, `security` is `starttls` by default (`tls` for a connection that is encrypted from the start, usually port 465). |
@@ -190,7 +196,7 @@ The webhook sends the format of the Alertmanager webhook receiver, version 4, so
 
 - `status` is `firing` for a new alert and for a reminder, and `resolved` when the cause is gone. A resolved message has the real `endsAt`.
 - `receiver` is the name of the channel. `fingerprint` and `groupKey` stay the same for the whole life of an alert, so a receiver can match a resolved message to the alert it closes.
-- `labels.alertname` is `LodestoreBackupFailed`, `LodestoreNoRecentBackup`, `LodestoreAgentOffline`, `LodestoreCheckFailed`, `LodestoreCertificateExpiring`, `LodestoreAgentUpdateFailed`, `LodestoreSnapshotQuarantined`, `LodestoreRepositoryUnavailable`, `LodestoreAgentSessionConflict`, `LodestoreAgentCertificateRejected` or `LodestoreSourceInstanceGone`, the same names as in the [Prometheus rules](/docs/reference/metrics/#importing-the-dashboard-and-the-rules). `severity` is `critical` or `warning`.
+- `labels.alertname` is `LodestoreBackupFailed`, `LodestoreNoRecentBackup`, `LodestoreAgentOffline`, `LodestoreCheckFailed`, `LodestoreCertificateExpiring`, `LodestoreAgentUpdateFailed`, `LodestoreSnapshotQuarantined`, `LodestoreRepositoryUnavailable`, `LodestoreAgentSessionConflict`, `LodestoreAgentCertificateRejected`, `LodestoreSourceInstanceGone`, `LodestoreGuaranteeDowngraded` or `LodestoreHostKeyChanged`, the same names as in the [Prometheus rules](/docs/reference/metrics/#importing-the-dashboard-and-the-rules). `severity` is `critical` or `warning`.
 - Other labels depend on the type and are present only when they apply: `host` and `host_id`, `policy`, `repository` and `level` (a check), `cert` (`agent` or `grpc`).
 - `annotations.summary` is the title shown in the web interface and `annotations.description` its detail line. For the alerts of a guest or database, the title names the source (for example "VM 101 · web") next to the host.
 - A test message has `alertname` `LodestoreTest` and severity `info`.

@@ -37,6 +37,7 @@ pub(crate) struct WizardEntry {
 pub(crate) struct Inner {
     pub wizards: HashMap<String, WizardEntry>,
     pub unlocked: HashMap<String, bool>,
+    pub access: HashMap<String, Arc<tokio::sync::Mutex<()>>>,
 }
 
 impl Inner {
@@ -54,6 +55,17 @@ pub struct ReposState {
 impl ReposState {
     pub(crate) fn lock(&self) -> MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Serialises a change of a repository's storage access with what a starting agent session reads and sends.
+    /// Held from the database write to the last send; under it only the database and the sealer are read,
+    /// never the storage.
+    pub fn access_lock(&self, repository_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.lock()
+            .access
+            .entry(repository_id.to_string())
+            .or_default()
+            .clone()
     }
 }
 
@@ -92,6 +104,12 @@ pub struct RepositoryDraft {
     pub location: LocationDto,
     pub server_credentials: Option<Credentials>,
     pub agent_credentials: Option<Credentials>,
+    /// Secret options of the agents' own access to the storage: `sas_token`
+    /// for azblob, `credential` for gcs, `user` and `key` for sftp. Sealed on
+    /// their own and never returned.
+    #[serde(default)]
+    #[schema(write_only)]
+    pub agent_options: Option<BTreeMap<String, String>>,
     /// Create the repository even when the storage does not stop a host from
     /// changing or deleting backups, or when the check could not measure it.
     #[serde(default)]
@@ -105,6 +123,15 @@ pub struct CheckDto {
     pub error: Option<String>,
 }
 
+/// The host key an SFTP server presented on first contact.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct OfferedHostKeyDto {
+    /// One OpenSSH public key line.
+    pub key: String,
+    /// The SHA256 fingerprint of the key, as `ssh-keygen -l` prints it.
+    pub fingerprint: String,
+}
+
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct CheckResult {
     pub existing_repository: bool,
@@ -116,6 +143,9 @@ pub struct CheckResult {
     /// Why the level is not the strongest one, as weakness codes.
     pub guarantee_notes: Vec<String>,
     pub checks: Vec<CheckDto>,
+    /// The SFTP server's host key, when the draft had none: confirm it and send it back as the `host_key` option.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_key: Option<OfferedHostKeyDto>,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]

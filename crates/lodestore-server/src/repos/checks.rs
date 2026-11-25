@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::time::Duration;
 
+use zeroize::Zeroizing;
+
 use lodestore_format::store::location::secret_option_names;
 use lodestore_format::store::probe::{
     AgentKeyState, AgentProbe, CHECK_ORDER, Check, CheckId, CheckStatus, GuaranteeLevel, ProbeKeys,
@@ -10,11 +12,11 @@ use lodestore_format::store::probe::{
 use lodestore_format::store::{RepoLocation, StaticCredentials, Store};
 
 use crate::error::ApiError;
-use crate::repos::db::AccessKey;
+use crate::repos::db::{AccessKey, AgentOptions};
 use crate::repos::object_lock::{self, LifecycleVerdict};
 use crate::repos::{CheckDto, CheckResult, LocationDto, RepositoryDraft};
 
-const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(crate) fn invalid(e: impl Display) -> ApiError {
@@ -56,44 +58,124 @@ pub fn split_secret_options(location: &RepoLocation) -> (RepoLocation, BTreeMap<
     )
 }
 
+/// The options an agent may bring of its own, by backend: credentials only.
+/// An Azure account key is not among them, since it opens the whole account,
+/// deletion included.
+pub fn agent_option_names(backend: &str) -> &'static [&'static str] {
+    match backend {
+        "azblob" => &["sas_token"],
+        "gcs" => &["credential"],
+        "sftp" => &["user", "key"],
+        _ => &[],
+    }
+}
+
+/// The server's credential options that an agent's own take the place of.
+pub fn server_credential_names(backend: &str) -> &'static [&'static str] {
+    match backend {
+        "azblob" => &["account_key", "sas_token"],
+        "gcs" => &["credential", "token"],
+        "sftp" => &["key"],
+        _ => &[],
+    }
+}
+
+pub fn check_agent_options(
+    backend: &str,
+    options: &BTreeMap<String, String>,
+) -> Result<(), ApiError> {
+    if options.is_empty() {
+        return Ok(());
+    }
+    let names = agent_option_names(backend);
+    if names.is_empty() {
+        return Err(ApiError::Validation(
+            "agent_options are for azblob, gcs and sftp; an S3 repository takes agent_credentials"
+                .into(),
+        ));
+    }
+    if let Some(name) = options
+        .iter()
+        .find_map(|(k, v)| (!names.contains(&k.as_str()) || v.is_empty()).then_some(k))
+    {
+        return Err(ApiError::Validation(format!(
+            "{backend} agent_options support only: {}; `{name}` is not accepted or is empty",
+            names.join(", ")
+        )));
+    }
+    Ok(())
+}
+
+fn agent_overlay(location: &RepoLocation, agent: &AgentOptions) -> RepoLocation {
+    let mut overlaid = location.clone();
+    if agent.is_empty() {
+        return overlaid;
+    }
+    for name in server_credential_names(&location.backend) {
+        overlaid.options.remove(*name);
+    }
+    overlaid
+        .options
+        .extend(agent.iter().map(|(k, v)| (k.clone(), v.to_string())));
+    overlaid
+}
+
+/// The location an agent opens: the server's own credentials give way to the
+/// agent's when it has them, and `for_agent` closes the ambient ones. The probe
+/// and the material sent to the agent both come from here.
+pub fn agent_location(location: &RepoLocation, agent: &AgentOptions) -> RepoLocation {
+    agent_overlay(location, agent).for_agent()
+}
+
 /// A location together with the stores opened from it: the server's own and,
 /// when the backend can tell them apart, the agent's.
 pub struct Opened {
     pub location: RepoLocation,
     pub server: Store,
     pub agent: Option<Store>,
+    pub agent_location: Option<RepoLocation>,
     pub server_creds: Option<AccessKey>,
     pub agent_creds: Option<AccessKey>,
+    pub agent_options: AgentOptions,
 }
 
 pub fn open_parts(
     location: RepoLocation,
     server_creds: Option<AccessKey>,
     agent_creds: Option<AccessKey>,
+    agent_options: AgentOptions,
 ) -> Result<Opened, ApiError> {
     location.validate().map_err(invalid)?;
     let server = open_store(&location, server_creds.as_ref()).map_err(invalid)?;
-    let agent = match location.backend.as_str() {
-        "local" => None,
-        "s3" => agent_creds
-            .as_ref()
-            .map(|k| open_store(&location, Some(k)))
-            .transpose()
-            .map_err(invalid)?,
+    let (agent, agent_at) = match location.backend.as_str() {
+        "local" => (None, None),
+        "s3" => (
+            agent_creds
+                .as_ref()
+                .map(|k| open_store(&location, Some(k)))
+                .transpose()
+                .map_err(invalid)?,
+            None,
+        ),
         _ => {
-            let for_agent = location.for_agent();
-            if let Some(problem) = location.agent_credentials_problem() {
+            if let Some(problem) =
+                agent_overlay(&location, &agent_options).agent_credentials_problem()
+            {
                 return Err(invalid(problem));
             }
-            Some(open_store(&for_agent, None).map_err(invalid)?)
+            let agent_at = agent_location(&location, &agent_options);
+            let store = open_store(&agent_at, None).map_err(invalid)?;
+            (Some(store), Some(agent_at))
         }
     };
     Ok(Opened {
         location,
         server,
         agent,
+        agent_location: agent_at,
         server_creds,
         agent_creds,
+        agent_options,
     })
 }
 
@@ -112,17 +194,24 @@ pub fn open_draft(draft: &RepositoryDraft) -> Result<Opened, ApiError> {
     } else {
         (None, None)
     };
-    open_parts(location, server_creds, agent_creds)
+    let agent_options = draft.agent_options.clone().unwrap_or_default();
+    check_agent_options(&location.backend, &agent_options)?;
+    let agent_options = agent_options
+        .into_iter()
+        .map(|(k, v)| (k, Zeroizing::new(v)))
+        .collect();
+    open_parts(location, server_creds, agent_creds, agent_options)
 }
 
 pub(crate) fn timed_out_report() -> ProbeReport {
+    unchecked_report("the storage did not answer within the time allowed for the checks")
+}
+
+pub(crate) fn unchecked_report(message: &str) -> ProbeReport {
     let note = |status, error: &str| (status, Some(error.to_string()));
     let skipped = || note(CheckStatus::Neutral, SKIPPED_NOTE);
     let outcomes = [
-        note(
-            CheckStatus::Fail,
-            "the storage did not answer within the time allowed for the checks",
-        ),
+        note(CheckStatus::Fail, message),
         skipped(),
         skipped(),
         skipped(),
@@ -139,6 +228,7 @@ pub(crate) fn timed_out_report() -> ProbeReport {
         agent_key: AgentKeyState::Unchecked,
         guarantee: GuaranteeLevel::Unchecked,
         weaknesses: Vec::new(),
+        host_key_changed: None,
     }
 }
 
@@ -161,12 +251,15 @@ pub async fn run_storage_probe(opened: &Opened) -> ProbeReport {
     match tokio::time::timeout(CLEANUP_TIMEOUT, remove_probe_objects(&opened.server, &keys)).await {
         Ok(failed) => {
             for (key, error) in failed {
+                let error = redact_signatures(&error.to_string());
                 tracing::warn!(%key, %error, "could not remove the probe object");
             }
         }
         Err(_) => tracing::warn!("removing the probe objects timed out after {CLEANUP_TIMEOUT:?}"),
     }
     for check in &mut report.checks {
+        check.error = check.error.as_deref().map(redact_signatures);
+        check.detail = check.detail.as_deref().map(redact_signatures);
         if let Some(detail) = &check.detail {
             tracing::warn!(
                 check = check.id.as_str(),
@@ -177,6 +270,28 @@ pub async fn run_storage_probe(opened: &Opened) -> ProbeReport {
         }
     }
     report
+}
+
+/// Hides the value of every `sig=` (an Azure SAS signature) in an error text.
+fn redact_signatures(text: &str) -> String {
+    const MARKS: [&str; 2] = ["sig=", "sig%3d"];
+    let lower = text.to_ascii_lowercase();
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    while let Some((found, mark)) = MARKS
+        .iter()
+        .filter_map(|mark| lower[at..].find(mark).map(|found| (found, mark.len())))
+        .min()
+    {
+        let start = at + found + mark;
+        out.push_str(&text[at..start]);
+        out.push_str("<redacted>");
+        at = text[start..]
+            .find(|c: char| c == '&' || c == '"' || c == '\'' || c.is_whitespace())
+            .map_or(text.len(), |end| start + end);
+    }
+    out.push_str(&text[at..]);
+    out
 }
 
 /// A lifecycle rule that removes objects caps the level; rules that cannot be
@@ -211,7 +326,12 @@ pub async fn run_probe(opened: &Opened) -> ProbeReport {
         let verdict = object_lock::lifecycle_check(&opened.location, creds).await;
         apply_lifecycle(&mut report, verdict);
     }
-    if !matches!(opened.location.backend.as_str(), "s3" | "local") {
+    if matches!(opened.location.backend.as_str(), "azblob" | "gcs") {
+        report.lifecycle_unverified();
+    }
+    if !matches!(opened.location.backend.as_str(), "s3" | "local")
+        && opened.agent_options.is_empty()
+    {
         report.cap_guarantee(Weakness::SharedCredentials);
     }
     report
@@ -257,6 +377,7 @@ pub fn to_result(report: &ProbeReport) -> CheckResult {
                 error: c.error.clone(),
             })
             .collect(),
+        host_key: None,
     }
 }
 
@@ -323,6 +444,134 @@ mod tests {
                 "{backend}: {:?}",
                 stored.options.keys()
             );
+        }
+    }
+
+    fn agent(pairs: &[(&str, &str)]) -> AgentOptions {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), Zeroizing::new(v.to_string())))
+            .collect()
+    }
+
+    #[test]
+    fn agent_location_overlays_only_credentials() {
+        let azure = RepoLocation::new(
+            "azblob",
+            [
+                ("container", "c"),
+                ("account_name", "n"),
+                ("account_key", "SRV"),
+                ("encryption_key", "E"),
+            ],
+        );
+        let got = agent_location(&azure, &agent(&[("sas_token", "AGT")]));
+        assert_eq!(got.options["sas_token"], "AGT");
+        assert_eq!(got.options["encryption_key"], "E");
+        assert!(!got.options.contains_key("account_key"));
+
+        let gcs = RepoLocation::new(
+            "gcs",
+            [
+                ("bucket", "b"),
+                ("credential", "SRV"),
+                ("token", "SRV"),
+                ("credential_path", "/x"),
+            ],
+        );
+        let got = agent_location(&gcs, &agent(&[("credential", "AGT")]));
+        assert_eq!(got.options["credential"], "AGT");
+        assert!(!got.options.contains_key("token"));
+        assert!(!got.options.contains_key("credential_path"));
+        assert_eq!(got.options["disable_vm_metadata"], "true");
+        assert_eq!(got.options["disable_config_load"], "true");
+
+        let sftp = RepoLocation::new(
+            "sftp",
+            [
+                ("endpoint", "h:22"),
+                ("user", "srv"),
+                ("key", "SRV"),
+                ("host_key", "HK"),
+                ("root", "/r"),
+            ],
+        );
+        let got = agent_location(&sftp, &agent(&[("user", "agent"), ("key", "AGT")]));
+        assert_eq!(got.options["user"], "agent");
+        assert_eq!(got.options["key"], "AGT");
+        assert_eq!(got.options["host_key"], "HK");
+        assert_eq!(got.options["endpoint"], "h:22");
+        assert_eq!(got.options["root"], "/r");
+
+        for location in [&azure, &gcs, &sftp] {
+            assert_eq!(agent_location(location, &agent(&[])), location.for_agent());
+        }
+    }
+
+    #[test]
+    fn redact_signatures_hides_every_sig() {
+        assert_eq!(
+            redact_signatures("https://a.blob/c/k?sv=1&sig=AbC%2F&se=2"),
+            "https://a.blob/c/k?sv=1&sig=<redacted>&se=2"
+        );
+        assert_eq!(redact_signatures("SIG=x y"), "SIG=<redacted> y");
+        assert_eq!(
+            redact_signatures("a?sig=1&b sig=2\""),
+            "a?sig=<redacted>&b sig=<redacted>\""
+        );
+        assert_eq!(redact_signatures("nothing here"), "nothing here");
+    }
+
+    #[test]
+    fn redact_signatures_hides_a_percent_encoded_sig() {
+        assert_eq!(
+            redact_signatures("u=https%3A%2F%2Fa%3Fsv%3D1%26sig%3DAbC%252F%26se%3D2 x"),
+            "u=https%3A%2F%2Fa%3Fsv%3D1%26sig%3D<redacted> x"
+        );
+        assert_eq!(
+            redact_signatures("Sig%3dabc&SIG=def"),
+            "Sig%3d<redacted>&SIG=<redacted>"
+        );
+    }
+
+    mod allow_list {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn check_agent_options_accepts_exactly_the_allow_list(
+                backend in prop::sample::select(vec!["s3", "local", "azblob", "gcs", "sftp"]),
+                options in prop::collection::btree_map(
+                    prop::sample::select(vec![
+                        "sas_token", "credential", "user", "key", "account_key", "endpoint",
+                        "bucket", "container", "root", "host_key", "publish",
+                        "credential_path", "token", "encryption_key", "sas_key", "Token",
+                    ]),
+                    prop_oneof![Just(String::new()), "[a-z]{1,6}"],
+                    0..5,
+                ),
+            ) {
+                let options: BTreeMap<String, String> =
+                    options.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+                let names = agent_option_names(backend);
+                let expected = options.is_empty()
+                    || (!names.is_empty()
+                        && options
+                            .iter()
+                            .all(|(k, v)| names.contains(&k.as_str()) && !v.is_empty()));
+                prop_assert_eq!(check_agent_options(backend, &options).is_ok(), expected);
+            }
+        }
+
+        #[test]
+        fn allow_list_names_match_the_documented_set() {
+            assert_eq!(agent_option_names("azblob"), ["sas_token"]);
+            assert_eq!(agent_option_names("gcs"), ["credential"]);
+            assert_eq!(agent_option_names("sftp"), ["user", "key"]);
+            let bad = BTreeMap::from([("account_key".to_string(), "x".to_string())]);
+            let error = check_agent_options("azblob", &bad).unwrap_err().to_string();
+            assert!(error.contains("sas_token"), "{error}");
         }
     }
 

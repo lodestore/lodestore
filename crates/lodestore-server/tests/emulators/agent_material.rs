@@ -16,7 +16,7 @@ use sqlx::Row;
 
 pub(crate) const PASSWORD: &str = "correct horse battery";
 
-async fn body(response: reqwest::Response) -> Value {
+pub(crate) async fn body(response: reqwest::Response) -> Value {
     response.json().await.expect("a JSON body")
 }
 
@@ -34,7 +34,7 @@ pub(crate) fn sftp_draft(sshd: &SshdServer, name: &str) -> Value {
     })
 }
 
-fn gcs_draft(gcs: &FakeGcsServer, bucket: &str, extra: Value) -> Value {
+pub(crate) fn gcs_draft(gcs: &FakeGcsServer, bucket: &str, extra: Value) -> Value {
     let mut options = json!({
         "bucket": bucket,
         "endpoint": gcs.endpoint(),
@@ -52,7 +52,7 @@ fn gcs_draft(gcs: &FakeGcsServer, bucket: &str, extra: Value) -> Value {
     })
 }
 
-fn azure_draft(az: &AzuriteServer, container: &str) -> Value {
+pub(crate) fn azure_draft(az: &AzuriteServer, container: &str) -> Value {
     json!({
         "name": "azure-repo",
         "location": { "backend": "azblob", "options": {
@@ -88,7 +88,7 @@ pub(crate) async fn create(api: &Api, draft: &Value) -> String {
     body(committed).await["id"].as_str().unwrap().to_string()
 }
 
-async fn stored_location(ts: &TestServer, id: &str) -> Value {
+pub(crate) async fn stored_location(ts: &TestServer, id: &str) -> Value {
     let row = sqlx::query("SELECT location_json FROM repositories WHERE id = $1")
         .bind(id)
         .fetch_one(&ts.state().db.pool)
@@ -97,7 +97,7 @@ async fn stored_location(ts: &TestServer, id: &str) -> Value {
     serde_json::from_str(&row.get::<String, _>("location_json")).unwrap()
 }
 
-fn check_row<'a>(result: &'a Value, id: &str) -> &'a Value {
+pub(crate) fn check_row<'a>(result: &'a Value, id: &str) -> &'a Value {
     result["checks"]
         .as_array()
         .unwrap()
@@ -124,7 +124,7 @@ async fn agent_material_sftp_host_key_reaches_the_agent() {
         .as_object_mut()
         .unwrap()
         .remove("host_key");
-    let refused = api.post("/api/v1/repositories/check", &unpinned).await;
+    let refused = api.post("/api/v1/repositories/wizard", &unpinned).await;
     assert_eq!(refused.status(), 422);
     let refused = body(refused).await;
     assert!(
@@ -360,5 +360,115 @@ async fn agent_material_sftp_changed_host_key_is_a_distinct_error() {
     assert_eq!(error.matches("SHA256:").count(), 2, "{error}");
     assert!(!error.contains("temporar"), "{error}");
     assert_eq!(rechecked["guarantee_level"], "unchecked");
+    ts.stop().await;
+}
+
+pub(crate) const HOUR: i64 = 3_600_000;
+
+pub(crate) async fn alerts_of(
+    ts: &TestServer,
+    kind: &str,
+    state: &str,
+) -> Vec<(String, String, Value)> {
+    sqlx::query("SELECT key, severity, facts_json FROM alerts WHERE type = $1 AND state = $2")
+        .bind(kind)
+        .bind(state)
+        .fetch_all(&ts.state().db.pool)
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| {
+            (
+                row.get("key"),
+                row.get("severity"),
+                serde_json::from_str(&row.get::<String, _>("facts_json")).unwrap(),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn host_key_changed_raises_its_own_alert_and_clears_on_the_pinned_key() {
+    let sshd = SshdServer::start().await;
+    let ts = TestServer::start_with(&Backend::Sqlite, |c| c.schedule_tick_secs = 0).await;
+    let api = ts.api().await;
+    let id = create(&api, &sftp_draft(&sshd, "sftp-repo")).await;
+    let now = lodestore_server::db::now_ms();
+    let stop = tokio_util::sync::CancellationToken::new();
+
+    sshd.rotate_host_key();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    for hours in [25, 50, 75] {
+        let ran =
+            lodestore_server::maintenance::guarantee::tick(ts.state(), now + hours * HOUR, &stop)
+                .await
+                .unwrap();
+        assert_eq!(ran, std::slice::from_ref(&id));
+        lodestore_server::alerts::tick(ts.state(), now + hours * HOUR)
+            .await
+            .unwrap();
+    }
+    let firing = alerts_of(&ts, "host_key_changed", "firing").await;
+    assert_eq!(firing.len(), 1);
+    let (key, severity, facts) = &firing[0];
+    assert_eq!(key, &format!("host_key_changed:{id}"));
+    assert_eq!(severity, "critical");
+    let (pinned, offered) = (
+        facts["pinned_fingerprint"].as_str().unwrap(),
+        facts["offered_fingerprint"].as_str().unwrap(),
+    );
+    assert!(pinned.starts_with("SHA256:") && offered.starts_with("SHA256:"));
+    assert_ne!(pinned, offered);
+    assert!(
+        alerts_of(&ts, "repository_unavailable", "firing")
+            .await
+            .is_empty()
+    );
+    assert!(
+        alerts_of(&ts, "guarantee_downgraded", "firing")
+            .await
+            .is_empty()
+    );
+    let runs: i64 = sqlx::query("SELECT guarantee_unchecked_runs FROM repositories WHERE id = $1")
+        .bind(&id)
+        .fetch_one(&ts.state().db.pool)
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(runs, 3);
+
+    let mut location = stored_location(&ts, &id).await;
+    location["host_key"] = json!(sshd.host_key());
+    sqlx::query("UPDATE repositories SET location_json = $1 WHERE id = $2")
+        .bind(location.to_string())
+        .bind(&id)
+        .execute(&ts.state().db.pool)
+        .await
+        .unwrap();
+    lodestore_server::maintenance::guarantee::tick(ts.state(), now + 100 * HOUR, &stop)
+        .await
+        .unwrap();
+    lodestore_server::alerts::tick(ts.state(), now + 100 * HOUR)
+        .await
+        .unwrap();
+    let mismatch: Option<String> =
+        sqlx::query("SELECT host_key_mismatch_json FROM repositories WHERE id = $1")
+            .bind(&id)
+            .fetch_one(&ts.state().db.pool)
+            .await
+            .unwrap()
+            .get(0);
+    assert_eq!(mismatch, None);
+    assert!(
+        alerts_of(&ts, "host_key_changed", "firing")
+            .await
+            .is_empty()
+    );
+    assert_eq!(
+        alerts_of(&ts, "host_key_changed", "resolved").await.len(),
+        1
+    );
     ts.stop().await;
 }
