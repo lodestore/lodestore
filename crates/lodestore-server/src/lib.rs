@@ -175,6 +175,10 @@ pub async fn serve(config: Config, listeners: Listeners) -> anyhow::Result<Serve
             state.clone(),
             stop.clone(),
         )));
+        tasks.push(tokio::spawn(grpc::sas_reissue::run(
+            state.clone(),
+            stop.clone(),
+        )));
         tasks.push(tokio::spawn(alerts::run(state.clone(), stop.clone())));
         tasks.push(tokio::spawn(notify::run(state.clone(), stop.clone())));
     }
