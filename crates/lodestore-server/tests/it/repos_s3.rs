@@ -2231,6 +2231,40 @@ async fn guarantee_tick_skips_a_row_it_cannot_read() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn guarantee_tick_dates_each_repository_by_its_own_probe() {
+    let minio = MinioServer::start().await;
+    minio.create_versioned_bucket(BUCKET).await;
+    minio.create_versioned_bucket("second").await;
+    let server = minio.root_credentials();
+    let ts = quiet_server(&Backend::Sqlite).await;
+    let http = Http::login(&ts).await;
+    let agent = agent_user(&minio, BUCKET).await;
+    let slow = create_s3(&http, &s3_draft(&minio, BUCKET, "slow", &server, &agent)).await;
+    let slow = slow["id"].as_str().unwrap();
+    let agent = agent_user(&minio, "second").await;
+    let next = create_s3(&http, &s3_draft(&minio, "second", "next", &server, &agent)).await;
+    let next = next["id"].as_str().unwrap();
+    let proxy = FaultProxy::start(minio.endpoint(), FaultPlan::none()).await;
+    point_at(&ts, slow, &proxy.endpoint()).await;
+
+    let at = lodestore_server::db::now_ms() + 25 * HOUR;
+    let (arrived, release) = proxy.hold("GET", &["lifecycle"]);
+    let (ticked, ()) = tokio::join!(daily_tick(&ts, at), async {
+        arrived.await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        release.send(()).unwrap();
+    });
+    assert_eq!(ticked, [slow, next]);
+    let checked = |marks: &sqlx::any::AnyRow| {
+        sqlx::Row::get::<Option<i64>, _>(marks, "guarantee_tick_at").unwrap()
+    };
+    assert!(checked(&repo_marks(&ts, slow).await) < at + 1000);
+    let later = checked(&repo_marks(&ts, next).await);
+    assert!(later >= at + 1500, "{later} is the tick's start {at}");
+    ts.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn guarantee_manual_inconclusive_check_keeps_the_failed_runs() {
     each_backend(|backend| async move {
         let minio = MinioServer::start().await;

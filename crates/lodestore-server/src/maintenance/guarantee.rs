@@ -60,6 +60,8 @@ pub async fn guarded<T: Send + 'static>(
 }
 
 /// Rechecks the repositories that are due, one at a time, and returns their ids.
+/// `now_ms` is the clock at the start; each repository is dated by that clock
+/// when its own probe starts.
 /// A failure of one is logged and does not stop the others.
 pub async fn tick(
     state: &AppState,
@@ -72,6 +74,7 @@ pub async fn tick(
     )
     .fetch_all(&state.db.pool)
     .await?;
+    let started = std::time::Instant::now();
     let mut checked = Vec::new();
     for row in &rows {
         if stop.is_cancelled() {
@@ -91,16 +94,17 @@ pub async fn tick(
                 continue;
             }
         };
-        if !due(now_ms, tick_at, measured) {
+        let at_ms = now_ms.saturating_add(started.elapsed().as_millis() as i64);
+        if !due(at_ms, tick_at, measured) {
             continue;
         }
         let work = tokio::spawn({
             let (state, id) = (state.clone(), id.clone());
-            async move { recheck_repository_at(&state, &id, now_ms, true).await }
+            async move { recheck_repository_at(&state, &id, at_ms, true).await }
         });
         let outcome = guarded(work, RECHECK_TIMEOUT, stop).await;
         if failed_attempt(&id, &outcome)
-            && let Err(error) = db::record_failed_recheck(state, &id, now_ms).await
+            && let Err(error) = db::record_failed_recheck(state, &id, at_ms).await
         {
             tracing::warn!(repository_id = %id, error = %format!("{error:#}"), "recording the daily recheck attempt failed");
         }
