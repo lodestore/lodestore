@@ -10,6 +10,7 @@ use lodestore_proto::agent::v1::server_message::Body as ServerBody;
 use lodestore_proto::agent::v1::{RepoLocation, ServerMessage};
 use lodestore_server::grpc::sas_reissue::reissue_once;
 use lodestore_testkit::azurite::AzuriteServer;
+use serde_json::json;
 use sqlx::Row;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -250,5 +251,154 @@ async fn sas_vending_agent_without_location_support_is_warned() {
     assert!(text.contains(&agent), "{text}");
     assert!(!text.contains(az.account_key()), "{text}");
     assert!(!text.contains("sig="), "{text}");
+    ts.stop().await;
+}
+
+async fn revoke(api: &Api, agent: &str) {
+    let response = api
+        .post(&format!("/api/v1/hosts/{agent}/revoke"), &json!({}))
+        .await;
+    assert_eq!(response.status(), 204);
+}
+
+async fn assert_session_refused(ts: &TestServer, paths: &lodestore_agent::Paths) {
+    let refused = tokio::spawn(open_session_at(
+        ts.grpc_address(),
+        paths.clone(),
+        capabilities_vec(&CAPS),
+    ))
+    .await
+    .unwrap_err()
+    .into_panic();
+    let refused = refused.downcast_ref::<String>().expect("a panic message");
+    assert!(refused.contains("revoked"), "{refused}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn sas_reissue_skips_a_revoked_agent() {
+    let az = AzuriteServer::start().await;
+    let ts = TestServer::start(&Backend::Sqlite).await;
+    let (api, id) = vending_repo(&ts, &az, "skiprevoked").await;
+    let paths = enroll_agent(&ts, &api, &id, "skip-revoked").await;
+    let agent = agent_id(&paths);
+    let mut stream = open_session(&ts, &paths, &CAPS).await;
+    next_location(&mut stream).await;
+    let recorded = expires_at(&ts, &agent).await;
+
+    revoke(&api, &agent).await;
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert_eq!(reissue_once(ts.state()).await.unwrap(), 0);
+    assert!(
+        locations_within(&mut stream, Duration::from_secs(1))
+            .await
+            .is_empty()
+    );
+    assert_eq!(expires_at(&ts, &agent).await, recorded);
+    assert_session_refused(&ts, &paths).await;
+    ts.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn sas_reissue_skips_an_agent_without_location_support() {
+    let az = AzuriteServer::start().await;
+    let ts = TestServer::start(&Backend::Sqlite).await;
+    let (api, id) = vending_repo(&ts, &az, "skipold").await;
+    let paths = enroll_agent(&ts, &api, &id, "skip-old").await;
+    let mut stream = open_session(&ts, &paths, &["host_key_v1"]).await;
+
+    assert_eq!(reissue_once(ts.state()).await.unwrap(), 0);
+    assert!(
+        locations_within(&mut stream, Duration::from_secs(1))
+            .await
+            .is_empty()
+    );
+    ts.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn sas_reissue_skips_repositories_without_vending() {
+    let az = AzuriteServer::start().await;
+    az.create_container("static").await;
+    let ts = TestServer::start(&Backend::Sqlite).await;
+    let api = ts.api().await;
+    let mut draft = azure_draft(&az, "static");
+    draft["agent_options"] = json!({
+        "sas_token": az.container_sas("static", "rcl", Duration::from_secs(3600)),
+    });
+    let id = create(&api, &draft).await;
+    let paths = enroll_agent(&ts, &api, &id, "skip-static").await;
+    let agent = agent_id(&paths);
+    let mut stream = open_session(&ts, &paths, &CAPS).await;
+    next_location(&mut stream).await;
+
+    assert_eq!(reissue_once(ts.state()).await.unwrap(), 0);
+    assert!(
+        locations_within(&mut stream, Duration::from_secs(1))
+            .await
+            .is_empty()
+    );
+    assert_eq!(expires_at(&ts, &agent).await, None);
+    ts.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn sas_reissue_waits_for_the_access_lock() {
+    let az = AzuriteServer::start().await;
+    let ts = TestServer::start(&Backend::Sqlite).await;
+    let (api, id) = vending_repo(&ts, &az, "waits").await;
+    let paths = enroll_agent(&ts, &api, &id, "waits-agent").await;
+    let mut stream = open_session(&ts, &paths, &CAPS).await;
+    next_location(&mut stream).await;
+
+    let lock = ts.state().repos.access_lock(&id);
+    let held = lock.lock().await;
+    let state = ts.state().clone();
+    let pass = tokio::spawn(async move { reissue_once(&state).await.unwrap() });
+    assert!(
+        locations_within(&mut stream, Duration::from_millis(500))
+            .await
+            .is_empty()
+    );
+    assert!(!pass.is_finished());
+    drop(held);
+    assert_eq!(pass.await.unwrap(), 1);
+    next_location(&mut stream).await;
+    ts.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn revoke_waits_for_the_access_lock_and_no_sas_follows_it() {
+    let az = AzuriteServer::start().await;
+    let ts = TestServer::start(&Backend::Sqlite).await;
+    let (api, id) = vending_repo(&ts, &az, "revokelock").await;
+    let api = Arc::new(api);
+    let paths = enroll_agent(&ts, &api, &id, "revoke-lock").await;
+    let agent = agent_id(&paths);
+    let mut stream = open_session(&ts, &paths, &CAPS).await;
+    next_location(&mut stream).await;
+    let recorded = expires_at(&ts, &agent).await;
+
+    let lock = ts.state().repos.access_lock(&id);
+    let held = lock.lock().await;
+    let revoking = {
+        let (api, agent) = (Arc::clone(&api), agent.clone());
+        tokio::spawn(async move { revoke(&api, &agent).await })
+    };
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!revoking.is_finished());
+    assert!(!ts.state().registry.is_revoked(&agent));
+    drop(held);
+    revoking.await.unwrap();
+    assert!(ts.state().registry.is_revoked(&agent));
+
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert_eq!(reissue_once(ts.state()).await.unwrap(), 0);
+    assert_session_refused(&ts, &paths).await;
+    assert_eq!(expires_at(&ts, &agent).await, recorded);
     ts.stop().await;
 }

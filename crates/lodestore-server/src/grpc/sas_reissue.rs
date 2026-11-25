@@ -88,3 +88,22 @@ pub async fn run(state: AppState, stop: CancellationToken) -> anyhow::Result<()>
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sas_reissue_filter_drops_revoked_sessions() {
+        let registry = Registry::default();
+        let _kept = registry.register("kept", "repo", None);
+        let _gone = registry.register("gone", "repo", None);
+        let _bare = registry.register("bare", "repo", None);
+        let _other = registry.register("other", "elsewhere", None);
+        for agent in ["kept", "gone", "other"] {
+            registry.set_capabilities(agent, vec![CAP_LOCATION.to_string()]);
+        }
+        registry.revoke("gone");
+        assert_eq!(recipients(&registry, "repo"), ["kept"]);
+    }
+}
