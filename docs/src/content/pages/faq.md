@@ -58,7 +58,7 @@ Open an issue or a pull request on GitHub. Every commit is signed off under the 
 
 ### Which storage can I use?
 
-S3-compatible object storage, such as AWS S3, MinIO or Ceph, or a local or network folder. From the next release also Azure Blob Storage, Google Cloud Storage, SFTP and Backblaze B2 (as an S3 preset). Only S3-compatible storage gives the agent a separate key without delete rights and offers Object Lock, which is why a folder is meant for trying Lodestore; for every repository Lodestore measures what a host can do to its backups and asks you to accept a weaker result. See [Storage backends and guarantee levels](/docs/reference/storage/) and [Why S3-compatible storage](/docs/quickstart/#why-s3-compatible-storage).
+S3-compatible object storage, such as AWS S3, MinIO or Ceph, or a local or network folder. From the next release also Azure Blob Storage, Google Cloud Storage, SFTP and Backblaze B2 (as an S3 preset). S3-compatible storage gives the agent a separate key without delete rights and offers Object Lock; on Azure Blob Storage, Google Cloud Storage and SFTP an agent can have credentials of its own that you create, and the level is measured with them, while without them the agent writes with the server's credentials. A folder is meant for trying Lodestore. For every repository Lodestore measures what a host can do to its backups, asks you to accept a weaker result, and checks again once a day, with an alert when the protection has become weaker. See [Storage backends and guarantee levels](/docs/reference/storage/) and [Why S3-compatible storage](/docs/quickstart/#why-s3-compatible-storage).
 
 ### Should I use SQLite or PostgreSQL for the catalog?
 

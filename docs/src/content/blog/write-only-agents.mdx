@@ -17,6 +17,8 @@ The Lodestore agent runs as root on every host it protects, so we design as if a
 
 *Update, 2026-11-20: from the next release a repository can also live on Azure Blob Storage, Google Cloud Storage or an SFTP server. This post describes S3-compatible storage. On those three backends the agent writes with the server's own credentials, which can delete, so they never reach the level described here, and a person has to accept that when the repository is created. The [storage reference](/docs/reference/storage/) lists what each backend enforces and what has been verified.*
 
+*Update, 2026-11-25: a repository on Azure Blob Storage, Google Cloud Storage or SFTP can have separate agent credentials (`agent_options`), and the level of such a repository is measured with the agent's own rights, as on S3 (SFTP stays at "host can overwrite or delete" because an agent can keep a published file open). Without them the statement above still holds. The server also checks every repository once a day and raises an alert when the level has become lower than the one you accepted.*
+
 ## What the agent holds
 
 An agent holds a writer keyset and a write-only S3 key. It can add data to the repository and it cannot read it back. The key carries no delete permission, and deletion and garbage collection run only on the server ([threat model, Agent credentials](/docs/security/threat-model/#agent-credentials)).
