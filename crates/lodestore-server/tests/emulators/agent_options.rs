@@ -145,7 +145,7 @@ async fn agent_options_azblob_rcl_sas_is_create_only() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
-async fn gcs_level_carries_lifecycle_unverified() {
+async fn gcs_level_reads_the_bucket_lifecycle() {
     let gcs = FakeGcsServer::start().await;
     gcs.create_bucket("lifecycle").await;
     let ts = TestServer::start(&Backend::Sqlite).await;
@@ -156,7 +156,8 @@ async fn gcs_level_carries_lifecycle_unverified() {
     assert_eq!(checked.status(), 200);
     let checked = body(checked).await;
     let found = notes(&checked);
-    assert!(found.contains(&"lifecycle_unverified"), "{checked}");
+    assert!(!found.contains(&"lifecycle_unverified"), "{checked}");
+    assert!(!found.contains(&"lifecycle_deletes"), "{checked}");
     assert!(found.contains(&"shared_credentials"), "{checked}");
     ts.stop().await;
 }
