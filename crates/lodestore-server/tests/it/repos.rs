@@ -727,3 +727,75 @@ async fn host_key_mismatch_write_needs_the_same_access_generation() {
         ts.stop().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn access_replacements_survive_concurrent_writes() {
+    use lodestore_server::repos::db::{
+        AccessKey, GuaranteeWrite, Stored, replace_agent_creds, replace_host_key,
+    };
+    let ts = TestServer::start(&Backend::Sqlite).await;
+    let id = ts.create_local_repository("busy").await;
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let writers: Vec<_> = (0..2)
+        .map(|_| {
+            let (pool, stop) = (ts.state().db.pool.clone(), stop.clone());
+            tokio::spawn(async move {
+                let mut n = 0i64;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    n += 1;
+                    sqlx::query(
+                        "INSERT INTO settings (key, value) VALUES ('busy-test', $1) \
+                         ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                    )
+                    .bind(n.to_string())
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                }
+            })
+        })
+        .collect();
+    let key = AccessKey {
+        access_key_id: "a".into(),
+        secret_access_key: "b".into(),
+    };
+    for round in 0..1000 {
+        let row = sqlx::query(
+            "SELECT access_generation, guarantee_accepted FROM repositories WHERE id = $1",
+        )
+        .bind(&id)
+        .fetch_one(&ts.state().db.pool)
+        .await
+        .unwrap();
+        let accepted: String = row.get("guarantee_accepted");
+        let guarantee = GuaranteeWrite {
+            level: accepted.clone(),
+            notes_json: "[]".into(),
+            accepted: accepted.clone(),
+            read_accepted: accepted,
+        };
+        let generation: i64 = row.get("access_generation");
+        let pinned = replace_host_key(
+            ts.state(),
+            &id,
+            generation,
+            "ssh-ed25519 AAAA",
+            "unchecked",
+            "[]",
+            &guarantee,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("round {round}: {e:#}"));
+        assert_eq!(pinned, Stored::Written);
+        assert!(
+            replace_agent_creds(ts.state(), &id, &key, "unchecked", "[]", &guarantee)
+                .await
+                .unwrap_or_else(|e| panic!("round {round}: {e:#}"))
+        );
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    for writer in writers {
+        writer.await.unwrap();
+    }
+    ts.stop().await;
+}

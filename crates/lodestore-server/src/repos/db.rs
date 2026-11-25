@@ -637,6 +637,22 @@ pub async fn server_access(state: &AppState, id: &str) -> anyhow::Result<ServerA
     })
 }
 
+/// Takes the write lock before the first read of a transaction: a read first
+/// fails with "database is locked" on SQLite when another connection commits
+/// in between. Returns the rows touched, 0 when the repository is missing.
+async fn take_write_lock(
+    tx: &mut sqlx::Transaction<'_, sqlx::Any>,
+    id: &str,
+) -> anyhow::Result<u64> {
+    Ok(
+        sqlx::query("UPDATE repositories SET access_generation = access_generation WHERE id = $1")
+            .bind(id)
+            .execute(&mut **tx)
+            .await?
+            .rows_affected(),
+    )
+}
+
 /// Swaps the sealed agent key for a new one in one transaction and records
 /// the outcome of the check that approved it, including the level it measured.
 /// Changes nothing and returns false when the accepted level is no longer
@@ -650,11 +666,13 @@ pub async fn replace_agent_creds(
     guarantee: &GuaranteeWrite,
 ) -> anyhow::Result<bool> {
     let mut tx = state.db.pool.begin().await?;
+    if take_write_lock(&mut tx, id).await? == 0 {
+        anyhow::bail!("repository {id} is missing");
+    }
     let old = sqlx::query("SELECT agent_creds_secret_id FROM repositories WHERE id = $1")
         .bind(id)
-        .fetch_optional(&mut *tx)
+        .fetch_one(&mut *tx)
         .await?
-        .with_context(|| format!("repository {id} is missing"))?
         .try_get::<Option<String>, _>("agent_creds_secret_id")?;
     let new = state
         .sealer
@@ -706,14 +724,7 @@ pub async fn replace_agent_options(
     guarantee: &GuaranteeWrite,
 ) -> anyhow::Result<Stored> {
     let mut tx = state.db.pool.begin().await?;
-    // Takes the write lock before the first read: a read first would fail with
-    // "database is locked" on SQLite when another connection commits in between.
-    let touched =
-        sqlx::query("UPDATE repositories SET access_generation = access_generation WHERE id = $1")
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-    if touched.rows_affected() == 0 {
+    if take_write_lock(&mut tx, id).await? == 0 {
         return Ok(Stored::Missing);
     }
     let old = sqlx::query("SELECT agent_creds_secret_id FROM repositories WHERE id = $1")
@@ -799,13 +810,13 @@ pub async fn replace_host_key(
     guarantee: &GuaranteeWrite,
 ) -> anyhow::Result<Stored> {
     let mut tx = state.db.pool.begin().await?;
-    let Some(row) = sqlx::query("SELECT location_json FROM repositories WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&mut *tx)
-        .await?
-    else {
+    if take_write_lock(&mut tx, id).await? == 0 {
         return Ok(Stored::Missing);
-    };
+    }
+    let row = sqlx::query("SELECT location_json FROM repositories WHERE id = $1")
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
     let mut options: BTreeMap<String, String> =
         serde_json::from_str(&row.try_get::<String, _>("location_json")?)?;
     options.insert("host_key".to_string(), host_key.to_string());
