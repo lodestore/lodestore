@@ -151,6 +151,11 @@ impl Enrollment for EnrollmentService {
             .rows_affected();
         }
         tx.commit().await.map_err(internal)?;
+        if let Some(expires_at_ms) = material.sas_expires_at_ms {
+            crate::repos::db::record_sas_issued(state, &agent_id, expires_at_ms)
+                .await
+                .map_err(internal)?;
+        }
         tracing::info!(agent_id = %agent_id, hostname, reused, rebound, "agent enrolled");
 
         let server_time = SystemTime::now()
