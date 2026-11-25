@@ -41,6 +41,8 @@ yaml_serde = "0.10.7"
 reqsign-aws-v4 = "3.3.1"
 reqsign-core = "3.3.2"
 reqsign-file-read-tokio = "3.0.7"
+reqsign-google = "3.2.0"
+bytes = "1"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
 http = "1"
 hyper = { version = "1.12.0", features = ["server", "http1"] }
@@ -72,7 +74,6 @@ rust-embed = { version = "8.13.0", optional = true }
 lodestore-format = { path = "../lodestore-format", features = ["test-hooks"] }
 tempfile = "3.27.0"
 proptest = "1.12.0"
-bytes = "1"
 opendal = { version = "0.59.4", default-features = false, features = ["services-s3"] }
 tokio = { version = "1.53.2", features = ["macros"] }
 lodestore-testkit = { path = "../lodestore-testkit" }

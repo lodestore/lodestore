@@ -14,6 +14,7 @@ use lodestore_format::store::{RepoLocation, StaticCredentials, Store};
 
 use crate::error::ApiError;
 use crate::repos::db::{self, AccessKey, AgentOptions};
+use crate::repos::gcs_lifecycle;
 use crate::repos::object_lock::{self, LifecycleVerdict};
 use crate::repos::{CheckDto, CheckResult, LocationDto, RepositoryDraft};
 use crate::state::AppState;
@@ -388,8 +389,13 @@ pub async fn run_probe(opened: &Opened) -> ProbeReport {
         let verdict = object_lock::lifecycle_check(&opened.location, creds).await;
         apply_lifecycle(&mut report, verdict);
     }
-    if matches!(opened.location.backend.as_str(), "azblob" | "gcs") {
-        report.lifecycle_unverified();
+    match opened.location.backend.as_str() {
+        "gcs" => {
+            let verdict = gcs_lifecycle::check(&opened.location).await;
+            apply_lifecycle(&mut report, verdict);
+        }
+        "azblob" => report.lifecycle_unverified(),
+        _ => {}
     }
     if !matches!(opened.location.backend.as_str(), "s3" | "local")
         && opened.agent_options.is_empty()

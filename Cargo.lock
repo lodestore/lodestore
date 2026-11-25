@@ -2683,6 +2683,7 @@ dependencies = [
  "reqsign-aws-v4",
  "reqsign-core",
  "reqsign-file-read-tokio",
+ "reqsign-google",
  "reqwest",
  "rust-embed",
  "rustix",

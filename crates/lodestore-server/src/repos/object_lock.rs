@@ -8,12 +8,12 @@ use reqsign_file_read_tokio::TokioFileRead;
 
 use crate::repos::db::AccessKey;
 
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const DEFAULT_REGION: &str = "us-east-1";
-const MAX_BODY: usize = 64 * 1024;
+pub(crate) const MAX_BODY: usize = 64 * 1024;
 const MAX_CODE_LEN: usize = 64;
 
-fn opt<'a>(location: &'a RepoLocation, key: &str) -> Option<&'a str> {
+pub(crate) fn opt<'a>(location: &'a RepoLocation, key: &str) -> Option<&'a str> {
     location
         .options
         .get(key)
@@ -306,7 +306,7 @@ fn root_element(xml: &str) -> Option<&str> {
     }
 }
 
-fn prefixes_overlap(rule: &str, repo: &str) -> bool {
+pub(crate) fn prefixes_overlap(rule: &str, repo: &str) -> bool {
     let overlap = |r: &str| r.starts_with(repo) || repo.starts_with(r);
     rule.contains('&') || overlap(rule) || overlap(rule.trim())
 }

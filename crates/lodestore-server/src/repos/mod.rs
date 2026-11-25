@@ -1,6 +1,7 @@
 pub mod agent_key;
 pub mod checks;
 pub mod db;
+pub mod gcs_lifecycle;
 pub mod object_lock;
 pub mod wizard;
 
