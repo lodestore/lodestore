@@ -379,6 +379,7 @@ pub async fn register(state: &AppState, r: Registration) -> Result<RepositorySum
             checked_at: Some(now_ms()),
             guarantee_level: Some(r.checks.guarantee_level),
             guarantee_notes_json: Some(guarantee_notes_json),
+            agent_sas_vending: false,
         },
     )
     .await?;

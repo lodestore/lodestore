@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
 use std::fmt::Display;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use zeroize::Zeroizing;
 
+use lodestore_format::store::azure_sas::{sas_https_only, sign_container_sas};
 use lodestore_format::store::location::secret_option_names;
 use lodestore_format::store::probe::{
     AgentKeyState, AgentProbe, CHECK_ORDER, Check, CheckId, CheckStatus, GuaranteeLevel, ProbeKeys,
@@ -127,6 +128,42 @@ pub fn agent_location(location: &RepoLocation, agent: &AgentOptions) -> RepoLoca
     agent_overlay(location, agent).for_agent()
 }
 
+/// Whether the server signs a SAS for the agents of this location: an Azure
+/// repository with the account key and no agent options of its own.
+pub fn vends_sas(location: &RepoLocation, agent: &AgentOptions) -> bool {
+    let set = |name: &str| location.options.get(name).is_some_and(|v| !v.is_empty());
+    location.backend == "azblob" && agent.is_empty() && set("account_name") && set("account_key")
+}
+
+/// [`agent_location`], except that a vending repository gets a container SAS
+/// signed now in place of the account key; the second element is its expiry.
+/// The probe and the agent material both come from here.
+pub fn agent_location_with(
+    location: &RepoLocation,
+    agent: &AgentOptions,
+    sas_vending: bool,
+) -> lodestore_format::Result<(RepoLocation, Option<SystemTime>)> {
+    if !(sas_vending && vends_sas(location, agent)) {
+        return Ok((agent_location(location, agent), None));
+    }
+    let opt = |name: &str| location.options.get(name).map_or("", String::as_str);
+    let signed = sign_container_sas(
+        opt("account_name"),
+        opt("account_key"),
+        opt("container"),
+        SystemTime::now(),
+        sas_https_only(opt("endpoint")),
+    )?;
+    let mut vended = location.clone();
+    for name in server_credential_names("azblob") {
+        vended.options.remove(*name);
+    }
+    vended
+        .options
+        .insert("sas_token".to_string(), signed.token.to_string());
+    Ok((vended.for_agent(), Some(signed.expires_at)))
+}
+
 /// A location together with the stores opened from it: the server's own and,
 /// when the backend can tell them apart, the agent's.
 pub struct Opened {
@@ -137,6 +174,7 @@ pub struct Opened {
     pub server_creds: Option<AccessKey>,
     pub agent_creds: Option<AccessKey>,
     pub agent_options: AgentOptions,
+    pub sas_vending: bool,
 }
 
 pub fn open_parts(
@@ -145,6 +183,17 @@ pub fn open_parts(
     agent_creds: Option<AccessKey>,
     agent_options: AgentOptions,
 ) -> Result<Opened, ApiError> {
+    open_parts_with(location, server_creds, agent_creds, agent_options, false)
+}
+
+pub fn open_parts_with(
+    location: RepoLocation,
+    server_creds: Option<AccessKey>,
+    agent_creds: Option<AccessKey>,
+    agent_options: AgentOptions,
+    sas_vending: bool,
+) -> Result<Opened, ApiError> {
+    let sas_vending = sas_vending && vends_sas(&location, &agent_options);
     location.validate().map_err(invalid)?;
     let server = open_store(&location, server_creds.as_ref()).map_err(invalid)?;
     let (agent, agent_at) = match location.backend.as_str() {
@@ -163,7 +212,8 @@ pub fn open_parts(
             {
                 return Err(invalid(problem));
             }
-            let agent_at = agent_location(&location, &agent_options);
+            let (agent_at, _) =
+                agent_location_with(&location, &agent_options, sas_vending).map_err(invalid)?;
             let store = open_store(&agent_at, None).map_err(invalid)?;
             (Some(store), Some(agent_at))
         }
@@ -176,10 +226,15 @@ pub fn open_parts(
         server_creds,
         agent_creds,
         agent_options,
+        sas_vending,
     })
 }
 
 pub fn open_draft(draft: &RepositoryDraft) -> Result<Opened, ApiError> {
+    open_draft_with(draft, false)
+}
+
+pub fn open_draft_with(draft: &RepositoryDraft, allow_vending: bool) -> Result<Opened, ApiError> {
     let location = format_location(&draft.location);
     location.validate_new().map_err(invalid)?;
     let (server_creds, agent_creds) = if location.backend == "s3" {
@@ -200,7 +255,13 @@ pub fn open_draft(draft: &RepositoryDraft) -> Result<Opened, ApiError> {
         .into_iter()
         .map(|(k, v)| (k, Zeroizing::new(v)))
         .collect();
-    open_parts(location, server_creds, agent_creds, agent_options)
+    open_parts_with(
+        location,
+        server_creds,
+        agent_creds,
+        agent_options,
+        allow_vending,
+    )
 }
 
 pub(crate) fn timed_out_report() -> ProbeReport {
@@ -331,6 +392,7 @@ pub async fn run_probe(opened: &Opened) -> ProbeReport {
     }
     if !matches!(opened.location.backend.as_str(), "s3" | "local")
         && opened.agent_options.is_empty()
+        && !opened.sas_vending
     {
         report.cap_guarantee(Weakness::SharedCredentials);
     }
@@ -505,6 +567,94 @@ mod tests {
 
         for location in [&azure, &gcs, &sftp] {
             assert_eq!(agent_location(location, &agent(&[])), location.for_agent());
+        }
+    }
+
+    fn account_key() -> String {
+        data_encoding::BASE64.encode(&[7u8; 64])
+    }
+
+    fn vending_location(extra: &[(&str, &str)]) -> RepoLocation {
+        let mut options = vec![
+            ("container", "vended"),
+            ("account_name", "lodeacct"),
+            ("endpoint", "https://lodeacct.blob.core.windows.net"),
+            ("root", "r"),
+            ("encryption_key_sha256", "H"),
+        ];
+        options.extend_from_slice(extra);
+        RepoLocation::new("azblob", options)
+    }
+
+    #[test]
+    fn vends_sas_needs_the_account_key_and_no_agent_options() {
+        let key = account_key();
+        let with_key = vending_location(&[("account_key", &key)]);
+        assert!(vends_sas(&with_key, &agent(&[])));
+        assert!(!vends_sas(&with_key, &agent(&[("sas_token", "sv=1")])));
+        assert!(!vends_sas(&vending_location(&[]), &agent(&[])));
+        assert!(!vends_sas(
+            &vending_location(&[("sas_token", "sv=1&sig=x")]),
+            &agent(&[])
+        ));
+        let mut nameless = with_key.clone();
+        nameless.options.remove("account_name");
+        assert!(!vends_sas(&nameless, &agent(&[])));
+        for backend in ["gcs", "sftp", "s3"] {
+            let other = RepoLocation::new(
+                backend,
+                [("account_name", "n"), ("account_key", key.as_str())],
+            );
+            assert!(!vends_sas(&other, &agent(&[])), "{backend}");
+        }
+    }
+
+    #[test]
+    fn agent_location_with_vends_a_sas_instead_of_the_account_key() {
+        let key = account_key();
+        let full = vending_location(&[("account_key", &key), ("encryption_key", "E")]);
+        let (got, expires) = agent_location_with(&full, &agent(&[]), true).unwrap();
+        assert!(!got.options.contains_key("account_key"));
+        let sas = &got.options["sas_token"];
+        assert!(sas.contains("sp=rcl") && sas.contains("sr=c"), "{sas}");
+        for kept in [
+            "container",
+            "root",
+            "endpoint",
+            "account_name",
+            "encryption_key",
+            "encryption_key_sha256",
+        ] {
+            assert_eq!(got.options[kept], full.options[kept], "{kept}");
+        }
+        let left = expires
+            .unwrap()
+            .duration_since(SystemTime::now())
+            .unwrap()
+            .as_secs();
+        assert!(
+            (23 * 3600 + 40 * 60..=23 * 3600 + 50 * 60).contains(&left),
+            "{left}"
+        );
+
+        let (same, none) = agent_location_with(&full, &agent(&[]), false).unwrap();
+        assert_eq!(same, agent_location(&full, &agent(&[])));
+        assert!(none.is_none());
+        let own = agent(&[("sas_token", "AGT")]);
+        let (kept, none) = agent_location_with(&full, &own, true).unwrap();
+        assert_eq!(kept.options["sas_token"], "AGT");
+        assert!(none.is_none());
+    }
+
+    #[test]
+    fn agent_location_with_refuses_a_bad_account_key() {
+        let bad = data_encoding::BASE64.encode(b"too short");
+        for value in ["not base64 !!", bad.as_str()] {
+            let full = vending_location(&[("account_key", value)]);
+            let error = agent_location_with(&full, &agent(&[]), true)
+                .unwrap_err()
+                .to_string();
+            assert!(!error.contains(value), "{error}");
         }
     }
 
