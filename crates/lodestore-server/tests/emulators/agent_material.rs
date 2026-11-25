@@ -299,7 +299,11 @@ async fn agent_material_shared_credentials_cap_the_level() {
     let ts = TestServer::start(&Backend::Sqlite).await;
     let api = ts.api().await;
 
-    let draft = azure_draft(&az, "shared");
+    let full_sas = az.container_sas("shared", "racwdl", std::time::Duration::from_secs(3600));
+    let mut draft = azure_draft(&az, "shared");
+    let options = draft["location"]["options"].as_object_mut().unwrap();
+    options.remove("account_key");
+    options.insert("sas_token".into(), json!(full_sas));
     let checked = api.post("/api/v1/repositories/check", &draft).await;
     assert_eq!(checked.status(), 200);
     let checked = body(checked).await;
@@ -318,13 +322,15 @@ async fn agent_material_shared_credentials_cap_the_level() {
     accepted["accept_weaker_guarantee"] = json!(true);
     let id = create(&api, &accepted).await;
     let material = writer_material(ts.state(), &id).await.unwrap();
-    assert_eq!(material.location.options["account_key"], az.account_key());
+    assert_eq!(material.location.options["sas_token"], full_sas);
+    assert!(!material.location.options.contains_key("account_key"));
+    assert!(material.sas_expires_at_ms.is_none());
 
     let mut keyless = draft.clone();
     keyless["location"]["options"]
         .as_object_mut()
         .unwrap()
-        .remove("account_key");
+        .remove("sas_token");
     let refused = api.post("/api/v1/repositories/check", &keyless).await;
     assert_eq!(refused.status(), 422);
     assert!(
@@ -469,6 +475,225 @@ async fn host_key_changed_raises_its_own_alert_and_clears_on_the_pinned_key() {
     assert_eq!(
         alerts_of(&ts, "host_key_changed", "resolved").await.len(),
         1
+    );
+    ts.stop().await;
+}
+
+pub(crate) async fn detail(api: &Api, id: &str) -> Value {
+    let response = api.get(&format!("/api/v1/repositories/{id}")).await;
+    assert_eq!(response.status(), 200);
+    body(response).await
+}
+
+pub(crate) fn note_list(detail: &Value) -> Vec<&str> {
+    detail["guarantee_notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n.as_str().unwrap())
+        .collect()
+}
+
+pub(crate) async fn vends(ts: &TestServer, id: &str) -> i64 {
+    sqlx::query("SELECT agent_sas_vending FROM repositories WHERE id = $1")
+        .bind(id)
+        .fetch_one(&ts.state().db.pool)
+        .await
+        .unwrap()
+        .get(0)
+}
+
+/// A row as the migration leaves the repositories that existed before it.
+pub(crate) async fn make_legacy(ts: &TestServer, id: &str) {
+    sqlx::query("UPDATE repositories SET agent_sas_vending = 0 WHERE id = $1")
+        .bind(id)
+        .execute(&ts.state().db.pool)
+        .await
+        .unwrap();
+}
+
+pub(crate) fn named(mut draft: Value, name: &str, container: &str) -> Value {
+    draft["name"] = json!(name);
+    draft["location"]["options"]["container"] = json!(container);
+    draft
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn sas_vending_new_azblob_repository_is_create_only() {
+    let az = AzuriteServer::start().await;
+    az.create_container("vended").await;
+    let ts = TestServer::start(&Backend::Sqlite).await;
+    let api = ts.api().await;
+
+    let draft = azure_draft(&az, "vended");
+    let checked = api.post("/api/v1/repositories/check", &draft).await;
+    assert_eq!(checked.status(), 200);
+    let text = checked.text().await.unwrap();
+    assert!(!text.contains(az.account_key()), "{text}");
+    let checked: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        checked["guarantee_level"],
+        GuaranteeLevel::CreateOnlyEnforced.as_str(),
+        "{checked}"
+    );
+    assert_eq!(note_list(&checked), ["lifecycle_unverified"], "{checked}");
+
+    let id = create(&api, &draft).await;
+    assert_eq!(vends(&ts, &id).await, 1);
+    let shown = detail(&api, &id).await;
+    assert_eq!(
+        shown["guarantee_level"],
+        GuaranteeLevel::CreateOnlyEnforced.as_str()
+    );
+    assert!(!shown.to_string().contains(az.account_key()), "{shown}");
+    let list = api.get("/api/v1/repositories").await.text().await.unwrap();
+    assert!(!list.contains(az.account_key()), "{list}");
+
+    let material = writer_material(ts.state(), &id).await.unwrap();
+    let options = &material.location.options;
+    assert!(options["sas_token"].contains("sp=rcl"), "{options:?}");
+    assert!(!options.contains_key("account_key"), "{options:?}");
+    let access = server_access(ts.state(), &id).await.unwrap();
+    assert_eq!(access.location.options["account_key"], az.account_key());
+    ts.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn sas_vending_connect_never_vends() {
+    let az = AzuriteServer::start().await;
+    az.create_container("again").await;
+    let ts = TestServer::start(&Backend::Sqlite).await;
+    let api = ts.api().await;
+
+    let first = create(&api, &azure_draft(&az, "again")).await;
+    assert_eq!(vends(&ts, &first).await, 1);
+
+    let mut second = named(azure_draft(&az, "again"), "azure-again", "again");
+    let refused = api
+        .post(
+            "/api/v1/repositories/connect",
+            &json!({ "draft": second, "password": PASSWORD }),
+        )
+        .await;
+    assert_eq!(refused.status(), 409);
+    let refused = body(refused).await;
+    assert_eq!(refused["code"], "weaker_guarantee", "{refused}");
+    assert_eq!(
+        refused["check"]["guarantee_level"],
+        GuaranteeLevel::HostCanOverwriteOrDelete.as_str()
+    );
+
+    second["accept_weaker_guarantee"] = json!(true);
+    let connected = api
+        .post(
+            "/api/v1/repositories/connect",
+            &json!({ "draft": second, "password": PASSWORD }),
+        )
+        .await;
+    assert_eq!(connected.status(), 201, "{}", body(connected).await);
+    let connected = body(connected).await;
+    let id = connected["id"].as_str().unwrap();
+    assert_eq!(vends(&ts, id).await, 0);
+    let shown = detail(&api, id).await;
+    assert_eq!(
+        shown["guarantee_level"],
+        GuaranteeLevel::HostCanOverwriteOrDelete.as_str()
+    );
+    assert!(note_list(&shown).contains(&"shared_credentials"), "{shown}");
+    let material = writer_material(ts.state(), id).await.unwrap();
+    assert_eq!(material.location.options["account_key"], az.account_key());
+    assert!(material.sas_expires_at_ms.is_none());
+    ts.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn sas_vending_existing_repository_keeps_shared_credentials() {
+    let az = AzuriteServer::start().await;
+    az.create_container("old").await;
+    let ts = TestServer::start(&Backend::Sqlite).await;
+    let api = ts.api().await;
+
+    let id = create(&api, &azure_draft(&az, "old")).await;
+    make_legacy(&ts, &id).await;
+    let rechecked = api
+        .post(&format!("/api/v1/repositories/{id}/check"), &json!({}))
+        .await;
+    assert_eq!(rechecked.status(), 200);
+    let rechecked = body(rechecked).await;
+    assert_eq!(
+        rechecked["guarantee_level"],
+        GuaranteeLevel::HostCanOverwriteOrDelete.as_str(),
+        "{rechecked}"
+    );
+    assert!(
+        rechecked["guarantee_notes"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("shared_credentials")),
+        "{rechecked}"
+    );
+    let material = writer_material(ts.state(), &id).await.unwrap();
+    assert_eq!(material.location.options["account_key"], az.account_key());
+    assert!(!material.location.options.contains_key("sas_token"));
+    ts.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn sas_vending_daily_recheck_measures_the_vended_sas() {
+    let az = AzuriteServer::start().await;
+    az.create_container("daily").await;
+    let ts = TestServer::start(&Backend::Sqlite).await;
+    let api = ts.api().await;
+
+    let id = create(&api, &azure_draft(&az, "daily")).await;
+    let result = lodestore_server::repos::agent_key::recheck_repository_at(
+        ts.state(),
+        &id,
+        lodestore_server::db::now_ms(),
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        result.guarantee_level,
+        GuaranteeLevel::CreateOnlyEnforced.as_str()
+    );
+    assert!(
+        !result
+            .guarantee_notes
+            .contains(&"shared_credentials".to_string())
+    );
+    ts.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn sas_vending_refuses_agent_options() {
+    let az = AzuriteServer::start().await;
+    az.create_container("noopts").await;
+    let ts = TestServer::start(&Backend::Sqlite).await;
+    let api = ts.api().await;
+
+    let id = create(&api, &azure_draft(&az, "noopts")).await;
+    let sas = az.container_sas("noopts", "rcl", std::time::Duration::from_secs(3600));
+    let response = api
+        .put(
+            &format!("/api/v1/repositories/{id}/agent-options"),
+            &json!({ "agent_options": { "sas_token": sas } }),
+        )
+        .await;
+    assert_eq!(response.status(), 409);
+    let refused = body(response).await;
+    assert!(
+        refused["message"]
+            .as_str()
+            .unwrap()
+            .contains("short-lived SAS tokens signed by the server"),
+        "{refused}"
     );
     ts.stop().await;
 }

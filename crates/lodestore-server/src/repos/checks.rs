@@ -399,11 +399,6 @@ pub async fn run_probe(opened: &Opened) -> ProbeReport {
     report
 }
 
-pub async fn run_checks(draft: &RepositoryDraft) -> Result<ProbeReport, ApiError> {
-    let opened = open_draft(draft)?;
-    Ok(run_probe(&opened).await)
-}
-
 pub fn agent_key_state_name(report: &ProbeReport) -> &'static str {
     match report.agent_key_state() {
         AgentKeyState::Verified => "verified",

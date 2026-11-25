@@ -23,8 +23,9 @@ use crate::error::{ApiError, ErrorBody};
 use crate::maintenance::check::db::repo_checks_summary;
 use crate::maintenance::gc::api::CleanupSummary;
 use crate::repos::checks::{
-    Opened, PROBE_TIMEOUT, consent_message, format_location, invalid, needs_consent, open_draft,
-    run_checks, run_probe, split_secret_options, timed_out_report, to_result, unchecked_report,
+    Opened, PROBE_TIMEOUT, consent_message, format_location, invalid, needs_consent,
+    open_draft_with, run_probe, split_secret_options, timed_out_report, to_result,
+    unchecked_report,
 };
 use crate::repos::db::{self, NewRepository, RepoExtras, RepoLocation};
 use crate::repos::{
@@ -141,7 +142,8 @@ async fn check_storage(
     if draft.location.backend == "sftp" && !pinned {
         return offer_host_key(&draft).await.map(Json);
     }
-    Ok(Json(to_result(&run_checks(&draft).await?)))
+    let opened = open_draft_with(&draft, true)?;
+    Ok(Json(to_result(&run_probe(&opened).await)))
 }
 
 /// First contact with an SFTP server: only the handshake runs, so nothing is
@@ -187,7 +189,8 @@ async fn start_wizard(
     Json(draft): Json<RepositoryDraft>,
 ) -> Result<Response, ApiError> {
     ensure_free_name(&state, &draft.name).await?;
-    let opened = open_draft(&draft)?;
+    let opened = open_draft_with(&draft, true)?;
+    let sas_vending = opened.sas_vending;
     let report = run_probe(&opened).await;
     let result = to_result(&report);
     if report.blocking() {
@@ -229,6 +232,7 @@ async fn start_wizard(
                 draft,
                 checks: result,
                 expires_at,
+                sas_vending,
             },
         );
     }
@@ -287,11 +291,12 @@ async fn commit_wizard(
         pending,
         draft,
         checks: probe_result,
+        sas_vending,
         ..
     } = entry;
 
     ensure_free_name(&state, &draft.name).await?;
-    let opened = open_draft(&draft)?;
+    let opened = open_draft_with(&draft, sas_vending)?;
     let keys = pending.read_keys();
     let master = keys.master().clone();
     let format_repo_id = *keys.repo_id();
@@ -349,6 +354,7 @@ pub async fn register(state: &AppState, r: Registration) -> Result<RepositorySum
         server_creds,
         agent_creds,
         agent_options,
+        sas_vending,
         ..
     } = r.opened;
     let (public, secret_options) = split_secret_options(&location);
@@ -379,7 +385,7 @@ pub async fn register(state: &AppState, r: Registration) -> Result<RepositorySum
             checked_at: Some(now_ms()),
             guarantee_level: Some(r.checks.guarantee_level),
             guarantee_notes_json: Some(guarantee_notes_json),
-            agent_sas_vending: false,
+            agent_sas_vending: sas_vending,
         },
     )
     .await?;
@@ -438,7 +444,7 @@ async fn connect_repository(
     }
     let draft = req.draft;
     ensure_free_name(&state, &draft.name).await?;
-    let opened = open_draft(&draft)?;
+    let opened = open_draft_with(&draft, false)?;
     let report = run_probe(&opened).await;
     let checks = to_result(&report);
     if report.blocking() {

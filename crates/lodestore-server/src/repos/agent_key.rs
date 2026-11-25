@@ -15,8 +15,8 @@ use crate::db::now_ms;
 use crate::error::{ApiError, ErrorBody};
 use crate::grpc::agent::{CAP_HOST_KEY, CAP_LOCATION, host_key_message, location_message};
 use crate::repos::checks::{
-    PROBE_TIMEOUT, agent_key_state_name, check_agent_options, invalid, open_parts, run_probe,
-    to_result,
+    PROBE_TIMEOUT, agent_key_state_name, check_agent_options, invalid, open_parts, open_parts_with,
+    run_probe, to_result,
 };
 use crate::repos::db::{self, AccessKey, AgentOptions, ServerAccess};
 use crate::repos::{CheckDto, CheckResult, Credentials, unlock_with_server_slot};
@@ -284,11 +284,12 @@ pub async fn recheck_repository_at(
 ) -> Result<CheckResult, ApiError> {
     let started = std::time::Instant::now();
     let access = load(state, id).await?;
-    let opened = open_parts(
+    let opened = open_parts_with(
         access.location.clone(),
         access.server_creds.clone(),
         access.agent_creds.clone(),
         access.agent_options.clone(),
+        access.sas_vending,
     )?;
     let report = run_probe(&opened)
         .instrument(tracing::info_span!("recheck", repository_id = %id))
@@ -682,7 +683,7 @@ async fn replace_host_key(
         (status = 200, description = "The options were replaced", body = AgentOptionsReplaced),
         (status = 403, description = "`step_up_required`: the password was not entered in the last 15 minutes", body = ErrorBody),
         (status = 404, description = "Unknown repository", body = ErrorBody),
-        (status = 409, description = "The repository is on S3 or local storage, was created with shared credentials, or its storage access changed during the check", body = ErrorBody),
+        (status = 409, description = "The repository is on S3 or local storage, was created with shared credentials, hands out server-signed SAS tokens, or its storage access changed during the check", body = ErrorBody),
         (status = 422, description = "An option is not allowed or empty, or the new options could not be verified", body = ErrorBody),
     )
 )]
@@ -699,6 +700,13 @@ async fn replace_agent_options(
         return Err(ApiError::Conflict(
             "Only Azure, GCS and SFTP repositories take agent options; an S3 repository takes PUT \
              /api/v1/repositories/{id}/agent-key."
+                .into(),
+        ));
+    }
+    if access.sas_vending {
+        return Err(ApiError::Conflict(
+            "This repository gives its agents short-lived SAS tokens signed by the server; there \
+             are no agent options to replace."
                 .into(),
         ));
     }
