@@ -486,6 +486,12 @@ impl BlobStore for S3Store {
         match self.op.write_with(key, data).if_not_exists(true).await {
             Ok(_) => Ok(()),
             Err(e) if e.kind() == ErrorKind::ConditionNotMatch => Err(BlobError::AlreadyExists),
+            // shortcut: R2 reports a bucket lock as 409 with this code in the body; match the code, not the status, until OpenDAL classifies it
+            Err(e) if e.to_string().contains("ObjectLockedByBucketPolicy") => {
+                Err(BlobError::Denied {
+                    message: redact_query_strings(&e.to_string()),
+                })
+            }
             Err(e) => Err(map_err(e)),
         }
     }
