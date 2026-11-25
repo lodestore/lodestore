@@ -333,11 +333,14 @@ pub fn guarantee_reason(
         Some("recheck_failing")
     } else {
         // The process start stands in only until the daily recheck first ran,
-        // so frequent restarts cannot hide one that stopped running.
+        // so frequent restarts cannot hide one that stopped running. Marks from
+        // a clock that ran ahead count as missing for the same reason.
+        let past = |at: i64| (at <= now_ms).then_some(at);
         let alive_since = g
             .tick_at_ms
+            .and_then(past)
             .unwrap_or(process_started_ms)
-            .max(g.measured_at_ms);
+            .max(past(g.measured_at_ms).unwrap_or(i64::MIN));
         (daily_recheck && now_ms - alive_since > NOT_RUNNING_AFTER_MS)
             .then_some("recheck_not_running")
     }
@@ -836,6 +839,14 @@ mod tests {
             Some("recheck_not_running"),
             "a restart does not hide a tick that stopped running"
         );
+
+        let future = g(NOW + 720 * HOUR, Some(NOW + 720 * HOUR));
+        assert_eq!(
+            reason(&future, NOW + 48 * HOUR + 1, NOW, true),
+            Some("recheck_not_running"),
+            "marks from a clock that ran ahead do not hide a tick that stopped running"
+        );
+        assert_eq!(reason(&future, NOW + 47 * HOUR, NOW, true), None);
 
         let lowered = RepositoryGuarantee {
             level: "host_can_overwrite_or_delete".into(),
