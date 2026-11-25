@@ -103,6 +103,112 @@ pub struct AgentOptionsReplaced {
     pub offline: u32,
 }
 
+/// Announced by agents that can pick up a reissued SAS in a running session.
+pub(crate) const CAP_SAS_REFRESH: &str = "sas_refresh_v1";
+
+#[derive(Serialize, ToSchema)]
+pub struct StorageAccess {
+    /// What happens to the access of revoked hosts: `expires` (the issued SAS runs out),
+    /// `until_rotation` (until the agent credentials are replaced and the old ones are
+    /// disabled at the provider), `new_repository` (shared credentials; only a new
+    /// repository and new credentials at the provider close it), `server_key_shared`
+    /// (the agents hold the server's own key) or `outside_lodestore` (a local path).
+    pub after_revoke: String,
+    /// `no_revoked_hosts`, `revoked_hosts_hold_access`, `rotated_disable_old_key_at_provider`,
+    /// `access_expires` or `access_expired`. Replacing credentials in Lodestore stops handing
+    /// the old ones out; it does not disable them at the provider.
+    pub status: String,
+    /// Hosts revoked after the credentials were last replaced (all of them when never replaced).
+    pub revoked_hosts_since_rotation: u32,
+    /// Hosts revoked before the last replacement; the old credentials still work at the
+    /// provider until they are disabled there.
+    pub revoked_hosts_before_rotation: u32,
+    /// Latest expiry of a SAS issued to a revoked host, unix ms; only while it is in the future.
+    pub access_ends_by: Option<i64>,
+    /// The endpoint that replaces the agents' credentials: `agent-key` or `agent-options`.
+    pub rotate_via: Option<String>,
+    /// Active hosts that cannot refresh a SAS; update them (SAS-issuing repositories only).
+    pub hosts_need_agent_update: u32,
+}
+
+pub fn storage_access_of(f: &db::StorageAccessFacts, now_ms: i64) -> StorageAccess {
+    let split = |hold_all: bool| {
+        let changed = f.changed_at.filter(|_| !hold_all).unwrap_or(i64::MIN);
+        let since = f.revoked.iter().filter(|(at, _)| *at > changed).count() as u32;
+        (since, f.revoked.len() as u32 - since)
+    };
+    let (after_revoke, rotate_via, hold_all) = match f.backend.as_str() {
+        "local" => ("outside_lodestore", None, true),
+        "s3" if f.agent_key_is_server_key => ("server_key_shared", None, true),
+        "s3" => ("until_rotation", Some("agent-key"), false),
+        _ if f.sas_vending => ("expires", None, true),
+        _ if f.has_agent_creds => ("until_rotation", Some("agent-options"), false),
+        _ => ("new_repository", None, true),
+    };
+    let mut out = StorageAccess {
+        after_revoke: after_revoke.into(),
+        status: "no_revoked_hosts".into(),
+        revoked_hosts_since_rotation: 0,
+        revoked_hosts_before_rotation: 0,
+        access_ends_by: None,
+        rotate_via: rotate_via.map(Into::into),
+        hosts_need_agent_update: f.outdated,
+    };
+    if f.sas_vending && after_revoke == "expires" {
+        let issued: Vec<i64> = f.revoked.iter().filter_map(|(_, se)| *se).collect();
+        let live = issued.iter().filter(|se| **se > now_ms).count() as u32;
+        if live > 0 {
+            out.status = "access_expires".into();
+            out.revoked_hosts_since_rotation = live;
+            out.access_ends_by = issued.into_iter().max();
+        } else if !issued.is_empty() {
+            out.status = "access_expired".into();
+        }
+        return out;
+    }
+    let (since, before) = split(hold_all);
+    out.revoked_hosts_since_rotation = since;
+    out.revoked_hosts_before_rotation = before;
+    if since > 0 {
+        out.status = "revoked_hosts_hold_access".into();
+    } else if before > 0 {
+        out.status = "rotated_disable_old_key_at_provider".into();
+    }
+    out
+}
+
+#[utoipa::path(
+    get,
+    tag = "Repositories",
+    summary = "Storage access of revoked hosts",
+    description = "Tells whether revoked hosts of the repository still hold access to its storage \
+        and what to do about it. `after_revoke` is `expires`, `until_rotation`, `new_repository`, \
+        `server_key_shared` or `outside_lodestore`. `status` is `no_revoked_hosts`, \
+        `revoked_hosts_hold_access`, `rotated_disable_old_key_at_provider`, `access_expires` or \
+        `access_expired`. `rotate_via` names the endpoint that replaces the agents' credentials: \
+        `agent-key` for S3 repositories, `agent-options` for the other backends with their own \
+        agent credentials. Replacing credentials in Lodestore stops handing out the old ones; the \
+        old key, service account key, SFTP key or static SAS keeps working at the provider until \
+        it is disabled there.",
+    security(("session" = [])),
+    path = "/api/v1/repositories/{id}/storage-access",
+    params(("id" = String, Path, description = "Repository id")),
+    responses(
+        (status = 200, description = "What revoked hosts of this repository can still reach", body = StorageAccess),
+        (status = 404, description = "Unknown repository", body = ErrorBody),
+    )
+)]
+async fn storage_access(
+    State(state): State<AppState>,
+    _user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<Json<StorageAccess>, ApiError> {
+    let facts = db::storage_access_facts(&state, &id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("repository not found".into()))?;
+    Ok(Json(storage_access_of(&facts, now_ms())))
+}
+
 async fn load(state: &AppState, id: &str) -> Result<ServerAccess, ApiError> {
     if db::find_repository(state, id).await?.is_none() {
         return Err(ApiError::NotFound("repository not found".into()));
@@ -888,6 +994,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(check_host_key))
         .routes(routes!(replace_host_key))
         .routes(routes!(replace_agent_options))
+        .routes(routes!(storage_access))
 }
 
 #[cfg(test)]
@@ -960,6 +1067,118 @@ mod tests {
         assert!(
             !message.contains("new key could not be verified"),
             "{message}"
+        );
+    }
+
+    const NOW: i64 = 1_000_000;
+
+    fn facts(backend: &str) -> db::StorageAccessFacts {
+        db::StorageAccessFacts {
+            backend: backend.into(),
+            sas_vending: false,
+            has_agent_creds: false,
+            agent_key_is_server_key: false,
+            changed_at: None,
+            revoked: vec![(10, None), (20, None)],
+            outdated: 0,
+        }
+    }
+
+    fn mode(f: &db::StorageAccessFacts) -> (String, Option<String>, u32) {
+        let a = storage_access_of(f, NOW);
+        (a.after_revoke, a.rotate_via, a.revoked_hosts_since_rotation)
+    }
+
+    #[test]
+    fn storage_access_follows_the_backend_and_mode() {
+        let with = |backend: &str, f: &dyn Fn(&mut db::StorageAccessFacts)| {
+            let mut x = facts(backend);
+            f(&mut x);
+            mode(&x)
+        };
+        let s = |a: &str, v: Option<&str>| (a.to_string(), v.map(String::from), 2);
+        assert_eq!(
+            with("s3", &|_| {}),
+            ("until_rotation".into(), Some("agent-key".into()), 2)
+        );
+        assert_eq!(
+            with("s3", &|f| f.agent_key_is_server_key = true),
+            s("server_key_shared", None)
+        );
+        for backend in ["azblob", "gcs", "sftp"] {
+            assert_eq!(
+                with(backend, &|f| f.has_agent_creds = true),
+                s("until_rotation", Some("agent-options")),
+                "{backend}"
+            );
+            assert_eq!(
+                with(backend, &|_| {}),
+                s("new_repository", None),
+                "{backend}"
+            );
+        }
+        assert_eq!(
+            with("azblob", &|f| {
+                f.sas_vending = true;
+                f.revoked = vec![(10, Some(NOW + 1))];
+            }),
+            ("expires".into(), None, 1)
+        );
+        assert_eq!(with("local", &|_| {}), s("outside_lodestore", None));
+        let mut shared = facts("s3");
+        shared.agent_key_is_server_key = true;
+        shared.changed_at = Some(100);
+        assert_eq!(
+            storage_access_of(&shared, NOW).revoked_hosts_before_rotation,
+            0
+        );
+    }
+
+    #[test]
+    fn storage_access_vending_ends_at_the_last_issued_expiry() {
+        let mut f = facts("azblob");
+        f.sas_vending = true;
+        f.revoked = vec![(10, Some(NOW + 3 * 3_600_000)), (20, Some(NOW + 1_000))];
+        let a = storage_access_of(&f, NOW);
+        assert_eq!(a.status, "access_expires");
+        assert_eq!(a.access_ends_by, Some(NOW + 3 * 3_600_000));
+        assert_eq!(a.revoked_hosts_since_rotation, 2);
+
+        f.revoked = vec![(10, Some(NOW - 5)), (20, Some(NOW - 1))];
+        let a = storage_access_of(&f, NOW);
+        assert_eq!(a.status, "access_expired");
+        assert_eq!(a.access_ends_by, None);
+        assert_eq!(
+            (
+                a.revoked_hosts_since_rotation,
+                a.revoked_hosts_before_rotation
+            ),
+            (0, 0)
+        );
+
+        f.revoked = vec![(10, None)];
+        let a = storage_access_of(&f, NOW);
+        assert_eq!(a.status, "no_revoked_hosts");
+        assert_eq!(a.revoked_hosts_since_rotation, 0);
+    }
+
+    #[test]
+    fn storage_access_revoked_before_upgrade_counts_until_rotation() {
+        let mut f = facts("s3");
+        f.revoked = vec![(50, None)];
+        let a = storage_access_of(&f, NOW);
+        assert_eq!(a.status, "revoked_hosts_hold_access");
+        assert_eq!(a.revoked_hosts_since_rotation, 1);
+
+        f.changed_at = Some(100);
+        let a = storage_access_of(&f, NOW);
+        assert_eq!(a.status, "rotated_disable_old_key_at_provider");
+        assert_eq!(
+            (
+                a.revoked_hosts_since_rotation,
+                a.revoked_hosts_before_rotation
+            ),
+            (0, 1)
         );
     }
 }

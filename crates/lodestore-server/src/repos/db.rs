@@ -9,6 +9,7 @@ use zeroize::Zeroizing;
 
 use crate::catalog::RepositoryUnavailable;
 use crate::db::now_ms;
+use crate::repos::agent_key::CAP_SAS_REFRESH;
 use crate::state::AppState;
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -829,7 +830,7 @@ pub async fn replace_agent_creds(
     let done = sqlx::query(
         "UPDATE repositories SET agent_creds_secret_id = $1, agent_key_state = $2, \
          checks_json = $3, checked_at = $4, guarantee_level = $5, guarantee_notes_json = $6, \
-         guarantee_accepted = $7, guarantee_checked_at = $4, \
+         guarantee_accepted = $7, guarantee_checked_at = $4, agent_access_changed_at = $4, \
          access_generation = access_generation + 1, guarantee_unchecked_runs = 0, \
          guarantee_failed_runs = 0 WHERE id = $8 AND guarantee_accepted = $9",
     )
@@ -903,8 +904,9 @@ pub async fn replace_agent_options(
     let done = sqlx::query(
         "UPDATE repositories SET agent_creds_secret_id = $1, agent_key_state = $2, \
          checks_json = $3, checked_at = $4, guarantee_level = $5, guarantee_notes_json = $6, \
-         guarantee_accepted = $7, guarantee_checked_at = $4, guarantee_unchecked_runs = 0, \
-         guarantee_failed_runs = 0, access_generation = access_generation + 1 \
+         guarantee_accepted = $7, guarantee_checked_at = $4, agent_access_changed_at = $4, \
+         guarantee_unchecked_runs = 0, guarantee_failed_runs = 0, \
+         access_generation = access_generation + 1 \
          WHERE id = $8 AND guarantee_accepted = $9 AND access_generation = $10",
     )
     .bind(new)
@@ -941,6 +943,81 @@ pub async fn replace_agent_options(
     }
     tx.commit().await?;
     Ok(Stored::Written)
+}
+
+/// What decides whether revoked hosts of a repository still hold access to its storage.
+pub struct StorageAccessFacts {
+    pub backend: String,
+    pub sas_vending: bool,
+    pub has_agent_creds: bool,
+    pub agent_key_is_server_key: bool,
+    /// When the agents' credentials were last replaced through the API; none when never.
+    pub changed_at: Option<i64>,
+    /// `revoked_at` and the latest SAS expiry issued, per revoked host.
+    pub revoked: Vec<(i64, Option<i64>)>,
+    /// Active hosts that cannot refresh a SAS.
+    pub outdated: u32,
+}
+
+pub async fn storage_access_facts(
+    state: &AppState,
+    id: &str,
+) -> anyhow::Result<Option<StorageAccessFacts>> {
+    let Some(row) = sqlx::query(
+        "SELECT backend, agent_sas_vending, agent_creds_secret_id, server_creds_secret_id, \
+         agent_access_changed_at FROM repositories WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&state.db.pool)
+    .await?
+    else {
+        return Ok(None);
+    };
+    let backend: String = row.try_get("backend")?;
+    let agent_sid = row.try_get::<Option<String>, _>("agent_creds_secret_id")?;
+    let server_sid = row.try_get::<Option<String>, _>("server_creds_secret_id")?;
+    let mut agent_key_is_server_key = false;
+    if backend == "s3"
+        && let (Some(a), Some(s)) = (&agent_sid, &server_sid)
+    {
+        let agent: SealedAccess = serde_json::from_slice(&state.sealer.get_secret(a).await?)?;
+        let server: SealedAccess = serde_json::from_slice(&state.sealer.get_secret(s).await?)?;
+        agent_key_is_server_key =
+            !agent.access_key_id.is_empty() && agent.access_key_id == server.access_key_id;
+    }
+    let sas_vending = row.try_get::<i64, _>("agent_sas_vending")? != 0;
+    let mut revoked = Vec::new();
+    let mut outdated = 0;
+    for r in sqlx::query(
+        "SELECT status, revoked_at, sas_expires_at, capabilities_json FROM agents \
+         WHERE repository_id = $1",
+    )
+    .bind(id)
+    .fetch_all(&state.db.pool)
+    .await?
+    {
+        if r.try_get::<String, _>("status")? == "revoked" {
+            revoked.push((
+                r.try_get::<Option<i64>, _>("revoked_at")?.unwrap_or(0),
+                r.try_get::<Option<i64>, _>("sas_expires_at")?,
+            ));
+        } else if sas_vending {
+            let can_refresh = r
+                .try_get::<Option<String>, _>("capabilities_json")?
+                .and_then(|j| serde_json::from_str::<Vec<String>>(&j).ok())
+                .is_some_and(|caps| caps.iter().any(|c| c == CAP_SAS_REFRESH));
+            outdated += u32::from(!can_refresh);
+        }
+    }
+    Ok(Some(StorageAccessFacts {
+        backend,
+        sas_vending,
+        has_agent_creds: agent_sid.is_some(),
+        agent_key_is_server_key,
+        changed_at: row.try_get("agent_access_changed_at")?,
+        revoked,
+        outdated,
+    }))
 }
 
 /// Pins a new host key after a probe with it reached the storage. The write

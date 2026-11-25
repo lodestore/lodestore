@@ -98,6 +98,7 @@ mod source_filter;
 mod sources;
 mod spa;
 mod stdin;
+mod storage_access;
 mod token_upgrade;
 mod tokens;
 mod tree_limits;
