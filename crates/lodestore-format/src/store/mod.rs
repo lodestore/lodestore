@@ -145,7 +145,9 @@ pub async fn put_named_bytes<S: BlobStore>(store: &S, key: &str, bytes: &Bytes) 
     match store.put_if_absent(key, bytes.clone()).await {
         Ok(()) => Ok(()),
         Err(BlobError::AlreadyExists) => match store.object_size(key).await {
-            Ok(Some(size)) => confirm_present(store, key, bytes, size).await,
+            Ok(Some(size)) => {
+                confirm_present(store, key, bytes, size, !store.publishes_atomically()).await
+            }
             Ok(None) => Err(BlobError::backend(format!(
                 "{key} reported as existing, then not found"
             ))
@@ -158,7 +160,7 @@ pub async fn put_named_bytes<S: BlobStore>(store: &S, key: &str, bytes: &Bytes) 
         // A key that may not overwrite can be refused instead of told the
         // object exists; that is a presence only if the object is seen.
         Err(denied @ BlobError::Denied { .. }) => match store.object_size(key).await {
-            Ok(Some(size)) => confirm_present(store, key, bytes, size).await,
+            Ok(Some(size)) => confirm_present(store, key, bytes, size, true).await,
             _ => Err(denied.into()),
         },
         Err(e) => Err(e.into()),
@@ -169,18 +171,20 @@ pub async fn put_named_bytes<S: BlobStore>(store: &S, key: &str, bytes: &Bytes) 
 /// size agrees and, on a store that can leave a torn object under the final
 /// name, when the bytes agree too: a direct write arrives out of order, so a
 /// full-size object can still have a hole. The read is capped at one byte
-/// past what was written.
+/// past what was written. A refusal (`compare`) always reads: pack names come
+/// from the server, not from the content, so a matching size proves nothing.
 async fn confirm_present<S: BlobStore>(
     store: &S,
     key: &str,
     bytes: &Bytes,
     size: u64,
+    compare: bool,
 ) -> Result<()> {
     let len = bytes.len() as u64;
     if size != len {
         return Err(Error::NameBurned { key: key.into() });
     }
-    if store.publishes_atomically() {
+    if !compare {
         return Ok(());
     }
     let seen = store.get_range(key, 0..len + 1).await?;
@@ -566,6 +570,48 @@ mod tests {
         fn publishes_atomically(&self) -> bool {
             true
         }
+    }
+
+    /// Refuses every write and holds these bytes under every name, as a key without
+    /// the right to overwrite does on a store that publishes atomically.
+    struct Refusing(Bytes);
+
+    impl BlobStore for Refusing {
+        async fn put_if_absent(&self, _: &str, _: Bytes) -> std::result::Result<(), BlobError> {
+            Err(BlobError::Denied {
+                message: "refused".into(),
+            })
+        }
+        async fn get(&self, _: &str) -> std::result::Result<Bytes, BlobError> {
+            Ok(self.0.clone())
+        }
+        async fn get_range(&self, _: &str, r: Range<u64>) -> std::result::Result<Bytes, BlobError> {
+            let end = (r.end as usize).min(self.0.len());
+            Ok(self.0.slice((r.start as usize).min(end)..end))
+        }
+        async fn list(&self, p: &str) -> std::result::Result<Vec<ListEntry>, BlobError> {
+            Ok(vec![ListEntry {
+                key: p.to_owned(),
+                size: self.0.len() as u64,
+                modified_ms: None,
+            }])
+        }
+
+        fn publishes_atomically(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_write_is_present_only_for_the_same_bytes() {
+        let store = Refusing(Bytes::from_static(b"abcd"));
+        put_named(&store, "packs/k", b"abcd".to_vec())
+            .await
+            .unwrap();
+        assert!(matches!(
+            put_named(&store, "packs/k", b"abce".to_vec()).await,
+            Err(Error::NameBurned { .. })
+        ));
     }
 
     async fn local(body: &[u8]) -> (tempfile::TempDir, LocalFsStore) {

@@ -6,7 +6,8 @@
 
 use std::collections::BTreeMap;
 
-use lodestore_format::store::{RepoLocation, Store};
+use bytes::Bytes;
+use lodestore_format::store::{BlobStore, RepoLocation, Store, put_named};
 use lodestore_testkit::fault_proxy::{FaultAction, FaultPlan, FaultProxy, FaultRule};
 use lodestore_testkit::gcs::FakeGcsServer;
 use lodestore_testkit::minio::free_port;
@@ -100,6 +101,58 @@ async fn adv_client_gcs_lost_response_retry_succeeds() {
     assert!(
         initiations.values().any(|n| *n >= 2),
         "no upload was repeated: {initiations:?}"
+    );
+}
+
+const FORBIDDEN: &str = r#"{"error":{"code":403,"message":"forbidden"}}"#;
+
+/// The server wrote `data`; the agent's upload of the same name is refused
+/// with 403, as a role without the right to overwrite may be.
+async fn refused_repeat(
+    bucket: &str,
+    data: &[u8],
+    repeat: Vec<u8>,
+) -> lodestore_format::Result<()> {
+    let plan = FaultPlan::none().with(FaultRule {
+        method: "POST",
+        key_prefix: String::new(),
+        action: FaultAction::Respond {
+            status: 403,
+            body: FORBIDDEN,
+        },
+        times: 1,
+    });
+    let (_gcs, _proxy, server, agent) = behind_proxy(bucket, plan).await;
+    let hex = blake3::hash(data).to_hex().to_string();
+    let key = format!("packs/{}/{hex}", &hex[..2]);
+    server
+        .put_if_absent(&key, Bytes::copy_from_slice(data))
+        .await
+        .unwrap();
+    put_named(&agent, &key, repeat).await
+}
+
+#[tokio::test]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn adv_client_gcs_refused_repeat_upload_is_present() {
+    let data = b"a pack the server already holds";
+    refused_repeat("refused-same", data, data.to_vec())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn adv_client_gcs_refused_upload_of_other_bytes_fails() {
+    let data = b"a pack the server already holds";
+    let mut other = data.to_vec();
+    other[0] ^= 1;
+    let err = refused_repeat("refused-other", data, other)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, lodestore_format::Error::NameBurned { .. }),
+        "{err:?}"
     );
 }
 
