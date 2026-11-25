@@ -297,7 +297,9 @@ fn credential_names(backend: &str) -> &'static [&'static str] {
     }
 }
 
-fn store_location(
+/// Stores the credentials of a location the server pushed in `repository.json`;
+/// a location that would change anything else is ignored.
+pub fn store_location(
     paths: &Paths,
     new: &lodestore_proto::agent::v1::RepoLocation,
 ) -> Result<(), AgentError> {
