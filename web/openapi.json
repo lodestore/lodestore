@@ -3999,6 +3999,16 @@
               }
             }
           },
+          "409": {
+            "description": "Another repository uses the container now (code `storage_changed`); check the storage again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "422": {
             "description": "Weak password or wrong last group",
             "content": {

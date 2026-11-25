@@ -339,6 +339,117 @@ pub async fn record_sas_issued(
     Ok(())
 }
 
+/// The credentials the agents of every Azure repository of the catalog hold,
+/// as [`crate::repos::checks::AzureNeighbour`]. A row whose secrets cannot be
+/// read counts as holding wide credentials on an unknown account.
+pub async fn azure_agent_credentials(
+    state: &AppState,
+    exclude_id: Option<&str>,
+) -> anyhow::Result<Vec<crate::repos::checks::AzureNeighbour>> {
+    use crate::repos::checks::{AzureNeighbour, agent_creds_wide, azure_account_name, vends_sas};
+
+    let rows = sqlx::query(
+        "SELECT id, location_json, server_creds_secret_id, agent_creds_secret_id, \
+         agent_sas_vending FROM repositories WHERE backend = 'azblob'",
+    )
+    .fetch_all(&state.db.pool)
+    .await?;
+    let mut found = Vec::new();
+    for row in rows {
+        let id: String = row.try_get("id")?;
+        if exclude_id == Some(id.as_str()) {
+            continue;
+        }
+        let read = async {
+            let mut options: BTreeMap<String, String> =
+                serde_json::from_str(&row.try_get::<String, _>("location_json")?)?;
+            if let Some(sid) = row.try_get::<Option<String>, _>("server_creds_secret_id")? {
+                let sealed: SealedAccess =
+                    serde_json::from_slice(&state.sealer.get_secret(&sid).await?)?;
+                options.extend(sealed.options);
+            }
+            let agent_options = match row.try_get::<Option<String>, _>("agent_creds_secret_id")? {
+                Some(sid) => {
+                    let sealed: SealedAccess =
+                        serde_json::from_slice(&state.sealer.get_secret(&sid).await?)?;
+                    sealed.agent_options()
+                }
+                None => AgentOptions::new(),
+            };
+            anyhow::Ok((options, agent_options))
+        };
+        found.push(match read.await {
+            Ok((options, agent_options)) => {
+                let location = lodestore_format::store::RepoLocation {
+                    backend: "azblob".to_string(),
+                    options,
+                };
+                let vending = row.try_get::<i64, _>("agent_sas_vending")? != 0
+                    && vends_sas(&location, &agent_options);
+                AzureNeighbour {
+                    account_name: azure_account_name(&location.options),
+                    container: location.options.get("container").cloned().unwrap_or_default(),
+                    wide: agent_creds_wide(&location, &agent_options, vending),
+                    protected: vending || !agent_options.is_empty(),
+                    id,
+                }
+            }
+            Err(error) => {
+                tracing::warn!(repository_id = %id, error = %format!("{error:#}"), "could not read the credentials of an Azure repository");
+                AzureNeighbour {
+                    id,
+                    account_name: None,
+                    container: String::new(),
+                    wide: true,
+                    protected: false,
+                }
+            }
+        });
+    }
+    Ok(found)
+}
+
+/// Applies the shared credentials cap to the stored level in one step and bumps
+/// the access generation, so a check that started earlier stores nothing over
+/// it. Returns whether anything changed; a level not yet measured stays so.
+pub async fn cap_guarantee_shared(state: &AppState, id: &str) -> anyhow::Result<bool> {
+    const CAPPED: &str = "host_can_overwrite_or_delete";
+    let note = lodestore_format::store::probe::Weakness::SharedCredentials.as_str();
+    let mut tx = state.db.pool.begin().await?;
+    if take_write_lock(&mut tx, id).await? == 0 {
+        return Ok(false);
+    }
+    let row =
+        sqlx::query("SELECT guarantee_level, guarantee_notes_json FROM repositories WHERE id = $1")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
+    let level: String = row.try_get("guarantee_level")?;
+    if level == "unchecked" {
+        return Ok(false);
+    }
+    let mut notes: Vec<String> =
+        serde_json::from_str(&row.try_get::<String, _>("guarantee_notes_json")?)
+            .unwrap_or_default();
+    if level == CAPPED && notes.iter().any(|n| n == note) {
+        return Ok(false);
+    }
+    if !notes.iter().any(|n| n == note) {
+        notes.push(note.to_string());
+    }
+    sqlx::query(
+        "UPDATE repositories SET guarantee_level = $1, guarantee_notes_json = $2, \
+         access_generation = access_generation + 1 WHERE id = $3",
+    )
+    .bind(CAPPED)
+    .bind(serde_json::to_string(&notes)?)
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
 #[derive(Debug, Clone)]
 pub struct RepoFull {
     pub id: String,

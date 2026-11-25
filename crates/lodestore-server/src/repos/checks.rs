@@ -13,9 +13,10 @@ use lodestore_format::store::probe::{
 use lodestore_format::store::{RepoLocation, StaticCredentials, Store};
 
 use crate::error::ApiError;
-use crate::repos::db::{AccessKey, AgentOptions};
+use crate::repos::db::{self, AccessKey, AgentOptions};
 use crate::repos::object_lock::{self, LifecycleVerdict};
 use crate::repos::{CheckDto, CheckResult, LocationDto, RepositoryDraft};
+use crate::state::AppState;
 
 pub(crate) const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -399,6 +400,187 @@ pub async fn run_probe(opened: &Opened) -> ProbeReport {
     report
 }
 
+/// True only for a service SAS that grants nothing beyond read, create and
+/// list. An account SAS, a missing `sr` or `sp`, any other permission letter
+/// or an unreadable token is wide.
+pub fn azure_sas_is_narrow(token: &str) -> bool {
+    let (mut service, mut permissions) = (false, false);
+    for pair in token.trim_start_matches('?').split('&') {
+        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+        if name.eq_ignore_ascii_case("ss") || name.eq_ignore_ascii_case("srt") {
+            return false;
+        }
+        if name.eq_ignore_ascii_case("sr") {
+            service = true;
+        } else if name.eq_ignore_ascii_case("sp") {
+            if value.is_empty() || !value.chars().all(|c| matches!(c, 'r' | 'c' | 'l')) {
+                return false;
+            }
+            permissions = true;
+        }
+    }
+    service && permissions
+}
+
+/// The Azure account name, lowercase: the `account_name` option, else the
+/// first label of a standard Azure Blob host. `None` when it cannot be told.
+pub fn azure_account_name(options: &BTreeMap<String, String>) -> Option<String> {
+    if let Some(name) = options.get("account_name").map(|n| n.trim())
+        && !name.is_empty()
+    {
+        return Some(name.to_ascii_lowercase());
+    }
+    let endpoint = options.get("endpoint")?;
+    let rest = endpoint
+        .split_once("://")
+        .map_or(endpoint.as_str(), |(_, r)| r);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = authority.rsplit('@').next().unwrap_or_default();
+    let host = host
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let name = if let Some(prefix) = host.strip_suffix(".blob.core.windows.net") {
+        prefix.strip_suffix(".privatelink").unwrap_or(prefix)
+    } else {
+        let prefix = host.strip_suffix(".blob.storage.azure.net")?;
+        let (name, zone) = prefix.rsplit_once('.')?;
+        let digits = zone.strip_prefix('z')?;
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        name
+    };
+    (!name.is_empty() && !name.contains('.')).then(|| name.to_string())
+}
+
+/// Two accounts are different only when both names are known and differ.
+pub fn same_azure_account(a: Option<&str>, b: Option<&str>) -> bool {
+    !matches!((a, b), (Some(a), Some(b)) if a != b)
+}
+
+/// Whether the agents of a repository hold credentials that reach beyond the
+/// repository's own container: the account key, or a SAS that is not narrow.
+pub fn agent_creds_wide(location: &RepoLocation, agent: &AgentOptions, sas_vending: bool) -> bool {
+    if sas_vending {
+        return false;
+    }
+    if !agent.is_empty() {
+        return agent
+            .get("sas_token")
+            .is_none_or(|sas| !azure_sas_is_narrow(sas));
+    }
+    if location
+        .options
+        .get("account_key")
+        .is_some_and(|k| !k.is_empty())
+    {
+        return true;
+    }
+    location
+        .options
+        .get("sas_token")
+        .is_none_or(|sas| !azure_sas_is_narrow(sas))
+}
+
+/// One Azure repository of the catalog as the credentials of its agents make it
+/// matter to another.
+pub struct AzureNeighbour {
+    pub id: String,
+    pub account_name: Option<String>,
+    pub container: String,
+    pub wide: bool,
+    /// The agents do not get the server's own credentials.
+    pub protected: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Neighbourhood {
+    pub same_container: bool,
+    pub account_wide: bool,
+}
+
+pub fn neighbourhood_of(our: &RepoLocation, neighbours: &[AzureNeighbour]) -> Neighbourhood {
+    let name = azure_account_name(&our.options);
+    let container = our.options.get("container");
+    let mut found = Neighbourhood {
+        same_container: false,
+        account_wide: false,
+    };
+    for n in neighbours {
+        if !same_azure_account(name.as_deref(), n.account_name.as_deref()) {
+            continue;
+        }
+        found.same_container |= container == Some(&n.container);
+        found.account_wide |= n.wide;
+    }
+    found
+}
+
+pub async fn azure_neighbourhood(
+    state: &AppState,
+    location: &RepoLocation,
+    exclude_id: Option<&str>,
+) -> Result<Neighbourhood, ApiError> {
+    if location.backend != "azblob" {
+        return Ok(Neighbourhood {
+            same_container: false,
+            account_wide: false,
+        });
+    }
+    let neighbours = db::azure_agent_credentials(state, exclude_id).await?;
+    Ok(neighbourhood_of(location, &neighbours))
+}
+
+/// [`run_probe`], and for an Azure repository whose agents do not get the
+/// server's credentials, the cap that other repositories of the same account
+/// put on its level.
+pub async fn run_probe_in(
+    state: &AppState,
+    opened: &Opened,
+    exclude_id: Option<&str>,
+) -> Result<ProbeReport, ApiError> {
+    let mut report = run_probe(opened).await;
+    if opened.location.backend == "azblob"
+        && (opened.sas_vending || !opened.agent_options.is_empty())
+    {
+        let around = azure_neighbourhood(state, &opened.location, exclude_id).await?;
+        if around.same_container || around.account_wide {
+            report.cap_guarantee(Weakness::SharedCredentials);
+        }
+    }
+    Ok(report)
+}
+
+/// Before a repository takes wide credentials or a container of another one,
+/// lowers the stored level of every protected repository of the same account
+/// that this puts at risk. Returns the ids it lowered.
+pub async fn cap_exposed_neighbours(
+    state: &AppState,
+    changed: &RepoLocation,
+    changed_agent: &AgentOptions,
+    changed_vending: bool,
+    exclude_id: Option<&str>,
+) -> Result<Vec<String>, ApiError> {
+    if changed.backend != "azblob" {
+        return Ok(Vec::new());
+    }
+    let wide = agent_creds_wide(changed, changed_agent, changed_vending);
+    let name = azure_account_name(&changed.options);
+    let container = changed.options.get("container");
+    let mut lowered = Vec::new();
+    for n in db::azure_agent_credentials(state, exclude_id).await? {
+        let exposed = n.protected
+            && same_azure_account(name.as_deref(), n.account_name.as_deref())
+            && (wide || container == Some(&n.container));
+        if exposed && db::cap_guarantee_shared(state, &n.id).await? {
+            lowered.push(n.id);
+        }
+    }
+    Ok(lowered)
+}
+
 pub fn agent_key_state_name(report: &ProbeReport) -> &'static str {
     match report.agent_key_state() {
         AgentKeyState::Verified => "verified",
@@ -718,6 +900,190 @@ mod tests {
             let error = check_agent_options("azblob", &bad).unwrap_err().to_string();
             assert!(error.contains("sas_token"), "{error}");
         }
+    }
+
+    #[test]
+    fn azure_sas_is_narrow_follows_the_table() {
+        for (token, narrow) in [
+            ("sv=2022-11-02&sr=c&sp=rcl&se=2030", true),
+            ("?sr=c&sp=r", true),
+            ("sr=c&sp=rcl&sp=d", false),
+            ("sr=c&sp=rcwl", false),
+            ("sr=c&sp=rcla", false),
+            ("sr=c&sp=rcld", false),
+            ("sr=c&sp=rclt", false),
+            ("sr=c&sp=rclx", false),
+            ("sr=c&sp=rcly", false),
+            ("ss=b&srt=sco&sp=rcl", false),
+            ("sr=c&sp=rcl&srt=o", false),
+            ("sp=rcl", false),
+            ("sr=c", false),
+            ("sr=c&sp=", false),
+            ("sr=c&sp", false),
+            ("", false),
+            ("%%%garbage&=&&", false),
+        ] {
+            assert_eq!(azure_sas_is_narrow(token), narrow, "{token}");
+        }
+    }
+
+    fn options(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    const SPELLINGS: [&str; 6] = [
+        "https://acct.blob.core.windows.net",
+        "HTTP://ACCT.blob.core.windows.net",
+        "https://acct.blob.core.windows.net:443/",
+        "https://acct.privatelink.blob.core.windows.net/",
+        "https://acct.z12.blob.storage.azure.net",
+        "https://user:pw@acct.blob.core.windows.net:8443/path?x=1",
+    ];
+
+    #[test]
+    fn azure_account_name_treats_every_spelling_as_one_account() {
+        assert_eq!(
+            azure_account_name(&options(&[("account_name", "Acct")])),
+            Some("acct".to_string())
+        );
+        for endpoint in SPELLINGS {
+            assert_eq!(
+                azure_account_name(&options(&[("endpoint", endpoint)])),
+                Some("acct".to_string()),
+                "{endpoint}"
+            );
+            assert_eq!(
+                azure_account_name(&options(&[
+                    ("endpoint", endpoint),
+                    ("account_name", "Acct")
+                ])),
+                Some("acct".to_string()),
+                "{endpoint}"
+            );
+        }
+        for endpoint in [
+            "https://backups.example.com",
+            "https://x.azureedge.net",
+            "http://127.0.0.1:10000/devstoreaccount1",
+            "https://a.b.blob.core.windows.net",
+            "https://acct.zz.blob.storage.azure.net",
+            "https://.blob.core.windows.net",
+            "[::1]:1",
+            "",
+            "://",
+        ] {
+            assert_eq!(
+                azure_account_name(&options(&[("endpoint", endpoint)])),
+                None,
+                "{endpoint}"
+            );
+        }
+        assert_eq!(azure_account_name(&options(&[])), None);
+    }
+
+    #[test]
+    fn same_azure_account_needs_proof_of_difference() {
+        assert!(!same_azure_account(Some("a"), Some("b")));
+        assert!(same_azure_account(Some("a"), Some("a")));
+        assert!(same_azure_account(None, Some("a")));
+        assert!(same_azure_account(Some("a"), None));
+        assert!(same_azure_account(None, None));
+        for first in SPELLINGS {
+            for second in SPELLINGS {
+                let name = |e| azure_account_name(&options(&[("endpoint", e)]));
+                assert!(
+                    same_azure_account(name(first).as_deref(), name(second).as_deref()),
+                    "{first} {second}"
+                );
+            }
+        }
+    }
+
+    fn azure_at(extra: &[(&str, &str)]) -> RepoLocation {
+        let mut all = vec![("container", "c"), ("account_name", "acct")];
+        all.extend_from_slice(extra);
+        RepoLocation::new("azblob", all)
+    }
+
+    #[test]
+    fn agent_creds_wide_follows_the_table() {
+        let key = account_key();
+        let narrow = "sr=c&sp=rcl&sv=1";
+        let wide = "sr=c&sp=racwdl&sv=1";
+        let keyed = azure_at(&[("account_key", &key)]);
+        assert!(!agent_creds_wide(&keyed, &agent(&[]), true));
+        assert!(!agent_creds_wide(
+            &keyed,
+            &agent(&[("sas_token", narrow)]),
+            false
+        ));
+        assert!(agent_creds_wide(
+            &keyed,
+            &agent(&[("sas_token", wide)]),
+            false
+        ));
+        assert!(agent_creds_wide(&keyed, &agent(&[]), false));
+        assert!(!agent_creds_wide(
+            &azure_at(&[("sas_token", narrow)]),
+            &agent(&[]),
+            false
+        ));
+        assert!(agent_creds_wide(
+            &azure_at(&[("sas_token", wide)]),
+            &agent(&[]),
+            false
+        ));
+        assert!(agent_creds_wide(&azure_at(&[]), &agent(&[]), false));
+    }
+
+    fn neighbour(account: Option<&str>, container: &str, wide: bool) -> AzureNeighbour {
+        AzureNeighbour {
+            id: "n".into(),
+            account_name: account.map(str::to_string),
+            container: container.into(),
+            wide,
+            protected: !wide,
+        }
+    }
+
+    #[test]
+    fn neighbourhood_of_follows_the_table() {
+        let ours = azure_at(&[]);
+        let around = |neighbours: &[AzureNeighbour]| {
+            let n = neighbourhood_of(&ours, neighbours);
+            (n.same_container, n.account_wide)
+        };
+        assert_eq!(around(&[]), (false, false));
+        assert_eq!(
+            around(&[neighbour(Some("acct"), "c", false)]),
+            (true, false)
+        );
+        assert_eq!(around(&[neighbour(None, "c", false)]), (true, false));
+        assert_eq!(around(&[neighbour(Some("acct"), "c", true)]), (true, true));
+        assert_eq!(around(&[neighbour(Some("acct"), "d", true)]), (false, true));
+        assert_eq!(around(&[neighbour(None, "d", true)]), (false, true));
+        assert_eq!(
+            around(&[neighbour(Some("acct"), "d", false)]),
+            (false, false)
+        );
+        assert_eq!(
+            around(&[neighbour(Some("other"), "c", true)]),
+            (false, false)
+        );
+        assert_eq!(
+            around(&[neighbour(Some("other"), "d", false)]),
+            (false, false)
+        );
+        assert_eq!(
+            around(&[
+                neighbour(Some("acct"), "d", false),
+                neighbour(Some("acct"), "e", true)
+            ]),
+            (false, true)
+        );
     }
 
     fn at(level: GuaranteeLevel) -> ProbeReport {

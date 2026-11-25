@@ -905,3 +905,80 @@ async fn sas_vending_material_carries_a_sas_and_no_account_key() {
         ts.stop().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sas_vending_cap_makes_an_in_flight_check_stale() {
+    use lodestore_server::repos::db::{
+        CheckWrite, GuaranteeWrite, Stored, cap_guarantee_shared, update_checks,
+    };
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let id = ts.create_local_repository("capped").await;
+        assert!(
+            !cap_guarantee_shared(ts.state(), &id).await.unwrap(),
+            "an unchecked level stays"
+        );
+        sqlx::query(
+            "UPDATE repositories SET guarantee_level = 'create_only_enforced', \
+             guarantee_accepted = 'create_only_enforced' WHERE id = $1",
+        )
+        .bind(&id)
+        .execute(&ts.state().db.pool)
+        .await
+        .unwrap();
+        let generation = server_access(ts.state(), &id).await.unwrap().generation;
+
+        assert!(cap_guarantee_shared(ts.state(), &id).await.unwrap());
+        assert!(!cap_guarantee_shared(ts.state(), &id).await.unwrap());
+        let row = sqlx::query(
+            "SELECT guarantee_level, guarantee_notes_json, access_generation \
+             FROM repositories WHERE id = $1",
+        )
+        .bind(&id)
+        .fetch_one(&ts.state().db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            row.get::<String, _>("guarantee_level"),
+            "host_can_overwrite_or_delete"
+        );
+        assert_eq!(
+            row.get::<String, _>("guarantee_notes_json"),
+            r#"["shared_credentials"]"#
+        );
+        assert_eq!(row.get::<i64, _>("access_generation"), generation + 1);
+
+        let older = GuaranteeWrite {
+            level: "create_only_enforced".into(),
+            notes_json: "[]".into(),
+            accepted: "create_only_enforced".into(),
+            read_accepted: "create_only_enforced".into(),
+        };
+        let now = lodestore_server::db::now_ms();
+        let stored = update_checks(
+            ts.state(),
+            &id,
+            &CheckWrite {
+                generation,
+                at_ms: now,
+                now_ms: now,
+                checks_json: "[]",
+                agent_key_state: "verified",
+                guarantee: Some(&older),
+                daily: false,
+                host_key_mismatch: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(stored, Stored::Stale, "[{}]", backend.name());
+        let level: String = sqlx::query("SELECT guarantee_level FROM repositories WHERE id = $1")
+            .bind(&id)
+            .fetch_one(&ts.state().db.pool)
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(level, "host_can_overwrite_or_delete");
+        ts.stop().await;
+    }
+}

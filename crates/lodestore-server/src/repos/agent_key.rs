@@ -15,8 +15,8 @@ use crate::db::now_ms;
 use crate::error::{ApiError, ErrorBody};
 use crate::grpc::agent::{CAP_HOST_KEY, CAP_LOCATION, host_key_message, location_message};
 use crate::repos::checks::{
-    PROBE_TIMEOUT, agent_key_state_name, check_agent_options, invalid, open_parts, open_parts_with,
-    run_probe, to_result,
+    PROBE_TIMEOUT, agent_key_state_name, cap_exposed_neighbours, check_agent_options, invalid,
+    open_parts, open_parts_with, run_probe, run_probe_in, to_result,
 };
 use crate::repos::db::{self, AccessKey, AgentOptions, ServerAccess};
 use crate::repos::{CheckDto, CheckResult, Credentials, unlock_with_server_slot};
@@ -291,9 +291,9 @@ pub async fn recheck_repository_at(
         access.agent_options.clone(),
         access.sas_vending,
     )?;
-    let report = run_probe(&opened)
+    let report = run_probe_in(state, &opened, Some(id))
         .instrument(tracing::info_span!("recheck", repository_id = %id))
-        .await;
+        .await?;
     let unlocked = match unlock_with_server_slot(&access).await {
         Ok(()) => true,
         Err(error) => {
@@ -735,9 +735,9 @@ async fn replace_agent_options(
         access.agent_creds.clone(),
         new.clone(),
     )?;
-    let report = run_probe(&opened)
+    let report = run_probe_in(&state, &opened, Some(&id))
         .instrument(tracing::info_span!("agent_options_probe", repository_id = %id))
-        .await;
+        .await?;
     let write = report.check(CheckId::Write);
     if write.status == CheckStatus::Fail {
         return Err(ApiError::Validation(format!(
@@ -750,6 +750,8 @@ async fn replace_agent_options(
             "The new agent options could not be verified: {reason}. The current agent options are unchanged."
         )));
     }
+
+    cap_exposed_neighbours(&state, &access.location, &new, false, Some(&id)).await?;
 
     let result = to_result(&report);
     let checks_json =
