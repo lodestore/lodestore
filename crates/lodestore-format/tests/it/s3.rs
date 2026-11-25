@@ -298,6 +298,7 @@ async fn s3_fault_ambiguous_put_is_success() {
 }
 
 const BUCKET_LOCKED: &str = "<Error><Code>ObjectLockedByBucketPolicy</Code><Message>Object is protected by a bucket lock rule.</Message></Error>";
+const INVALID_BUCKET_STATE: &str = "<Error><Code>InvalidBucketState</Code><Message>The request is not valid with the current state of the bucket.</Message></Error>";
 
 fn pack_key_of(data: &[u8]) -> String {
     let hex = blake3::hash(data).to_hex().to_string();
@@ -329,6 +330,31 @@ async fn s3_fault_bucket_lock_conflict_is_present() {
         "{err:?}"
     );
     assert_eq!(direct.get(&key).await.unwrap(), Bytes::from(data));
+}
+
+#[tokio::test]
+#[ignore = "slow; run with --run-ignored only"]
+async fn s3_fault_other_conflict_stays_an_error() {
+    let reply = FaultAction::Respond {
+        status: 409,
+        body: INVALID_BUCKET_STATE,
+    };
+    let (_minio, _proxy, store, direct) = proxied("other-conflict", put_rule(reply, 1)).await;
+    let data = b"a pack the server already holds".to_vec();
+    let key = pack_key_of(&data);
+    direct
+        .put_if_absent(&key, Bytes::from(data.clone()))
+        .await
+        .unwrap();
+
+    let err = put_named(&store, &key, data).await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            lodestore_format::Error::Store(BlobError::Backend { .. })
+        ),
+        "{err:?}"
+    );
 }
 
 #[tokio::test]
