@@ -2583,6 +2583,8 @@ dependencies = [
  "protox",
  "rand_chacha 0.10.0",
  "rand_core 0.10.1",
+ "reqsign-azure-storage",
+ "reqsign-core",
  "russh",
  "russh-sftp",
  "rustix",
