@@ -294,6 +294,14 @@ pub async fn recheck_repository_at(
     let result = to_result(&report);
     let checks_json =
         serde_json::to_string(&result.checks).map_err(|e| ApiError::Internal(e.into()))?;
+    let host_key_mismatch = (access.location.backend == "sftp")
+        .then(|| {
+            db::mismatch_update(
+                report.host_key_changed.as_ref(),
+                report.check(CheckId::Write).status != CheckStatus::Fail,
+            )
+        })
+        .flatten();
     let mut stored = false;
     for _ in 0..GUARANTEE_ATTEMPTS {
         let write = guarantee_write(&result, &accepted_now(state, id).await?, false)?;
@@ -308,25 +316,12 @@ pub async fn recheck_repository_at(
                 agent_key_state: &result.agent_key_state,
                 guarantee: write.as_ref(),
                 daily,
+                host_key_mismatch: host_key_mismatch.clone(),
             },
         )
         .await?;
         match outcome {
             db::Stored::Written => {
-                if access.location.backend == "sftp" {
-                    let reached = report.check(CheckId::Write).status != CheckStatus::Fail;
-                    if let Err(error) = db::record_host_key_check(
-                        state,
-                        id,
-                        access.generation,
-                        report.host_key_changed.as_ref(),
-                        reached,
-                    )
-                    .await
-                    {
-                        tracing::warn!(repository_id = %id, error = %format!("{error:#}"), "could not record the host key check");
-                    }
-                }
                 stored = true;
                 break;
             }

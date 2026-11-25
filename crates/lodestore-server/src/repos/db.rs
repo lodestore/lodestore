@@ -390,6 +390,8 @@ pub struct CheckWrite<'a> {
     pub agent_key_state: &'a str,
     pub guarantee: Option<&'a GuaranteeWrite>,
     pub daily: bool,
+    /// The host key mismatch column, as [`mismatch_update`] decides it.
+    pub host_key_mismatch: Option<Option<String>>,
 }
 
 /// What [`update_checks`] did with a check.
@@ -411,6 +413,8 @@ pub async fn update_checks(
     write: &CheckWrite<'_>,
 ) -> anyhow::Result<Stored> {
     let daily = i64::from(write.daily);
+    let set_mismatch = i64::from(write.host_key_mismatch.is_some());
+    let mismatch = write.host_key_mismatch.clone().flatten();
     let done =
         match write.guarantee {
             None => sqlx::query(
@@ -418,7 +422,8 @@ pub async fn update_checks(
                  guarantee_tick_at = CASE WHEN $5 = 1 THEN $3 ELSE guarantee_tick_at END, \
                  guarantee_unchecked_runs = CASE WHEN $5 = 1 \
                  THEN guarantee_unchecked_runs + 1 ELSE guarantee_unchecked_runs END, \
-                 guarantee_failed_runs = CASE WHEN $5 = 1 THEN 0 ELSE guarantee_failed_runs END \
+                 guarantee_failed_runs = CASE WHEN $5 = 1 THEN 0 ELSE guarantee_failed_runs END, \
+                 host_key_mismatch_json = CASE WHEN $8 = 1 THEN $9 ELSE host_key_mismatch_json END \
                  WHERE id = $4 AND access_generation = $6 \
                  AND (checked_at IS NULL OR checked_at <= $3 OR checked_at > $7)",
             )
@@ -429,6 +434,8 @@ pub async fn update_checks(
             .bind(daily)
             .bind(write.generation)
             .bind(write.now_ms)
+            .bind(set_mismatch)
+            .bind(mismatch)
             .execute(&state.db.pool)
             .await?,
             Some(g) => sqlx::query(
@@ -436,7 +443,8 @@ pub async fn update_checks(
                  guarantee_level = $4, guarantee_notes_json = $5, guarantee_accepted = $6, \
                  guarantee_checked_at = $3, \
                  guarantee_tick_at = CASE WHEN $9 = 1 THEN $3 ELSE guarantee_tick_at END, \
-                 guarantee_unchecked_runs = 0, guarantee_failed_runs = 0 \
+                 guarantee_unchecked_runs = 0, guarantee_failed_runs = 0, \
+                 host_key_mismatch_json = CASE WHEN $12 = 1 THEN $13 ELSE host_key_mismatch_json END \
                  WHERE id = $7 AND guarantee_accepted = $8 AND access_generation = $10 \
                  AND (checked_at IS NULL OR checked_at <= $3 OR checked_at > $11)",
             )
@@ -451,6 +459,8 @@ pub async fn update_checks(
             .bind(daily)
             .bind(write.generation)
             .bind(write.now_ms)
+            .bind(set_mismatch)
+            .bind(mismatch)
             .execute(&state.db.pool)
             .await?,
         };
@@ -480,37 +490,13 @@ pub async fn update_checks(
 /// `Some(None)` clears it, `Some(Some(json))` records the two fingerprints.
 /// The column clears only when the server answered a write again, so a probe
 /// that failed for another reason keeps a standing alert.
-fn mismatch_update(change: Option<&HostKeyChange>, reached: bool) -> Option<Option<String>> {
+pub fn mismatch_update(change: Option<&HostKeyChange>, reached: bool) -> Option<Option<String>> {
     match change {
         Some(c) => Some(Some(
             serde_json::json!({ "pinned": c.pinned, "offered": c.offered }).to_string(),
         )),
         None => reached.then_some(None),
     }
-}
-
-/// Stores or clears the host key mismatch of an SFTP repository under the
-/// same access generation the probe was measured with. Returns whether the
-/// row was written.
-pub async fn record_host_key_check(
-    state: &AppState,
-    id: &str,
-    generation: i64,
-    change: Option<&HostKeyChange>,
-    reached: bool,
-) -> anyhow::Result<bool> {
-    let Some(value) = mismatch_update(change, reached) else {
-        return Ok(false);
-    };
-    let done = sqlx::query(
-        "UPDATE repositories SET host_key_mismatch_json = $1 WHERE id = $2 AND access_generation = $3",
-    )
-    .bind(value)
-    .bind(id)
-    .bind(generation)
-    .execute(&state.db.pool)
-    .await?;
-    Ok(done.rows_affected() > 0)
 }
 
 /// Records that the daily recheck ran without storing a result; `failed`

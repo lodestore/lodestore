@@ -622,6 +622,7 @@ async fn guarantee_write_never_overwrites_an_accept_in_between() {
             agent_key_state: "verified",
             guarantee: Some(g),
             daily: false,
+            host_key_mismatch: None,
         }
     }
     for backend in backends() {
@@ -663,16 +664,28 @@ async fn guarantee_write_never_overwrites_an_accept_in_between() {
     }
 }
 
-/// The host key mismatch of a probe is written only under the access
-/// generation the probe was measured with.
+/// The host key mismatch of a probe is written together with the check, under
+/// the access generation it was measured with and only when no newer check
+/// was stored.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn host_key_mismatch_write_needs_the_same_access_generation() {
+async fn host_key_mismatch_is_written_with_its_check() {
     use lodestore_format::store::probe::HostKeyChange;
-    use lodestore_server::repos::db::record_host_key_check;
+    use lodestore_server::repos::db::{CheckWrite, Stored, mismatch_update, update_checks};
     let change = HostKeyChange {
         pinned: "SHA256:old".into(),
         offered: "SHA256:new".into(),
     };
+    let write = |generation: i64, at_ms: i64, mismatch: Option<Option<String>>| CheckWrite {
+        generation,
+        at_ms,
+        now_ms: lodestore_server::db::now_ms(),
+        checks_json: "[]",
+        agent_key_state: "unchecked",
+        guarantee: None,
+        daily: false,
+        host_key_mismatch: mismatch,
+    };
+    let now = lodestore_server::db::now_ms();
     for backend in backends() {
         let ts = TestServer::start(&backend).await;
         let id = ts.create_local_repository("keyed").await;
@@ -685,45 +698,47 @@ async fn host_key_mismatch_write_needs_the_same_access_generation() {
                 .try_get::<Option<String>, _>("host_key_mismatch_json")
                 .unwrap()
         };
-        sqlx::query("UPDATE repositories SET access_generation = 1 WHERE id = $1")
-            .bind(&id)
-            .execute(&ts.state().db.pool)
-            .await
-            .unwrap();
+        let store = |w: CheckWrite<'static>| {
+            let (state, id) = (ts.state(), id.clone());
+            async move { update_checks(state, &id, &w).await.unwrap() }
+        };
+        sqlx::query(
+            "UPDATE repositories SET access_generation = 1, checked_at = NULL WHERE id = $1",
+        )
+        .bind(&id)
+        .execute(&ts.state().db.pool)
+        .await
+        .unwrap();
+        let seen = mismatch_update(Some(&change), false);
 
-        let stored = record_host_key_check(ts.state(), &id, 0, Some(&change), false)
-            .await
-            .unwrap();
-        assert!(!stored, "[{}]", backend.name());
+        assert_eq!(
+            store(write(0, now, seen.clone())).await,
+            Stored::Stale,
+            "[{}]",
+            backend.name()
+        );
         assert_eq!(column().await, None);
 
-        let stored = record_host_key_check(ts.state(), &id, 1, Some(&change), false)
-            .await
-            .unwrap();
-        assert!(stored, "[{}]", backend.name());
+        assert_eq!(store(write(1, now, seen.clone())).await, Stored::Written);
         let json: Value = serde_json::from_str(&column().await.unwrap()).unwrap();
         assert_eq!(
             json,
             json!({ "pinned": "SHA256:old", "offered": "SHA256:new" })
         );
 
-        assert!(
-            !record_host_key_check(ts.state(), &id, 0, None, true)
-                .await
-                .unwrap()
+        let cleared = mismatch_update(None, true);
+        assert_eq!(cleared, Some(None));
+        assert_eq!(
+            store(write(1, now - 1, cleared.clone())).await,
+            Stored::Stale
+        );
+        assert!(column().await.is_some(), "an older probe cleared it");
+        assert_eq!(
+            store(write(1, now + 1, mismatch_update(None, false))).await,
+            Stored::Written
         );
         assert!(column().await.is_some());
-        assert!(
-            !record_host_key_check(ts.state(), &id, 1, None, false)
-                .await
-                .unwrap()
-        );
-        assert!(column().await.is_some());
-        assert!(
-            record_host_key_check(ts.state(), &id, 1, None, true)
-                .await
-                .unwrap()
-        );
+        assert_eq!(store(write(1, now + 2, cleared)).await, Stored::Written);
         assert_eq!(column().await, None);
         ts.stop().await;
     }
