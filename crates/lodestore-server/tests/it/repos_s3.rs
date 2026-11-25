@@ -2206,6 +2206,31 @@ async fn guarantee_newer_measurement_is_not_overwritten_by_a_slower_check() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn guarantee_tick_skips_a_row_it_cannot_read() {
+    let minio = MinioServer::start().await;
+    minio.create_versioned_bucket(BUCKET).await;
+    minio.create_versioned_bucket("second").await;
+    let server = minio.root_credentials();
+    let ts = quiet_server(&Backend::Sqlite).await;
+    let http = Http::login(&ts).await;
+    let agent = agent_user(&minio, BUCKET).await;
+    let broken = create_s3(&http, &s3_draft(&minio, BUCKET, "broken", &server, &agent)).await;
+    let broken = broken["id"].as_str().unwrap();
+    let agent = agent_user(&minio, "second").await;
+    let fine = create_s3(&http, &s3_draft(&minio, "second", "fine", &server, &agent)).await;
+    let fine = fine["id"].as_str().unwrap();
+    sqlx::query("UPDATE repositories SET guarantee_tick_at = 'not a time' WHERE id = $1")
+        .bind(broken)
+        .execute(&ts.state().db.pool)
+        .await
+        .unwrap();
+
+    let at = lodestore_server::db::now_ms() + 25 * HOUR;
+    assert_eq!(daily_tick(&ts, at).await, [fine]);
+    ts.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn guarantee_manual_inconclusive_check_keeps_the_failed_runs() {
     each_backend(|backend| async move {
         let minio = MinioServer::start().await;

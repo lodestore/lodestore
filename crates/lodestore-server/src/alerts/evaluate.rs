@@ -332,11 +332,12 @@ pub fn guarantee_reason(
     } else if g.host_key_mismatch.is_none() && g.failed_runs >= FAILED_RUNS {
         Some("recheck_failing")
     } else {
+        // The process start stands in only until the daily recheck first ran,
+        // so frequent restarts cannot hide one that stopped running.
         let alive_since = g
             .tick_at_ms
-            .unwrap_or(i64::MIN)
-            .max(g.measured_at_ms)
-            .max(process_started_ms);
+            .unwrap_or(process_started_ms)
+            .max(g.measured_at_ms);
         (daily_recheck && now_ms - alive_since > NOT_RUNNING_AFTER_MS)
             .then_some("recheck_not_running")
     }
@@ -828,6 +829,13 @@ mod tests {
 
         let fresh_tick = g(NOW - 100 * HOUR, Some(NOW - HOUR));
         assert_eq!(reason(&fresh_tick, NOW, 0, true), None);
+
+        let restarted = g(NOW - 100 * HOUR, Some(NOW - 49 * HOUR));
+        assert_eq!(
+            reason(&restarted, NOW, NOW - HOUR, true),
+            Some("recheck_not_running"),
+            "a restart does not hide a tick that stopped running"
+        );
 
         let lowered = RepositoryGuarantee {
             level: "host_can_overwrite_or_delete".into(),

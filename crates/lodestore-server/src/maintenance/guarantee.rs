@@ -77,9 +77,20 @@ pub async fn tick(
         if stop.is_cancelled() {
             break;
         }
-        let id: String = row.try_get("id")?;
-        let measured: Option<i64> = row.try_get("guarantee_checked_at")?;
-        let tick_at: Option<i64> = row.try_get("guarantee_tick_at")?;
+        let read = || -> Result<(String, Option<i64>, Option<i64>), sqlx::Error> {
+            Ok((
+                row.try_get("id")?,
+                row.try_get("guarantee_checked_at")?,
+                row.try_get("guarantee_tick_at")?,
+            ))
+        };
+        let (id, measured, tick_at) = match read() {
+            Ok(read) => read,
+            Err(error) => {
+                tracing::warn!(%error, "a repository could not be read for the daily recheck");
+                continue;
+            }
+        };
         if !due(now_ms, tick_at, measured) {
             continue;
         }
