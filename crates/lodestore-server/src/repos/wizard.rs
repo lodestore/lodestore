@@ -7,7 +7,9 @@ use lodestore_format::config::config_hash;
 use lodestore_format::crypto::Entropy;
 use lodestore_format::keys::{MasterKey, RecoveryKey};
 use lodestore_format::repo::{InitOptions, PendingInit, Repository};
-use lodestore_format::store::policy::{agent_iam_policy_json, agent_minio_commands, agent_rights};
+use lodestore_format::store::policy::{
+    STORAGE_PRESETS, agent_iam_policy_json, agent_minio_commands, agent_rights,
+};
 use lodestore_format::store::{BlobStore, SftpStore};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
@@ -579,6 +581,47 @@ async fn agent_policy(
     }))
 }
 
+#[derive(Serialize, ToSchema)]
+pub struct StoragePresetDto {
+    pub id: String,
+    pub label: String,
+    pub backend: String,
+    pub endpoint_template: Option<String>,
+    pub region: Option<String>,
+    pub path_style: bool,
+    pub provider: Option<String>,
+    pub mechanism: String,
+    pub verified: bool,
+    pub note: String,
+}
+
+#[utoipa::path(
+    get,
+    tag = "Repositories",
+    summary = "List the storage presets",
+    path = "/api/v1/storage-presets",
+    responses((status = 200, description = "The storage presets", body = Vec<StoragePresetDto>))
+)]
+async fn storage_presets(_user: AuthUser) -> Json<Vec<StoragePresetDto>> {
+    Json(
+        STORAGE_PRESETS
+            .iter()
+            .map(|p| StoragePresetDto {
+                id: p.id.into(),
+                label: p.label.into(),
+                backend: p.backend.into(),
+                endpoint_template: p.endpoint_template.map(Into::into),
+                region: p.region.map(Into::into),
+                path_style: p.path_style,
+                provider: p.provider.map(Into::into),
+                mechanism: p.mechanism.as_str().into(),
+                verified: p.verified,
+                note: p.note.into(),
+            })
+            .collect(),
+    )
+}
+
 pub fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(check_storage))
@@ -586,4 +629,5 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(commit_wizard))
         .routes(routes!(connect_repository))
         .routes(routes!(agent_policy))
+        .routes(routes!(storage_presets))
 }

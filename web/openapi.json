@@ -6748,6 +6748,30 @@
         ]
       }
     },
+    "/api/v1/storage-presets": {
+      "get": {
+        "tags": [
+          "Repositories"
+        ],
+        "summary": "List the storage presets",
+        "operationId": "storage_presets",
+        "responses": {
+          "200": {
+            "description": "The storage presets",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/StoragePresetDto"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/tokens": {
       "get": {
         "tags": [
@@ -15116,6 +15140,59 @@
         "properties": {
           "password": {
             "type": "string"
+          }
+        }
+      },
+      "StoragePresetDto": {
+        "type": "object",
+        "required": [
+          "id",
+          "label",
+          "backend",
+          "path_style",
+          "mechanism",
+          "verified",
+          "note"
+        ],
+        "properties": {
+          "backend": {
+            "type": "string"
+          },
+          "endpoint_template": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "mechanism": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string"
+          },
+          "path_style": {
+            "type": "boolean"
+          },
+          "provider": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "region": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "verified": {
+            "type": "boolean"
           }
         }
       },
