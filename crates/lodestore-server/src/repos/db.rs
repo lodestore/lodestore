@@ -418,7 +418,8 @@ pub async fn update_checks(
                  guarantee_tick_at = CASE WHEN $5 = 1 THEN $3 ELSE guarantee_tick_at END, \
                  guarantee_unchecked_runs = CASE WHEN $5 = 1 \
                  THEN guarantee_unchecked_runs + 1 ELSE guarantee_unchecked_runs END, \
-                 guarantee_failed_runs = 0 WHERE id = $4 AND access_generation = $6 \
+                 guarantee_failed_runs = CASE WHEN $5 = 1 THEN 0 ELSE guarantee_failed_runs END \
+                 WHERE id = $4 AND access_generation = $6 \
                  AND (checked_at IS NULL OR checked_at <= $3 OR checked_at > $7)",
             )
             .bind(write.checks_json)

@@ -2206,6 +2206,46 @@ async fn guarantee_newer_measurement_is_not_overwritten_by_a_slower_check() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn guarantee_manual_inconclusive_check_keeps_the_failed_runs() {
+    each_backend(|backend| async move {
+        let minio = MinioServer::start().await;
+        minio.create_versioned_bucket(BUCKET).await;
+        let server = minio.root_credentials();
+        let agent = agent_user(&minio, BUCKET).await;
+        let ts = quiet_server(&backend).await;
+        let http = Http::login(&ts).await;
+        let created = create_s3(&http, &s3_draft(&minio, BUCKET, "cloud", &server, &agent)).await;
+        let id = created["id"].as_str().unwrap();
+        sqlx::query("UPDATE repositories SET guarantee_failed_runs = 2 WHERE id = $1")
+            .bind(id)
+            .execute(&ts.state().db.pool)
+            .await
+            .unwrap();
+        let proxy = FaultProxy::start(minio.endpoint(), delete_not_implemented()).await;
+        point_at(&ts, id, &proxy.endpoint()).await;
+
+        let manual = recheck(&http, id).await;
+        assert_eq!(manual["guarantee_level"], "unchecked");
+        let marks = repo_marks(&ts, id).await;
+        assert_eq!(
+            counter(&marks, "guarantee_failed_runs"),
+            2,
+            "[{}]",
+            backend.name()
+        );
+        assert_eq!(counter(&marks, "guarantee_unchecked_runs"), 0);
+
+        let at = lodestore_server::db::now_ms() + 25 * HOUR;
+        assert_eq!(daily_tick(&ts, at).await, [id]);
+        let marks = repo_marks(&ts, id).await;
+        assert_eq!(counter(&marks, "guarantee_failed_runs"), 0);
+        assert_eq!(counter(&marks, "guarantee_unchecked_runs"), 1);
+        ts.stop().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn guarantee_check_marks_from_the_future_do_not_silence_the_recheck() {
     each_backend(|backend| async move {
         let minio = MinioServer::start().await;
