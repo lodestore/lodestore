@@ -68,7 +68,7 @@ The levels above them need no consent. A repository the server already knew keep
 
 A manual check measures the storage again and stores the measured level and its reasons. The accepted level changes by one rule: it rises when the measured level is higher, and otherwise stays. A measured level below the accepted one is shown on the repository page, with an action to accept the new level. A level of **Host can overwrite or delete** is never accepted by a check on its own, and a check that settles nothing changes neither level.
 
-The server also checks every repository by itself once a day, with the same probe. The first pass starts ten minutes after the server starts, and a repository is due when its last recorded result or last attempt is a day old. The alert `guarantee_downgraded` ([Alerts and notifications](/docs/guides/alerts/)) is raised for one of five causes:
+The server also checks every repository by itself once a day, with the same probe. The first pass starts ten minutes after the server starts, and a repository is due when its last recorded result or last failed attempt is a day old, or carries a time in the future, as a clock that ran ahead leaves it. A stopped server or a discarded result records no attempt, so the repository stays due. The alert `guarantee_downgraded` ([Alerts and notifications](/docs/guides/alerts/)) is raised for one of five causes:
 
 - the measured level is below the accepted one (`lower`);
 - the accepted level is **Unchecked** and the measured one is **Host can overwrite or delete** (`weak_unaccepted`);
@@ -76,7 +76,7 @@ The server also checks every repository by itself once a day, with the same prob
 - the check failed three times in a row before it recorded a result (`recheck_failing`);
 - the daily check has not run for more than two days (`recheck_not_running`).
 
-One failed check or one inconclusive probe changes nothing. A probe that started before the credentials, the host key or the agent options were replaced, or that finished after a newer result was stored, is discarded and does not overwrite anything. A changed SFTP host key raises its own alert, `host_key_changed`, instead of the two causes about missing measurements.
+One failed check or one inconclusive probe changes nothing. A probe that started before the credentials, the host key or the agent options were replaced, or that finished after a newer result was stored, is discarded and does not overwrite anything; a stored result with a time later than the clock of the new check does not count as newer. A changed SFTP host key raises its own alert, `host_key_changed`, instead of the two causes about missing measurements.
 
 After an update, an existing repository shows **Unchecked** as its measured level until its first check. The level it had before, taken from the state of its agent key, is kept as the accepted level. The first daily check after the update can raise `guarantee_downgraded` for repositories that existed before: when the accepted level is **Unchecked** and the check measures **Host can overwrite or delete**, the cause is `weak_unaccepted`. Accept the level on the repository page if you chose it, or fix the storage. `recheck_failing` does not appear at once: it needs three failed checks in a row, as for a new repository. Agents need the new version to take a new SFTP host key and new agent credentials from the server; an older agent is counted in `needs_update` when you replace them, and keeps the old values.
 
