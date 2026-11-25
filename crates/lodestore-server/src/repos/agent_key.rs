@@ -670,7 +670,7 @@ async fn replace_host_key(
     put,
     tag = "Repositories",
     summary = "Replace the agents' own credentials",
-    description = "For Azure Blob, GCS and SFTP repositories. Needs the password entered in the last \
+    description = "For Azure Blob, GCS and SFTP repositories created with separate agent credentials. Needs the password entered in the last \
         15 minutes. Replaces the whole set of agent options after a full check with them reached the \
         storage, then sends the new location to the online agents; offline agents get it when they \
         connect. Nothing changes when the check fails. The values are never returned.",
@@ -682,7 +682,7 @@ async fn replace_host_key(
         (status = 200, description = "The options were replaced", body = AgentOptionsReplaced),
         (status = 403, description = "`step_up_required`: the password was not entered in the last 15 minutes", body = ErrorBody),
         (status = 404, description = "Unknown repository", body = ErrorBody),
-        (status = 409, description = "The repository is on S3 or local storage, or its storage access changed during the check", body = ErrorBody),
+        (status = 409, description = "The repository is on S3 or local storage, was created with shared credentials, or its storage access changed during the check", body = ErrorBody),
         (status = 422, description = "An option is not allowed or empty, or the new options could not be verified", body = ErrorBody),
     )
 )]
@@ -699,6 +699,14 @@ async fn replace_agent_options(
         return Err(ApiError::Conflict(
             "Only Azure, GCS and SFTP repositories take agent options; an S3 repository takes PUT \
              /api/v1/repositories/{id}/agent-key."
+                .into(),
+        ));
+    }
+    if access.agent_options.is_empty() {
+        return Err(ApiError::Conflict(
+            "This repository was created with shared credentials, so every enrolled host already \
+             holds the server's credentials. Create a new repository with separate agent \
+             credentials."
                 .into(),
         ));
     }
