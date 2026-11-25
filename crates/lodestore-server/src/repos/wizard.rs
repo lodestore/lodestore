@@ -7,7 +7,9 @@ use lodestore_format::config::config_hash;
 use lodestore_format::crypto::Entropy;
 use lodestore_format::keys::{MasterKey, RecoveryKey};
 use lodestore_format::repo::{InitOptions, PendingInit, Repository};
-use lodestore_format::store::policy::{agent_iam_policy_json, agent_minio_commands};
+use lodestore_format::store::policy::{
+    STORAGE_PRESETS, agent_iam_policy_json, agent_minio_commands, agent_rights,
+};
 use lodestore_format::store::{BlobStore, SftpStore};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
@@ -500,15 +502,32 @@ async fn connect_repository(
 #[derive(Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 struct PolicyQuery {
-    bucket: String,
+    #[serde(default)]
+    bucket: Option<String>,
     #[serde(default)]
     prefix: String,
+    #[serde(default)]
+    preset: Option<String>,
+    #[serde(default)]
+    user: Option<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct AgentRightsDto {
+    pub preset: String,
+    pub mechanism: String,
+    pub text: String,
+    pub server_text: Option<String>,
+    pub verified: bool,
+    pub note: String,
 }
 
 #[derive(Serialize, ToSchema)]
 pub struct AgentPolicy {
     pub iam_json: String,
     pub minio_commands: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rights: Option<AgentRightsDto>,
 }
 
 #[utoipa::path(
@@ -519,20 +538,88 @@ pub struct AgentPolicy {
     params(PolicyQuery),
     responses(
         (status = 200, description = "The IAM policy for a write-only agent key", body = AgentPolicy),
-        (status = 422, description = "No bucket given", body = ErrorBody),
+        (status = 422, description = "Unsafe or missing bucket, prefix or user, or unknown preset", body = ErrorBody),
     )
 )]
 async fn agent_policy(
     _user: AuthUser,
     Query(q): Query<PolicyQuery>,
 ) -> Result<Json<AgentPolicy>, ApiError> {
-    if q.bucket.trim().is_empty() {
+    let bucket = q.bucket.as_deref().unwrap_or_default();
+    let have_bucket = !bucket.trim().is_empty();
+    if q.preset.is_none() && !have_bucket {
         return Err(ApiError::Validation("Enter the bucket name.".into()));
     }
+    let rights = match &q.preset {
+        None => None,
+        Some(preset) => {
+            let user = q.user.as_deref().unwrap_or_default();
+            let found = agent_rights(preset, bucket, &q.prefix, user)
+                .map_err(|e| ApiError::Validation(e.to_string()))?;
+            Some(AgentRightsDto {
+                preset: preset.clone(),
+                mechanism: found.mechanism.as_str().into(),
+                text: found.text,
+                server_text: found.server_text,
+                verified: found.verified,
+                note: found.note.into(),
+            })
+        }
+    };
+    let (iam_json, minio_commands) = if have_bucket {
+        (
+            agent_iam_policy_json(bucket, &q.prefix),
+            agent_minio_commands(bucket, &q.prefix),
+        )
+    } else {
+        Default::default()
+    };
     Ok(Json(AgentPolicy {
-        iam_json: agent_iam_policy_json(&q.bucket, &q.prefix),
-        minio_commands: agent_minio_commands(&q.bucket, &q.prefix),
+        iam_json,
+        minio_commands,
+        rights,
     }))
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct StoragePresetDto {
+    pub id: String,
+    pub label: String,
+    pub backend: String,
+    pub endpoint_template: Option<String>,
+    pub region: Option<String>,
+    pub path_style: bool,
+    pub provider: Option<String>,
+    pub mechanism: String,
+    pub verified: bool,
+    pub note: String,
+}
+
+#[utoipa::path(
+    get,
+    tag = "Repositories",
+    summary = "List the storage presets",
+    path = "/api/v1/storage-presets",
+    responses((status = 200, description = "The storage presets", body = Vec<StoragePresetDto>))
+)]
+async fn storage_presets(_user: AuthUser) -> Json<Vec<StoragePresetDto>> {
+    Json(
+        STORAGE_PRESETS
+            .iter()
+            .map(|p| StoragePresetDto {
+                id: p.id.into(),
+                label: p.label.into(),
+                backend: p.backend.into(),
+                endpoint_template: p.endpoint_template.map(Into::into),
+                region: p.region.map(Into::into),
+                path_style: p.path_style,
+                provider: p.provider.map(Into::into),
+                mechanism: p.mechanism.as_str().into(),
+                verified: p.verified,
+                note: p.note.into(),
+            })
+            .collect(),
+    )
 }
 
 pub fn routes() -> OpenApiRouter<AppState> {
@@ -542,4 +629,5 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(commit_wizard))
         .routes(routes!(connect_repository))
         .routes(routes!(agent_policy))
+        .routes(routes!(storage_presets))
 }

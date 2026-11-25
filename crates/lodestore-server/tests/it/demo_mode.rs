@@ -989,6 +989,7 @@ fn get_table(ids: &Ids) -> Vec<(&'static str, String)> {
             "/api/v1/agent-policy",
             "/api/v1/agent-policy?bucket=demo-bucket".into(),
         ),
+        ("/api/v1/storage-presets", "/api/v1/storage-presets".into()),
         ("/api/v1/fleet", "/api/v1/fleet".into()),
         (
             "/api/v1/fleet/hosts/{id}",

@@ -184,13 +184,29 @@
           {
             "name": "bucket",
             "in": "query",
-            "required": true,
+            "required": false,
             "schema": {
               "type": "string"
             }
           },
           {
             "name": "prefix",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "preset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "user",
             "in": "query",
             "required": false,
             "schema": {
@@ -210,7 +226,7 @@
             }
           },
           "422": {
-            "description": "No bucket given",
+            "description": "Unsafe or missing bucket, prefix or user, or unknown preset",
             "content": {
               "application/json": {
                 "schema": {
@@ -6732,6 +6748,30 @@
         ]
       }
     },
+    "/api/v1/storage-presets": {
+      "get": {
+        "tags": [
+          "Repositories"
+        ],
+        "summary": "List the storage presets",
+        "operationId": "storage_presets",
+        "responses": {
+          "200": {
+            "description": "The storage presets",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/StoragePresetDto"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/tokens": {
       "get": {
         "tags": [
@@ -7040,6 +7080,49 @@
           },
           "minio_commands": {
             "type": "string"
+          },
+          "rights": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AgentRightsDto"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "AgentRightsDto": {
+        "type": "object",
+        "required": [
+          "preset",
+          "mechanism",
+          "text",
+          "verified",
+          "note"
+        ],
+        "properties": {
+          "mechanism": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string"
+          },
+          "preset": {
+            "type": "string"
+          },
+          "server_text": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
+            "type": "string"
+          },
+          "verified": {
+            "type": "boolean"
           }
         }
       },
@@ -15057,6 +15140,59 @@
         "properties": {
           "password": {
             "type": "string"
+          }
+        }
+      },
+      "StoragePresetDto": {
+        "type": "object",
+        "required": [
+          "id",
+          "label",
+          "backend",
+          "path_style",
+          "mechanism",
+          "verified",
+          "note"
+        ],
+        "properties": {
+          "backend": {
+            "type": "string"
+          },
+          "endpoint_template": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "mechanism": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string"
+          },
+          "path_style": {
+            "type": "boolean"
+          },
+          "provider": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "region": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "verified": {
+            "type": "boolean"
           }
         }
       },
