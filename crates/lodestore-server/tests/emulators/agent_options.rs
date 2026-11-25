@@ -1,7 +1,9 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::agent_material::{PASSWORD, azure_draft, body, create, gcs_draft, sftp_draft};
+use crate::agent_material::{
+    PASSWORD, azure_draft, body, create, gcs_draft, make_legacy, sftp_draft,
+};
 use crate::common::{Api, Backend, TestServer, WAIT, wait_until};
 use crate::host_key_push::{
     agent_id, capabilities_vec, enroll_agent, open_session, open_session_at,
@@ -615,6 +617,7 @@ async fn agent_options_replace_refuses_without_step_up_or_a_working_probe() {
     shared["name"] = json!("shared");
     shared["accept_weaker_guarantee"] = json!(true);
     let shared = create(&api, &shared).await;
+    make_legacy(&ts, &shared).await;
     let before_shared = marks(&ts, &shared).await;
     let shared_sas = sas_with(&az, "refuse-shared", "rcl", 30);
     let (status, refused) = put_options(&api, &shared, json!({ "sas_token": shared_sas })).await;

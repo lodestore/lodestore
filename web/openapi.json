@@ -3999,6 +3999,16 @@
               }
             }
           },
+          "409": {
+            "description": "Another repository uses the container now (code `storage_changed`); check the storage again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "422": {
             "description": "Weak password or wrong last group",
             "content": {
@@ -4267,7 +4277,7 @@
             }
           },
           "409": {
-            "description": "The repository is on S3 or local storage, was created with shared credentials, or its storage access changed during the check",
+            "description": "The repository is on S3 or local storage, was created with shared credentials, hands out server-signed SAS tokens, or its storage access changed during the check",
             "content": {
               "application/json": {
                 "schema": {

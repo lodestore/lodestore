@@ -34,6 +34,9 @@ pub enum ApiError {
     BadRequest(&'static str, String),
     #[error("{0}")]
     Conflict(String),
+    /// A conflict refused with its own error code.
+    #[error("{1}")]
+    ConflictCode(&'static str, String),
     #[error("{0}")]
     PolicyConflict(String),
     #[error("too many requests")]
@@ -70,6 +73,7 @@ impl ApiError {
             ApiError::Validation(_) => (StatusCode::UNPROCESSABLE_ENTITY, "validation"),
             ApiError::BadRequest(code, _) => (StatusCode::BAD_REQUEST, code),
             ApiError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
+            ApiError::ConflictCode(code, _) => (StatusCode::CONFLICT, code),
             ApiError::PolicyConflict(_) => (StatusCode::CONFLICT, "policy_conflict"),
             ApiError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
             ApiError::TooManyRuns { .. } => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),

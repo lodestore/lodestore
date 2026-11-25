@@ -11,10 +11,30 @@ use crate::catalog::RepositoryUnavailable;
 use crate::db::now_ms;
 use crate::state::AppState;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoLocation {
     pub backend: String,
     pub options: BTreeMap<String, String>,
+}
+
+impl std::fmt::Debug for RepoLocation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let secret = lodestore_format::store::location::secret_option_names(&self.backend);
+        let options: BTreeMap<&str, &str> = self
+            .options
+            .iter()
+            .map(|(k, v)| {
+                let hidden = secret.contains(&k.as_str())
+                    || ["sas_token", "account_key", "key", "credential", "token"]
+                        .contains(&k.as_str());
+                (k.as_str(), if hidden { "<redacted>" } else { v.as_str() })
+            })
+            .collect();
+        f.debug_struct("RepoLocation")
+            .field("backend", &self.backend)
+            .field("options", &options)
+            .finish()
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -56,6 +76,8 @@ pub struct WriterMaterial {
     pub writer_keys_text: Zeroizing<String>,
     pub location: RepoLocation,
     pub agent_creds: Option<AccessKey>,
+    /// When the SAS signed for this material stops working, if one was signed.
+    pub sas_expires_at_ms: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -111,6 +133,8 @@ pub struct RepoExtras {
     pub checked_at: Option<i64>,
     pub guarantee_level: Option<String>,
     pub guarantee_notes_json: Option<String>,
+    /// Set only by the wizard's create path, never by connect or by a migration.
+    pub agent_sas_vending: bool,
 }
 
 pub async fn create_repository(state: &AppState, new: NewRepository) -> anyhow::Result<String> {
@@ -169,9 +193,9 @@ pub async fn create_repository_ext(
          config_hash, master_secret_id, server_slot_secret_id, server_creds_secret_id, \
          agent_creds_secret_id, agent_key_state, checks_json, checked_at, created_at, \
          provenance_backfilled_at, guarantee_level, guarantee_accepted, guarantee_notes_json, \
-         guarantee_checked_at) \
+         guarantee_checked_at, agent_sas_vending) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, \
-         $18, $19)",
+         $18, $19, $20)",
     )
     .bind(&id)
     .bind(&new.name)
@@ -196,6 +220,7 @@ pub async fn create_repository_ext(
     .bind(&guarantee_level)
     .bind(&guarantee_notes_json)
     .bind(extras.checked_at)
+    .bind(i64::from(extras.agent_sas_vending))
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -227,8 +252,8 @@ pub async fn writer_material(
 ) -> anyhow::Result<WriterMaterial> {
     let row = sqlx::query(
         "SELECT backend, location_json, format_repo_id, config_hash, \
-         master_secret_id, server_creds_secret_id, agent_creds_secret_id, open_error \
-         FROM repositories WHERE id = $1",
+         master_secret_id, server_creds_secret_id, agent_creds_secret_id, open_error, \
+         agent_sas_vending FROM repositories WHERE id = $1",
     )
     .bind(repository_id)
     .fetch_optional(&state.db.pool)
@@ -278,7 +303,13 @@ pub async fn writer_material(
             None => (None, AgentOptions::new()),
         };
     let full = lodestore_format::store::RepoLocation { backend, options };
-    let for_agent = crate::repos::checks::agent_location(&full, &agent_options);
+    let sas_vending = row.try_get::<i64, _>("agent_sas_vending")? != 0;
+    let (for_agent, expires_at) =
+        crate::repos::checks::agent_location_with(&full, &agent_options, sas_vending)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let sas_expires_at_ms = expires_at
+        .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+        .and_then(|d| i64::try_from(d.as_millis()).ok());
     Ok(WriterMaterial {
         writer_keys_text,
         location: RepoLocation {
@@ -286,7 +317,137 @@ pub async fn writer_material(
             options: for_agent.options,
         },
         agent_creds,
+        sas_expires_at_ms,
     })
+}
+
+/// Keeps on the host the latest expiry of a SAS sent to it; a smaller value
+/// never replaces a larger one.
+pub async fn record_sas_issued(
+    state: &AppState,
+    agent_id: &str,
+    expires_at_ms: i64,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE agents SET sas_expires_at = CASE WHEN sas_expires_at IS NULL \
+         OR sas_expires_at < $1 THEN $1 ELSE sas_expires_at END WHERE id = $2",
+    )
+    .bind(expires_at_ms)
+    .bind(agent_id)
+    .execute(&state.db.pool)
+    .await?;
+    Ok(())
+}
+
+/// The credentials the agents of every Azure repository of the catalog hold,
+/// as [`crate::repos::checks::AzureNeighbour`]. A row whose secrets cannot be
+/// read counts as holding wide credentials on an unknown account.
+pub async fn azure_agent_credentials(
+    state: &AppState,
+    exclude_id: Option<&str>,
+) -> anyhow::Result<Vec<crate::repos::checks::AzureNeighbour>> {
+    use crate::repos::checks::{AzureNeighbour, agent_creds_wide, azure_account_name, vends_sas};
+
+    let rows = sqlx::query(
+        "SELECT id, location_json, server_creds_secret_id, agent_creds_secret_id, \
+         agent_sas_vending FROM repositories WHERE backend = 'azblob'",
+    )
+    .fetch_all(&state.db.pool)
+    .await?;
+    let mut found = Vec::new();
+    for row in rows {
+        let id: String = row.try_get("id")?;
+        if exclude_id == Some(id.as_str()) {
+            continue;
+        }
+        let read = async {
+            let mut options: BTreeMap<String, String> =
+                serde_json::from_str(&row.try_get::<String, _>("location_json")?)?;
+            if let Some(sid) = row.try_get::<Option<String>, _>("server_creds_secret_id")? {
+                let sealed: SealedAccess =
+                    serde_json::from_slice(&state.sealer.get_secret(&sid).await?)?;
+                options.extend(sealed.options);
+            }
+            let agent_options = match row.try_get::<Option<String>, _>("agent_creds_secret_id")? {
+                Some(sid) => {
+                    let sealed: SealedAccess =
+                        serde_json::from_slice(&state.sealer.get_secret(&sid).await?)?;
+                    sealed.agent_options()
+                }
+                None => AgentOptions::new(),
+            };
+            anyhow::Ok((options, agent_options))
+        };
+        found.push(match read.await {
+            Ok((options, agent_options)) => {
+                let location = lodestore_format::store::RepoLocation {
+                    backend: "azblob".to_string(),
+                    options,
+                };
+                let vending = row.try_get::<i64, _>("agent_sas_vending")? != 0
+                    && vends_sas(&location, &agent_options);
+                AzureNeighbour {
+                    account_name: azure_account_name(&location.options),
+                    container: location.options.get("container").cloned().unwrap_or_default(),
+                    wide: agent_creds_wide(&location, &agent_options, vending),
+                    protected: vending || !agent_options.is_empty(),
+                    id,
+                }
+            }
+            Err(error) => {
+                tracing::warn!(repository_id = %id, error = %format!("{error:#}"), "could not read the credentials of an Azure repository");
+                AzureNeighbour {
+                    id,
+                    account_name: None,
+                    container: String::new(),
+                    wide: true,
+                    protected: false,
+                }
+            }
+        });
+    }
+    Ok(found)
+}
+
+/// Applies the shared credentials cap to the stored level in one step and bumps
+/// the access generation, so a check that started earlier stores nothing over
+/// it. Returns whether anything changed; a level not yet measured stays so.
+pub async fn cap_guarantee_shared(state: &AppState, id: &str) -> anyhow::Result<bool> {
+    const CAPPED: &str = "host_can_overwrite_or_delete";
+    let note = lodestore_format::store::probe::Weakness::SharedCredentials.as_str();
+    let mut tx = state.db.pool.begin().await?;
+    if take_write_lock(&mut tx, id).await? == 0 {
+        return Ok(false);
+    }
+    let row =
+        sqlx::query("SELECT guarantee_level, guarantee_notes_json FROM repositories WHERE id = $1")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
+    let level: String = row.try_get("guarantee_level")?;
+    if level == "unchecked" {
+        return Ok(false);
+    }
+    let mut notes: Vec<String> =
+        serde_json::from_str(&row.try_get::<String, _>("guarantee_notes_json")?)
+            .unwrap_or_default();
+    if level == CAPPED && notes.iter().any(|n| n == note) {
+        return Ok(false);
+    }
+    if !notes.iter().any(|n| n == note) {
+        notes.push(note.to_string());
+    }
+    sqlx::query(
+        "UPDATE repositories SET guarantee_level = $1, guarantee_notes_json = $2, \
+         access_generation = access_generation + 1 WHERE id = $3",
+    )
+    .bind(CAPPED)
+    .bind(serde_json::to_string(&notes)?)
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(true)
 }
 
 #[derive(Debug, Clone)]
@@ -543,6 +704,7 @@ pub struct ServerAccess {
     pub server_slot_secret: Option<Zeroizing<Vec<u8>>>,
     pub open_error: Option<String>,
     pub generation: i64,
+    pub sas_vending: bool,
 }
 
 pub(crate) async fn set_open_error(
@@ -571,7 +733,7 @@ pub async fn server_access(state: &AppState, id: &str) -> anyhow::Result<ServerA
     let row = sqlx::query(
         "SELECT backend, location_json, config_hash, format_repo_id, master_secret_id, \
          server_slot_secret_id, server_creds_secret_id, agent_creds_secret_id, open_error, \
-         access_generation FROM repositories WHERE id = $1",
+         access_generation, agent_sas_vending FROM repositories WHERE id = $1",
     )
     .bind(id)
     .fetch_optional(&state.db.pool)
@@ -619,6 +781,7 @@ pub async fn server_access(state: &AppState, id: &str) -> anyhow::Result<ServerA
         server_slot_secret,
         open_error: row.try_get("open_error")?,
         generation: row.try_get("access_generation")?,
+        sas_vending: row.try_get::<i64, _>("agent_sas_vending")? != 0,
     })
 }
 
@@ -844,6 +1007,26 @@ pub async fn replace_host_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repo_location_debug_hides_secrets() {
+        let location = RepoLocation {
+            backend: "azblob".into(),
+            options: BTreeMap::from([
+                ("container".into(), "visible-container".into()),
+                ("account_key".into(), "SECRET-KEY".into()),
+                ("sas_token".into(), "SECRET-SAS".into()),
+                ("encryption_key".into(), "SECRET-ENC".into()),
+                ("key".into(), "SECRET-K".into()),
+                ("credential".into(), "SECRET-C".into()),
+                ("token".into(), "SECRET-T".into()),
+            ]),
+        };
+        let shown = format!("{location:?}");
+        assert!(shown.contains("visible-container"), "{shown}");
+        assert!(!shown.contains("SECRET"), "{shown}");
+        assert!(shown.contains("<redacted>"), "{shown}");
+    }
 
     #[test]
     fn mismatch_update_follows_the_table() {

@@ -23,8 +23,9 @@ use crate::error::{ApiError, ErrorBody};
 use crate::maintenance::check::db::repo_checks_summary;
 use crate::maintenance::gc::api::CleanupSummary;
 use crate::repos::checks::{
-    Opened, PROBE_TIMEOUT, consent_message, format_location, invalid, needs_consent, open_draft,
-    run_checks, run_probe, split_secret_options, timed_out_report, to_result, unchecked_report,
+    Opened, PROBE_TIMEOUT, azure_neighbourhood, cap_exposed_neighbours, consent_message,
+    format_location, invalid, needs_consent, open_draft_with, run_probe_in, split_secret_options,
+    timed_out_report, to_result, unchecked_report,
 };
 use crate::repos::db::{self, NewRepository, RepoExtras, RepoLocation};
 use crate::repos::{
@@ -130,6 +131,7 @@ fn random_id() -> String {
     )
 )]
 async fn check_storage(
+    State(state): State<AppState>,
     _user: AuthUser,
     Json(draft): Json<RepositoryDraft>,
 ) -> Result<Json<CheckResult>, ApiError> {
@@ -141,7 +143,18 @@ async fn check_storage(
     if draft.location.backend == "sftp" && !pinned {
         return offer_host_key(&draft).await.map(Json);
     }
-    Ok(Json(to_result(&run_checks(&draft).await?)))
+    let opened = open_new(&state, &draft).await?;
+    Ok(Json(to_result(&run_probe_in(&state, &opened, None).await?)))
+}
+
+/// Opens a draft for a new repository. An Azure repository is measured with a
+/// server-signed SAS unless another repository of the catalog uses its container.
+async fn open_new(state: &AppState, draft: &RepositoryDraft) -> Result<Opened, ApiError> {
+    let location = format_location(&draft.location);
+    let allow = !azure_neighbourhood(state, &location, None)
+        .await?
+        .same_container;
+    open_draft_with(draft, allow)
 }
 
 /// First contact with an SFTP server: only the handshake runs, so nothing is
@@ -187,8 +200,9 @@ async fn start_wizard(
     Json(draft): Json<RepositoryDraft>,
 ) -> Result<Response, ApiError> {
     ensure_free_name(&state, &draft.name).await?;
-    let opened = open_draft(&draft)?;
-    let report = run_probe(&opened).await;
+    let opened = open_new(&state, &draft).await?;
+    let sas_vending = opened.sas_vending;
+    let report = run_probe_in(&state, &opened, None).await?;
     let result = to_result(&report);
     if report.blocking() {
         return Ok(conflict_with(
@@ -229,6 +243,7 @@ async fn start_wizard(
                 draft,
                 checks: result,
                 expires_at,
+                sas_vending,
             },
         );
     }
@@ -255,6 +270,7 @@ async fn start_wizard(
     responses(
         (status = 201, description = "The repository was created", body = RepositorySummary),
         (status = 404, description = "The setup session expired", body = ErrorBody),
+        (status = 409, description = "Another repository uses the container now (code `storage_changed`); check the storage again", body = ErrorBody),
         (status = 422, description = "Weak password or wrong last group", body = ErrorBody),
     )
 )]
@@ -287,11 +303,22 @@ async fn commit_wizard(
         pending,
         draft,
         checks: probe_result,
+        sas_vending,
         ..
     } = entry;
 
     ensure_free_name(&state, &draft.name).await?;
-    let opened = open_draft(&draft)?;
+    if sas_vending
+        && azure_neighbourhood(&state, &format_location(&draft.location), None)
+            .await?
+            .same_container
+    {
+        return Err(ApiError::ConflictCode(
+            "storage_changed",
+            "Another repository uses this container now. Check the storage again.".into(),
+        ));
+    }
+    let opened = open_draft_with(&draft, sas_vending)?;
     let keys = pending.read_keys();
     let master = keys.master().clone();
     let format_repo_id = *keys.repo_id();
@@ -349,8 +376,10 @@ pub async fn register(state: &AppState, r: Registration) -> Result<RepositorySum
         server_creds,
         agent_creds,
         agent_options,
+        sas_vending,
         ..
     } = r.opened;
+    cap_exposed_neighbours(state, &location, &agent_options, sas_vending, None).await?;
     let (public, secret_options) = split_secret_options(&location);
     let checks_json =
         serde_json::to_string(&r.checks.checks).map_err(|e| ApiError::Internal(e.into()))?;
@@ -379,6 +408,7 @@ pub async fn register(state: &AppState, r: Registration) -> Result<RepositorySum
             checked_at: Some(now_ms()),
             guarantee_level: Some(r.checks.guarantee_level),
             guarantee_notes_json: Some(guarantee_notes_json),
+            agent_sas_vending: sas_vending,
         },
     )
     .await?;
@@ -437,8 +467,8 @@ async fn connect_repository(
     }
     let draft = req.draft;
     ensure_free_name(&state, &draft.name).await?;
-    let opened = open_draft(&draft)?;
-    let report = run_probe(&opened).await;
+    let opened = open_draft_with(&draft, false)?;
+    let report = run_probe_in(&state, &opened, None).await?;
     let checks = to_result(&report);
     if report.blocking() {
         return Ok(conflict_with(

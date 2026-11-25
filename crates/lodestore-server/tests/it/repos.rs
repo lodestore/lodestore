@@ -815,3 +815,170 @@ async fn access_replacements_survive_concurrent_writes() {
     }
     ts.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sas_vending_material_carries_a_sas_and_no_account_key() {
+    use lodestore_format::crypto::Entropy;
+    use lodestore_format::repo::{InitOptions, PendingInit};
+    use lodestore_server::repos::db::{
+        NewRepository, RepoExtras, RepoLocation, create_repository_ext, record_sas_issued,
+        writer_material,
+    };
+    use std::collections::BTreeMap;
+
+    let account_key = data_encoding::BASE64.encode(&[9u8; 64]);
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let pending = PendingInit::generate(&mut Entropy::os(), InitOptions::default())
+            .expect("generating a repository");
+        let keys = pending.read_keys();
+        let id = create_repository_ext(
+            ts.state(),
+            NewRepository {
+                name: "vended".into(),
+                location: RepoLocation {
+                    backend: "azblob".into(),
+                    options: BTreeMap::from([
+                        ("account_name".into(), "lodeacct".into()),
+                        ("endpoint".into(), "http://127.0.0.1:9/lodeacct".into()),
+                        ("container".into(), "vended".into()),
+                    ]),
+                },
+                format_repo_id: *keys.repo_id(),
+                config_hash: lodestore_format::config::config_hash(pending.config_bytes()),
+                master: keys.master().clone(),
+                server_slot_secret: None,
+                server_creds: None,
+                agent_creds: None,
+            },
+            RepoExtras {
+                secret_options: BTreeMap::from([("account_key".into(), account_key.clone())]),
+                agent_sas_vending: true,
+                ..RepoExtras::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let material = writer_material(ts.state(), &id).await.unwrap();
+        let options = &material.location.options;
+        let sas = &options["sas_token"];
+        assert!(sas.contains("sp=rcl"), "{sas}");
+        assert!(!options.contains_key("account_key"), "{options:?}");
+        let left = material.sas_expires_at_ms.unwrap() - lodestore_server::db::now_ms();
+        let minute = 60_000;
+        assert!(
+            (23 * 60 * minute + 44 * minute..=23 * 60 * minute + 46 * minute).contains(&left),
+            "[{}] {left}",
+            backend.name()
+        );
+        let shown = format!("{:?}", material.location);
+        let sig = sas
+            .split('&')
+            .find_map(|p| p.strip_prefix("sig="))
+            .expect("a signature");
+        assert!(
+            !shown.contains(&account_key) && !shown.contains(sig),
+            "{shown}"
+        );
+
+        sqlx::query(
+            "INSERT INTO agents (id, hostname, repository_id, labels_json, os, arch, version, \
+             status, enrolled_at, cert_serial, cert_issued_at, cert_not_after) \
+             VALUES ('host-1', 'h', $1, '[]', 'linux', 'x86_64', '0.1.0', 'active', 1, 's', 1, 2)",
+        )
+        .bind(&id)
+        .execute(&ts.state().db.pool)
+        .await
+        .unwrap();
+        let stored = || async {
+            sqlx::query("SELECT sas_expires_at FROM agents WHERE id = 'host-1'")
+                .fetch_one(&ts.state().db.pool)
+                .await
+                .unwrap()
+                .get::<Option<i64>, _>(0)
+        };
+        assert_eq!(stored().await, None);
+        record_sas_issued(ts.state(), "host-1", 2000).await.unwrap();
+        record_sas_issued(ts.state(), "host-1", 1000).await.unwrap();
+        assert_eq!(stored().await, Some(2000));
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sas_vending_cap_makes_an_in_flight_check_stale() {
+    use lodestore_server::repos::db::{
+        CheckWrite, GuaranteeWrite, Stored, cap_guarantee_shared, update_checks,
+    };
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let id = ts.create_local_repository("capped").await;
+        assert!(
+            !cap_guarantee_shared(ts.state(), &id).await.unwrap(),
+            "an unchecked level stays"
+        );
+        sqlx::query(
+            "UPDATE repositories SET guarantee_level = 'create_only_enforced', \
+             guarantee_accepted = 'create_only_enforced' WHERE id = $1",
+        )
+        .bind(&id)
+        .execute(&ts.state().db.pool)
+        .await
+        .unwrap();
+        let generation = server_access(ts.state(), &id).await.unwrap().generation;
+
+        assert!(cap_guarantee_shared(ts.state(), &id).await.unwrap());
+        assert!(!cap_guarantee_shared(ts.state(), &id).await.unwrap());
+        let row = sqlx::query(
+            "SELECT guarantee_level, guarantee_notes_json, access_generation \
+             FROM repositories WHERE id = $1",
+        )
+        .bind(&id)
+        .fetch_one(&ts.state().db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            row.get::<String, _>("guarantee_level"),
+            "host_can_overwrite_or_delete"
+        );
+        assert_eq!(
+            row.get::<String, _>("guarantee_notes_json"),
+            r#"["shared_credentials"]"#
+        );
+        assert_eq!(row.get::<i64, _>("access_generation"), generation + 1);
+
+        let older = GuaranteeWrite {
+            level: "create_only_enforced".into(),
+            notes_json: "[]".into(),
+            accepted: "create_only_enforced".into(),
+            read_accepted: "create_only_enforced".into(),
+        };
+        let now = lodestore_server::db::now_ms();
+        let stored = update_checks(
+            ts.state(),
+            &id,
+            &CheckWrite {
+                generation,
+                at_ms: now,
+                now_ms: now,
+                checks_json: "[]",
+                agent_key_state: "verified",
+                guarantee: Some(&older),
+                daily: false,
+                host_key_mismatch: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(stored, Stored::Stale, "[{}]", backend.name());
+        let level: String = sqlx::query("SELECT guarantee_level FROM repositories WHERE id = $1")
+            .bind(&id)
+            .fetch_one(&ts.state().db.pool)
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(level, "host_can_overwrite_or_delete");
+        ts.stop().await;
+    }
+}
