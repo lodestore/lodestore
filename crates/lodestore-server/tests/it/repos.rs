@@ -617,6 +617,7 @@ async fn guarantee_write_never_overwrites_an_accept_in_between() {
         CheckWrite {
             generation: 0,
             at_ms: lodestore_server::db::now_ms(),
+            now_ms: lodestore_server::db::now_ms(),
             checks_json: "[]",
             agent_key_state: "verified",
             guarantee: Some(g),

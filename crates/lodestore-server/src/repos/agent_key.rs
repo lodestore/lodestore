@@ -272,6 +272,7 @@ pub async fn recheck_repository_at(
     at_ms: i64,
     daily: bool,
 ) -> Result<CheckResult, ApiError> {
+    let started = std::time::Instant::now();
     let access = load(state, id).await?;
     let opened = open_parts(
         access.location.clone(),
@@ -302,6 +303,7 @@ pub async fn recheck_repository_at(
             &db::CheckWrite {
                 generation: access.generation,
                 at_ms,
+                now_ms: at_ms.saturating_add(started.elapsed().as_millis() as i64),
                 checks_json: &checks_json,
                 agent_key_state: &result.agent_key_state,
                 guarantee: write.as_ref(),

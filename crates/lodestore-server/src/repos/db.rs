@@ -379,10 +379,13 @@ pub struct GuaranteeWrite {
 }
 
 /// One check to store. `generation` is the access generation read together
-/// with the credentials the probe used; `at_ms` is when the probe started.
+/// with the credentials the probe used; `at_ms` is when the probe started and
+/// `now_ms` is the same clock at the write. A stored check later than `now_ms`
+/// was written by a wrong clock and does not block this one.
 pub struct CheckWrite<'a> {
     pub generation: i64,
     pub at_ms: i64,
+    pub now_ms: i64,
     pub checks_json: &'a str,
     pub agent_key_state: &'a str,
     pub guarantee: Option<&'a GuaranteeWrite>,
@@ -416,7 +419,7 @@ pub async fn update_checks(
                  guarantee_unchecked_runs = CASE WHEN $5 = 1 \
                  THEN guarantee_unchecked_runs + 1 ELSE guarantee_unchecked_runs END, \
                  guarantee_failed_runs = 0 WHERE id = $4 AND access_generation = $6 \
-                 AND (checked_at IS NULL OR checked_at <= $3)",
+                 AND (checked_at IS NULL OR checked_at <= $3 OR checked_at > $7)",
             )
             .bind(write.checks_json)
             .bind(write.agent_key_state)
@@ -424,6 +427,7 @@ pub async fn update_checks(
             .bind(id)
             .bind(daily)
             .bind(write.generation)
+            .bind(write.now_ms)
             .execute(&state.db.pool)
             .await?,
             Some(g) => sqlx::query(
@@ -433,7 +437,7 @@ pub async fn update_checks(
                  guarantee_tick_at = CASE WHEN $9 = 1 THEN $3 ELSE guarantee_tick_at END, \
                  guarantee_unchecked_runs = 0, guarantee_failed_runs = 0 \
                  WHERE id = $7 AND guarantee_accepted = $8 AND access_generation = $10 \
-                 AND (checked_at IS NULL OR checked_at <= $3)",
+                 AND (checked_at IS NULL OR checked_at <= $3 OR checked_at > $11)",
             )
             .bind(write.checks_json)
             .bind(write.agent_key_state)
@@ -445,6 +449,7 @@ pub async fn update_checks(
             .bind(&g.read_accepted)
             .bind(daily)
             .bind(write.generation)
+            .bind(write.now_ms)
             .execute(&state.db.pool)
             .await?,
         };
@@ -460,7 +465,7 @@ pub async fn update_checks(
         Some(row) => {
             let checked_at: Option<i64> = row.try_get("checked_at")?;
             if row.try_get::<i64, _>("access_generation")? != write.generation
-                || checked_at.is_some_and(|at| at > write.at_ms)
+                || checked_at.is_some_and(|at| at > write.at_ms && at <= write.now_ms)
             {
                 Stored::Stale
             } else {

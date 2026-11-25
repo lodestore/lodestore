@@ -22,10 +22,11 @@ const RECHECK_TIMEOUT: Duration = Duration::from_secs(120);
 /// A repository is due when the later of its last written level and its last
 /// daily attempt is a day old or missing. Both marks are written by the
 /// guarantee code only; a manual check that measured nothing moves neither.
+/// A mark in the future was written by a wrong clock and does not count.
 fn due(now_ms: i64, tick_at: Option<i64>, guarantee_checked_at: Option<i64>) -> bool {
     tick_at
         .max(guarantee_checked_at)
-        .is_none_or(|last| now_ms - last >= RECHECK_AFTER_MS)
+        .is_none_or(|last| last > now_ms || now_ms - last >= RECHECK_AFTER_MS)
 }
 
 #[derive(Debug)]
@@ -95,7 +96,7 @@ pub async fn tick(
             }
             Outcome::Done(Err(ApiError::Conflict(reason))) => {
                 tracing::debug!(repository_id = %id, %reason, "the daily recheck result was discarded");
-                Some(false)
+                None
             }
             Outcome::Done(Err(error)) => {
                 tracing::warn!(repository_id = %id, %error, "the daily recheck failed");
@@ -152,6 +153,8 @@ mod tests {
         assert!(due(30 * HOUR, Some(0), Some(0)));
         assert!(!due(30 * HOUR, Some(10 * HOUR), Some(0)));
         assert!(!due(30 * HOUR, Some(0), Some(10 * HOUR)));
+        assert!(due(30 * HOUR, Some(31 * HOUR), None));
+        assert!(due(30 * HOUR, None, Some(31 * HOUR)));
     }
 
     async fn dropped(rx: tokio::sync::oneshot::Receiver<()>) -> bool {

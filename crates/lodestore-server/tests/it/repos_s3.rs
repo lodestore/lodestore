@@ -2132,7 +2132,7 @@ async fn guarantee_tick_discards_a_result_measured_with_replaced_credentials() {
         );
         assert_eq!(
             sqlx::Row::get::<Option<i64>, _>(&marks, "guarantee_tick_at"),
-            Some(at)
+            None
         );
         assert_eq!(counter(&marks, "guarantee_unchecked_runs"), 0);
         assert_eq!(counter(&marks, "guarantee_failed_runs"), 0);
@@ -2178,7 +2178,7 @@ async fn guarantee_newer_measurement_is_not_overwritten_by_a_slower_check() {
             lodestore_server::repos::agent_key::recheck_repository_at(
                 ts.state(),
                 id,
-                at + HOUR,
+                at + 1,
                 false,
             )
             .await
@@ -2195,9 +2195,59 @@ async fn guarantee_newer_measurement_is_not_overwritten_by_a_slower_check() {
         );
         assert_eq!(
             sqlx::Row::get::<Option<i64>, _>(&marks, "checked_at"),
-            Some(at + HOUR)
+            Some(at + 1)
         );
         let firing = guarantee_alerts(&ts, at + 2 * HOUR, "firing").await;
+        assert_eq!(firing.len(), 1);
+        assert_eq!(reason(&firing[0].2), "lower");
+        ts.stop().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn guarantee_check_marks_from_the_future_do_not_silence_the_recheck() {
+    each_backend(|backend| async move {
+        let minio = MinioServer::start().await;
+        minio.create_versioned_bucket(BUCKET).await;
+        let server = minio.root_credentials();
+        let agent = agent_user(&minio, BUCKET).await;
+        let ts = quiet_server(&backend).await;
+        let http = Http::login(&ts).await;
+        let created = create_s3(&http, &s3_draft(&minio, BUCKET, "cloud", &server, &agent)).await;
+        let id = created["id"].as_str().unwrap();
+        let now = lodestore_server::db::now_ms();
+        let future = now + 30 * 24 * HOUR;
+        sqlx::query(
+            "UPDATE repositories SET checked_at = $1, guarantee_checked_at = $1, \
+             guarantee_tick_at = $1 WHERE id = $2",
+        )
+        .bind(future)
+        .bind(id)
+        .execute(&ts.state().db.pool)
+        .await
+        .unwrap();
+
+        minio
+            .mc(&["version", "suspend", &bucket_path()])
+            .await
+            .expect("mc version suspend");
+        assert_eq!(daily_tick(&ts, now).await, [id], "[{}]", backend.name());
+        let marks = repo_marks(&ts, id).await;
+        assert_eq!(
+            sqlx::Row::get::<String, _>(&marks, "guarantee_level"),
+            "host_can_overwrite_or_delete",
+            "[{}]",
+            backend.name()
+        );
+        for column in ["checked_at", "guarantee_checked_at", "guarantee_tick_at"] {
+            assert_eq!(
+                sqlx::Row::get::<Option<i64>, _>(&marks, column),
+                Some(now),
+                "{column}"
+            );
+        }
+        let firing = guarantee_alerts(&ts, now, "firing").await;
         assert_eq!(firing.len(), 1);
         assert_eq!(reason(&firing[0].2), "lower");
         ts.stop().await;
