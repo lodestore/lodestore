@@ -147,7 +147,7 @@ remote_stage2() {
   set -euo pipefail
   export DEBIAN_FRONTEND=noninteractive
   echo "postfix postfix/main_mailer_type select No configuration" | debconf-set-selections
-  apt-get install -yq proxmox-ve postfix open-iscsi chrony libnbd-bin
+  apt-get install -yq proxmox-ve postfix open-iscsi chrony libnbd-bin acl attr
   local old
   # shellcheck disable=SC2016
   mapfile -t old < <(dpkg-query -W -f '${Package}\n' 'linux-image-*cloud*' 2>/dev/null || true)
@@ -164,7 +164,7 @@ remote_stage3() {
   mkdir -p /srv/dirstore
   pveam update
   local template
-  template=$(pveam available --section system | awk '$2 ~ /^debian-13-standard_/ {print $2}' | sort -V | tail -n 1)
+  template=$(pveam available --section system | awk '$2 ~ /^debian-13-standard_.*_amd64\./ {print $2}' | sort -V | tail -n 1)
   [ -n "$template" ] || { echo "no debian-13-standard template in pveam available" >&2; exit 1; }
   pveam download local "$template"
   pveversion -v
