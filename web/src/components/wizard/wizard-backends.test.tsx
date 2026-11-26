@@ -419,16 +419,14 @@ describe("Hetzner Storage Box", () => {
 		expect(screen.queryByLabelText("Address")).toBeNull();
 		expect(screen.queryByLabelText("User")).toBeNull();
 		await user.type(screen.getByLabelText("Storage Box user"), "u123");
-		expect(
-			screen.getByText("ssh://u123.your-storagebox.de:23"),
-		).toBeInTheDocument();
+		expect(screen.getByText("u123.your-storagebox.de:23")).toBeInTheDocument();
 		await user.type(screen.getByLabelText("Directory"), "/backups");
 		await user.type(screen.getByLabelText("Private key"), "BOX-KEY");
 
 		await user.click(screen.getByRole("button", { name: "Get host key" }));
 		await user.click(await screen.findByRole("radio", { name: "It matches" }));
 		expect(bodies[0].location.options).toEqual({
-			endpoint: "ssh://u123.your-storagebox.de:23",
+			endpoint: "u123.your-storagebox.de:23",
 			root: "/backups",
 		});
 		await user.click(toRights());
@@ -446,7 +444,7 @@ describe("Hetzner Storage Box", () => {
 		await user.click(screen.getByRole("button", { name: "Check" }));
 		await waitFor(() => expect(bodies).toHaveLength(2));
 		expect(bodies[1].location.options).toEqual({
-			endpoint: "ssh://u123.your-storagebox.de:23",
+			endpoint: "u123.your-storagebox.de:23",
 			user: "u123",
 			key: "BOX-KEY",
 			root: "/backups",

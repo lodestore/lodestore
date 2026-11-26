@@ -10,7 +10,6 @@ use crate::host_key_push::{
 };
 use lodestore_agent::{NetOptions, Paths, RunArgs};
 use lodestore_format::store::probe::GuaranteeLevel;
-use lodestore_format::store::{BlobStore, RepoLocation};
 use lodestore_proto::agent::v1::ServerMessage;
 use lodestore_proto::agent::v1::server_message::Body as ServerBody;
 use lodestore_server::repos::db::{server_access, writer_material};
@@ -31,27 +30,33 @@ fn notes(result: &Value) -> Vec<&str> {
         .collect()
 }
 
+/// Leaves only the repository root, as the wizard's agent rights step does.
+fn empty_root(sshd: &SshdServer) {
+    let root = format!("/srv/repo{}", sshd.root());
+    let out = std::process::Command::new("docker")
+        .args(["exec", sshd.container(), "sh", "-c"])
+        .arg(format!("rm -rf {root}/* && ls -A {root}"))
+        .output()
+        .expect("docker exec");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
 async fn agent_options_sftp_restricted_user_is_measured_by_its_own_rights() {
     let sshd = SshdServer::start().await;
+    empty_root(&sshd);
     let ts = TestServer::start(&Backend::Sqlite).await;
     let api = ts.api().await;
-
-    let srv_draft = sftp_draft(&sshd, "prefixes");
-    let srv = RepoLocation::new(
-        "sftp",
-        srv_draft["location"]["options"]
-            .as_object()
-            .unwrap()
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str().unwrap())),
-    )
-    .open(None)
-    .unwrap();
-    srv.ensure_prefixes(&["packs", "index", "snapshots"])
-        .await
-        .unwrap();
 
     let mut draft = sftp_draft(&sshd, "sftp-own-rights");
     draft["agent_options"] = json!({
@@ -97,6 +102,27 @@ async fn agent_options_sftp_restricted_user_is_measured_by_its_own_rights() {
     let found = notes(&rechecked);
     assert!(found.contains(&"held_handle_rewrite"), "{rechecked}");
     assert!(!found.contains(&"shared_credentials"), "{rechecked}");
+    ts.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn agent_options_sftp_skip_starts_from_an_empty_root() {
+    let sshd = SshdServer::start().await;
+    empty_root(&sshd);
+    let ts = TestServer::start(&Backend::Sqlite).await;
+    let api = ts.api().await;
+
+    let draft = sftp_draft(&sshd, "sftp-skip");
+    let checked = api.post("/api/v1/repositories/check", &draft).await;
+    assert_eq!(checked.status(), 200);
+    let checked = body(checked).await;
+    assert_eq!(checked["blocking"], false, "{checked}");
+    assert_eq!(checked["checks"][0]["id"], "write", "{checked}");
+    assert_eq!(checked["checks"][0]["status"], "pass", "{checked}");
+    assert!(notes(&checked).contains(&"shared_credentials"), "{checked}");
+
+    create(&api, &draft).await;
     ts.stop().await;
 }
 

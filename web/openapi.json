@@ -4076,6 +4076,7 @@
           "Repositories"
         ],
         "summary": "Replace agent credentials",
+        "description": "Needs the password entered in the last 15 minutes. Replaces the key only after a check with it passed; the current key stays when the check fails.",
         "operationId": "replace_key",
         "parameters": [
           {
@@ -4105,6 +4106,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/KeyReplaced"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`step_up_required`: the password was not entered in the last 15 minutes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
