@@ -9,6 +9,7 @@ pub mod facts;
 pub mod hooks;
 pub mod identity;
 pub mod jobs;
+pub mod pve;
 pub mod session;
 pub mod shared_channel;
 pub mod socket;

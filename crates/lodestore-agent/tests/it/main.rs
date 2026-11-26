@@ -7,6 +7,7 @@ mod distrusted;
 mod hooks;
 mod jobs;
 mod limits;
+mod pve_socket;
 mod restore;
 mod runner;
 mod socket;
