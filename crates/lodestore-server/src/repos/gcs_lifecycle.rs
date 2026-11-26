@@ -679,7 +679,11 @@ mod tests {
         for bucket in ["real/o", "b?x", "b#x", "B", ""] {
             let at = RepoLocation::new(
                 "gcs",
-                vec![("bucket", bucket), ("root", "/repo"), ("token", "ya29.test")],
+                vec![
+                    ("bucket", bucket),
+                    ("root", "/repo"),
+                    ("token", "ya29.test"),
+                ],
             );
             let fake = Fake::answering([Some((200, "{}"))]);
             assert_eq!(check_with(&at, fake.clone()).await, Unverified, "{bucket}");
