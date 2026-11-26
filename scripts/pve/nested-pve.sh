@@ -131,6 +131,7 @@ remote_stage1() {
   local keyring_url=$1 keyring_sha=$2 repo_url=$3
   local keyring=/usr/share/keyrings/proxmox-archive-keyring.gpg
   export DEBIAN_FRONTEND=noninteractive
+  echo "grub-pc grub-pc/install_devices multiselect /dev/vda" | debconf-set-selections
   apt-get update -q
   apt-get install -yq curl ca-certificates
   curl -fsSL "$keyring_url" -o "$keyring"
