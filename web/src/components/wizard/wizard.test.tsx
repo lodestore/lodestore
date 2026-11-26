@@ -777,7 +777,7 @@ describe("repository wizard with S3", () => {
 		expect(bodies[1]).toMatchObject({ password: "wrong password" });
 	});
 
-	it("offers only the presets agents can write to, with Local path last", async () => {
+	it("offers every server preset, with Local path last", async () => {
 		mockS3(s3Result());
 		renderApp("/welcome");
 
@@ -791,6 +791,10 @@ describe("repository wizard with S3", () => {
 			"backblaze-b2",
 			"cloudflare-r2",
 			"hetzner-object-storage",
+			"hetzner-storage-box",
+			"azure-blob",
+			"google-cloud-storage",
+			"sftp",
 			"local",
 		]);
 		expect(

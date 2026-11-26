@@ -16,6 +16,7 @@ import {
 	InputGroupButton,
 	InputGroupInput,
 } from "@/components/ui/input-group";
+import { Textarea } from "@/components/ui/textarea";
 import { copy } from "@/copy";
 import { text } from "./text";
 
@@ -117,6 +118,7 @@ export function TextField({
 	id,
 	label,
 	help,
+	placeholder,
 	value,
 	onChange,
 	disabled,
@@ -124,6 +126,7 @@ export function TextField({
 	id: string;
 	label: string;
 	help?: string;
+	placeholder?: string;
 	value: string;
 	onChange: (value: string) => void;
 	disabled: boolean;
@@ -139,6 +142,7 @@ export function TextField({
 				autoCapitalize="off"
 				spellCheck={false}
 				disabled={disabled}
+				placeholder={placeholder}
 				aria-describedby={help ? `${id}-help` : undefined}
 				value={value}
 				onChange={(event) => onChange(event.target.value)}
@@ -207,5 +211,72 @@ export function KeyFields({
 				</Field>
 			</FieldGroup>
 		</FieldSet>
+	);
+}
+
+export function SecretField({
+	id,
+	label,
+	help,
+	value,
+	onChange,
+	disabled,
+}: {
+	id: string;
+	label: string;
+	help?: string;
+	value: string;
+	onChange: (value: string) => void;
+	disabled: boolean;
+}) {
+	return (
+		<Field>
+			<FieldLabel htmlFor={id}>{label}</FieldLabel>
+			<SecretInput
+				id={id}
+				what={label.toLowerCase()}
+				disabled={disabled}
+				describedBy={help ? `${id}-help` : undefined}
+				value={value}
+				onChange={onChange}
+			/>
+			{help && (
+				<FieldDescription id={`${id}-help`} className="wrap-anywhere">
+					{help}
+				</FieldDescription>
+			)}
+		</Field>
+	);
+}
+
+export function PrivateKeyField({
+	id,
+	label,
+	value,
+	onChange,
+	disabled,
+}: {
+	id: string;
+	label: string;
+	value: string;
+	onChange: (value: string) => void;
+	disabled: boolean;
+}) {
+	return (
+		<Field>
+			<FieldLabel htmlFor={id}>{label}</FieldLabel>
+			<Textarea
+				id={id}
+				name={id}
+				rows={5}
+				className="font-mono"
+				autoComplete="off"
+				autoCapitalize="off"
+				spellCheck={false}
+				disabled={disabled}
+				value={value}
+				onChange={(event) => onChange(event.target.value)}
+			/>
+		</Field>
 	);
 }

@@ -6,6 +6,7 @@ export const text = {
 		key: copy.recoveryKey.heading,
 		host: copy.addHost.title,
 	},
+	hostKeyFingerprint: "Host key fingerprint",
 	name: "Repository name",
 	nameHelper: "1 to 48 characters: lowercase letters, digits and hyphens.",
 	path: "Path",

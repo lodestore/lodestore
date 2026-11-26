@@ -180,11 +180,15 @@ const OVERALL = {
 export function CapabilityChecklist({
 	rows,
 	stale,
+	ids = CHECK_IDS,
+	hideSummary = false,
 }: {
 	rows: CheckRow[];
 	stale?: boolean;
+	ids?: readonly CheckId[];
+	hideSummary?: boolean;
 }) {
-	const full: CheckRow[] = CHECK_IDS.map(
+	const full: CheckRow[] = ids.map(
 		(id) => rows.find((r) => r.id === id) ?? { id, status: "neutral" },
 	);
 	const isStale = stale ?? full.some((r) => r.status === "stale");
@@ -195,12 +199,12 @@ export function CapabilityChecklist({
 		warn: count("warn"),
 		fail: count("fail"),
 	};
-	const summary = copy.checklist.summary(counts);
+	const summary = hideSummary ? "" : copy.checklist.summary(counts);
 	const overall = OVERALL[counts.fail ? "fail" : counts.warn ? "warn" : "pass"];
 
 	return (
 		<div aria-live="polite" className="flex flex-col gap-4">
-			{(summary !== "" || isStale) && (
+			{(summary !== "" || (isStale && !hideSummary)) && (
 				<div className="flex flex-wrap items-center gap-2">
 					{summary !== "" && (
 						<>
@@ -211,7 +215,7 @@ export function CapabilityChecklist({
 							<p className="font-semibold">{summary}</p>
 						</>
 					)}
-					{isStale && (
+					{isStale && !hideSummary && (
 						<Badge variant="outline">{copy.checklist.outdated}</Badge>
 					)}
 				</div>

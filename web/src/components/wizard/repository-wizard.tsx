@@ -22,16 +22,19 @@ import { ConnectExistingStep } from "./connect-existing-step";
 import { ConnectionStep } from "./connection-step";
 import {
 	BACKENDS,
+	CHECK_TIMEOUT_MS,
 	type CheckState,
 	choosePreset,
 	connectionReady,
 	type Draft,
 	emptyAgent,
+	endpointOf,
 	newDraft,
 	type PresetInfo,
 	STEPS,
 	type Step,
 	toApiDraft,
+	withFreshHostKey,
 	withoutSecrets,
 } from "./draft";
 import { FirstHostStep } from "./first-host-step";
@@ -51,6 +54,10 @@ const PERSISTED = [
 	"pathStyle",
 	"path",
 	"templateValues",
+	"container",
+	"accountName",
+	"serverUser",
+	"azureCredentialKind",
 ] as const satisfies readonly (keyof Draft)[];
 
 function parsePreset(value: unknown): PresetInfo | null {
@@ -125,8 +132,6 @@ export function clearSavedDraft() {
 
 export type WizardMode = "welcome" | "settings";
 
-const CHECK_TIMEOUT_MS = 60_000;
-
 const withoutConsent = (d: Draft) =>
 	d.acceptWeakerGuarantee ? { ...d, acceptWeakerGuarantee: false } : d;
 
@@ -186,7 +191,7 @@ export function RepositoryWizard({
 	});
 
 	function change(patch: Partial<Draft>) {
-		setDraft((d) => ({ ...d, ...patch }));
+		setDraft((d) => withFreshHostKey(d, { ...d, ...patch }));
 		if (Object.keys(patch).every((key) => key === "acceptWeakerGuarantee")) {
 			return;
 		}
@@ -269,6 +274,7 @@ export function RepositoryWizard({
 		else setConfirmExit(true);
 	}
 
+	const sftp = preset?.backend === "sftp";
 	const wide =
 		current === "storage" || current === "rights" || current === "host";
 	const stepInfo = steps.map((id, position) => {
@@ -278,12 +284,19 @@ export function RepositoryWizard({
 				? id === "storage"
 					? preset?.label
 					: id === "connection"
-						? draft.bucket.trim() || draft.path.trim()
+						? draft.bucket.trim() ||
+							draft.container.trim() ||
+							draft.path.trim() ||
+							(sftp ? endpointOf(draft) : "")
 						: undefined
 				: undefined;
 		return {
 			title: copy.wizard.steps[i],
-			description: chosen || copy.wizard.stepDescriptions[i],
+			description:
+				chosen ||
+				(sftp && id === "connection"
+					? copy.wizard.stepDescriptionSftp
+					: copy.wizard.stepDescriptions[i]),
 		};
 	});
 	const back = local ? "connection" : "rights";
