@@ -71,7 +71,7 @@ MinIO does not tell these rights apart: a key with `s3:DeleteObject` alone can d
 
 A backup has to see the `locks/gc-*` list before it reuses a pack. The agent key therefore needs read access to `locks/`: `s3:GetObject` on `locks/*` and `s3:ListBucket` for the prefixes `locks/` and `locks/*`. It still has no write or delete right on `locks/`.
 
-Repositories connected before cleanup existed have the old agent policy without these lines. Open the repository in the web interface, take the current agent key policy from its agent key page, and replace the policy of the key in your storage with it. Until you do, the **Agent key** check keeps cleanup from turning on.
+Repositories connected before cleanup existed have the old agent policy without these lines. Open the repository in the web interface, take the current agent policy from the **Limit agent rights** panel of its page (or from `GET /api/v1/agent-policy`), and replace the policy of the key in your storage with it. Until you do, the **Agent key** check keeps cleanup from turning on.
 
 ## Object Lock and versioning
 

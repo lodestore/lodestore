@@ -56,7 +56,7 @@ Then:
    docker logs lodestore 2>&1 | grep 'setup?token='
    ```
 
-2. In the setup wizard, connect your bucket (or a folder), choose a repository password and save the recovery key.
+2. In the setup wizard, choose your storage (Amazon S3, MinIO, Wasabi, Backblaze B2, Cloudflare R2, Hetzner, Azure Blob Storage, Google Cloud Storage, SFTP or a folder) and connect it. The wizard shows the commands that create a key for your hosts that cannot delete, checks what that key can do, then asks for a repository password and shows the recovery key to save.
 3. Open **Hosts**, choose **Add host** and run the command it shows as root on the host you want to back up. The host appears as online within seconds.
 4. Open **Policies**, create a policy for the folders to back up, choose the host and run it. When the job succeeds, the snapshot is in your bucket.
 5. Open **Restore** to bring files back, or restore without the server:

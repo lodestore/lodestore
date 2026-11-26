@@ -13,7 +13,7 @@ Object Lock is checked by automated tests against MinIO, including a lock in `GO
 
 ## The agent key: write-only
 
-Agents and the `lode backup` command need to add objects and to read a few. They never delete. The policy below is the one the setup wizard shows when you add a repository, filled in with your bucket and folder. Copy it from the wizard; this is the same policy for a bucket named `my-bucket` with the repository at its root:
+Agents and the `lode backup` command need to add objects and to read a few. They never delete. The policy below is the one the **Agent rights** step of the setup wizard shows for the Amazon S3 tile (and, without the last statement, for Wasabi and the others), filled in with your bucket and folder. Copy it from the wizard; this is the same policy for a bucket named `my-bucket` with the repository at its root:
 
 ```json
 {
@@ -70,7 +70,7 @@ What it grants, and what it leaves out:
 
 If the repository lives in a folder of the bucket, the wizard puts the folder into every resource and prefix.
 
-After you attach the policy, the wizard checks the key and reports one of four levels:
+After you attach the policy, paste the key into the wizard and choose **Check**. The Result panel reports one of four levels, and for S3 storage it adds a Bucket group with **Object Lock**, **Versioning** and **Lifecycle rules**:
 
 | Level | What a host can do | Confirmation |
 | --- | --- | --- |
@@ -83,7 +83,7 @@ You get **Create-only enforced** when the storage refuses the overwrite, which t
 
 ### MinIO
 
-MinIO rejects the `s3:if-none-match` condition, so the policy it gets is the same without the last statement. The wizard shows these commands for it, with your bucket in the policy:
+MinIO rejects the `s3:if-none-match` condition, so the policy it gets is the same without the last statement. The **Agent rights** step shows these commands for the MinIO tile, with your bucket in the policy:
 
 ```sh
 mc admin policy create ALIAS lodestore-agent lodestore-agent-policy.json
@@ -183,6 +183,6 @@ Lodestore never asks the storage to bypass a lock. In both modes a locked versio
 - **Space comes back later.** When retention forgets a snapshot, or cleanup removes packs, the locked versions stay until their period ends. The cleanup report shows them as `Held by Object Lock` with the date they free up. Storage cost goes up by the data you hold for the period. Pick a period that matches how long an attacker could be undetected, not longer.
 - **Repacking adds before it removes.** On a locked bucket the old packs stay until their locks end, so usage can rise before it falls.
 - **Backups are not affected.** The agent only adds new objects, which the lock allows.
-- **Setup check.** The wizard shows **Object Lock** as passed when the bucket reports it enabled. A bucket without a lock, or a storage that does not implement the call, is shown as neutral and does not block anything.
+- **Setup check.** The Bucket group of the Result panel shows **Object Lock** as passed when the bucket reports it enabled. A bucket without a lock is shown as **Off** with the note that a lock is recommended, and a storage that does not implement the call is shown as neutral; neither blocks anything.
 
 Read [Cleanup](/docs/guides/gc/#object-lock-and-versioning) for the full behavior.
