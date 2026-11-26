@@ -10,7 +10,11 @@ import type { RepositoryDetail } from "@/api/gen/model";
 import { LevelLine, LevelScale } from "@/components/guarantee-level";
 import { levelName } from "@/components/guarantee-notes";
 import { RelativeTime } from "@/components/relative-time";
-import { isBelowAccepted } from "@/components/repos/guarantee-banner";
+import {
+	GUARANTEE_STALE_MS,
+	isBelowAccepted,
+} from "@/components/repos/guarantee-banner";
+import { DAY_MS, Warning } from "@/components/repos/guarantee-cell";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Spinner } from "@/components/ui/spinner";
@@ -82,13 +86,22 @@ export function GuaranteeCard({
 						<dd>{levelName(repository.guarantee_accepted)}</dd>
 						<dt className="text-muted-foreground">{copy.guarantee.checked}</dt>
 						<dd>
-							{checkedAt != null ? (
+							{checkedAt == null ? (
+								<Warning>{copy.guarantee.neverChecked}</Warning>
+							) : Date.now() - checkedAt > GUARANTEE_STALE_MS ? (
+								<>
+									<Warning>
+										{copy.guarantee.notCheckedFor(
+											Math.floor((Date.now() - checkedAt) / DAY_MS),
+										)}
+									</Warning>{" "}
+									· {copy.guarantee.daily}
+								</>
+							) : (
 								<>
 									<RelativeTime value={new Date(checkedAt)} /> ·{" "}
 									{copy.guarantee.daily}
 								</>
-							) : (
-								copy.guarantee.neverChecked
 							)}
 						</dd>
 						<dt className="text-muted-foreground">{copy.guarantee.why}</dt>

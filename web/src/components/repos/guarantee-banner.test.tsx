@@ -1,4 +1,4 @@
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { describe, expect, it } from "vitest";
@@ -258,5 +258,19 @@ describe("repository page title", () => {
 			"Write-only verified",
 		);
 		expect(screen.queryByText("Write-only verified")).toBeNull();
+	});
+
+	it("warns in the guarantee card when the last check is older than 48 hours", async () => {
+		open({
+			guarantee_level: "create_only_enforced",
+			guarantee_accepted: "create_only_enforced",
+			guarantee_checked_at: Date.now() - 3 * 24 * 60 * 60 * 1000,
+		});
+		const title = await screen.findByRole("heading", {
+			name: "What a host can do to backups",
+		});
+		const card = title.closest("#guarantee") as HTMLElement;
+		const stale = within(card).getByText("Not checked for 3 days");
+		expect(stale.closest(".text-warning")).not.toBeNull();
 	});
 });

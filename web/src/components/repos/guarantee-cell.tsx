@@ -16,9 +16,9 @@ import {
 import { copy } from "@/copy";
 import { formatDateTime } from "@/lib/format";
 
-const DAY_MS = 24 * 60 * 60 * 1000;
+export const DAY_MS = 24 * 60 * 60 * 1000;
 
-function Warning({ children }: { children: ReactNode }) {
+export function Warning({ children }: { children: ReactNode }) {
 	return (
 		<span className="inline-flex items-center gap-1 text-warning">
 			<Clock aria-hidden className="size-4 shrink-0" />
