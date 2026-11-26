@@ -72,6 +72,7 @@ export default defineConfig({
 			sidebar: [
 				{ label: 'Start', items: [{ slug: 'docs/quickstart' }] },
 				{ label: 'Install', items: [{ autogenerate: { directory: 'docs/install' } }] },
+				{ label: 'Storage', items: [{ autogenerate: { directory: 'docs/storage' } }] },
 				{ label: 'Guides', items: [{ autogenerate: { directory: 'docs/guides' } }] },
 				{ label: 'Recipes', items: [{ autogenerate: { directory: 'docs/recipes' } }] },
 				{ label: 'Reference', items: [{ autogenerate: { directory: 'docs/reference' } }] },
