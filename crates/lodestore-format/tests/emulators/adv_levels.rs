@@ -213,10 +213,8 @@ async fn assert_short_object_is_not_counted(planter: &Store, agent: &Store, key:
     assert!(matches!(err, Error::NameBurned { .. }), "{key}: {err:?}");
 }
 
-/// A full-size object that differs from the one written. A store that
-/// publishes atomically cannot produce one by itself, so a name holding
-/// full-size bytes is accepted by size; only a store that can leave a torn
-/// object is compared byte for byte.
+/// A full-size object that differs from the one written. Pack names come
+/// from the server, so the name is burned on every store, atomic or not.
 async fn assert_full_size_with_hole(planter: &Store, agent: &Store, key: &str) {
     let mut holed = vec![1u8; 4096];
     holed[..2048].fill(0);
@@ -225,14 +223,10 @@ async fn assert_full_size_with_hole(planter: &Store, agent: &Store, key: &str) {
         .await
         .unwrap();
     let result = put_named(agent, key, vec![1u8; 4096]).await;
-    if agent.publishes_atomically() {
-        result.unwrap();
-    } else {
-        assert!(
-            matches!(result, Err(Error::NameBurned { .. })),
-            "{key}: {result:?}"
-        );
-    }
+    assert!(
+        matches!(result, Err(Error::NameBurned { .. })),
+        "{key}: {result:?}"
+    );
 }
 
 #[tokio::test]

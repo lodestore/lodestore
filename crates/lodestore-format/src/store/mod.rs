@@ -119,9 +119,9 @@ pub trait BlobStore: Send + Sync {
 
     /// Whether an object becomes visible only once it is complete. A store
     /// that can leave a torn object under the final name (a direct SFTP write)
-    /// returns `false`, and then an existing name is trusted only after its
-    /// bytes are compared. No default: a wrapper that forgot to forward the
-    /// answer would trust a torn object on size alone.
+    /// returns `false`, and then a name it may not stat is never trusted. No
+    /// default: a wrapper that forgot to forward the answer would trust a torn
+    /// object it cannot see.
     fn publishes_atomically(&self) -> bool;
 }
 
@@ -145,9 +145,7 @@ pub async fn put_named_bytes<S: BlobStore>(store: &S, key: &str, bytes: &Bytes) 
     match store.put_if_absent(key, bytes.clone()).await {
         Ok(()) => Ok(()),
         Err(BlobError::AlreadyExists) => match store.object_size(key).await {
-            Ok(Some(size)) => {
-                confirm_present(store, key, bytes, size, !store.publishes_atomically()).await
-            }
+            Ok(Some(size)) => confirm_present(store, key, bytes, size).await,
             Ok(None) => Err(BlobError::backend(format!(
                 "{key} reported as existing, then not found"
             ))
@@ -160,32 +158,26 @@ pub async fn put_named_bytes<S: BlobStore>(store: &S, key: &str, bytes: &Bytes) 
         // A key that may not overwrite can be refused instead of told the
         // object exists; that is a presence only if the object is seen.
         Err(denied @ BlobError::Denied { .. }) => match store.object_size(key).await {
-            Ok(Some(size)) => confirm_present(store, key, bytes, size, true).await,
+            Ok(Some(size)) => confirm_present(store, key, bytes, size).await,
             _ => Err(denied.into()),
         },
         Err(e) => Err(e.into()),
     }
 }
 
-/// An object of `size` bytes holds the name. It is the one written when the
-/// size agrees and, on a store that can leave a torn object under the final
-/// name, when the bytes agree too: a direct write arrives out of order, so a
-/// full-size object can still have a hole. The read is capped at one byte
-/// past what was written. A refusal (`compare`) always reads: pack names come
-/// from the server, not from the content, so a matching size proves nothing.
+/// An object of `size` bytes holds the name. It is the one written only when
+/// the bytes agree: pack names come from the server, not from the content, so
+/// a matching size proves nothing, and a direct write can leave a full-size
+/// object with a hole. The read is capped at one byte past what was written.
 async fn confirm_present<S: BlobStore>(
     store: &S,
     key: &str,
     bytes: &Bytes,
     size: u64,
-    compare: bool,
 ) -> Result<()> {
     let len = bytes.len() as u64;
     if size != len {
         return Err(Error::NameBurned { key: key.into() });
-    }
-    if !compare {
-        return Ok(());
     }
     let seen = store.get_range(key, 0..len + 1).await?;
     if seen == *bytes {
