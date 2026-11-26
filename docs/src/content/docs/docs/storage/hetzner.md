@@ -11,7 +11,7 @@ Hetzner offers two storages and Lodestore has a preset for each. The levels and 
 
 | | Key from another project with the Lodestore bucket policy |
 |---|---|
-| A host can delete backups | No: the policy allows put, get and list only |
+| A host can delete backups | No: the policy allows get and list, and put only under `packs/`, `index/` and `snapshots/` |
 | A host can overwrite backups | Yes unless Object Lock or versioning keeps the old version: the policy has no `If-None-Match` condition |
 | What protects older data | Object Lock, or versioning |
 | When a host is revoked | It keeps the key until you replace it and delete the old one in Hetzner |

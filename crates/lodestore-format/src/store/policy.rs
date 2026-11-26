@@ -293,7 +293,9 @@ fn b2_rights(bucket: &str, prefix: &str) -> AgentRights {
 }
 
 fn hetzner_rights(bucket: &str, prefix: &str) -> AgentRights {
-    let objects = json_string(&format!("arn:aws:s3:::{bucket}/{}", join(prefix, "*")));
+    let arn = |path: &str| json_string(&format!("arn:aws:s3:::{bucket}/{}", join(prefix, path)));
+    let objects = arn("*");
+    let writable = [arn("packs/*"), arn("index/*"), arn("snapshots/*")].join(", ");
     let bucket_arn = json_string(&format!("arn:aws:s3:::{bucket}"));
     let principal = json_string("arn:aws:iam:::user/pAGENT_PROJECT_ID:AGENT_ACCESS_KEY");
     let policy = format!(
@@ -303,7 +305,13 @@ fn hetzner_rights(bucket: &str, prefix: &str) -> AgentRights {
     {{
       "Effect": "Allow",
       "Principal": {{"AWS": [{principal}]}},
-      "Action": ["s3:PutObject", "s3:GetObject", "s3:GetObjectVersion"],
+      "Action": ["s3:PutObject"],
+      "Resource": [{writable}]
+    }},
+    {{
+      "Effect": "Allow",
+      "Principal": {{"AWS": [{principal}]}},
+      "Action": ["s3:GetObject", "s3:GetObjectVersion"],
       "Resource": [{objects}]
     }},
     {{
@@ -324,7 +332,7 @@ fn hetzner_rights(bucket: &str, prefix: &str) -> AgentRights {
     AgentRights::new(
         RightsMechanism::Policy,
         text,
-        "Not checked against the real service: the key lives in another project and the policy limits it to put, get and list; also turn on Object Lock.",
+        "Not checked against the real service: the key lives in another project and the policy limits it to get and list, and to put under packs/, index/ and snapshots/, where it can still overwrite; also turn on Object Lock.",
     )
 }
 
@@ -592,6 +600,17 @@ mod tests {
             );
             for a in s["Action"].as_array().unwrap() {
                 assert!(allowed.contains(&a.as_str().unwrap()), "{a}");
+                if a == "s3:PutObject" {
+                    for r in s["Resource"].as_array().unwrap() {
+                        let r = r.as_str().unwrap();
+                        assert!(
+                            ["/packs/*", "/index/*", "/snapshots/*"]
+                                .iter()
+                                .any(|p| r.ends_with(p)),
+                            "{r}"
+                        );
+                    }
+                }
             }
         }
     }
