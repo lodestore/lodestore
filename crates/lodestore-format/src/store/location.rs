@@ -238,10 +238,10 @@ impl RepoLocation {
     }
 
     pub fn validate(&self) -> Result<()> {
-        self.validate_inner(true)
+        self.validate_inner()
     }
 
-    fn validate_inner(&self, need_host_key: bool) -> Result<()> {
+    fn validate_inner(&self) -> Result<()> {
         match self.backend.as_str() {
             "s3" => {
                 self.require("bucket")?;
@@ -278,7 +278,7 @@ impl RepoLocation {
                 for option in ["endpoint", "user", "key"] {
                     self.require(option)?;
                 }
-                if need_host_key && self.opt("host_key").is_none() {
+                if self.opt("host_key").is_none() {
                     return Err(Error::InvalidInput(
                         "Enter the SFTP server's host key: one line of `ssh-keyscan -p <port> <host>` output"
                             .into(),
@@ -297,14 +297,24 @@ impl RepoLocation {
     /// Lodestore supports for the backend, spelled exactly. A stored location
     /// is opened without this check, so an older one keeps working.
     pub fn validate_new(&self) -> Result<()> {
-        self.validate_inner(true)?;
+        self.validate_inner()?;
         self.check_option_names()
     }
 
-    /// For the first contact of a TOFU check: everything [`Self::validate_new`]
-    /// checks except the host key.
-    pub fn validate_new_without_host_key(&self) -> Result<()> {
-        self.validate_inner(false)?;
+    /// First contact of a TOFU check needs only the server's address; the full
+    /// check is [`Self::validate_new`].
+    pub fn validate_first_contact(&self) -> Result<()> {
+        if self.backend != "sftp" {
+            return Err(Error::InvalidInput(format!(
+                "{} location has no host key to offer",
+                self.backend
+            )));
+        }
+        if self.opt("endpoint").is_none_or(|e| e.trim().is_empty()) {
+            return Err(Error::InvalidInput(
+                "Enter the SFTP server's address as host:port.".into(),
+            ));
+        }
         self.check_option_names()
     }
 
@@ -416,10 +426,6 @@ mod tests {
     const KEY: &str =
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl";
 
-    fn outcome(r: Result<()>) -> std::result::Result<(), String> {
-        r.map_err(|e| e.to_string())
-    }
-
     #[test]
     fn open_refreshing_refuses_other_backends() {
         let source: SasSource = std::sync::Arc::new(|| None);
@@ -458,41 +464,47 @@ mod tests {
     }
 
     #[test]
-    fn validate_new_without_host_key_accepts_only_the_missing_key() {
-        let draft = |extra: &[(&'static str, &'static str)]| {
-            let mut options = vec![("endpoint", "h:22"), ("user", "u"), ("key", "k")];
-            options.extend_from_slice(extra);
-            RepoLocation::new("sftp", options)
+    fn validate_first_contact_needs_only_the_endpoint() {
+        let sftp = |options: &[(&'static str, &'static str)]| {
+            RepoLocation::new("sftp", options.iter().copied())
         };
-        draft(&[]).validate_new_without_host_key().unwrap();
-        assert!(draft(&[]).validate_new().is_err());
-        for bad in [
-            RepoLocation::new("sftp", [("user", "u"), ("key", "k")]),
-            RepoLocation::new("sftp", [("endpoint", "h"), ("key", "k")]),
-            RepoLocation::new("sftp", [("endpoint", "h"), ("user", "u")]),
-            draft(&[("publish", "rename")]),
-            draft(&[("foo", "x")]),
-        ] {
-            let with_key = {
-                let mut loc = bad.clone();
-                loc.options.insert("host_key".into(), KEY.into());
-                loc
-            };
-            assert_eq!(
-                outcome(bad.validate_new_without_host_key()),
-                outcome(with_key.validate_new())
-            );
-            assert!(bad.validate_new_without_host_key().is_err());
-        }
+        sftp(&[("endpoint", "h:22")])
+            .validate_first_contact()
+            .unwrap();
+        sftp(&[("endpoint", "h:22"), ("root", "/srv")])
+            .validate_first_contact()
+            .unwrap();
+        sftp(&[("endpoint", "h:22"), ("key", "k")])
+            .validate_first_contact()
+            .unwrap();
+        sftp(&[("endpoint", "h:22"), ("user", "u")])
+            .validate_first_contact()
+            .unwrap();
+        assert!(sftp(&[("root", "/srv")]).validate_first_contact().is_err());
+        assert!(
+            sftp(&[("endpoint", "  ")])
+                .validate_first_contact()
+                .is_err()
+        );
+        let err = sftp(&[("endpoint", "h:22"), ("hostkey", "SECRET")])
+            .validate_first_contact()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("hostkey") && !err.contains("SECRET"), "{err}");
+        assert!(
+            RepoLocation::new("s3", [("bucket", "b")])
+                .validate_first_contact()
+                .is_err()
+        );
     }
 
     proptest! {
         #[test]
-        fn validate_new_without_host_key_differs_only_in_host_key(
+        fn validate_first_contact_is_endpoint_and_known_names(
             backend in prop::sample::select(vec!["s3", "azblob", "gcs", "sftp", "local"]),
             picks in prop::collection::vec(
                 prop::option::of(prop::sample::select(vec![
-                    "", "x", "rename", "hardlink", "direct", "127.0.0.1:22", "/srv", KEY,
+                    "", " ", "x", "rename", "hardlink", "direct", "127.0.0.1:22", "/srv", KEY,
                 ])),
                 16,
             ),
@@ -509,14 +521,13 @@ mod tests {
                     draft.options.insert((*name).to_owned(), (*value).to_owned());
                 }
             }
-            let strict = if backend == "sftp" {
-                let mut with_key = draft.clone();
-                with_key.options.insert("host_key".into(), KEY.into());
-                with_key.validate_new()
-            } else {
-                draft.validate_new()
-            };
-            prop_assert_eq!(outcome(strict), outcome(draft.validate_new_without_host_key()));
+            let expected = backend == "sftp"
+                && draft.options.get("endpoint").is_some_and(|e| !e.trim().is_empty())
+                && draft.options.keys().all(|k| is_known_option(backend, k));
+            prop_assert_eq!(draft.validate_first_contact().is_ok(), expected);
+            if backend == "sftp" && draft.validate_new().is_ok() {
+                prop_assert!(draft.validate_first_contact().is_ok());
+            }
         }
     }
 

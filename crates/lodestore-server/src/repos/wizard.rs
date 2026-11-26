@@ -161,7 +161,7 @@ async fn open_new(state: &AppState, draft: &RepositoryDraft) -> Result<Opened, A
 /// authenticated or written; the client confirms the key and sends it back.
 async fn offer_host_key(draft: &RepositoryDraft) -> Result<CheckResult, ApiError> {
     let location = format_location(&draft.location);
-    location.validate_new_without_host_key().map_err(invalid)?;
+    location.validate_first_contact().map_err(invalid)?;
     let endpoint = location.options.get("endpoint").map_or("", String::as_str);
     let offered = tokio::time::timeout(PROBE_TIMEOUT, SftpStore::offered_host_key(endpoint)).await;
     let report = match offered {
