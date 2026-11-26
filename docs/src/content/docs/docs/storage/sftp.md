@@ -34,7 +34,7 @@ The levels and how they are measured are in [Storage backends and guarantee leve
 - the agent's public key in `authorized_keys`;
 - a `Match User` block with `ChrootDirectory <root>`, `ForceCommand internal-sftp -P <deny list> -u 0222`, and no forwarding.
 
-Do not create the repository's directories yourself: the storage check creates `packs`, `index`, `snapshots`, `locks`, `keys`, `tmp` and `packs/00` to `packs/ff` with the server's key, and the agent never creates a directory. The preset is marked verified: the commands are run against OpenSSH in a container.
+Do not create the repository's directories yourself: the storage check creates `packs`, `index`, `snapshots` and `tmp` with the server's key, creating the repository adds the rest of the layout, and the agent never creates a directory. The preset is marked verified: the commands are run against OpenSSH in a container.
 
 ## Limits
 
