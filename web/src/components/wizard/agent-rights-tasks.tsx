@@ -1,5 +1,5 @@
 import { keepPreviousData } from "@tanstack/react-query";
-import { Check, TriangleAlert } from "lucide-react";
+import { Check, Info, TriangleAlert } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 import { ApiError } from "@/api/fetcher";
 import { useAgentPolicy } from "@/api/gen/endpoints";
@@ -63,16 +63,18 @@ function useDebounced(value: string, ms: number) {
 	return debounced;
 }
 
-function Commands({
+export function Commands({
 	preset,
 	bucket,
 	prefix,
 	user,
+	variant = "wizard",
 }: {
 	preset: PresetInfo;
 	bucket: string;
 	prefix: string;
 	user: string;
+	variant?: "wizard" | "sheet";
 }) {
 	const policy = useAgentPolicy(
 		{
@@ -112,6 +114,15 @@ function Commands({
 	}
 	const rights = policy.data.rights;
 	if (!rights) return null;
+	const note =
+		rights.note === "" ? null : variant === "sheet" ? (
+			<Alert>
+				<Info aria-hidden />
+				<AlertDescription>{rights.note}</AlertDescription>
+			</Alert>
+		) : (
+			<p className="text-sm text-muted-foreground">{rights.note}</p>
+		);
 	if (presetUsesServerKey(preset)) {
 		return (
 			<Alert className="text-warning">
@@ -130,9 +141,7 @@ function Commands({
 		return (
 			<>
 				<p className="text-sm whitespace-pre-line">{rights.text}</p>
-				{rights.note !== "" && (
-					<p className="text-sm text-muted-foreground">{rights.note}</p>
-				)}
+				{note}
 			</>
 		);
 	}
@@ -145,9 +154,7 @@ function Commands({
 					<CodeBlock text={rights.server_text} object={copy.rights.serverToo} />
 				</div>
 			)}
-			{rights.note !== "" && (
-				<p className="text-sm text-muted-foreground">{rights.note}</p>
-			)}
+			{note}
 		</>
 	);
 }
@@ -231,6 +238,7 @@ export function AgentRightsTasks({
 	onAgent,
 	disabled,
 	vendsSas = false,
+	variant = "wizard",
 }: {
 	preset: PresetInfo;
 	bucket: string;
@@ -239,6 +247,7 @@ export function AgentRightsTasks({
 	onAgent: (agent: AgentSecrets) => void;
 	disabled: boolean;
 	vendsSas?: boolean;
+	variant?: "wizard" | "sheet";
 }) {
 	const filled = agentFilled(preset, agent);
 	const shared = presetUsesServerKey(preset) || vendsSas;
@@ -264,6 +273,7 @@ export function AgentRightsTasks({
 						bucket={bucket}
 						prefix={prefix}
 						user={user}
+						variant={variant}
 					/>
 				)}
 			</Task>

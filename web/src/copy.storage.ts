@@ -128,11 +128,16 @@ export const limit = {
 			"Paste a SAS token that cannot delete. Agents switch to it after the check passes.",
 		r2: "An R2 token cannot be limited. Turn on a bucket lock in Cloudflare so that objects cannot be deleted or replaced.",
 	},
+	cancel: "Cancel",
 	submit: "Check and switch agents",
 	checking: "Checking…",
 	done: (provider: string) =>
 		`Agents switched to the new key. Disable the old one at ${provider}.`,
 	doneShared: "Agents switched to the new key. The server keeps its own key.",
+	needsUpdate: (count: number) =>
+		count === 1
+			? "1 online agent is too old to take the new key; update it."
+			: `${count} online agents are too old to take the new key; update them.`,
 	failed: "switch the agents' key",
 	close: "Close",
 };

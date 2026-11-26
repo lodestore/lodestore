@@ -248,7 +248,6 @@ export const copy = {
 		skipHost: "Skip adding a host",
 		keepHost: "Keep host",
 		discardChanges: "Discard changes",
-		keepCurrentKey: "Keep current key",
 		stepDescriptions: [
 			"Provider and name",
 			"Bucket and server key",
@@ -349,12 +348,6 @@ export const copy = {
 		levelChanged:
 			"The level changed while this page was open. Review the new level before you accept it.",
 		seeChecks: "See storage checks",
-	},
-	policy: {
-		title: "Policy for the agent key",
-		body: "Attach this to the agent key's user. The bucket name follows what you typed. Copy it as is.",
-		tabIam: "AWS IAM",
-		tabMinio: "MinIO",
 	},
 	check: {
 		button: "Check storage",
@@ -568,17 +561,8 @@ export const copy = {
 		agentKeyCanDelete: "Can delete",
 		agentKeyCanOverwrite: "Can overwrite",
 		agentKeyNotChecked: "Not checked",
-		replaceKeyTitle: (name: string) => `Replace the agent key for "${name}"?`,
-		replaceKeyBody: (online: string) =>
-			`Enter the new write-only key. The server verifies it, then sends it to ${online}. Offline agents receive it when they reconnect, and until then they cannot write.`,
-		replaceKeyConfirm: "Verify and replace key",
 		replaceKeyResult: (online: string, offline: string) =>
 			`New key sent to ${online}. ${offline} will receive it when they reconnect.`,
-		replaceKeyFailure: (reason: string) =>
-			`The new key could not be verified: ${reason}. The current key is unchanged.`,
-		replaceKey: "Replace agent key",
-		accessKeyId: "Access key ID",
-		secretAccessKey: "Secret access key",
 		columns: {
 			name: "Name",
 			backend: "Backend",
@@ -619,7 +603,6 @@ export const copy = {
 		loadFailed:
 			"Couldn't load this repository. Check that the server is reachable, then retry.",
 		checkFailed: "storage check",
-		keyChangeFailed: "replace the agent key",
 		close: "Close",
 	},
 	errors: {

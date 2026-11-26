@@ -145,6 +145,17 @@ export const server = setupServer(
 			),
 		});
 	}),
+	http.get("/api/v1/repositories/:id/storage-access", () =>
+		HttpResponse.json({
+			after_revoke: "until_rotation",
+			status: "no_revoked_hosts",
+			rotate_via: "agent-key",
+			access_ends_by: null,
+			hosts_need_agent_update: 0,
+			revoked_hosts_before_rotation: 0,
+			revoked_hosts_since_rotation: 0,
+		}),
+	),
 	http.get("/api/v1/agent-updates", () =>
 		HttpResponse.json({
 			agent_dir: "/usr/share/lodestore/agents",

@@ -78,6 +78,11 @@ export function onStepUpRequired(
 	stepUpHandler = handler;
 }
 
+/** Asks for the password through the global step-up dialog; false when it is cancelled or no dialog is mounted. */
+export function requestStepUp(): Promise<boolean> {
+	return stepUpHandler ? stepUpHandler() : Promise.resolve(false);
+}
+
 /** Sends the user to login for a 401 from a request that bypasses apiFetch. */
 export function notifyUnauthorized() {
 	unauthorizedHandler?.();

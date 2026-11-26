@@ -1,9 +1,12 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { TriangleAlert } from "lucide-react";
+import { ShieldCheck, TriangleAlert } from "lucide-react";
 import { ApiError } from "@/api/fetcher";
-import { useAgentPolicy, useGetRepository } from "@/api/gen/endpoints";
+import {
+	useGetRepository,
+	useStorageAccess,
+	useStoragePresets,
+} from "@/api/gen/endpoints";
 import { agentKeyWarning } from "@/components/capability-checklist";
-import { PolicyPanel } from "@/components/policy-panel";
 import { AgentKeyBadge } from "@/components/repos/agent-key-badge";
 import { CatalogCard } from "@/components/repos/catalog-card";
 import { ChecksCard } from "@/components/repos/checks/checks-card";
@@ -12,8 +15,11 @@ import {
 	guaranteeBannerKind,
 } from "@/components/repos/guarantee-banner";
 import { GuaranteeCard } from "@/components/repos/guarantee-card";
+import {
+	LimitAgentRightsSheet,
+	limitTarget,
+} from "@/components/repos/limit-agent-rights-sheet";
 import { ReclaimCard } from "@/components/repos/reclaim/reclaim-card";
-import { ReplaceAgentKeyDialog } from "@/components/repos/replace-agent-key-dialog";
 import { StorageChecksCard } from "@/components/repos/storage-checks-card";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
@@ -42,6 +48,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { copy } from "@/copy";
 import { hostCount } from "@/lib/plural";
+import { presetOf } from "@/lib/presets";
 
 export const Route = createFileRoute("/_app/settings/repositories/$id")({
 	component: RepositoryPage,
@@ -73,17 +80,31 @@ function RepositoryPage() {
 	const repository = query.data;
 	const notFound =
 		query.error instanceof ApiError && query.error.status === 404;
-	const options = repository?.location.options;
-	const bucket = options?.bucket;
-	const isS3 = repository?.backend === "s3";
 	const keyWarning =
 		repository &&
 		!guaranteeBannerKind(repository) &&
 		agentKeyWarning(repository);
 
-	const policy = useAgentPolicy(
-		{ bucket: bucket ?? "", prefix: options?.prefix },
-		{ query: { enabled: isS3 && !!bucket } },
+	const limitable = !!repository && repository.backend !== "local";
+	const access = useStorageAccess(id, { query: { enabled: limitable } });
+	const presets = useStoragePresets({ query: { enabled: limitable } });
+	const instructionOnly =
+		repository !== undefined &&
+		presets.data !== undefined &&
+		presetOf(repository, presets.data)?.mechanism === "instruction" &&
+		repository.backend === "s3";
+	const canLimit =
+		limitable && (limitTarget(access.data) !== null || instructionOnly);
+	const limitButton = (variant: "default" | "outline", label: string) => (
+		<LimitAgentRightsSheet
+			repositoryId={id}
+			trigger={
+				<Button type="button" variant={variant}>
+					<ShieldCheck aria-hidden />
+					{label}
+				</Button>
+			}
+		/>
 	);
 
 	return (
@@ -145,7 +166,18 @@ function RepositoryPage() {
 						)}
 					</header>
 
-					<GuaranteeCard repository={repository} />
+					<GuaranteeCard
+						repository={repository}
+						actions={
+							canLimit &&
+							limitButton(
+								repository.guarantee_level === "create_only_enforced"
+									? "outline"
+									: "default",
+								copy.guarantee.limit,
+							)
+						}
+					/>
 
 					<GuaranteeBanner repository={repository} />
 
@@ -178,20 +210,14 @@ function RepositoryPage() {
 								<h2>{copy.repos.agentKeyTitle}</h2>
 							</CardTitle>
 							<CardDescription>
-								{isS3 ? copy.backend.twoKeys : copy.repos.localAgentKey}
+								{repository.backend === "local"
+									? copy.repos.localAgentKey
+									: copy.backend.twoKeys}
 							</CardDescription>
 						</CardHeader>
-						{isS3 && (
-							<CardContent className="flex flex-col gap-4">
-								<PolicyPanel
-									iamJson={policy.data?.iam_json}
-									minioCommands={policy.data?.minio_commands}
-									loading={policy.isLoading}
-								/>
-								<ReplaceAgentKeyDialog
-									repositoryId={repository.id}
-									name={repository.name}
-								/>
+						{canLimit && (
+							<CardContent>
+								{limitButton("outline", copy.revoke.replaceKey)}
 							</CardContent>
 						)}
 					</Card>

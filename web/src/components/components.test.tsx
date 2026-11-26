@@ -10,7 +10,6 @@ import {
 } from "@/components/capability-checklist";
 import { CodeBlock } from "@/components/code-block";
 import { LabelsEditor } from "@/components/labels-editor";
-import { PolicyPanel } from "@/components/policy-panel";
 import { RelativeTime } from "@/components/relative-time";
 import { StatusBadge } from "@/components/status-badge";
 import { Stepper } from "@/components/stepper";
@@ -366,22 +365,6 @@ describe("plural", () => {
 		expect(expiresInDays(5)).toBe("Expires in 5 days");
 		expect(hostCount(1)).toBe("1 host");
 		expect(hostCount(5)).toBe("5 hosts");
-	});
-});
-
-describe("PolicyPanel", () => {
-	it("switches tabs and shows the MinIO commands", async () => {
-		const user = userEvent.setup();
-		render(
-			<PolicyPanel
-				iamJson='{"Version":"2012-10-17"}'
-				minioCommands="mc admin policy create local lode-agent policy.json"
-			/>,
-		);
-		expect(screen.getByText("Policy for the agent key")).toBeInTheDocument();
-		expect(screen.getByText('{"Version":"2012-10-17"}')).toBeInTheDocument();
-		await user.click(screen.getByRole("tab", { name: "MinIO" }));
-		expect(screen.getByText(/mc admin policy/)).toBeInTheDocument();
 	});
 });
 
