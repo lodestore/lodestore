@@ -1,7 +1,6 @@
 use bytes::Bytes;
 
 use super::{BlobDelete, BlobError, BlobPurge, BlobStore, PurgeOutcome, SftpStore, Store};
-use crate::repo::LAYOUT_PREFIXES;
 
 /// The key prefixes of the repository layout an agent may write under. A probe
 /// object under any of them must stay invisible to every reader.
@@ -447,9 +446,10 @@ pub async fn probe_keep(server: &Store, agent: AgentProbe<'_>, keys: &ProbeKeys)
 
     let own_text = own_error_text(server);
 
-    // The server key lays out the repository as `commit` would, so an agent key
-    // without mkdir finds the directories it writes into.
-    let written = match server.ensure_prefixes(&LAYOUT_PREFIXES).await {
+    // The server key makes the directories the probe objects live in, so an
+    // agent key without mkdir finds them; the rest of the layout is `commit`'s.
+    let dirs = PROBE_PREFIXES.map(|p| p.trim_end_matches(|c| c != '/'));
+    let written = match server.ensure_dirs_for_probe(&dirs).await {
         Ok(()) => server.put_if_absent(&key, body.clone()).await,
         Err(e) => Err(e),
     };

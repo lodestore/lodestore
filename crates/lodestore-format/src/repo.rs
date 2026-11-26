@@ -15,7 +15,7 @@ use crate::store::{BlobDelete, BlobError, BlobStore, ListEntry, put_named, read_
 
 const CONFIG_KEY: &str = "config";
 const KEYS_PREFIX: &str = "keys/";
-pub(crate) const LAYOUT_PREFIXES: [&str; 4] = ["packs", "index", "snapshots", "locks"];
+const LAYOUT_PREFIXES: [&str; 4] = ["packs", "index", "snapshots", "locks"];
 
 #[derive(Debug, Clone)]
 pub struct InitOptions {
