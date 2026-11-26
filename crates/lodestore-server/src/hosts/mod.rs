@@ -345,6 +345,19 @@ async fn revoke_host(
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let now = now_ms();
+    let Some(repository_id) = sqlx::query("SELECT repository_id FROM agents WHERE id = $1")
+        .bind(&id)
+        .fetch_optional(&state.db.pool)
+        .await?
+        .map(|row| row.try_get::<String, _>("repository_id"))
+        .transpose()?
+    else {
+        return Err(ApiError::NotFound("host not found".into()));
+    };
+    // Under the access lock, so that no SAS is issued between the status change
+    // and the session being cut, even when a later step fails.
+    let access = state.repos.access_lock(&repository_id);
+    let held = access.lock().await;
     let mut tx = state.db.pool.begin().await?;
     sqlx::query("UPDATE agents SET status = 'revoked', revoked_at = $1 WHERE id = $2 AND status <> 'revoked'")
         .bind(now)
@@ -360,14 +373,8 @@ async fn revoke_host(
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    let known = sqlx::query("SELECT 1 FROM agents WHERE id = $1")
-        .bind(&id)
-        .fetch_optional(&state.db.pool)
-        .await?
-        .is_some();
-    if !known {
-        return Err(ApiError::NotFound("host not found".into()));
-    }
+    state.registry.revoke(&id);
+    drop(held);
     let active = sqlx::query(
         "SELECT id FROM jobs WHERE host_id = $1 AND state IN ('queued', 'assigned', 'running')",
     )
@@ -389,15 +396,6 @@ async fn revoke_host(
         state.registry.live.remove(&job_id);
         state.registry.clear_issued(&job_id);
     }
-    let repository_id: String = sqlx::query("SELECT repository_id FROM agents WHERE id = $1")
-        .bind(&id)
-        .fetch_one(&state.db.pool)
-        .await?
-        .try_get("repository_id")?;
-    let access = state.repos.access_lock(&repository_id);
-    let held = access.lock().await;
-    state.registry.revoke(&id);
-    drop(held);
     crate::agent_update::rollout::kick(&state);
     Ok(StatusCode::NO_CONTENT)
 }

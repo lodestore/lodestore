@@ -87,13 +87,21 @@ impl<H: HttpSend> HttpSend for Tracked<H> {
     }
 }
 
-fn bucket_url(location: &RepoLocation) -> String {
+/// `None` for a bucket name GCS would not accept, so that a `/`, `?` or `#`
+/// cannot turn the request into one for another resource.
+fn bucket_url(location: &RepoLocation) -> Option<String> {
     let endpoint = opt(location, "endpoint").unwrap_or(DEFAULT_ENDPOINT);
     let bucket = opt(location, "bucket").unwrap_or_default();
-    format!(
-        "{}/storage/v1/b/{bucket}?fields=lifecycle",
-        endpoint.trim_end_matches('/')
-    )
+    let valid = !bucket.is_empty()
+        && bucket
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b));
+    valid.then(|| {
+        format!(
+            "{}/storage/v1/b/{bucket}?fields=lifecycle",
+            endpoint.trim_end_matches('/')
+        )
+    })
 }
 
 fn repo_prefix(location: &RepoLocation) -> &str {
@@ -141,7 +149,10 @@ pub(crate) async fn check_with(location: &RepoLocation, http: impl HttpSend) -> 
     let Some(auth) = auth(location, &ctx) else {
         return LifecycleVerdict::Unverified;
     };
-    let Ok((mut parts, ())) = http::Request::get(bucket_url(location))
+    let Some(url) = bucket_url(location) else {
+        return LifecycleVerdict::Unverified;
+    };
+    let Ok((mut parts, ())) = http::Request::get(url)
         .body(())
         .map(http::Request::into_parts)
     else {
@@ -661,6 +672,19 @@ mod tests {
         assert_eq!(check_with(&at, Fake::answering([None])).await, Inconclusive);
         let broken = location(&[("credential", "!!not base64!!")]);
         assert_eq!(check_with(&broken, Fake::answering([])).await, Unverified);
+    }
+
+    #[tokio::test]
+    async fn gcs_lifecycle_odd_bucket_name_is_unverified() {
+        for bucket in ["real/o", "b?x", "b#x", "B", ""] {
+            let at = RepoLocation::new(
+                "gcs",
+                vec![("bucket", bucket), ("root", "/repo"), ("token", "ya29.test")],
+            );
+            let fake = Fake::answering([Some((200, "{}"))]);
+            assert_eq!(check_with(&at, fake.clone()).await, Unverified, "{bucket}");
+            assert!(fake.requests.lock().unwrap().is_empty(), "{bucket}");
+        }
     }
 
     #[tokio::test]
