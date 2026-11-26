@@ -99,3 +99,28 @@ describe("CapabilityChecklist stale result", () => {
 		expect(screen.queryByText("Outdated")).toBeNull();
 	});
 });
+
+describe("CapabilityChecklist ids", () => {
+	it("draws and counts only the given rows", () => {
+		render(
+			<CapabilityChecklist
+				ids={["write", "object_lock"]}
+				rows={rowsOf("pass", "pass", "pass", "pass", "warn")}
+			/>,
+		);
+		expect(screen.getAllByRole("listitem")).toHaveLength(2);
+		expect(screen.getByText("1 passed, 1 with warnings")).toBeInTheDocument();
+	});
+
+	it("can hide the summary", () => {
+		render(
+			<CapabilityChecklist
+				ids={["object_lock"]}
+				hideSummary
+				rows={rowsOf("pass", "pass", "pass", "pass", "pass")}
+			/>,
+		);
+		expect(screen.getAllByRole("listitem")).toHaveLength(1);
+		expect(screen.queryByText("1 passed")).toBeNull();
+	});
+});

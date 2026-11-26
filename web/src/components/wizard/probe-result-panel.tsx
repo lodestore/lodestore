@@ -1,5 +1,9 @@
-import { CircleAlert, Info, TriangleAlert } from "lucide-react";
-import { CapabilityChecklist } from "@/components/capability-checklist";
+import { CircleAlert, CircleCheck, Info, TriangleAlert } from "lucide-react";
+import type { CheckResult } from "@/api/gen/model";
+import {
+	CapabilityChecklist,
+	type CheckId,
+} from "@/components/capability-checklist";
 import { LevelLine, LevelScale } from "@/components/guarantee-level";
 import { GuaranteeNotes, UNCHECKED_LEVEL } from "@/components/guarantee-notes";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -7,6 +11,15 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Field, FieldLabel } from "@/components/ui/field";
+import {
+	Item,
+	ItemActions,
+	ItemContent,
+	ItemDescription,
+	ItemGroup,
+	ItemMedia,
+	ItemTitle,
+} from "@/components/ui/item";
 import { copy } from "@/copy";
 import { cn } from "@/lib/utils";
 import {
@@ -17,6 +30,103 @@ import {
 	needsConsent,
 	runningRows,
 } from "./draft";
+
+const BUCKET_BACKENDS = ["s3", "gcs", "azblob"];
+const MAIN_IDS: readonly CheckId[] = [
+	"write",
+	"list",
+	"conditional_write",
+	"agent_delete",
+];
+const LOCK_IDS: readonly CheckId[] = ["object_lock"];
+const notes = copy.guarantee.notes as Record<string, string>;
+
+export type BucketFact = {
+	id: "versioning" | "lifecycle";
+	status: "pass" | "warn";
+	label: string;
+	detail: string;
+	codes: string[];
+};
+
+export function bucketFacts(
+	result: CheckResult,
+	backend: string,
+): BucketFact[] {
+	if (!BUCKET_BACKENDS.includes(backend)) return [];
+	const facts = copy.rights.facts;
+	const has = (code: string) => result.guarantee_notes.includes(code);
+	const level = result.guarantee_level;
+	const out: BucketFact[] = [];
+	if (level === "overwrite_keeps_old_version") {
+		out.push({
+			id: "versioning",
+			status: "pass",
+			label: facts.versioning,
+			detail: facts.versioningOn,
+			codes: [],
+		});
+	} else if (has("agent_can_overwrite")) {
+		out.push({
+			id: "versioning",
+			status: "warn",
+			label: facts.versioning,
+			detail: facts.versioningOff,
+			codes: ["agent_can_overwrite"],
+		});
+	}
+	const lifecycle = ["lifecycle_deletes", "lifecycle_unverified"].filter(has);
+	if (lifecycle.length > 0) {
+		out.push({
+			id: "lifecycle",
+			status: "warn",
+			label: facts.lifecycle,
+			detail: lifecycle.map((code) => notes[code]).join(" "),
+			codes: lifecycle,
+		});
+	} else if (level !== UNCHECKED_LEVEL) {
+		out.push({
+			id: "lifecycle",
+			status: "pass",
+			label: facts.lifecycle,
+			detail: facts.lifecycleOk,
+			codes: [],
+		});
+	}
+	return out;
+}
+
+function FactRow({ fact }: { fact: BucketFact }) {
+	const pass = fact.status === "pass";
+	const Icon = pass ? CircleCheck : TriangleAlert;
+	return (
+		<Item
+			role="listitem"
+			variant="outline"
+			size="sm"
+			data-status={fact.status}
+			data-fact={fact.id}
+		>
+			<ItemMedia variant="icon" className="size-6 border-0 bg-transparent">
+				<Icon
+					aria-hidden
+					className={cn("size-6", pass ? "text-success" : "text-warning")}
+				/>
+			</ItemMedia>
+			<ItemContent>
+				<ItemTitle>{fact.label}</ItemTitle>
+				<ItemDescription className="line-clamp-none">
+					{fact.detail}
+				</ItemDescription>
+			</ItemContent>
+			<ItemActions
+				className={cn("text-xs", pass ? "text-success" : "text-warning")}
+			>
+				{copy.check.status[fact.status]}
+			</ItemActions>
+		</Item>
+	);
+}
 
 export function ProbeResultPanel({
 	draft,
@@ -81,6 +191,12 @@ function DoneResult({
 	const level = result.guarantee_level;
 	const consent = !stale && needsConsent(result);
 	const unchecked = level === UNCHECKED_LEVEL;
+	const backend = backendOf(draft.preset) ?? "s3";
+	const grouped = BUCKET_BACKENDS.includes(backend);
+	const facts = stale ? [] : bucketFacts(result, backend);
+	const shown = new Set(facts.flatMap((fact) => fact.codes));
+	const remaining = result.guarantee_notes.filter((code) => !shown.has(code));
+	const rows = checkRows(result, backend, stale);
 	return (
 		<>
 			{result.existing_repository && (
@@ -99,16 +215,35 @@ function DoneResult({
 				</Alert>
 			)}
 			<CapabilityChecklist
-				rows={checkRows(result, backendOf(draft.preset) ?? "s3", stale)}
+				rows={rows}
 				stale={stale}
+				ids={grouped ? MAIN_IDS : undefined}
 			/>
+			{grouped && (
+				<div className="flex flex-col gap-2">
+					<h4 className="text-sm font-semibold">{copy.rights.bucketGroup}</h4>
+					<CapabilityChecklist
+						rows={rows}
+						stale={stale}
+						ids={LOCK_IDS}
+						hideSummary
+					/>
+					{facts.length > 0 && (
+						<ItemGroup className="gap-2">
+							{facts.map((fact) => (
+								<FactRow key={fact.id} fact={fact} />
+							))}
+						</ItemGroup>
+					)}
+				</div>
+			)}
 			{!stale && (
 				<div className="flex flex-col gap-4">
 					<LevelScale level={level} />
 					<LevelLine level={level} />
 					{!consent && (
 						<div className="text-sm">
-							<GuaranteeNotes codes={result.guarantee_notes} />
+							<GuaranteeNotes codes={remaining} />
 						</div>
 					)}
 				</div>
@@ -123,8 +258,14 @@ function DoneResult({
 					</AlertTitle>
 					<AlertDescription className="flex flex-col gap-4 [&_p:not(:last-child)]:mb-0">
 						{unchecked && <p>{copy.guarantee.uncheckedBody}</p>}
-						{draft.skipRights && <p>{copy.rights.skippedBody}</p>}
-						<GuaranteeNotes codes={result.guarantee_notes} />
+						{draft.skipRights && (
+							<p>
+								{backend === "s3"
+									? copy.rights.skippedBody
+									: copy.rights.skippedBodyShared}
+							</p>
+						)}
+						<GuaranteeNotes codes={remaining} />
 						{unchecked && (
 							<div>
 								<Button
