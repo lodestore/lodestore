@@ -148,6 +148,7 @@ remote_stage2() {
   export DEBIAN_FRONTEND=noninteractive
   echo "postfix postfix/main_mailer_type select No configuration" | debconf-set-selections
   apt-get install -yq proxmox-ve postfix open-iscsi chrony libnbd-bin acl attr
+  rm -f /etc/apt/sources.list.d/pve-enterprise.sources /etc/apt/sources.list.d/ceph.sources
   local old
   # shellcheck disable=SC2016
   mapfile -t old < <(dpkg-query -W -f '${Package}\n' 'linux-image-*cloud*' 2>/dev/null || true)
