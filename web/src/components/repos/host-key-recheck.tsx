@@ -97,9 +97,11 @@ export function HostKeyRecheck({ repositoryId }: { repositoryId: string }) {
 					</DialogHeader>
 					<dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-2 text-sm">
 						<dt className="text-muted-foreground">{copy.hostKey.pinned}</dt>
-						<dd className="font-mono break-all">{offer?.pinned_fingerprint}</dd>
+						<dd className="font-mono wrap-anywhere">
+							{offer?.pinned_fingerprint}
+						</dd>
 						<dt className="text-muted-foreground">{copy.hostKey.presented}</dt>
-						<dd className="font-mono break-all">{offer?.fingerprint}</dd>
+						<dd className="font-mono wrap-anywhere">{offer?.fingerprint}</dd>
 					</dl>
 					<Alert className="text-warning">
 						<TriangleAlert aria-hidden />
