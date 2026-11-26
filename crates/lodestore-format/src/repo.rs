@@ -108,7 +108,7 @@ impl PendingInit {
         }
     }
 
-    /// Writes the key slots, creates the layout and writes `config` last. A
+    /// Creates the layout, writes the key slots and writes `config` last. A
     /// repository without `config` is not a repository, so an interrupted
     /// init leaves nothing that opens.
     ///
@@ -139,10 +139,10 @@ impl PendingInit {
             Some(self.created),
             entropy,
         )?;
+        store.ensure_prefixes(&LAYOUT_PREFIXES).await?;
         for slot in [password_slot, recovery_slot] {
             put_named(store, &slot_object_name(&slot), slot).await?;
         }
-        store.ensure_prefixes(&LAYOUT_PREFIXES).await?;
 
         match store
             .put_if_absent(CONFIG_KEY, Bytes::from(self.config_bytes.clone()))
@@ -548,7 +548,7 @@ mod tests {
         assert_eq!(log.iter().filter(|l| l.starts_with("put keys/")).count(), 2);
         let slot_at = log.iter().position(|l| l.starts_with("put keys/")).unwrap();
         let prefixes_at = log.iter().position(|l| l.starts_with("prefixes")).unwrap();
-        assert!(slot_at < prefixes_at && prefixes_at < log.len() - 1);
+        assert!(prefixes_at < slot_at && slot_at < log.len() - 1);
 
         let repo = Repository::open(&store, b"pw").await.unwrap();
         assert_eq!(repo.read_keys().repo_id(), &repo_id);

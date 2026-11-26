@@ -323,7 +323,9 @@ pub async fn run_storage_probe(opened: &Opened) -> ProbeReport {
     for check in &mut report.checks {
         check.error = check.error.as_deref().map(redact_signatures);
         check.detail = check.detail.as_deref().map(redact_signatures);
-        if let Some(detail) = &check.detail {
+        if let Some(detail) = &check.detail
+            && check.status != CheckStatus::Pass
+        {
             tracing::warn!(
                 check = check.id.as_str(),
                 status = ?check.status,

@@ -41,6 +41,15 @@ fn files(sshd: &SshdServer) -> String {
     exec(sshd, &["find", sshd.root(), "-type", "f"])
 }
 
+async fn assert_handshake_only(sshd: &SshdServer, mark: usize) {
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let log = sshd.log();
+    let tail = log.get(mark..).unwrap_or("");
+    for forbidden in ["Accepted publickey", "Failed publickey", "subsystem"] {
+        assert!(!tail.contains(forbidden), "{forbidden}: {tail}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
 async fn sftp_tofu_check_offers_the_host_key_and_writes_nothing() {
@@ -81,12 +90,7 @@ async fn sftp_tofu_check_offers_the_host_key_and_writes_nothing() {
         );
     }
 
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let log = sshd.log();
-    let tail = log.get(mark..).unwrap_or("");
-    for forbidden in ["Accepted publickey", "Failed publickey", "subsystem"] {
-        assert!(!tail.contains(forbidden), "{forbidden}: {tail}");
-    }
+    assert_handshake_only(&sshd, mark).await;
     assert_eq!(files(&sshd), before);
 
     for path in [
@@ -110,19 +114,39 @@ async fn sftp_tofu_check_offers_the_host_key_and_writes_nothing() {
         );
     }
 
-    for (what, mutate) in [("endpoint", "endpoint"), ("user", "user"), ("key", "key")] {
+    let mut draft = unpinned_draft(&sshd, "sftp-repo");
+    draft["location"]["options"]
+        .as_object_mut()
+        .unwrap()
+        .remove("endpoint");
+    let response = api.post("/api/v1/repositories/check", &draft).await;
+    assert_eq!(response.status(), 422);
+
+    let fingerprint = SftpStore::host_key_fingerprint(&sshd.host_key()).unwrap();
+    for missing in ["user", "key"] {
+        let mark = sshd.log().len();
         let mut draft = unpinned_draft(&sshd, "sftp-repo");
         draft["location"]["options"]
             .as_object_mut()
             .unwrap()
-            .remove(mutate);
+            .remove(missing);
         let response = api.post("/api/v1/repositories/check", &draft).await;
-        assert_eq!(response.status(), 422, "{what}");
+        assert_eq!(response.status(), 200, "{missing}");
+        let result = body(response).await;
+        assert_eq!(result["host_key"]["fingerprint"], fingerprint, "{missing}");
+        assert_handshake_only(&sshd, mark).await;
     }
+
     let mut draft = unpinned_draft(&sshd, "sftp-repo");
     draft["location"]["options"]["bogus"] = json!("x");
     let response = api.post("/api/v1/repositories/check", &draft).await;
     assert_eq!(response.status(), 422);
+    assert!(
+        body(response).await["message"]
+            .as_str()
+            .unwrap()
+            .contains("`bogus`")
+    );
 
     let mut draft = unpinned_draft(&sshd, "sftp-repo");
     draft["location"]["options"]["endpoint"] = json!("127.0.0.1:1");
@@ -131,6 +155,38 @@ async fn sftp_tofu_check_offers_the_host_key_and_writes_nothing() {
     let result = body(response).await;
     assert_eq!(result["blocking"], true);
     assert!(result.get("host_key").is_none(), "{result}");
+    ts.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn sftp_tofu_offer_needs_only_the_address() {
+    let sshd = SshdServer::start().await;
+    let ts = TestServer::start(&Backend::Sqlite).await;
+    let api = ts.api().await;
+    let (mark, before) = (sshd.log().len(), files(&sshd));
+
+    let draft = json!({
+        "location": {
+            "backend": "sftp",
+            "options": { "endpoint": sshd.endpoint(), "root": sshd.root() },
+        },
+    });
+    let response = api.post("/api/v1/repositories/check", &draft).await;
+    assert_eq!(response.status(), 200);
+    let result = body(response).await;
+    assert_eq!(result["blocking"], true, "{result}");
+    assert_eq!(result["guarantee_level"], "unchecked");
+    let host_key = sshd.host_key();
+    assert_eq!(
+        result["host_key"]["fingerprint"],
+        SftpStore::host_key_fingerprint(&host_key).unwrap()
+    );
+    let bare = host_key.split_whitespace().take(2).collect::<Vec<_>>();
+    assert_eq!(result["host_key"]["key"], bare.join(" "));
+
+    assert_handshake_only(&sshd, mark).await;
+    assert_eq!(files(&sshd), before);
     ts.stop().await;
 }
 

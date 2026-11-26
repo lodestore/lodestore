@@ -10,6 +10,14 @@ import { overview } from "@/copy.overview";
 import { policies } from "@/copy.policies";
 import { restore } from "@/copy.restore";
 import { sources } from "@/copy.sources";
+import {
+	connection,
+	hostKey,
+	limit,
+	presets,
+	revoke,
+	rights,
+} from "@/copy.storage";
 import { tokens } from "@/copy.tokens";
 import { user } from "@/copy.user";
 import { sentence } from "@/lib/sentence";
@@ -30,6 +38,12 @@ export const copy = {
 	user,
 	hostBackup,
 	snapshots,
+	presets,
+	connection,
+	rights,
+	hostKey,
+	limit,
+	revoke,
 	demo: {
 		notAvailable: "Not available in the demo.",
 		banner:
@@ -131,22 +145,9 @@ export const copy = {
 		password: "Password",
 	},
 	access: {
-		serverKey: {
-			title: "Server key",
-			body: "Full access. Stays on the server to manage and clean up the repository.",
-		},
-		agentKey: {
-			title: "Agent key",
-			body: "Write-only. Sent to every host so it can upload backups.",
-		},
-		writeOnlyBadge: "Write-only",
 		whyWriteOnly: {
 			title: "Why write-only?",
 			body: "If a host is ever compromised, the attacker can add data but cannot delete or read your backups. Deleting data is done by the server only.",
-		},
-		verify: {
-			title: "Verify access",
-			body: "Lodestore tries each permission once with a small test object, then removes it with the server key.",
 		},
 	},
 	checklist: {
@@ -229,22 +230,31 @@ export const copy = {
 	wizard: {
 		title: "Set up your first repository",
 		subtitle:
-			"Four steps: choose storage, check access, save the recovery key, add a host. About 5 minutes.",
-		steps: ["Storage", "Access", "Recovery key", "First host"],
+			"Five steps: choose storage, connect it, give agents a key that cannot delete, save the recovery key, add a host. About 5 minutes.",
+		steps: [
+			"Storage",
+			"Connection",
+			"Agent rights",
+			"Recovery key",
+			"First host",
+		],
 		back: "Back",
-		continueToAccess: "Continue to access",
+		continueToConnection: "Continue to connection",
+		continueToRights: "Continue to agent rights",
+		stepDescriptionSftp: "Address and host key",
+		stepDescriptionAzure: "Container and server key",
 		continueToKey: "Continue to recovery key",
 		createRepository: "Create repository",
 		openHosts: "Open Hosts",
 		skipHost: "Skip adding a host",
 		keepHost: "Keep host",
 		discardChanges: "Discard changes",
-		keepCurrentKey: "Keep current key",
 		stepDescriptions: [
-			"Choose where backups live",
-			"Give Lodestore two keys",
-			"Save the way back in",
-			"Connect a machine",
+			"Provider and name",
+			"Bucket and server key",
+			"A key that cannot delete",
+			"Restore without the server",
+			"Install the agent",
 		],
 		progress: (n: number, total: number) => `Step ${n} of ${total}`,
 		progressLabel: "Progress",
@@ -261,8 +271,6 @@ export const copy = {
 		completed: "completed",
 	},
 	backend: {
-		s3: "S3-compatible storage such as AWS S3, MinIO or Ceph.",
-		local: "Local folder. A path both the server and the agent can see.",
 		twoKeys:
 			"Two keys. The server key has full access and manages the repository. The agent key can only write, so a compromised host cannot delete backups.",
 	},
@@ -296,8 +304,36 @@ export const copy = {
 				"The bucket's lifecycle rules could not be read; check that none deletes objects or earlier versions.",
 		},
 		unknownNote: "The check found another limit.",
-		levelLine: (level: string) => `Guarantee level: ${level}.`,
 		consentLabel: "I understand and want to continue",
+		column: "Guarantee",
+		cardTitle: "What a host can do to backups",
+		measured: "Measured",
+		accepted: "Accepted",
+		checked: "Checked",
+		why: "Why",
+		daily: "daily",
+		checkedPrefix: "Checked",
+		notCheckedFor: (days: number) => `Not checked for ${days} days`,
+		neverChecked: "Never checked",
+		acceptedChecked: "Accepted · checked",
+		lowerThanAccepted: "Lower than accepted",
+		seeAlert: "See alert",
+		limit: "Limit agent rights",
+		checkNow: "Check now",
+		whyBackend: {
+			s3: "The agent key's rights decide what a host can do.",
+			azblob:
+				"Agents get a short SAS signed by the server; its permissions decide.",
+			gcs: "The roles of the service account decide what a host can do.",
+			sftp: "An SFTP user can change a file it holds open.",
+			local: "Any process that can write to the folder can change its files.",
+		},
+		scale: {
+			weak: "Overwrite or delete",
+			keeps: "Overwrite keeps old version",
+			createOnly: "Create-only",
+			notMeasured: "Not measured",
+		},
 		weakTitle: "A host could change or delete backups here",
 		uncheckedTitle: "Lodestore could not measure what a host can do",
 		uncheckedBody:
@@ -313,12 +349,6 @@ export const copy = {
 		levelChanged:
 			"The level changed while this page was open. Review the new level before you accept it.",
 		seeChecks: "See storage checks",
-	},
-	policy: {
-		title: "Policy for the agent key",
-		body: "Attach this to the agent key's user. The bucket name follows what you typed. Copy it as is.",
-		tabIam: "AWS IAM",
-		tabMinio: "MinIO",
 	},
 	check: {
 		button: "Check storage",
@@ -348,6 +378,9 @@ export const copy = {
 				"Tighten the key's policy, or enable bucket versioning or Object Lock, and check again.",
 			agentKeyLockOn:
 				"Object Lock is enabled, but whether earlier versions are protected depends on its retention rules. Tightening the key's policy is still recommended.",
+			agentKeyVersioned:
+				"The storage keeps earlier versions, so an overwrite can be undone. Tightening the key's policy is still recommended.",
+			agentKeyTighten: "Tighten the key's permissions and check again.",
 			agentKeyAccept:
 				"You can also continue and accept the risk. This warning stays visible on the repository.",
 			objectLockOn: "Object Lock is enabled on the bucket.",
@@ -364,6 +397,7 @@ export const copy = {
 			warn: "Warning",
 			fail: "Failed",
 			neutral: "Not applicable",
+			off: "Off",
 			stale: "Outdated",
 		},
 		blockedContinue: "Fix the failed checks to continue to the recovery key.",
@@ -419,9 +453,10 @@ export const copy = {
 		revokeHost: "Revoke host",
 		hostRevoked: (name: string) => `Host "${name}" revoked.`,
 		revokeTitle: (name: string) => `Revoke host "${name}"?`,
+		revokedTitle: (name: string) => `Host "${name}" is revoked`,
 		revokeBody:
-			"The agent is disconnected immediately and can't reconnect or receive jobs. To use this machine again, reinstall the agent with --force and a new token. The agent S3 key is shared by all hosts of this repository, so a revoked host can still write to the bucket until you replace the key. It cannot read or delete.",
-		replaceKeyLink: "Replace the agent key",
+			"The agent is disconnected immediately and can't reconnect or receive jobs. To use this machine again, reinstall the agent with --force and a new token. After the revoke you see what the host can still reach in the storage of its repository.",
+		replaceKeyLink: "Open the repository",
 		actionsFor: (name: string) => `Actions for ${name}`,
 		columns: {
 			host: "Host",
@@ -532,17 +567,8 @@ export const copy = {
 		agentKeyCanDelete: "Can delete",
 		agentKeyCanOverwrite: "Can overwrite",
 		agentKeyNotChecked: "Not checked",
-		replaceKeyTitle: (name: string) => `Replace the agent key for "${name}"?`,
-		replaceKeyBody: (online: string) =>
-			`Enter the new write-only key. The server verifies it, then sends it to ${online}. Offline agents receive it when they reconnect, and until then they cannot write.`,
-		replaceKeyConfirm: "Verify and replace key",
 		replaceKeyResult: (online: string, offline: string) =>
 			`New key sent to ${online}. ${offline} will receive it when they reconnect.`,
-		replaceKeyFailure: (reason: string) =>
-			`The new key could not be verified: ${reason}. The current key is unchanged.`,
-		replaceKey: "Replace agent key",
-		accessKeyId: "Access key ID",
-		secretAccessKey: "Secret access key",
 		columns: {
 			name: "Name",
 			backend: "Backend",
@@ -583,7 +609,6 @@ export const copy = {
 		loadFailed:
 			"Couldn't load this repository. Check that the server is reachable, then retry.",
 		checkFailed: "storage check",
-		keyChangeFailed: "replace the agent key",
 		close: "Close",
 	},
 	errors: {

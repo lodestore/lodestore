@@ -19,6 +19,14 @@ Hetzner offers two storages and Lodestore has a preset for each. The levels and 
 | Level the check reports | What the check measures |
 | Tested against | Not verified on the live service |
 
+### In the web interface
+
+1. **Storage.** Choose the **Hetzner Object Storage** tile.
+2. **Connection.** **Region**, from which the wizard builds `https://<region>.your-objectstorage.com`, then **Bucket**, **Key prefix** and the server key: the access key ID and the secret of the bucket owner.
+3. **Agent rights.** The step shows the commands and the bucket policy of the next section, with the agent as principal. Create the agent key in a second Hetzner project, apply the policy with the bucket owner's key, paste the agent's access key ID and secret, and choose **Check**.
+
+**Skip, use the server key** lets agents use the owner's key; you accept the weaker level. **Limit agent rights** on the repository page shows the same commands and, after your password and a full check, switches the agents to a new key; delete the old one in Hetzner.
+
 ### Agent rights
 
 `GET /api/v1/agent-policy?preset=hetzner-object-storage&bucket=<bucket>&prefix=<prefix>` returns commands and a bucket policy; the mechanism is `policy`. Create the agent key in a second Hetzner project, then apply the policy with the bucket owner's key (`aws s3api put-bucket-policy`). The policy names the agent as the principal `arn:aws:iam:::user/p<project>:<access key>` (placeholders `AGENT_PROJECT_ID` and `AGENT_ACCESS_KEY`) and allows `s3:PutObject`, `s3:GetObject`, `s3:GetObjectVersion` on the repository prefix and `s3:ListBucket` on the bucket. The endpoint template is `https://{region}.your-objectstorage.com`. This has not been checked against the real service. Turn on Object Lock too.
@@ -41,6 +49,14 @@ Create a new key in the second project, update `AGENT_ACCESS_KEY` in the policy,
 | Level the check reports | Host can overwrite or delete, always |
 | Tested against | Not verified on the live service. The SFTP client is tested against OpenSSH in a container |
 
+### In the web interface
+
+1. **Storage.** Choose the **Hetzner Storage Box** tile.
+2. **Connection.** **Storage Box user**; the wizard builds the address `<user>.your-storagebox.de:23` from it and shows it. Enter the **Directory**, choose **Get host key**, compare the fingerprint with the one you know for your Storage Box and choose **It matches**; only then does the wizard ask for the **Private key** of the main account.
+3. **Agent rights.** The step shows the instruction of the next section: a Storage Box cannot forbid deleting, so there are no commands. Create the sub-account, enter its user and private key, and choose **Check**. The level is **Host can overwrite or delete**.
+
+**Skip, use the server key** makes the agents use the main account; only a new repository with a sub-account changes that, and the repository page offers no **Limit agent rights** for it. A repository created with a sub-account takes a new key through that panel.
+
 ### Agent rights
 
 `GET /api/v1/agent-policy?preset=hetzner-storage-box` returns an instruction; the mechanism is `instruction`:
@@ -49,7 +65,7 @@ Create a new key in the second project, update `AGENT_ACCESS_KEY` in the policy,
 2. Give the agent only that sub-account; the server keeps the main account.
 3. Keep Storage Box snapshots so that an overwritten or deleted object can be recovered.
 
-The preset endpoint is `ssh://<user>.your-storagebox.de:23`. The level stays **Host can overwrite or delete**, and so it does for any SFTP account: an SFTP user can keep writing to a file it holds open (`held_handle_rewrite`). Give the sub-account to the agents as `agent_options` (`user` and `key`); see [SFTP](/docs/storage/sftp/) for the options and the host key.
+The preset address is `<user>.your-storagebox.de:23`, with no `ssh://` in front: an SFTP address with a scheme is refused. The level stays **Host can overwrite or delete**, and so it does for any SFTP account: an SFTP user can keep writing to a file it holds open (`held_handle_rewrite`). Give the sub-account to the agents as `agent_options` (`user` and `key`); see [SFTP](/docs/storage/sftp/) for the options and the host key.
 
 ### Rotating agent credentials
 

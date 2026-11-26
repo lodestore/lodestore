@@ -17,6 +17,14 @@ The levels and how they are measured are in [Storage backends and guarantee leve
 | Level the check reports | **Host can overwrite or delete**, always (`held_handle_rewrite`) |
 | Tested against | OpenSSH in a container. Hosted SFTP and NAS: not yet |
 
+## In the web interface
+
+1. **Storage.** Choose the **SFTP (OpenSSH)** tile.
+2. **Connection.** **Address** as `host` or `host:port`, with no `ssh://` or `sftp://` (an address with a scheme is refused), and **Directory**, an absolute path on the server. Choose **Get host key**. The server makes the SSH handshake and shows the key type and the fingerprint, and nothing else is sent. Compare the fingerprint with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the SFTP server and choose **It matches**; **It does not match** stops you. Only then does the wizard ask for the server's **User** and **Private key**, so the private key is sent after you have confirmed. A change of the address or the directory drops the confirmed key.
+3. **Agent rights.** The step shows the commands and the `sshd_config` block of this page, with the agent's **User** (default `lodestore-agent`). Run them, paste the agent's private key, and choose **Check**. The check creates the folders it writes into with the server's key, so the directory may be empty. The level is **Host can overwrite or delete**.
+
+**Skip, use the server key** makes the agents log in as the server's user. You accept the level, and only a new repository with its own user and key changes that: the repository page offers no **Limit agent rights** for it. A repository created with its own agent key takes a new key through that panel, after your password and a full check. **Check host key again** on the repository page shows the key the server presents now; if it differs from the pinned one, the dialog shows both fingerprints.
+
 ## Agent rights
 
 `GET /api/v1/agent-policy?preset=sftp&prefix=<absolute path>&user=<name>` returns shell commands and an `sshd_config` block; the mechanism is `commands`. The commands assume that the repository lives in `<root>/data` and that the agent sees it as `/data` inside its chroot:
@@ -26,7 +34,7 @@ The levels and how they are measured are in [Storage backends and guarantee leve
 - the agent's public key in `authorized_keys`;
 - a `Match User` block with `ChrootDirectory <root>`, `ForceCommand internal-sftp -P <deny list> -u 0222`, and no forwarding.
 
-Create the directories `packs`, `index` and `snapshots` beforehand: the agent cannot create directories. The preset is marked verified: the commands are run against OpenSSH in a container.
+Do not create the repository's directories yourself: the storage check creates `packs`, `index`, `snapshots` and `tmp` with the server's key, creating the repository adds the rest of the layout, and the agent never creates a directory. The preset is marked verified: the commands are run against OpenSSH in a container.
 
 ## Limits
 

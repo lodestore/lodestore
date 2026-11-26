@@ -299,6 +299,11 @@ fn parse_endpoint(endpoint: &str) -> Result<(String, u16)> {
             "invalid SFTP endpoint {endpoint:?}; use host[:port]"
         ))
     };
+    if endpoint.contains("://") {
+        return Err(Error::InvalidInput(format!(
+            "invalid SFTP endpoint {endpoint:?}; use host[:port], without ssh:// or sftp://"
+        )));
+    }
     let (host, port) = if let Some(rest) = endpoint.strip_prefix('[') {
         let (host, tail) = rest.split_once(']').ok_or_else(bad)?;
         match tail {
@@ -1354,18 +1359,45 @@ impl BlobStore for SftpStore {
     }
 
     async fn ensure_prefixes(&self, prefixes: &[&str]) -> std::result::Result<(), BlobError> {
-        let mut dirs: Vec<String> = Vec::new();
-        for p in prefixes {
-            let p = p.trim_matches('/');
-            check_key(p)?;
-            dirs.push(p.to_owned());
-        }
+        let mut dirs = checked_dirs(prefixes)?;
         for fixed in ["keys", TMP_DIR] {
             dirs.push(fixed.to_owned());
         }
         for shard in 0..=255u8 {
             dirs.push(format!("packs/{shard:02x}"));
         }
+        self.ensure_dirs(dirs).await
+    }
+
+    fn publishes_atomically(&self) -> bool {
+        self.inner.publish == Publish::Hardlink
+    }
+}
+
+fn checked_dirs(prefixes: &[&str]) -> std::result::Result<Vec<String>, BlobError> {
+    prefixes
+        .iter()
+        .map(|p| {
+            let p = p.trim_matches('/');
+            check_key(p)?;
+            Ok(p.to_owned())
+        })
+        .collect()
+}
+
+impl SftpStore {
+    /// Creates only the given directories and the upload directory, not the
+    /// layout `ensure_prefixes` lays out: what a probe writes into.
+    pub(super) async fn ensure_probe_dirs(
+        &self,
+        prefixes: &[&str],
+    ) -> std::result::Result<(), BlobError> {
+        let mut dirs = checked_dirs(prefixes)?;
+        dirs.push(TMP_DIR.to_owned());
+        self.ensure_dirs(dirs).await
+    }
+
+    async fn ensure_dirs(&self, mut dirs: Vec<String>) -> std::result::Result<(), BlobError> {
         dirs.sort();
         dirs.dedup();
         let root = self.inner.root.clone();
@@ -1384,10 +1416,6 @@ impl BlobStore for SftpStore {
             }
         })
         .await
-    }
-
-    fn publishes_atomically(&self) -> bool {
-        self.inner.publish == Publish::Hardlink
     }
 }
 
@@ -1449,6 +1477,26 @@ mod tests {
         for bad in ["", ":22", "host:", "host:x", "host:70000", "[::1", "[::1]x"] {
             assert!(parse_endpoint(bad).is_err(), "{bad:?}");
         }
+        for schemed in ["ssh://host:23", "sftp://host", "ssh://[::1]:23", "x://"] {
+            match parse_endpoint(schemed) {
+                Err(Error::InvalidInput(m)) => assert!(m.contains("without ssh://"), "{m}"),
+                other => panic!("{schemed:?}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn storage_box_preset_address_parses_to_port_23() {
+        let template = crate::store::policy::STORAGE_PRESETS
+            .iter()
+            .find(|p| p.id == "hetzner-storage-box")
+            .and_then(|p| p.endpoint_template)
+            .expect("the Storage Box preset has an address template");
+        let address = template.replace("{user}", "u123");
+        assert_eq!(
+            parse_endpoint(&address).unwrap(),
+            ("u123.your-storagebox.de".into(), 23)
+        );
     }
 
     #[test]

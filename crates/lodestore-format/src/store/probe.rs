@@ -295,7 +295,16 @@ impl ProbeReport {
         };
     }
 
-    fn set_blob_error(&mut self, id: CheckId, status: CheckStatus, prefix: &str, e: &BlobError) {
+    /// `own_text`: the error comes from a store whose messages we compose and
+    /// that holds no secret in them (SFTP, local), so its reason may be shown.
+    fn set_blob_error(
+        &mut self,
+        id: CheckId,
+        status: CheckStatus,
+        prefix: &str,
+        e: &BlobError,
+        own_text: bool,
+    ) {
         let text = match e {
             BlobError::HostKeyMismatch { pinned, offered } => {
                 self.host_key_changed = Some(HostKeyChange {
@@ -304,6 +313,10 @@ impl ProbeReport {
                 });
                 e.to_string()
             }
+            BlobError::Backend {
+                message,
+                temporary: false,
+            } if own_text => shown(message),
             _ => message(e).to_string(),
         };
         self.set(id, status, Some(format!("{prefix}{text}")));
@@ -350,6 +363,44 @@ fn message(e: &BlobError) -> &'static str {
         } => "the storage is temporarily unavailable",
         _ => "the storage returned an unexpected error, see the server log",
     }
+}
+
+/// Cloud SDK errors may carry request details, so only SFTP and local stores,
+/// whose messages we write, pass their reason on.
+fn own_error_text(store: &Store) -> bool {
+    matches!(store, Store::Sftp(_) | Store::Local(_))
+}
+
+const SHOWN_MAX_CHARS: usize = 300;
+
+/// Bidi controls and zero-width characters: they reorder or hide text.
+fn is_invisible_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061C}'
+            | '\u{00AD}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}'
+    )
+}
+
+/// A store's own message, with control and invisible format characters
+/// blanked and the length bounded: an SFTP server's status text is part of it.
+fn shown(message: &str) -> String {
+    message
+        .chars()
+        .take(SHOWN_MAX_CHARS)
+        .map(|c| {
+            if c.is_control() || is_invisible_format(c) {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect()
 }
 
 /// The names of the throwaway objects one probe run may leave behind.
@@ -413,13 +464,22 @@ pub async fn probe_keep(server: &Store, agent: AgentProbe<'_>, keys: &ProbeKeys)
     let key = keys.server.clone();
     let body = Bytes::from_static(PROBE_BODY);
 
-    let wrote = match server.put_if_absent(&key, body.clone()).await {
+    let own_text = own_error_text(server);
+
+    // The server key makes the directories the probe objects live in, so an
+    // agent key without mkdir finds them; the rest of the layout is `commit`'s.
+    let dirs = PROBE_PREFIXES.map(|p| p.trim_end_matches(|c| c != '/'));
+    let written = match server.ensure_dirs_for_probe(&dirs).await {
+        Ok(()) => server.put_if_absent(&key, body.clone()).await,
+        Err(e) => Err(e),
+    };
+    let wrote = match written {
         Ok(()) => {
             report.set(CheckId::Write, CheckStatus::Pass, None);
             true
         }
         Err(e) => {
-            report.set_blob_error(CheckId::Write, CheckStatus::Fail, "", &e);
+            report.set_blob_error(CheckId::Write, CheckStatus::Fail, "", &e, own_text);
             false
         }
     };
@@ -434,7 +494,7 @@ pub async fn probe_keep(server: &Store, agent: AgentProbe<'_>, keys: &ProbeKeys)
                 CheckStatus::Fail,
                 Some("the probe object is missing from the listing".into()),
             ),
-            Err(e) => report.set_blob_error(CheckId::List, CheckStatus::Fail, "", &e),
+            Err(e) => report.set_blob_error(CheckId::List, CheckStatus::Fail, "", &e, own_text),
         }
         if !server.conditional_write_supported() {
             report.set(
@@ -452,9 +512,13 @@ pub async fn probe_keep(server: &Store, agent: AgentProbe<'_>, keys: &ProbeKeys)
                     CheckStatus::Warn,
                     Some("a second write of the same key was not rejected".into()),
                 ),
-                Err(e) => {
-                    report.set_blob_error(CheckId::ConditionalWrite, CheckStatus::Warn, "", &e)
-                }
+                Err(e) => report.set_blob_error(
+                    CheckId::ConditionalWrite,
+                    CheckStatus::Warn,
+                    "",
+                    &e,
+                    own_text,
+                ),
             }
         }
     } else {
@@ -598,6 +662,7 @@ async fn probe_agent(
                     CheckStatus::Fail,
                     "agent key cannot write: ",
                     &e,
+                    own_error_text(agent),
                 );
                 return;
             }
@@ -626,6 +691,7 @@ async fn probe_agent(
             CheckStatus::Neutral,
             "inconclusive: ",
             &e,
+            own_error_text(agent),
         );
     } else if let Some((level, weakness)) = overwrote {
         report.agent_key = AgentKeyState::CanOverwrite;
@@ -786,7 +852,7 @@ mod tests {
             pinned: "SHA256:pinned".into(),
             offered: "SHA256:offered".into(),
         };
-        r.set_blob_error(CheckId::Write, CheckStatus::Fail, "", &changed);
+        r.set_blob_error(CheckId::Write, CheckStatus::Fail, "", &changed, true);
         assert_eq!(r.check(CheckId::Write).error, Some(changed.to_string()));
         assert_eq!(
             r.host_key_changed,
@@ -798,10 +864,52 @@ mod tests {
         r.host_key_changed = None;
 
         let hostile = BlobError::backend("the SFTP server's host key changed: pinned <a href=x>");
-        r.set_blob_error(CheckId::List, CheckStatus::Fail, "", &hostile);
+        r.set_blob_error(CheckId::List, CheckStatus::Fail, "", &hostile, false);
         let error = r.check(CheckId::List).error.clone().unwrap_or_default();
         assert!(!error.contains("host key"), "{error}");
         assert_eq!(r.host_key_changed, None);
+    }
+
+    #[test]
+    fn only_an_own_store_message_reaches_the_error() {
+        let mut r = ProbeReport::new(false);
+        let missing = BlobError::backend("the upload directory of /r/tmp/x does not exist");
+        r.set_blob_error(CheckId::Write, CheckStatus::Fail, "", &missing, true);
+        assert_eq!(
+            r.check(CheckId::Write).error.as_deref(),
+            Some("the upload directory of /r/tmp/x does not exist")
+        );
+        r.set_blob_error(CheckId::Write, CheckStatus::Fail, "", &missing, false);
+        assert_eq!(
+            r.check(CheckId::Write).error.as_deref(),
+            Some("the storage returned an unexpected error, see the server log")
+        );
+
+        let noisy = BlobError::backend(format!("SFTP error: a\nb\u{1b}[31m{}", "x".repeat(400)));
+        r.set_blob_error(CheckId::List, CheckStatus::Fail, "", &noisy, true);
+        let error = r.check(CheckId::List).error.clone().unwrap_or_default();
+        assert!(!error.chars().any(char::is_control), "{error:?}");
+        assert_eq!(error.chars().count(), SHOWN_MAX_CHARS);
+
+        let flaky = BlobError::Backend {
+            message: "SFTP connection error: reset".into(),
+            temporary: true,
+        };
+        r.set_blob_error(CheckId::List, CheckStatus::Fail, "", &flaky, true);
+        assert_eq!(
+            r.check(CheckId::List).error.as_deref(),
+            Some("the storage is temporarily unavailable")
+        );
+    }
+
+    #[test]
+    fn shown_blanks_invisible_format_characters() {
+        let hidden = "\u{061C}\u{00AD}\u{200B}\u{200F}\u{202A}\u{202E}\u{2060}\u{2064}\u{2066}\u{2069}\u{FEFF}";
+        assert_eq!(
+            shown(&format!("denied\u{202E}txt.exe\u{200B}!{hidden}")),
+            format!("denied txt.exe !{}", " ".repeat(hidden.chars().count()))
+        );
+        assert_eq!(shown("dossier refusé"), "dossier refusé");
     }
 
     fn report_at(level: GuaranteeLevel) -> ProbeReport {

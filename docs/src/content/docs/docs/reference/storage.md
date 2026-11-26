@@ -4,7 +4,7 @@ description: "Where a Lodestore repository can live, the options of each backend
 ---
 A repository lives on S3 or an S3-compatible storage, Azure Blob Storage, Google Cloud Storage, an SFTP server or a local folder. The agent writes to it directly, so what a host that has been taken over can do to its own backups depends on the storage and on the credentials the host holds. Lodestore measures this when you create or connect a repository and reports it as a **guarantee level**. This page lists the backends, the levels, how the measurement works, and what has not been verified on a real service. For the threat behind it see [Agent credentials](/docs/security/threat-model/#agent-credentials).
 
-The web wizard creates S3 and local-folder repositories. Azure Blob Storage, Google Cloud Storage and SFTP repositories are created through [the API](/docs/reference/api/#repositories-and-the-storage-guarantee) or with `lode repo init`; the agents of a server use all five backends.
+The web wizard creates repositories on every backend below, from a tile for each provider (see [Presets in the wizard](#presets-in-the-wizard)). The same repositories can be created through [the API](/docs/reference/api/#repositories-and-the-storage-guarantee) or with `lode repo init`.
 
 ## Backends
 
@@ -21,7 +21,7 @@ The web wizard creates S3 and local-folder repositories. Azure Blob Storage, Goo
 - **Secrets** are sealed in the server database on their own and never appear in an API response. On the command line they come from `LODE_*` environment variables; see [Repository location](/docs/reference/cli/#repository-location).
 - **Backblaze B2** is connected only with `provider = b2`. A location whose endpoint is `backblazeb2.com` or a subdomain of it without that option is refused, because B2 does not apply `If-None-Match` and a delete there hides the file instead of removing it. With the option Lodestore writes without `If-None-Match`, and the cleanup does not remove objects that are only hidden. A snapshot hidden by anyone but the server stops cleanup until it is brought back or removed, so a host cannot make cleanup delete its data (see [Cleanup](/docs/guides/gc/#sftp-and-backblaze-b2)).
 - **Azure Blob Storage and Google Cloud Storage** take the `root` as a folder inside the container or bucket, and it is part of the address: `azblob://<container>/<root>`, `gcs://<bucket>/<root>`. An agent never reads Google credentials from its own host (the environment, well-known files or VM metadata) and never reads `credential_path` from a file; it signs with what the server sent. A Google Cloud Storage draft without `credential` (or `token`, `skip_signature` or `allow_anonymous`) is refused with `422`.
-- **SFTP** needs the key of the server in `host_key`, one line of `ssh-keyscan -p <port> <host>` output. You can type it in beforehand, or let the server show it: a check of a draft without `host_key` makes the SSH handshake only, without authenticating or writing, and returns the key and its fingerprint. At first contact Lodestore only shows the key; trusting it is your decision, so compare the fingerprint with the one the server's administrator knows before you send the key back. The key is then pinned. A server that presents another key is a connection error that names both fingerprints, and raises the alert `host_key_changed` (see [Alerts and notifications](/docs/guides/alerts/)); the key is never replaced by itself. A new key is pinned only by an explicit request, which needs the password entered in the last 15 minutes and a full check with the new key, and the agents then get it from the server. An agent of an older version cannot take a new key; the answer counts such agents as `needs_update`. The user key and the host key must be ed25519 or ECDSA; RSA keys, keys with a passphrase, host certificates and passwords are not supported, and a server that has only an RSA host key is refused with a permanent error.
+- **SFTP** needs the key of the server in `host_key`, one line of `ssh-keyscan -p <port> <host>` output. You can type it in beforehand, or let the server show it: a check of a draft without `host_key` makes the SSH handshake only, without authenticating or writing, and returns the key and its fingerprint. That first contact needs only the `endpoint`: no user and no private key. The wizard uses it, so it sends the server's private key to a host only after you have compared the fingerprint and chosen **It matches**. The `endpoint` is `host` or `host:port` without a scheme; an address that starts with `ssh://` or `sftp://` is refused. At first contact Lodestore only shows the key; trusting it is your decision, so compare the fingerprint with the one the server's administrator knows before you send the key back. The key is then pinned. A server that presents another key is a connection error that names both fingerprints, and raises the alert `host_key_changed` (see [Alerts and notifications](/docs/guides/alerts/)); the key is never replaced by itself. A new key is pinned only by an explicit request, which needs the password entered in the last 15 minutes and a full check with the new key, and the agents then get it from the server. An agent of an older version cannot take a new key; the answer counts such agents as `needs_update`. The user key and the host key must be ed25519 or ECDSA; RSA keys, keys with a passphrase, host certificates and passwords are not supported, and a server that has only an RSA host key is refused with a permanent error.
 - **Separate agent credentials.** A repository on Azure Blob Storage, Google Cloud Storage or SFTP may have `agent_options`, the secrets that its agents use instead of the server's: `sas_token` (Azure), `credential` (Google Cloud Storage), `user` and `key` (SFTP; the options need a `key`). The Azure account key is never given to an agent, only a SAS; a new Azure repository without `agent_options` gets one signed by the server (see [Azure Blob Storage](/docs/storage/azure-blob/)). Details and the replacement of these credentials are in [the API reference](/docs/reference/api/#repositories-and-the-storage-guarantee).
 - **Restoring** from Azure Blob Storage, Google Cloud Storage and SFTP with only the storage and the password or recovery key works as for S3; see [Restoring without the server](/docs/recipes/restore-without-server/). Through the server, an agent reads packs by signed link where the storage can issue one (S3), and otherwise the server relays the ranges.
 
@@ -34,9 +34,30 @@ The web wizard creates S3 and local-folder repositories. Azure Blob Storage, Goo
 
 An agent on SFTP cannot be stopped from keeping a published file open and writing to it. The server cannot revoke that handle (`held_handle_rewrite`), so an SFTP repository is never reported above **Host can overwrite or delete**, whatever the account may do otherwise.
 
+## Presets in the wizard
+
+`GET /api/v1/storage-presets` lists the tiles of the wizard. Each preset fixes the backend and the options that follow from the provider (an endpoint template, `provider = b2` for Backblaze B2, path-style addressing for MinIO) and says how the agent key is limited. Only the `minio` and `sftp` presets are marked verified, which means their commands have been run against a real MinIO and an OpenSSH server; a level that a preset gives is known only after the check has measured it.
+
+| Tile | Backend | Address the wizard builds | The agent key |
+|------|---------|---------------------------|---------------|
+| Amazon S3 | S3 | the AWS endpoint, or the `Endpoint` you enter for Ceph and other S3-compatible storage | an IAM policy without delete |
+| MinIO | S3 | the `Endpoint` you enter | `mc` commands for a user without delete (verified) |
+| Wasabi | S3 | `https://s3.{region}.wasabisys.com` | an IAM policy without delete |
+| Backblaze B2 | S3 with `provider = b2` | `https://s3.{region}.backblazeb2.com` | a `b2 key create` command without `deleteFiles` |
+| Cloudflare R2 | S3 | `https://{account_id}.r2.cloudflarestorage.com`, region `auto` | none: an instruction to turn on a bucket lock, because an R2 token cannot be limited |
+| Hetzner Object Storage | S3 | `https://{region}.your-objectstorage.com` | a bucket policy for a key from another project |
+| Hetzner Storage Box | SFTP | `{user}.your-storagebox.de:23` | an instruction for a sub-account |
+| Azure Blob Storage | Azure | the account and container you enter | a SAS without delete, signed by the server with the account key; nothing to create |
+| Google Cloud Storage | GCS | the bucket you enter | `gcloud` commands for a custom role without delete |
+| SFTP (OpenSSH) | SFTP | the `host:port` you enter | commands for a chrooted user with a deny list (verified) |
+
+A local path has no tile of this kind: the wizard checks the folder in the Connection step and has no Agent rights step.
+
+The Agent rights step shows the commands, takes the agent key and checks it. **Skip, use the server key** lets agents use the server's credentials. It leads to **Host can overwrite or delete** and needs the consent below; it is not offered for Cloudflare R2 and for Azure with the account key. On SFTP, Azure and Google Cloud Storage, skipping means shared credentials (see below), and only a new repository with a limited key changes that. On S3 and Backblaze B2, **Limit agent rights** on the repository page replaces the key later with the same commands.
+
 ## Guarantee levels
 
-The check writes small objects with the credentials the agents will use, tries to write the same object twice and to delete it, once in each of `packs/`, `index/` and `snapshots/`, and reads the object's earlier versions where the storage keeps them. The objects it creates have names no reader looks at, and it removes them afterwards with the credentials it has.
+On SFTP and in a local folder the check first creates the folders its own objects go into (`packs`, `index` and `snapshots`, and on SFTP also the root directory and `tmp`) with the server's own credentials, so an empty directory is enough; the rest of the layout is created with the repository and the agent's key needs no right to create a directory; on object storage this step does nothing. When a check fails there, the storage's own message is shown; for S3, Azure and Google Cloud Storage the message stays general and the detail goes to the server log. The check writes small objects with the credentials the agents will use, tries to write the same object twice and to delete it, once in each of `packs/`, `index/` and `snapshots/`, and reads the object's earlier versions where the storage keeps them. The objects it creates have names no reader looks at, and it removes them afterwards with the credentials it has.
 
 | Level | What a host can do | What it needs from the storage |
 |-------|--------------------|--------------------------------|
@@ -44,6 +65,8 @@ The check writes small objects with the credentials the agents will use, tries t
 | **Overwrite keeps old version** | replace objects, but the storage keeps the earlier version | bucket versioning or Object Lock on S3 (or a compatible storage), no lifecycle rule that deletes versions |
 | **Host can overwrite or delete** | change or delete backups | nothing: this is the level of a folder, of every SFTP repository, and of any storage where the agent's credentials can delete or overwrite without a kept version |
 | **Unchecked** | not known: the check timed out, the storage was unreachable or an answer settled nothing | a repeat of the check |
+
+The web interface shows the measured level in the **Guarantee** column of the repository list, with the time of the last check, and in the card **What a host can do to backups** at the top of the repository page, which also shows the accepted level, the reasons, and **Check now**. A check older than 48 hours, a repository that was never checked, and a measured level below the accepted one carry a warning.
 
 The reasons behind a level are returned as codes (`guarantee_notes`); the list is in [the API reference](/docs/reference/api/#repositories-and-the-storage-guarantee).
 
@@ -60,13 +83,13 @@ A repository whose measured level is **Host can overwrite or delete** or **Unche
 
 - API: `POST /api/v1/repositories/wizard` and `.../connect` answer `409` with the code `weaker_guarantee` unless the draft has `accept_weaker_guarantee: true`. Nothing is written to the storage before that.
 - Command line: `lode repo init` stops and creates nothing unless `--accept-weaker-guarantee` is given.
-- Web: the wizard asks for a checkbox.
+- Web: the Agent rights step asks for a checkbox.
 
 The levels above them need no consent. A repository the server already knew keeps the level that was accepted for it.
 
 ### Checking again
 
-A manual check measures the storage again and stores the measured level and its reasons. The accepted level changes by one rule: it rises when the measured level is higher, and otherwise stays. A measured level below the accepted one is shown on the repository page, with an action to accept the new level. A level of **Host can overwrite or delete** is never accepted by a check on its own, and a check that settles nothing changes neither level.
+A manual check (**Check now** on the repository page, or `POST /api/v1/repositories/{id}/check`) measures the storage again and stores the measured level and its reasons. The accepted level changes by one rule: it rises when the measured level is higher, and otherwise stays. A measured level below the accepted one is shown on the repository page, with an action to accept the new level. A level of **Host can overwrite or delete** is never accepted by a check on its own, and a check that settles nothing changes neither level.
 
 The server also checks every repository by itself once a day, with the same probe. The first pass starts ten minutes after the server starts, and a repository is due when its last recorded result or last failed attempt is a day old, or carries a time in the future, as a clock that ran ahead leaves it. A stopped server or a discarded result records no attempt, so the repository stays due. The alert `guarantee_downgraded` ([Alerts and notifications](/docs/guides/alerts/)) is raised for one of five causes:
 

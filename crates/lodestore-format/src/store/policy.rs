@@ -463,7 +463,7 @@ pub const STORAGE_PRESETS: &[StoragePreset] = &[
         )
     },
     StoragePreset {
-        endpoint_template: Some("ssh://{user}.your-storagebox.de:23"),
+        endpoint_template: Some("{user}.your-storagebox.de:23"),
         ..preset(
             "hetzner-storage-box",
             "Hetzner Storage Box",

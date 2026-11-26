@@ -64,6 +64,7 @@ describe("repositories list", () => {
 			"Name",
 			"Backend",
 			"Location",
+			"Guarantee",
 			"Hosts",
 			"Agent key",
 			"Last checked",
@@ -71,11 +72,18 @@ describe("repositories list", () => {
 			"Checks",
 			"Actions",
 		]);
+		const header = (name: string) => screen.getByRole("columnheader", { name });
+		expect(header("Guarantee")).not.toHaveClass("hidden");
+		expect(header("Cleanup")).toHaveClass("hidden", "xl:table-cell");
+		expect(header("Agent key")).toHaveClass("hidden", "2xl:table-cell");
+		expect(screen.getByText("Create-only enforced").closest("td")).toHaveClass(
+			"whitespace-normal",
+		);
 		expect(screen.getByText("archive")).toBeInTheDocument();
 		expect(
 			screen.getByText("Host can overwrite or delete"),
 		).toBeInTheDocument();
-		expect(screen.queryByText("Create-only enforced")).not.toBeInTheDocument();
+		expect(screen.getByText("Create-only enforced")).toBeInTheDocument();
 		expect(screen.getByText("Can delete")).toBeInTheDocument();
 		expect(screen.getByText("Not checked")).toBeInTheDocument();
 		expect(screen.getByText("s3://bucket/prefix")).toBeInTheDocument();
@@ -84,27 +92,60 @@ describe("repositories list", () => {
 		).toHaveAttribute("href", "/settings/repositories/new");
 	});
 
-	it("badges every level except create-only enforced, unchecked included", async () => {
+	it("shows the level of every repository with how long ago it was checked", async () => {
+		const row = (name: string, extra: Record<string, unknown>) => ({
+			...repository,
+			id: name,
+			name,
+			guarantee_checked_at: Date.now() - 3 * 3_600_000,
+			...extra,
+		});
 		useSignedIn({
 			repositories: [
-				s3Repository,
-				azureRepository,
-				{
-					...azureRepository,
-					id: "repo-3",
-					name: "unmeasured",
+				row("fresh", {}),
+				row("old", { guarantee_checked_at: Date.now() - 3 * DAY - 1000 }),
+				row("never", { guarantee_checked_at: null }),
+				row("lower", { guarantee_level: "host_can_overwrite_or_delete" }),
+				row("weak", {
+					guarantee_level: "host_can_overwrite_or_delete",
+					guarantee_accepted: "host_can_overwrite_or_delete",
+				}),
+				row("unmeasured", {
 					guarantee_level: "unchecked",
-				},
+					guarantee_accepted: "unchecked",
+					guarantee_checked_at: null,
+				}),
 			],
 		});
 		renderApp("/settings/repositories");
 
-		expect(await screen.findByText("unmeasured")).toBeInTheDocument();
-		expect(screen.getByText("Unchecked")).toBeInTheDocument();
+		const cell = async (name: string) =>
+			within(
+				(await screen.findByRole("link", { name })).closest(
+					"tr",
+				) as HTMLElement,
+			);
+		const fresh = await cell("fresh");
+		expect(fresh.getByText("Create-only enforced")).toBeInTheDocument();
+		expect(fresh.getByText("3 hours ago")).toBeInTheDocument();
 		expect(
-			screen.getByText("Host can overwrite or delete"),
+			(await cell("old")).getByText("Not checked for 3 days"),
 		).toBeInTheDocument();
-		expect(screen.queryByText("Create-only enforced")).not.toBeInTheDocument();
+		expect(
+			(await cell("never")).getByText("Never checked"),
+		).toBeInTheDocument();
+		const lower = await cell("lower");
+		expect(lower.getByText("Lower than accepted")).toBeInTheDocument();
+		expect(lower.getByRole("link", { name: "See alert" })).toHaveAttribute(
+			"href",
+			"/settings/repositories/lower#guarantee",
+		);
+		expect(
+			(await cell("weak")).getByText(/^Accepted · checked/),
+		).toBeInTheDocument();
+		expect(
+			(await cell("unmeasured")).getByText("Unchecked"),
+		).toBeInTheDocument();
 	});
 
 	it("shows the empty state when the list becomes empty", async () => {
@@ -406,190 +447,77 @@ describe("repository page", () => {
 		expect(mock.rechecks()).toBe(1);
 	});
 
-	it("shows the agent policy for the bucket of the repository", async () => {
+	it("shows what a host can do in a card under the title and measures again on Check now", async () => {
 		useSignedIn({ repositories: [s3Repository] });
-		mockDetail();
-		let requested: URLSearchParams | undefined;
+		let checkedAt: number | null = null;
+		let rechecks = 0;
 		server.use(
-			http.get("/api/v1/agent-policy", ({ request }) => {
-				requested = new URL(request.url).searchParams;
+			http.get("/api/v1/repositories/repo-1", () =>
+				HttpResponse.json({
+					...detail,
+					guarantee_checked_at: checkedAt,
+					guarantee_notes: ["agent_can_overwrite"],
+				}),
+			),
+			http.post("/api/v1/repositories/repo-1/check", () => {
+				rechecks += 1;
+				checkedAt = Date.now();
 				return HttpResponse.json({
-					iam_json: "POLICY-FOR-my-bucket",
-					minio_commands: "mc admin policy create",
+					existing_repository: true,
+					blocking: false,
+					agent_key_state: "can_delete",
+					checks: [],
 				});
 			}),
+			http.get("/api/v1/agent-policy", () =>
+				HttpResponse.json({ iam_json: "{}", minio_commands: "mc" }),
+			),
 		);
 		renderApp("/settings/repositories/repo-1");
-
-		expect(await screen.findByText("POLICY-FOR-my-bucket")).toBeInTheDocument();
-		expect(requested?.get("bucket")).toBe("my-bucket");
-		expect(requested?.get("prefix")).toBe("lode");
-	});
-});
-
-const host = (id: string, status: string, repositoryId = "repo-1") => ({
-	id,
-	hostname: id,
-	status,
-	version: "0.1.0",
-	os: "linux",
-	arch: "x86_64",
-	labels: [],
-	repository_id: repositoryId,
-	cert_not_after: Date.now() + DAY,
-	enrolled_at: Date.now() - DAY,
-});
-
-function mockKeyApi(
-	verification: { status: string; error?: string },
-	put?: { status: number; body: unknown },
-	agentKeyState = "verified",
-) {
-	const calls = { verify: 0, put: [] as unknown[] };
-	mockDetail();
-	server.use(
-		http.get("/api/v1/agent-policy", () =>
-			HttpResponse.json({ iam_json: "{}", minio_commands: "mc" }),
-		),
-		http.get("/api/v1/hosts", () =>
-			HttpResponse.json([
-				host("h1", "online"),
-				host("h2", "offline"),
-				host("h3", "online", "repo-2"),
-			]),
-		),
-		http.post("/api/v1/repositories/repo-1/agent-key/verify", () => {
-			calls.verify += 1;
-			return HttpResponse.json({
-				agent_key_state: agentKeyState,
-				check: { id: "agent_delete", ...verification },
-			});
-		}),
-		http.put("/api/v1/repositories/repo-1/agent-key", async ({ request }) => {
-			calls.put.push(await request.json());
-			return HttpResponse.json(
-				put?.body ?? {
-					agent_key_state: "verified",
-					online_notified: 1,
-					offline: 2,
-				},
-				{ status: put?.status ?? 200 },
-			);
-		}),
-	);
-	return calls;
-}
-
-async function fillKey(user: ReturnType<typeof userEvent.setup>) {
-	await user.click(
-		await screen.findByRole("button", { name: "Replace agent key" }),
-	);
-	await user.type(await screen.findByLabelText("Access key ID"), "AKIANEW");
-	await user.type(screen.getByLabelText("Secret access key"), "s3cr3t");
-	await user.click(
-		screen.getByRole("button", { name: "Verify and replace key" }),
-	);
-}
-
-describe("replace agent key", () => {
-	it("keeps the current key when the new one fails verification", async () => {
-		useSignedIn({ repositories: [s3Repository] });
-		const calls = mockKeyApi({ status: "fail", error: "AccessDenied" });
-		renderApp("/settings/repositories/repo-1");
 		const user = userEvent.setup();
-		await fillKey(user);
 
+		const title = await screen.findByRole("heading", {
+			name: "What a host can do to backups",
+		});
+		const card = within(title.closest("#guarantee") as HTMLElement);
+		expect(card.getAllByText("Create-only enforced")).toHaveLength(2);
+		expect(card.getByText("Never checked")).toBeInTheDocument();
 		expect(
-			await screen.findByText(
-				"The new key could not be verified: AccessDenied. The current key is unchanged.",
+			card.getByText(
+				"A host can replace backups, and the storage keeps no earlier version.",
 			),
 		).toBeInTheDocument();
-		expect(calls.verify).toBe(1);
-		expect(calls.put).toHaveLength(0);
-		expect(screen.getByLabelText("Secret access key")).toHaveValue("");
+
+		await user.click(card.getByRole("button", { name: "Check now" }));
+
+		expect(await card.findByText(/just now/)).toHaveTextContent("just now");
+		expect(card.queryByText("Never checked")).toBeNull();
+		expect(rechecks).toBe(1);
 	});
 
-	it("names what the new key can do in the confirmation", async () => {
+	it("explains the backend when there are no notes, and shows an unmeasured level as such", async () => {
 		useSignedIn({ repositories: [s3Repository] });
-		mockKeyApi({ status: "warn" }, undefined, "can_overwrite");
-		renderApp("/settings/repositories/repo-1");
-		const user = userEvent.setup();
-		await fillKey(user);
-
-		const confirm = await screen.findByRole("alertdialog");
-		expect(
-			within(confirm).getByText(/The agent key can overwrite objects\./),
-		).toBeInTheDocument();
-	});
-
-	it("verifies, confirms and reports the online and offline agents", async () => {
-		useSignedIn({ repositories: [s3Repository] });
-		const calls = mockKeyApi({ status: "pass" });
-		renderApp("/settings/repositories/repo-1");
-		const user = userEvent.setup();
-		await fillKey(user);
-
-		const confirm = await screen.findByRole("alertdialog");
-		expect(
-			within(confirm).getByText('Replace the agent key for "main"?'),
-		).toBeInTheDocument();
-		expect(
-			within(confirm).getByText(/sends it to 1 online agent\./),
-		).toBeInTheDocument();
-		expect(calls.put).toHaveLength(0);
-
-		await user.click(
-			within(confirm).getByRole("button", { name: "Verify and replace key" }),
-		);
-
-		expect(
-			await screen.findByText(
-				"New key sent to 1 online agent. 2 offline agents will receive it when they reconnect.",
+		server.use(
+			http.get("/api/v1/repositories/repo-1", () =>
+				HttpResponse.json({
+					...detail,
+					guarantee_level: "unchecked",
+					guarantee_accepted: "unchecked",
+				}),
 			),
-		).toBeInTheDocument();
-		expect(calls.put).toEqual([
-			{ access_key_id: "AKIANEW", secret_access_key: "s3cr3t" },
-		]);
-		expect(screen.queryByLabelText("Secret access key")).toBeNull();
-	});
-
-	it("shows the server refusal and clears the secret", async () => {
-		useSignedIn({ repositories: [s3Repository] });
-		mockKeyApi(
-			{ status: "pass" },
-			{
-				status: 422,
-				body: {
-					code: "validation",
-					message:
-						"The new key could not be verified: it cannot write. The current key is unchanged.",
-				},
-			},
-		);
-		renderApp("/settings/repositories/repo-1");
-		const user = userEvent.setup();
-		await fillKey(user);
-		const confirm = await screen.findByRole("alertdialog");
-		await user.click(
-			within(confirm).getByRole("button", { name: "Verify and replace key" }),
-		);
-
-		expect(
-			await screen.findByText(
-				/it cannot write\. The current key is unchanged\./,
+			http.get("/api/v1/agent-policy", () =>
+				HttpResponse.json({ iam_json: "{}", minio_commands: "mc" }),
 			),
-		).toBeInTheDocument();
-		expect(screen.getByLabelText("Secret access key")).toHaveValue("");
-	});
-
-	it("is not offered for a local repository", async () => {
-		useSignedIn({ repositories: [s3Repository] });
-		mockDetail({ local: true });
+		);
 		renderApp("/settings/repositories/repo-1");
 
-		await screen.findByText("Storage checks");
+		const title = await screen.findByRole("heading", {
+			name: "What a host can do to backups",
+		});
+		const card = within(title.closest("#guarantee") as HTMLElement);
+		expect(card.getByText("Not measured")).toBeInTheDocument();
 		expect(
-			screen.queryByRole("button", { name: "Replace agent key" }),
-		).toBeNull();
+			card.getByText("The agent key's rights decide what a host can do."),
+		).toBeInTheDocument();
 	});
 });

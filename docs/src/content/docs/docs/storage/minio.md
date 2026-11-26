@@ -17,6 +17,14 @@ MinIO is the S3-compatible storage Lodestore is tested against. This page covers
 | Level the check reports | Host can overwrite or delete without versioning; Overwrite keeps old version on a versioned bucket |
 | Tested against | The pinned MinIO release, including Object Lock |
 
+## In the web interface
+
+1. **Storage.** Choose the **MinIO** tile.
+2. **Connection.** **Endpoint** (the URL of your MinIO), **Region** if you use one, **Bucket** and **Key prefix**; path-style addressing is on, as MinIO needs. Then the server key: the access key and the secret of a user with full access to the bucket.
+3. **Agent rights.** The step shows the `mc` commands of this page. Replace `ALIAS`, `AGENT_ACCESS_KEY` and `AGENT_SECRET_KEY`, run them, paste the key you made and choose **Check**. The Result panel has the Bucket group; without versioning or Object Lock the level is **Host can overwrite or delete**, and the note that MinIO rejects `If-None-Match` stays visible until the conditional-write check has passed.
+
+**Skip, use the server key** lets agents use the server's own key; the level then is **Host can overwrite or delete** and the wizard asks you to accept it. On the repository page, **Limit agent rights** opens the same commands in a panel: after your password it checks the new key and switches the agents to it, and you disable the old key at MinIO (`mc admin user remove`).
+
 ## Agent rights
 
 `GET /api/v1/agent-policy?preset=minio&bucket=<bucket>&prefix=<prefix>` returns `mc` commands; the mechanism is `commands`. They write the policy to a file, create it with `mc admin policy create`, create a user with `mc admin user add` and attach the policy with `mc admin policy attach`. Replace `ALIAS`, `AGENT_ACCESS_KEY` and `AGENT_SECRET_KEY` with your own values. The policy is the Amazon S3 policy without the `If-None-Match` statement; see [Amazon S3](/docs/storage/aws-s3/) for what it allows.
@@ -29,6 +37,7 @@ The check writes, repeats and deletes small objects with the agent user, reads t
 
 ## Limits
 
+- On the repository page, an S3 endpoint that is not Amazon S3 and matches no provider template is treated as MinIO, so the **Limit agent rights** panel shows `mc` commands. For a Ceph gateway or another S3-compatible storage, use the policy of [Amazon S3](/docs/storage/aws-s3/) with the tools of that storage.
 - Without versioning or Object Lock, a host that is taken over can replace its backups. Turn one of them on; see [S3 access keys and Object Lock](/docs/recipes/s3-iam-object-lock/).
 - The check does not test the bucket-configuration rights of the key; the policy gives none.
 

@@ -25,6 +25,46 @@ const STRENGTH: Record<string, number> = {
 	create_only_enforced: 2,
 };
 
+export const GUARANTEE_STALE_MS = 48 * 60 * 60 * 1000;
+
+type Measured = Pick<
+	RepositoryDetail,
+	"guarantee_level" | "guarantee_accepted"
+>;
+
+export function isBelowAccepted(level: string, accepted: string): boolean {
+	if (level === UNCHECKED_LEVEL) return false;
+	return accepted === UNCHECKED_LEVEL
+		? level === WEAK_LEVEL
+		: (STRENGTH[level] ?? 0) < (STRENGTH[accepted] ?? 0);
+}
+
+export type GuaranteeAge =
+	| "lower"
+	| "stale"
+	| "never"
+	| "accepted"
+	| "checked"
+	| "none";
+
+export function guaranteeAge(
+	repository: Measured & Pick<RepositoryDetail, "guarantee_checked_at">,
+	now: number,
+): GuaranteeAge {
+	const checkedAt = repository.guarantee_checked_at;
+	const unchecked = repository.guarantee_level === UNCHECKED_LEVEL;
+	if (
+		isBelowAccepted(repository.guarantee_level, repository.guarantee_accepted)
+	)
+		return "lower";
+	if (checkedAt == null) return unchecked ? "none" : "never";
+	if (now - checkedAt > GUARANTEE_STALE_MS) return "stale";
+	return repository.guarantee_level === WEAK_LEVEL &&
+		repository.guarantee_accepted === WEAK_LEVEL
+		? "accepted"
+		: "checked";
+}
+
 export type GuaranteeBannerKind = "unchecked" | "downgrade" | "weak" | "notes";
 
 export function guaranteeBannerKind(
@@ -33,13 +73,9 @@ export function guaranteeBannerKind(
 		"guarantee_level" | "guarantee_accepted" | "guarantee_notes"
 	>,
 ): GuaranteeBannerKind | undefined {
-	const { guarantee_level: level, guarantee_accepted: accepted } = repository;
+	const level = repository.guarantee_level;
 	if (level === UNCHECKED_LEVEL) return "unchecked";
-	const lower =
-		accepted === UNCHECKED_LEVEL
-			? level === WEAK_LEVEL
-			: (STRENGTH[level] ?? 0) < (STRENGTH[accepted] ?? 0);
-	if (lower) return "downgrade";
+	if (isBelowAccepted(level, repository.guarantee_accepted)) return "downgrade";
 	if (level === WEAK_LEVEL) return "weak";
 	return repository.guarantee_notes.length > 0 ? "notes" : undefined;
 }
