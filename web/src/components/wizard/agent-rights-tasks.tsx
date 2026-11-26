@@ -1,5 +1,6 @@
+import { keepPreviousData } from "@tanstack/react-query";
 import { Check, TriangleAlert } from "lucide-react";
-import type { ReactNode } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { ApiError } from "@/api/fetcher";
 import { useAgentPolicy } from "@/api/gen/endpoints";
 import { CodeBlock } from "@/components/code-block";
@@ -10,10 +11,12 @@ import { copy } from "@/copy";
 import { cn } from "@/lib/utils";
 import {
 	type AgentSecrets,
+	agentFilled,
+	DEFAULT_AGENT_USER,
 	type PresetInfo,
 	presetUsesServerKey,
 } from "./draft";
-import { KeyFields } from "./parts";
+import { KeyFields, PrivateKeyField, SecretField, TextField } from "./parts";
 import { text } from "./text";
 
 export function Task({
@@ -51,22 +54,40 @@ export function Task({
 	);
 }
 
+function useDebounced(value: string, ms: number) {
+	const [debounced, setDebounced] = useState(value);
+	useEffect(() => {
+		const timer = setTimeout(() => setDebounced(value), ms);
+		return () => clearTimeout(timer);
+	}, [value, ms]);
+	return debounced;
+}
+
 function Commands({
 	preset,
 	bucket,
 	prefix,
+	user,
 }: {
 	preset: PresetInfo;
 	bucket: string;
 	prefix: string;
+	user: string;
 }) {
 	const policy = useAgentPolicy(
 		{
 			preset: preset.id,
-			bucket,
+			...(bucket ? { bucket } : {}),
 			...(prefix ? { prefix } : {}),
+			...(user ? { user } : {}),
 		},
-		{ query: { staleTime: 60_000, retry: false } },
+		{
+			query: {
+				staleTime: 60_000,
+				retry: false,
+				placeholderData: keepPreviousData,
+			},
+		},
 	);
 	if (policy.isPending) return <Skeleton className="h-40 w-full" />;
 	if (policy.isError) {
@@ -102,6 +123,19 @@ function Commands({
 			</Alert>
 		);
 	}
+	if (
+		rights.mechanism === "instruction" ||
+		rights.mechanism === "server_issued"
+	) {
+		return (
+			<>
+				<p className="text-sm whitespace-pre-line">{rights.text}</p>
+				{rights.note !== "" && (
+					<p className="text-sm text-muted-foreground">{rights.note}</p>
+				)}
+			</>
+		);
+	}
 	return (
 		<>
 			<CodeBlock text={rights.text} object={copy.rights.commands} />
@@ -118,6 +152,77 @@ function Commands({
 	);
 }
 
+function AgentFields({
+	preset,
+	agent,
+	onAgent,
+	disabled,
+}: {
+	preset: PresetInfo;
+	agent: AgentSecrets;
+	onAgent: (agent: AgentSecrets) => void;
+	disabled: boolean;
+}) {
+	switch (preset.backend) {
+		case "gcs":
+			return (
+				<SecretField
+					id="agent-credential"
+					label={copy.rights.agentCredential}
+					value={agent.credential}
+					onChange={(credential) => onAgent({ ...agent, credential })}
+					disabled={disabled}
+				/>
+			);
+		case "sftp":
+			return (
+				<>
+					<TextField
+						id="agent-user"
+						label={copy.rights.agentUser}
+						placeholder={
+							preset.mechanism === "instruction"
+								? undefined
+								: DEFAULT_AGENT_USER
+						}
+						value={agent.user}
+						onChange={(user) => onAgent({ ...agent, user })}
+						disabled={disabled}
+					/>
+					<PrivateKeyField
+						id="agent-private-key"
+						label={copy.rights.agentPrivateKey}
+						value={agent.privateKey}
+						onChange={(privateKey) => onAgent({ ...agent, privateKey })}
+						disabled={disabled}
+					/>
+				</>
+			);
+		case "azblob":
+			return (
+				<SecretField
+					id="agent-sas"
+					label={copy.rights.agentSas}
+					value={agent.sas}
+					onChange={(sas) => onAgent({ ...agent, sas })}
+					disabled={disabled}
+				/>
+			);
+		default:
+			return (
+				<KeyFields
+					prefix="agent"
+					legend={text.agentKey}
+					keyId={agent.keyId}
+					secret={agent.secret}
+					onKeyId={(keyId) => onAgent({ ...agent, keyId })}
+					onSecret={(secret) => onAgent({ ...agent, secret })}
+					disabled={disabled}
+				/>
+			);
+	}
+}
+
 export function AgentRightsTasks({
 	preset,
 	bucket,
@@ -125,6 +230,7 @@ export function AgentRightsTasks({
 	agent,
 	onAgent,
 	disabled,
+	vendsSas = false,
 }: {
 	preset: PresetInfo;
 	bucket: string;
@@ -132,9 +238,17 @@ export function AgentRightsTasks({
 	agent: AgentSecrets;
 	onAgent: (agent: AgentSecrets) => void;
 	disabled: boolean;
+	vendsSas?: boolean;
 }) {
-	const filled = agent.keyId.trim() !== "" && agent.secret !== "";
-	const shared = presetUsesServerKey(preset);
+	const filled = agentFilled(preset, agent);
+	const shared = presetUsesServerKey(preset) || vendsSas;
+	const user = useDebounced(
+		preset.backend === "sftp"
+			? agent.user.trim() ||
+					(preset.mechanism === "instruction" ? "" : DEFAULT_AGENT_USER)
+			: "",
+		300,
+	);
 	return (
 		<>
 			<Task
@@ -142,17 +256,23 @@ export function AgentRightsTasks({
 				title={copy.rights.create(preset.label)}
 				done={filled && !shared}
 			>
-				<Commands preset={preset} bucket={bucket} prefix={prefix} />
+				{vendsSas ? (
+					<p className="text-sm">{copy.rights.azure}</p>
+				) : (
+					<Commands
+						preset={preset}
+						bucket={bucket}
+						prefix={prefix}
+						user={user}
+					/>
+				)}
 			</Task>
 			{!shared && (
 				<Task number={2} title={copy.rights.paste} done={filled}>
-					<KeyFields
-						prefix="agent"
-						legend={text.agentKey}
-						keyId={agent.keyId}
-						secret={agent.secret}
-						onKeyId={(keyId) => onAgent({ ...agent, keyId })}
-						onSecret={(secret) => onAgent({ ...agent, secret })}
+					<AgentFields
+						preset={preset}
+						agent={agent}
+						onAgent={onAgent}
 						disabled={disabled}
 					/>
 				</Task>

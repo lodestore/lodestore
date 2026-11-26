@@ -3,11 +3,12 @@ import { Spinner } from "@/components/ui/spinner";
 import { copy } from "@/copy";
 import { AgentRightsTasks, Task } from "./agent-rights-tasks";
 import {
+	agentCanSkip,
+	azureVendsSas,
 	type CheckState,
 	type Draft,
 	needsConsent,
 	type PresetInfo,
-	presetUsesServerKey,
 	rightsReady,
 } from "./draft";
 import { StepCard, StepHeading } from "./parts";
@@ -45,7 +46,7 @@ export function RightsStep({
 			backDisabled={running}
 			actions={
 				<>
-					{!presetUsesServerKey(preset) && (
+					{agentCanSkip(draft) && (
 						<Button
 							type="button"
 							variant="outline"
@@ -79,6 +80,7 @@ export function RightsStep({
 							preset={preset}
 							bucket={draft.bucket.trim()}
 							prefix={draft.prefix.trim()}
+							vendsSas={azureVendsSas(draft)}
 							agent={draft.agent}
 							onAgent={(agent) => onChange({ agent })}
 							disabled={running}
