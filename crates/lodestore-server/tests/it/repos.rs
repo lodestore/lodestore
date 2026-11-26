@@ -502,6 +502,55 @@ async fn repos_refuse_unknown_location_options() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sftp_offer_without_an_address_is_refused() {
+    let ts = TestServer::start(&Backend::Sqlite).await;
+    let api = ts.api().await;
+    for (options, needle, secret) in [
+        (json!({ "root": "/srv" }), "address", None),
+        (
+            json!({ "endpoint": "127.0.0.1:9", "password": "SECRET" }),
+            "password",
+            Some("SECRET"),
+        ),
+    ] {
+        let draft = json!({ "location": { "backend": "sftp", "options": options } });
+        let response = api.post("/api/v1/repositories/check", &draft).await;
+        assert_eq!(response.status(), 422, "{options}");
+        let message = body(response).await["message"].as_str().unwrap().to_owned();
+        assert!(message.contains(needle), "{message}");
+        if let Some(secret) = secret {
+            assert!(!message.contains(secret), "{message}");
+        }
+    }
+    ts.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sftp_full_check_still_needs_user_and_key() {
+    let ts = TestServer::start(&Backend::Sqlite).await;
+    let api = ts.api().await;
+    let host_key =
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl";
+    for (options, needle) in [
+        (
+            json!({ "endpoint": "127.0.0.1:9", "key": "k", "host_key": host_key }),
+            "`user`",
+        ),
+        (
+            json!({ "endpoint": "127.0.0.1:9", "user": "u", "host_key": host_key }),
+            "`key`",
+        ),
+    ] {
+        let draft = json!({ "location": { "backend": "sftp", "options": options } });
+        let response = api.post("/api/v1/repositories/check", &draft).await;
+        assert_eq!(response.status(), 422, "{options}");
+        let message = body(response).await["message"].as_str().unwrap().to_owned();
+        assert!(message.contains(needle), "{message}");
+    }
+    ts.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn migration_0037_carries_the_current_level_as_accepted() {
     let cases = [
         ("loc", "local", "unchecked", "host_can_overwrite_or_delete"),
