@@ -1037,3 +1037,70 @@ async fn static_sas_repository_with_an_account_key_neighbour_is_capped() {
     assert_shared(&recheck_of(&api, &r4).await);
     ts.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn sas_vending_refreshing_store_probes_like_the_server() {
+    use lodestore_format::store::probe::{AgentProbe, ProbeKeys, probe_keep, remove_probe_objects};
+    use lodestore_server::repos::checks::open_parts_with;
+    use zeroize::Zeroizing;
+
+    let az = AzuriteServer::start().await;
+    az.create_container("refreshing").await;
+    let ts = TestServer::start(&Backend::Sqlite).await;
+    let api = ts.api().await;
+
+    let id = create(&api, &azure_draft(&az, "refreshing")).await;
+    assert_eq!(vends(&ts, &id).await, 1);
+    let access = server_access(ts.state(), &id).await.unwrap();
+    assert!(access.sas_vending);
+    let opened = open_parts_with(
+        access.location,
+        access.server_creds,
+        access.agent_creds,
+        access.agent_options,
+        access.sas_vending,
+    )
+    .unwrap();
+    let server_agent = opened.agent.as_ref().expect("the agent store");
+    let keys_a = ProbeKeys::default();
+    let by_server = probe_keep(&opened.server, AgentProbe::Store(server_agent), &keys_a).await;
+    assert!(
+        remove_probe_objects(&opened.server, &keys_a)
+            .await
+            .is_empty()
+    );
+
+    let material = writer_material(ts.state(), &id).await.unwrap();
+    let sas = Zeroizing::new(material.location.options["sas_token"].clone());
+    assert!(
+        sas.contains("sp=rcl"),
+        "the material carries the vended SAS"
+    );
+    assert!(!material.location.options.contains_key("account_key"));
+    let source: lodestore_format::store::opendal::SasSource =
+        std::sync::Arc::new(move || Some(sas.clone()));
+    let agent_store = RepoLocation {
+        backend: material.location.backend.clone(),
+        options: material.location.options.clone(),
+    }
+    .for_agent()
+    .open_refreshing(source, std::time::Duration::from_secs(1))
+    .unwrap();
+    let keys_b = ProbeKeys::default();
+    let by_agent = probe_keep(&opened.server, AgentProbe::Store(&agent_store), &keys_b).await;
+    assert!(
+        remove_probe_objects(&opened.server, &keys_b)
+            .await
+            .is_empty()
+    );
+
+    assert_eq!(by_server.guarantee, GuaranteeLevel::CreateOnlyEnforced);
+    assert_eq!(by_agent.guarantee, by_server.guarantee);
+    for (agent, server) in by_agent.checks.iter().zip(&by_server.checks) {
+        assert_eq!((agent.id, agent.status), (server.id, server.status));
+    }
+    assert_eq!(by_agent.weaknesses, by_server.weaknesses);
+    assert_eq!(by_agent.agent_key, by_server.agent_key);
+    ts.stop().await;
+}
