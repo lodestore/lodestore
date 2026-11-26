@@ -4,7 +4,7 @@ import { HttpResponse, http } from "msw";
 import { toast } from "sonner";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderApp, repository, useSignedIn } from "@/test/app";
-import { server } from "@/test/server";
+import { server, storagePresets } from "@/test/server";
 
 const PASSWORD = "correct horse battery";
 
@@ -72,9 +72,9 @@ function mockServer() {
 }
 
 async function toAccess(user: ReturnType<typeof userEvent.setup>) {
-	await user.click(await screen.findByRole("radio", { name: /Local folder/ }));
+	await user.click(await screen.findByRole("radio", { name: /Local path/ }));
 	await user.click(
-		await screen.findByRole("button", { name: "Continue to access" }),
+		await screen.findByRole("button", { name: "Continue to connection" }),
 	);
 	await user.type(await screen.findByLabelText("Path"), "/srv/lodestore");
 }
@@ -101,10 +101,17 @@ describe("repository wizard with a local folder", () => {
 			within(screen.getByRole("list", { name: "Progress" })).getAllByRole(
 				"listitem",
 			),
-		).toHaveLength(4);
-		expect(screen.getByRole("radio", { name: /S3-compatible/ })).toBeChecked();
+		).toHaveLength(5);
+		expect(
+			screen.getByRole("button", { name: "Continue to connection" }),
+		).toBeDisabled();
 
 		await toAccess(user);
+		expect(
+			within(screen.getByRole("list", { name: "Progress" })).getAllByRole(
+				"listitem",
+			),
+		).toHaveLength(4);
 		await user.click(screen.getByRole("button", { name: "Check storage" }));
 		expect(
 			await screen.findByText("The server key can write."),
@@ -234,15 +241,18 @@ describe("repository wizard with a local folder", () => {
 		mockServer();
 		renderApp("/welcome?step=key");
 		expect(
-			await screen.findByRole("heading", { name: "Choose storage" }),
+			await screen.findByRole("heading", { name: "Connect storage" }),
 		).toBeInTheDocument();
 	});
 
-	it("shows three steps when adding a repository from settings", async () => {
+	it("shows four steps when adding a repository from settings", async () => {
 		mockServer();
 		useSignedIn();
+		const user = userEvent.setup();
 		renderApp("/settings/repositories/new");
 		const list = await screen.findByRole("list", { name: "Progress" });
+		expect(within(list).getAllByRole("listitem")).toHaveLength(4);
+		await user.click(await screen.findByRole("radio", { name: /Local path/ }));
 		expect(within(list).getAllByRole("listitem")).toHaveLength(3);
 		expect(
 			screen.queryByRole("heading", { name: "Set up your first repository" }),
@@ -276,7 +286,7 @@ describe("repository wizard with a local folder", () => {
 		expect(
 			screen.queryByRole("button", { name: "Exit setup" }),
 		).not.toBeInTheDocument();
-		expect(screen.getByText("Step 1 of 4")).toBeInTheDocument();
+		expect(screen.getByText("Step 1 of 5")).toBeInTheDocument();
 		expect(
 			screen.getByRole("progressbar", { name: "Progress" }),
 		).toHaveAttribute("aria-valuenow", "1");
@@ -366,32 +376,26 @@ function s3Result(
 
 function mockS3(result: ReturnType<typeof s3Result>) {
 	const calls = mockServer();
-	const buckets: string[] = [];
 	server.use(
 		http.post("/api/v1/repositories/check", async ({ request }) => {
 			calls.check.push(await request.json());
 			return HttpResponse.json(result);
 		}),
-		http.get("/api/v1/agent-policy", ({ request }) => {
-			const bucket = new URL(request.url).searchParams.get("bucket") ?? "";
-			buckets.push(bucket);
-			return HttpResponse.json({
-				iam_json: `{"Resource":"arn:aws:s3:::${bucket}/*"}`,
-				minio_commands: `mc admin policy create local agent ${bucket}`,
-			});
-		}),
 	);
-	return { calls, buckets };
+	return calls;
 }
 
-async function fillKeys(user: User) {
+async function fillServerKey(user: User) {
 	await user.type(screen.getByLabelText("Server key: Access key ID"), "root");
 	await user.type(
 		screen.getByLabelText("Server key: Secret access key"),
 		SERVER_SECRET,
 	);
+}
+
+async function fillAgentKey(user: User) {
 	await user.type(
-		screen.getByLabelText("Agent key (write-only): Access key ID"),
+		await screen.findByLabelText("Agent key (write-only): Access key ID"),
 		"agent",
 	);
 	await user.type(
@@ -400,21 +404,36 @@ async function fillKeys(user: User) {
 	);
 }
 
-async function fillS3(user: User) {
+async function chooseTile(user: User, name: RegExp) {
+	await user.click(await screen.findByRole("radio", { name }));
 	await user.click(
-		await screen.findByRole("button", { name: "Continue to access" }),
+		screen.getByRole("button", { name: "Continue to connection" }),
 	);
+}
+
+async function fillMinio(user: User) {
+	await chooseTile(user, /MinIO/);
 	await user.type(
 		await screen.findByLabelText("Endpoint"),
 		"http://minio:9000",
 	);
 	await user.type(screen.getByLabelText("Bucket"), "my-bucket");
-	await fillKeys(user);
+	await fillServerKey(user);
+	await user.click(
+		screen.getByRole("button", { name: "Continue to agent rights" }),
+	);
 }
 
+async function toRights(user: User) {
+	await fillMinio(user);
+	await fillAgentKey(user);
+}
+
+const CHECK = { name: "Check" };
+
 describe("repository wizard with S3", () => {
-	it("keeps the policy in step with the bucket and sends both keys", async () => {
-		const { calls, buckets } = mockS3(
+	it("walks the MinIO preset from storage to the recovery key with a limited agent key", async () => {
+		const { check } = mockS3(
 			s3Result(
 				{ agent_delete: { status: "warn" } },
 				{
@@ -427,53 +446,47 @@ describe("repository wizard with S3", () => {
 		const user = userEvent.setup();
 		renderApp("/welcome");
 
+		await fillMinio(user);
 		expect(
-			await screen.findByRole("radio", { name: /S3-compatible/ }),
-		).toBeChecked();
-		await user.click(
-			screen.getByRole("button", { name: "Continue to access" }),
-		);
-		await waitFor(() => expect(buckets).toContain("YOUR-BUCKET"));
-		expect(screen.getByText(/Two keys\./)).toBeInTheDocument();
-
-		await user.type(screen.getByLabelText("Bucket"), "my-bucket");
-		await waitFor(() => expect(buckets).toContain("my-bucket"));
-		await user.click(screen.getByRole("tab", { name: "MinIO" }));
-		expect(
-			await screen.findByText(/mc admin policy create local agent my-bucket/),
+			await screen.findByRole("heading", {
+				name: "Give agents a key that cannot delete",
+			}),
 		).toBeInTheDocument();
+		expect(
+			await screen.findByText("agent-rights minio my-bucket"),
+		).toBeInTheDocument();
+		expect(
+			screen.getByText("Run the check to see what this key can do."),
+		).toBeInTheDocument();
+		expect(screen.getByRole("button", CHECK)).toBeDisabled();
 
-		expect(
-			screen.getByRole("button", { name: "Check storage" }),
-		).toBeDisabled();
-		await user.type(screen.getByLabelText("Endpoint"), "http://minio:9000");
-		await fillKeys(user);
-		expect(
-			screen.getByLabelText("Server key: Secret access key"),
-		).toHaveAttribute("autocomplete", "off");
-		await user.click(screen.getByRole("button", { name: "Check storage" }));
+		await fillAgentKey(user);
+		await user.click(screen.getByRole("button", CHECK));
 
 		expect(
 			await screen.findByText("The agent key can delete objects"),
 		).toBeInTheDocument();
 		expect(screen.getByText(/versioning or Object Lock/)).toBeInTheDocument();
-		expect(
-			screen.getByRole("button", { name: "Continue to recovery key" }),
-		).toBeDisabled();
+		const next = screen.getByRole("button", {
+			name: "Continue to recovery key",
+		});
+		expect(next).toBeDisabled();
 		await user.click(
 			screen.getByRole("checkbox", {
 				name: "I understand and want to continue",
 			}),
 		);
-		expect(
-			screen.getByRole("button", { name: "Continue to recovery key" }),
-		).toBeEnabled();
-		expect(calls.check).toEqual([
+		expect(next).toBeEnabled();
+		expect(check).toEqual([
 			{
 				name: "default",
 				location: {
 					backend: "s3",
-					options: { bucket: "my-bucket", endpoint: "http://minio:9000" },
+					options: {
+						bucket: "my-bucket",
+						endpoint: "http://minio:9000",
+						path_style: "true",
+					},
 				},
 				server_credentials: {
 					access_key_id: "root",
@@ -486,16 +499,89 @@ describe("repository wizard with S3", () => {
 			},
 		]);
 
-		await user.type(screen.getByLabelText("Bucket"), "2");
+		await user.type(
+			screen.getByLabelText("Agent key (write-only): Access key ID"),
+			"2",
+		);
 		await waitFor(() =>
 			expect(document.querySelectorAll('[data-status="stale"]')).toHaveLength(
 				5,
 			),
 		);
 		expect(
-			screen.queryByRole("button", { name: "Continue to recovery key" }),
-		).not.toBeInTheDocument();
-		expect(screen.getByRole("button", { name: "Check storage" })).toBeEnabled();
+			screen.getByRole("button", { name: "Continue to recovery key" }),
+		).toBeDisabled();
+		expect(screen.getByRole("button", { name: "Check again" })).toBeEnabled();
+	});
+
+	it("builds the Backblaze B2 endpoint from the region field and sends provider b2", async () => {
+		const { check } = mockS3(s3Result());
+		const user = userEvent.setup();
+		renderApp("/welcome");
+
+		await chooseTile(user, /Backblaze B2/);
+		expect(screen.queryByLabelText("Endpoint")).toBeNull();
+		await user.type(await screen.findByLabelText("Region"), "eu-central-003");
+		expect(
+			screen.getByText("https://s3.eu-central-003.backblazeb2.com"),
+		).toBeInTheDocument();
+		await user.type(screen.getByLabelText("Bucket"), "my-bucket");
+		await fillServerKey(user);
+		await user.click(
+			screen.getByRole("button", { name: "Continue to agent rights" }),
+		);
+		await fillAgentKey(user);
+		await user.click(screen.getByRole("button", CHECK));
+		await screen.findByText("Result");
+		await waitFor(() => expect(check).toHaveLength(1));
+
+		expect(check).toEqual([
+			expect.objectContaining({
+				location: {
+					backend: "s3",
+					options: {
+						bucket: "my-bucket",
+						region: "eu-central-003",
+						endpoint: "https://s3.eu-central-003.backblazeb2.com",
+						path_style: "false",
+						provider: "b2",
+					},
+				},
+			}),
+		]);
+	});
+
+	it("asks for each placeholder of a template endpoint", async () => {
+		mockS3(s3Result());
+		const user = userEvent.setup();
+		renderApp("/welcome");
+
+		await chooseTile(user, /Cloudflare R2/);
+		await user.type(await screen.findByLabelText("Account ID"), "abc123");
+		expect(screen.queryByLabelText("Region")).toBeNull();
+		expect(
+			screen.getByText("https://abc123.r2.cloudflarestorage.com"),
+		).toBeInTheDocument();
+		expect(
+			screen.getByRole("button", { name: "Continue to agent rights" }),
+		).toBeDisabled();
+	});
+
+	it("marks only the selected tile", async () => {
+		mockS3(s3Result());
+		const user = userEvent.setup();
+		renderApp("/welcome");
+
+		const minio = await screen.findByRole("radio", { name: /MinIO/ });
+		const local = screen.getByRole("radio", { name: /Local path/ });
+		const mark = (radio: HTMLElement) =>
+			radio.closest("label")?.querySelector('[data-slot="preset-selected"]');
+		expect(mark(minio)).toBeNull();
+		await user.click(minio);
+		expect(mark(minio)).not.toBeNull();
+		await user.click(local);
+		expect(mark(local)).not.toBeNull();
+		expect(mark(minio)).toBeNull();
 	});
 
 	it("blocks the key step on a failed write", async () => {
@@ -511,8 +597,8 @@ describe("repository wizard with S3", () => {
 		const user = userEvent.setup();
 		renderApp("/welcome");
 
-		await fillS3(user);
-		await user.click(screen.getByRole("button", { name: "Check storage" }));
+		await toRights(user);
+		await user.click(screen.getByRole("button", CHECK));
 
 		expect(
 			await screen.findByText(
@@ -542,8 +628,8 @@ describe("repository wizard with S3", () => {
 		const user = userEvent.setup();
 		renderApp("/welcome");
 
-		await fillS3(user);
-		await user.click(screen.getByRole("button", { name: "Check storage" }));
+		await toRights(user);
+		await user.click(screen.getByRole("button", CHECK));
 
 		expect(
 			await screen.findByText("The agent key can overwrite objects"),
@@ -566,8 +652,8 @@ describe("repository wizard with S3", () => {
 		const user = userEvent.setup();
 		renderApp("/welcome");
 
-		await fillS3(user);
-		await user.click(screen.getByRole("button", { name: "Check storage" }));
+		await toRights(user);
+		await user.click(screen.getByRole("button", CHECK));
 
 		expect(
 			await screen.findByText("Skipped because the write check failed"),
@@ -582,8 +668,11 @@ describe("repository wizard with S3", () => {
 				},
 			}),
 		);
-		await user.type(screen.getByLabelText("Bucket"), "2");
-		await user.click(screen.getByRole("button", { name: "Check storage" }));
+		await user.type(
+			screen.getByLabelText("Agent key (write-only): Access key ID"),
+			"2",
+		);
+		await user.click(screen.getByRole("button", { name: "Check again" }));
 		expect(
 			await screen.findByText("Could not check: access denied"),
 		).toBeInTheDocument();
@@ -602,12 +691,12 @@ describe("repository wizard with S3", () => {
 		const user = userEvent.setup();
 		renderApp("/welcome");
 
-		await fillS3(user);
-		await user.click(screen.getByRole("button", { name: "Check storage" }));
+		await toRights(user);
+		await user.click(screen.getByRole("button", CHECK));
 		expect(
 			await screen.findByText("Couldn't check the storage. Boom. Try again."),
 		).toBeInTheDocument();
-		expect(screen.getByRole("button", { name: "Check storage" })).toBeEnabled();
+		expect(screen.getByRole("button", CHECK)).toBeEnabled();
 	});
 
 	it("connects an existing repository", async () => {
@@ -629,8 +718,8 @@ describe("repository wizard with S3", () => {
 		const user = userEvent.setup();
 		renderApp("/welcome");
 
-		await fillS3(user);
-		await user.click(screen.getByRole("button", { name: "Check storage" }));
+		await toRights(user);
+		await user.click(screen.getByRole("button", CHECK));
 		expect(
 			await screen.findByText("A Lodestore repository already exists here"),
 		).toBeInTheDocument();
@@ -688,55 +777,96 @@ describe("repository wizard with S3", () => {
 		expect(bodies[1]).toMatchObject({ password: "wrong password" });
 	});
 
-	it("offers only the backends agents can write to", async () => {
+	it("offers only the presets agents can write to, with Local path last", async () => {
 		mockS3(s3Result());
 		renderApp("/welcome");
 
-		await screen.findByRole("button", { name: "Continue to access" });
+		await screen.findByRole("radio", { name: /MinIO/ });
 		expect(
 			screen.getAllByRole("radio").map((radio) => radio.getAttribute("value")),
-		).toEqual(["s3", "local"]);
-		expect(screen.queryByRole("button", { name: /More backends/ })).toBeNull();
+		).toEqual([
+			"aws-s3",
+			"minio",
+			"wasabi",
+			"backblaze-b2",
+			"cloudflare-r2",
+			"hetzner-object-storage",
+			"local",
+		]);
+		expect(
+			screen.getByText("Cannot limit · use bucket lock"),
+		).toBeInTheDocument();
+		expect(
+			screen.getByText("Bucket policy · not verified"),
+		).toBeInTheDocument();
 	});
 
-	it("falls back to S3 when a stored draft names a hidden backend", async () => {
+	it("shows a retry when the providers do not load", async () => {
+		mockS3(s3Result());
+		let calls = 0;
+		server.use(
+			http.get("/api/v1/storage-presets", () => {
+				calls += 1;
+				return calls === 1
+					? HttpResponse.json(
+							{ code: "internal", message: "x" },
+							{ status: 500 },
+						)
+					: HttpResponse.json(storagePresets);
+			}),
+		);
+		const user = userEvent.setup();
+		renderApp("/welcome");
+
+		expect(
+			await screen.findByText("Could not load providers"),
+		).toBeInTheDocument();
+		await user.click(screen.getByRole("button", { name: "Retry" }));
+		expect(await screen.findByRole("radio", { name: /MinIO/ })).toBeVisible();
+	});
+
+	it("ignores a stored preset of a hidden backend", async () => {
 		sessionStorage.setItem(
 			"lodestore.wizard.draft",
-			JSON.stringify({ backend: "webdav", name: "stored" }),
+			JSON.stringify({
+				name: "stored",
+				preset: { id: "x", label: "X", backend: "webdav" },
+			}),
 		);
 		mockS3(s3Result());
 		renderApp("/welcome");
 
-		await screen.findByRole("button", { name: "Continue to access" });
-		expect(screen.getByRole("radio", { name: /S3-compatible/ })).toBeChecked();
+		await screen.findByRole("radio", { name: /MinIO/ });
+		expect(screen.getByLabelText("Repository name")).toHaveValue("default");
 	});
 
 	it("restores non-secret fields after a reload and never stores secrets", async () => {
 		mockS3(s3Result());
 		const user = userEvent.setup();
 		renderApp("/welcome");
-		await fillS3(user);
+		await toRights(user);
 
 		const stored = JSON.stringify(sessionStorage);
 		expect(stored).toContain("my-bucket");
 		expect(stored).toContain("http://minio:9000");
+		expect(stored).toContain("minio");
 		expect(stored).not.toContain(SERVER_SECRET);
 		expect(stored).not.toContain(AGENT_SECRET);
 		expect(stored).not.toContain("root");
+		expect(stored).not.toContain('"agent"');
 
 		cleanup();
 		renderApp("/welcome");
+		await screen.findByRole("radio", { name: /MinIO/ });
+		expect(screen.getByRole("radio", { name: /MinIO/ })).toBeChecked();
 		await user.click(
-			await screen.findByRole("button", { name: "Continue to access" }),
+			screen.getByRole("button", { name: "Continue to connection" }),
 		);
 		expect(await screen.findByLabelText("Bucket")).toHaveValue("my-bucket");
 		expect(screen.getByLabelText("Endpoint")).toHaveValue("http://minio:9000");
 		expect(screen.getByLabelText("Server key: Secret access key")).toHaveValue(
 			"",
 		);
-		expect(
-			screen.getByLabelText("Agent key (write-only): Secret access key"),
-		).toHaveValue("");
 		expect(screen.getByLabelText("Server key: Access key ID")).toHaveValue("");
 	});
 });
@@ -865,9 +995,10 @@ describe("guarantee consent", () => {
 		await toAccess(user);
 		await user.click(screen.getByRole("button", { name: "Check storage" }));
 
+		expect(await screen.findByText("Create-only")).toBeInTheDocument();
 		expect(
-			await screen.findByText("Guarantee level: Overwrite keeps old version."),
-		).toBeInTheDocument();
+			screen.getAllByText("Overwrite keeps old version").length,
+		).toBeGreaterThan(1);
 		expect(screen.queryByRole("checkbox", CONSENT)).toBeNull();
 		expect(
 			screen.getByRole("button", { name: "Continue to recovery key" }),

@@ -2,26 +2,15 @@ import { copy } from "@/copy";
 
 export const text = {
 	stepHeading: {
-		storage: "Choose storage",
-		access: "Check access",
+		storage: "Connect storage",
 		key: copy.recoveryKey.heading,
 		host: copy.addHost.title,
 	},
 	name: "Repository name",
 	nameHelper: "1 to 48 characters: lowercase letters, digits and hyphens.",
-	backendLegend: "Storage backend",
-	backendNames: {
-		s3: "S3-compatible",
-		local: "Local folder",
-	},
-	backendCards: {
-		s3: copy.backend.s3,
-		local: copy.backend.local,
-	},
 	path: "Path",
 	pathHelper: "An absolute path on the server, for example /srv/lodestore.",
 	endpoint: "Endpoint",
-	endpointHelper: "Leave empty for AWS",
 	region: "Region",
 	regionHelper: "Leave empty for us-east-1.",
 	bucket: "Bucket",

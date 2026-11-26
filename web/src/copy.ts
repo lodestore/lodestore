@@ -10,6 +10,14 @@ import { overview } from "@/copy.overview";
 import { policies } from "@/copy.policies";
 import { restore } from "@/copy.restore";
 import { sources } from "@/copy.sources";
+import {
+	connection,
+	hostKey,
+	limit,
+	presets,
+	revoke,
+	rights,
+} from "@/copy.storage";
 import { tokens } from "@/copy.tokens";
 import { user } from "@/copy.user";
 import { sentence } from "@/lib/sentence";
@@ -30,6 +38,12 @@ export const copy = {
 	user,
 	hostBackup,
 	snapshots,
+	presets,
+	connection,
+	rights,
+	hostKey,
+	limit,
+	revoke,
 	demo: {
 		notAvailable: "Not available in the demo.",
 		banner:
@@ -131,22 +145,9 @@ export const copy = {
 		password: "Password",
 	},
 	access: {
-		serverKey: {
-			title: "Server key",
-			body: "Full access. Stays on the server to manage and clean up the repository.",
-		},
-		agentKey: {
-			title: "Agent key",
-			body: "Write-only. Sent to every host so it can upload backups.",
-		},
-		writeOnlyBadge: "Write-only",
 		whyWriteOnly: {
 			title: "Why write-only?",
 			body: "If a host is ever compromised, the attacker can add data but cannot delete or read your backups. Deleting data is done by the server only.",
-		},
-		verify: {
-			title: "Verify access",
-			body: "Lodestore tries each permission once with a small test object, then removes it with the server key.",
 		},
 	},
 	checklist: {
@@ -229,10 +230,18 @@ export const copy = {
 	wizard: {
 		title: "Set up your first repository",
 		subtitle:
-			"Four steps: choose storage, check access, save the recovery key, add a host. About 5 minutes.",
-		steps: ["Storage", "Access", "Recovery key", "First host"],
+			"Five steps: choose storage, connect it, give agents a key that cannot delete, save the recovery key, add a host. About 5 minutes.",
+		steps: [
+			"Storage",
+			"Connection",
+			"Agent rights",
+			"Recovery key",
+			"First host",
+		],
 		back: "Back",
-		continueToAccess: "Continue to access",
+		continueToConnection: "Continue to connection",
+		continueToRights: "Continue to agent rights",
+		stepDescriptionSftp: "Address and host key",
 		continueToKey: "Continue to recovery key",
 		createRepository: "Create repository",
 		openHosts: "Open Hosts",
@@ -241,10 +250,11 @@ export const copy = {
 		discardChanges: "Discard changes",
 		keepCurrentKey: "Keep current key",
 		stepDescriptions: [
-			"Choose where backups live",
-			"Give Lodestore two keys",
-			"Save the way back in",
-			"Connect a machine",
+			"Provider and name",
+			"Bucket and server key",
+			"A key that cannot delete",
+			"Restore without the server",
+			"Install the agent",
 		],
 		progress: (n: number, total: number) => `Step ${n} of ${total}`,
 		progressLabel: "Progress",
@@ -261,8 +271,6 @@ export const copy = {
 		completed: "completed",
 	},
 	backend: {
-		s3: "S3-compatible storage such as AWS S3, MinIO or Ceph.",
-		local: "Local folder. A path both the server and the agent can see.",
 		twoKeys:
 			"Two keys. The server key has full access and manages the repository. The agent key can only write, so a compromised host cannot delete backups.",
 	},
@@ -296,8 +304,36 @@ export const copy = {
 				"The bucket's lifecycle rules could not be read; check that none deletes objects or earlier versions.",
 		},
 		unknownNote: "The check found another limit.",
-		levelLine: (level: string) => `Guarantee level: ${level}.`,
 		consentLabel: "I understand and want to continue",
+		column: "Guarantee",
+		cardTitle: "What a host can do to backups",
+		measured: "Measured",
+		accepted: "Accepted",
+		checked: "Checked",
+		why: "Why",
+		daily: "daily",
+		checkedPrefix: "Checked",
+		notCheckedFor: (days: number) => `Not checked for ${days} days`,
+		neverChecked: "Never checked",
+		acceptedChecked: "Accepted · checked",
+		lowerThanAccepted: "Lower than accepted",
+		seeAlert: "See alert",
+		limit: "Limit agent rights",
+		checkNow: "Check now",
+		whyBackend: {
+			s3: "The agent key's rights decide what a host can do.",
+			azblob:
+				"Agents get a short SAS signed by the server; its permissions decide.",
+			gcs: "The roles of the service account decide what a host can do.",
+			sftp: "An SFTP user can change a file it holds open.",
+			local: "Any process that can write to the folder can change its files.",
+		},
+		scale: {
+			weak: "Overwrite or delete",
+			keeps: "Overwrite keeps old version",
+			createOnly: "Create-only",
+			notMeasured: "Not measured",
+		},
 		weakTitle: "A host could change or delete backups here",
 		uncheckedTitle: "Lodestore could not measure what a host can do",
 		uncheckedBody:
