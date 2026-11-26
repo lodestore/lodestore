@@ -157,6 +157,20 @@ async fn cli_sftp_init_backup_restore() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn cli_sftp_direct_init_on_an_empty_root() {
+    let sftp = Sftp::start().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let lode_direct = || {
+        let mut cmd = sftp.lode(SshUser::Srv);
+        cmd.env("LODE_SFTP_PUBLISH", "direct");
+        cmd
+    };
+    init_with_consent(&lode_direct, tmp.path());
+    backup_and_restore(&lode_direct, tmp.path());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
 async fn cli_sftp_direct_init_backup_restore() {
     let sftp = Sftp::start().await;
     let tmp = tempfile::tempdir().unwrap();
