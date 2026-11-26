@@ -34,7 +34,7 @@ const STABLE_STREAM: Duration = Duration::from_secs(60);
 const RENEW_RETRY: Duration = Duration::from_secs(60);
 const MAX_SKEW_SECS: i64 = 300;
 const JOBS_DRAIN: Duration = Duration::from_secs(30);
-pub const CAPABILITIES: [&str; 8] = [
+pub const CAPABILITIES: [&str; 9] = [
     "restore_v1",
     "limits_v1",
     "gc_v1",
@@ -43,6 +43,7 @@ pub const CAPABILITIES: [&str; 8] = [
     "source:files",
     "host_key_v1",
     "location_v1",
+    "sas_refresh_v1",
 ];
 const CAP_UPDATE: &str = "update_v1";
 
@@ -648,6 +649,11 @@ mod tests {
     const KEY_RSA: &str = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAAgQC7";
     const KEY_CERT: &str =
         "ssh-ed25519-cert-v01@openssh.com AAAAIHNzaC1lZDI1NTE5LWNlcnQtdjAxQG9wZW5zc2guY29t";
+
+    #[test]
+    fn capabilities_include_sas_refresh() {
+        assert!(CAPABILITIES.contains(&"sas_refresh_v1"));
+    }
 
     fn paths(dir: &tempfile::TempDir) -> Paths {
         Paths {

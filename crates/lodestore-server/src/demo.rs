@@ -36,6 +36,7 @@ pub const ALLOWED: &[(&str, &str)] = &[
     ("GET", "/api/v1/account"),
     ("GET", "/api/v1/tokens"),
     ("GET", "/api/v1/agent-policy"),
+    ("GET", "/api/v1/storage-presets"),
     ("GET", "/api/v1/fleet"),
     ("GET", "/api/v1/fleet/hosts/{id}"),
     ("GET", "/api/v1/hosts"),

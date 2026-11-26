@@ -1,6 +1,7 @@
 pub mod agent_key;
 pub mod checks;
 pub mod db;
+pub mod gcs_lifecycle;
 pub mod object_lock;
 pub mod wizard;
 
@@ -31,6 +32,8 @@ pub(crate) struct WizardEntry {
     pub draft: RepositoryDraft,
     pub checks: CheckResult,
     pub expires_at: i64,
+    /// Whether the check at start measured the repository with a server-signed SAS.
+    pub sas_vending: bool,
 }
 
 #[derive(Default)]

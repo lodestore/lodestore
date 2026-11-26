@@ -1,3 +1,4 @@
+pub mod azure_sas;
 mod local;
 pub mod location;
 pub mod opendal;
@@ -118,9 +119,9 @@ pub trait BlobStore: Send + Sync {
 
     /// Whether an object becomes visible only once it is complete. A store
     /// that can leave a torn object under the final name (a direct SFTP write)
-    /// returns `false`, and then an existing name is trusted only after its
-    /// bytes are compared. No default: a wrapper that forgot to forward the
-    /// answer would trust a torn object on size alone.
+    /// returns `false`, and then a name it may not stat is never trusted. No
+    /// default: a wrapper that forgot to forward the answer would trust a torn
+    /// object it cannot see.
     fn publishes_atomically(&self) -> bool;
 }
 
@@ -164,11 +165,10 @@ pub async fn put_named_bytes<S: BlobStore>(store: &S, key: &str, bytes: &Bytes) 
     }
 }
 
-/// An object of `size` bytes holds the name. It is the one written when the
-/// size agrees and, on a store that can leave a torn object under the final
-/// name, when the bytes agree too: a direct write arrives out of order, so a
-/// full-size object can still have a hole. The read is capped at one byte
-/// past what was written.
+/// An object of `size` bytes holds the name. It is the one written only when
+/// the bytes agree: pack names come from the server, not from the content, so
+/// a matching size proves nothing, and a direct write can leave a full-size
+/// object with a hole. The read is capped at one byte past what was written.
 async fn confirm_present<S: BlobStore>(
     store: &S,
     key: &str,
@@ -178,9 +178,6 @@ async fn confirm_present<S: BlobStore>(
     let len = bytes.len() as u64;
     if size != len {
         return Err(Error::NameBurned { key: key.into() });
-    }
-    if store.publishes_atomically() {
-        return Ok(());
     }
     let seen = store.get_range(key, 0..len + 1).await?;
     if seen == *bytes {
@@ -565,6 +562,48 @@ mod tests {
         fn publishes_atomically(&self) -> bool {
             true
         }
+    }
+
+    /// Refuses every write and holds these bytes under every name, as a key without
+    /// the right to overwrite does on a store that publishes atomically.
+    struct Refusing(Bytes);
+
+    impl BlobStore for Refusing {
+        async fn put_if_absent(&self, _: &str, _: Bytes) -> std::result::Result<(), BlobError> {
+            Err(BlobError::Denied {
+                message: "refused".into(),
+            })
+        }
+        async fn get(&self, _: &str) -> std::result::Result<Bytes, BlobError> {
+            Ok(self.0.clone())
+        }
+        async fn get_range(&self, _: &str, r: Range<u64>) -> std::result::Result<Bytes, BlobError> {
+            let end = (r.end as usize).min(self.0.len());
+            Ok(self.0.slice((r.start as usize).min(end)..end))
+        }
+        async fn list(&self, p: &str) -> std::result::Result<Vec<ListEntry>, BlobError> {
+            Ok(vec![ListEntry {
+                key: p.to_owned(),
+                size: self.0.len() as u64,
+                modified_ms: None,
+            }])
+        }
+
+        fn publishes_atomically(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_write_is_present_only_for_the_same_bytes() {
+        let store = Refusing(Bytes::from_static(b"abcd"));
+        put_named(&store, "packs/k", b"abcd".to_vec())
+            .await
+            .unwrap();
+        assert!(matches!(
+            put_named(&store, "packs/k", b"abce".to_vec()).await,
+            Err(Error::NameBurned { .. })
+        ));
     }
 
     async fn local(body: &[u8]) -> (tempfile::TempDir, LocalFsStore) {

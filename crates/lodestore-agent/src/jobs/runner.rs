@@ -15,6 +15,7 @@ use lodestore_format::index::hex32;
 use lodestore_format::keys::WriteKeys;
 use lodestore_format::locks::DEFAULT_MAX_RUNTIME;
 use lodestore_format::pb::IssueKind;
+use lodestore_format::store::opendal::SasSource;
 use lodestore_format::store::s3::StaticCredentials;
 use lodestore_format::store::{RepoLocation, Store};
 use lodestore_format::tree_cache::{CacheWriter, open_parent};
@@ -39,6 +40,7 @@ use crate::hooks::{HookError, HookPhase, HookRun, HookSpec, run_hook};
 
 const OUTPUT_CHUNK: usize = 8 * 1024;
 const CANCEL_POLL: Duration = Duration::from_millis(50);
+const SAS_REFRESH: Duration = Duration::from_secs(300);
 
 #[derive(Deserialize)]
 struct RepositoryFile {
@@ -76,6 +78,24 @@ fn read_write_keys(paths: &Paths) -> Result<WriteKeys, String> {
     WriteKeys::from_file_text(&text).map_err(|e| format!("writer keys: {e}"))
 }
 
+fn sas_source(paths: &Paths, first: Zeroizing<String>) -> SasSource {
+    let path = paths.repository_json();
+    Arc::new(move || {
+        let token = std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<RepositoryFile>(&bytes).ok())
+            .and_then(|file| file.options.get("sas_token").cloned())
+            .filter(|t| !t.is_empty());
+        Some(match token {
+            Some(token) => Zeroizing::new(token),
+            None => {
+                tracing::debug!("repository.json is unreadable; keeping the storage token in use");
+                first.clone()
+            }
+        })
+    })
+}
+
 async fn open_writer_with(
     paths: &Paths,
     keys: WriteKeys,
@@ -99,10 +119,18 @@ async fn open_writer_with(
         backend: repository.backend,
         options: repository.options,
     };
-    let store = location
-        .for_agent()
-        .open(creds)
-        .map_err(|e| format!("cannot open the repository: {e}"))?;
+    let sas = location
+        .options
+        .get("sas_token")
+        .filter(|t| location.backend == "azblob" && !t.is_empty())
+        .map(|t| Zeroizing::new(t.clone()));
+    let store = match sas {
+        Some(token) => location
+            .for_agent()
+            .open_refreshing(sas_source(paths, token), SAS_REFRESH),
+        None => location.for_agent().open(creds),
+    }
+    .map_err(|e| format!("cannot open the repository: {e}"))?;
     Writer::connect_attested(
         Throttled::new(store, rate, uploaded),
         keys,
@@ -694,6 +722,47 @@ mod tests {
         assert!(gc_locks_gate(true, false).is_none());
         assert!(gc_locks_gate(false, true).is_none());
         assert!(gc_locks_gate(false, false).is_none());
+    }
+
+    fn repository_with(paths: &Paths, options: serde_json::Value) {
+        std::fs::create_dir_all(&paths.state_dir).unwrap();
+        let file = serde_json::json!({ "backend": "azblob", "options": options });
+        std::fs::write(paths.repository_json(), file.to_string()).unwrap();
+    }
+
+    fn token_of(source: &SasSource) -> String {
+        source().unwrap().to_string()
+    }
+
+    #[test]
+    fn sas_source_follows_repository_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            config_dir: dir.path().join("etc"),
+            state_dir: dir.path().join("var"),
+        };
+        repository_with(&paths, serde_json::json!({"sas_token": "sig=A"}));
+        let source = sas_source(&paths, Zeroizing::new("sig=A".into()));
+        assert_eq!(token_of(&source), "sig=A");
+        repository_with(&paths, serde_json::json!({"sas_token": "sig=B"}));
+        assert_eq!(token_of(&source), "sig=B");
+    }
+
+    #[test]
+    fn sas_source_keeps_the_first_token_when_the_file_is_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            config_dir: dir.path().join("etc"),
+            state_dir: dir.path().join("var"),
+        };
+        let source = sas_source(&paths, Zeroizing::new("sig=first".into()));
+        assert_eq!(token_of(&source), "sig=first");
+        repository_with(&paths, serde_json::json!({"container": "c"}));
+        assert_eq!(token_of(&source), "sig=first");
+        repository_with(&paths, serde_json::json!({"sas_token": ""}));
+        assert_eq!(token_of(&source), "sig=first");
+        std::fs::write(paths.repository_json(), b"{ not json").unwrap();
+        assert_eq!(token_of(&source), "sig=first");
     }
 
     use lodestore_proto::agent::v1::{Database, DatabaseServer, ProxmoxFacts, ProxmoxGuest};

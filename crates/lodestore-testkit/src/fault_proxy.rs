@@ -36,6 +36,9 @@ pub enum FaultAction {
     /// Answer 501 NotImplemented without contacting the upstream: a failure
     /// that is permanent but says nothing about permissions.
     NotImplemented,
+    /// Answer `status` with `body` without contacting the upstream: a reply
+    /// the test dictates, such as a provider's own error code.
+    Respond { status: u16, body: &'static str },
 }
 
 #[derive(Debug, Clone)]
@@ -304,6 +307,12 @@ async fn handle(State(st): State<Arc<Inner>>, req: Request) -> Response {
     }
     if action == Some(FaultAction::DenyUnconditional) {
         return xml(StatusCode::FORBIDDEN, ACCESS_DENIED);
+    }
+    if let Some(FaultAction::Respond { status, body }) = action {
+        return xml(
+            StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            body,
+        );
     }
 
     let hold = {

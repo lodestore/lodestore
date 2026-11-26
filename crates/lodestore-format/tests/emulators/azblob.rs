@@ -45,6 +45,29 @@ async fn azblob_put_twice_is_already_exists() {
 
 #[tokio::test]
 #[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
+async fn azblob_rcl_sas_repeat_of_other_bytes_of_the_same_length_fails() {
+    let az = AzuriteServer::start().await;
+    az.create_container("samelen").await;
+    let server = account_store(&az, "samelen").await;
+    let agent = sas_store(&az, "samelen", "rcl");
+    let data = b"a pack the server already holds".to_vec();
+    let hex = blake3::hash(&data).to_hex().to_string();
+    let key = format!("packs/{}/{hex}", &hex[..2]);
+    server
+        .put_if_absent(&key, Bytes::from(data.clone()))
+        .await
+        .unwrap();
+
+    put_named(&agent, &key, data.clone()).await.unwrap();
+
+    let mut other = data.clone();
+    other[0] ^= 1;
+    let err = put_named(&agent, &key, other).await.unwrap_err();
+    assert!(matches!(err, Error::NameBurned { .. }), "{err:?}");
+}
+
+#[tokio::test]
+#[ignore = "needs the storage emulators: scripts/test-emulators.sh"]
 async fn azblob_backup_and_restore() {
     let az = AzuriteServer::start().await;
     az.create_container("cycle").await;

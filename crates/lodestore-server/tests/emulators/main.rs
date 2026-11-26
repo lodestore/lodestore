@@ -8,4 +8,5 @@ mod agent_material;
 mod agent_options;
 mod gc_sftp;
 mod host_key_push;
+mod sas_vending;
 mod tofu;

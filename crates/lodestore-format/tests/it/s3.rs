@@ -11,7 +11,7 @@ use lodestore_format::pack::pack_object_key;
 use lodestore_format::reader::{Reader, RestoreOptions};
 use lodestore_format::repo::{InitOptions, PendingInit, Repository};
 use lodestore_format::store::{
-    BlobError, BlobStore, LocalFsStore, S3Store, StaticCredentials, Store,
+    BlobError, BlobStore, LocalFsStore, S3Store, StaticCredentials, Store, put_named,
 };
 use lodestore_format::writer::{BackupOptions, BackupOutcome, Writer};
 use lodestore_testkit::fault_proxy::{FaultAction, FaultPlan, FaultProxy, FaultRule};
@@ -295,6 +295,66 @@ async fn s3_fault_ambiguous_put_is_success() {
         "the PUT whose answer was lost was sent once more and refused"
     );
     restore_and_compare(&direct, &outcome, src.path()).await;
+}
+
+const BUCKET_LOCKED: &str = "<Error><Code>ObjectLockedByBucketPolicy</Code><Message>Object is protected by a bucket lock rule.</Message></Error>";
+const INVALID_BUCKET_STATE: &str = "<Error><Code>InvalidBucketState</Code><Message>The request is not valid with the current state of the bucket.</Message></Error>";
+
+fn pack_key_of(data: &[u8]) -> String {
+    let hex = blake3::hash(data).to_hex().to_string();
+    format!("packs/{}/{hex}", &hex[..2])
+}
+
+#[tokio::test]
+#[ignore = "slow; run with --run-ignored only"]
+async fn s3_fault_bucket_lock_conflict_is_present() {
+    let reply = FaultAction::Respond {
+        status: 409,
+        body: BUCKET_LOCKED,
+    };
+    let (_minio, _proxy, store, direct) = proxied("lock-conflict", put_rule(reply, 2)).await;
+    let data = b"a pack the server already holds".to_vec();
+    let key = pack_key_of(&data);
+    direct
+        .put_if_absent(&key, Bytes::from(data.clone()))
+        .await
+        .unwrap();
+
+    put_named(&store, &key, data.clone()).await.unwrap();
+
+    let mut other = data.clone();
+    other[0] ^= 1;
+    let err = put_named(&store, &key, other).await.unwrap_err();
+    assert!(
+        matches!(err, lodestore_format::Error::NameBurned { .. }),
+        "{err:?}"
+    );
+    assert_eq!(direct.get(&key).await.unwrap(), Bytes::from(data));
+}
+
+#[tokio::test]
+#[ignore = "slow; run with --run-ignored only"]
+async fn s3_fault_other_conflict_stays_an_error() {
+    let reply = FaultAction::Respond {
+        status: 409,
+        body: INVALID_BUCKET_STATE,
+    };
+    let (_minio, _proxy, store, direct) = proxied("other-conflict", put_rule(reply, 1)).await;
+    let data = b"a pack the server already holds".to_vec();
+    let key = pack_key_of(&data);
+    direct
+        .put_if_absent(&key, Bytes::from(data.clone()))
+        .await
+        .unwrap();
+
+    let err = put_named(&store, &key, data).await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            lodestore_format::Error::Store(BlobError::Backend { .. })
+        ),
+        "{err:?}"
+    );
 }
 
 #[tokio::test]

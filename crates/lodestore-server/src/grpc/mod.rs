@@ -4,6 +4,7 @@ pub mod dispatch;
 pub mod enrollment;
 pub mod registry;
 pub mod restore;
+pub mod sas_reissue;
 
 use std::sync::Arc;
 use std::time::Duration;

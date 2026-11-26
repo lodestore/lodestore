@@ -184,13 +184,29 @@
           {
             "name": "bucket",
             "in": "query",
-            "required": true,
+            "required": false,
             "schema": {
               "type": "string"
             }
           },
           {
             "name": "prefix",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "preset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "user",
             "in": "query",
             "required": false,
             "schema": {
@@ -210,7 +226,7 @@
             }
           },
           "422": {
-            "description": "No bucket given",
+            "description": "Unsafe or missing bucket, prefix or user, or unknown preset",
             "content": {
               "application/json": {
                 "schema": {
@@ -3983,6 +3999,16 @@
               }
             }
           },
+          "409": {
+            "description": "Another repository uses the container now (code `storage_changed`); check the storage again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "422": {
             "description": "Weak password or wrong last group",
             "content": {
@@ -4251,7 +4277,7 @@
             }
           },
           "409": {
-            "description": "The repository is on S3 or local storage, was created with shared credentials, or its storage access changed during the check",
+            "description": "The repository is on S3 or local storage, was created with shared credentials, hands out server-signed SAS tokens, or its storage access changed during the check",
             "content": {
               "application/json": {
                 "schema": {
@@ -5790,6 +5816,54 @@
         ]
       }
     },
+    "/api/v1/repositories/{id}/storage-access": {
+      "get": {
+        "tags": [
+          "Repositories"
+        ],
+        "summary": "Storage access of revoked hosts",
+        "description": "Tells whether revoked hosts of the repository still hold access to its storage and what to do about it. `after_revoke` is `expires`, `until_rotation`, `new_repository`, `server_key_shared` or `outside_lodestore`. `status` is `no_revoked_hosts`, `revoked_hosts_hold_access`, `rotated_disable_old_key_at_provider`, `access_expires` or `access_expired`. `rotate_via` names the endpoint that replaces the agents' credentials: `agent-key` for S3 repositories, `agent-options` for the other backends with their own agent credentials. Replacing credentials in Lodestore stops handing out the old ones; the old key, service account key, SFTP key or static SAS keeps working at the provider until it is disabled there.",
+        "operationId": "storage_access",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Repository id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "What revoked hosts of this repository can still reach",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StorageAccess"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown repository",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
     "/api/v1/restore/hosts": {
       "get": {
         "tags": [
@@ -6732,6 +6806,30 @@
         ]
       }
     },
+    "/api/v1/storage-presets": {
+      "get": {
+        "tags": [
+          "Repositories"
+        ],
+        "summary": "List the storage presets",
+        "operationId": "storage_presets",
+        "responses": {
+          "200": {
+            "description": "The storage presets",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/StoragePresetDto"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/tokens": {
       "get": {
         "tags": [
@@ -7040,6 +7138,49 @@
           },
           "minio_commands": {
             "type": "string"
+          },
+          "rights": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AgentRightsDto"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "AgentRightsDto": {
+        "type": "object",
+        "required": [
+          "preset",
+          "mechanism",
+          "text",
+          "verified",
+          "note"
+        ],
+        "properties": {
+          "mechanism": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string"
+          },
+          "preset": {
+            "type": "string"
+          },
+          "server_text": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
+            "type": "string"
+          },
+          "verified": {
+            "type": "boolean"
           }
         }
       },
@@ -15057,6 +15198,112 @@
         "properties": {
           "password": {
             "type": "string"
+          }
+        }
+      },
+      "StorageAccess": {
+        "type": "object",
+        "required": [
+          "after_revoke",
+          "status",
+          "revoked_hosts_since_rotation",
+          "revoked_hosts_before_rotation",
+          "hosts_need_agent_update"
+        ],
+        "properties": {
+          "access_ends_by": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Latest expiry of a SAS issued to a revoked host, unix ms; only while it is in the future."
+          },
+          "after_revoke": {
+            "type": "string",
+            "description": "What happens to the access of revoked hosts: `expires` (the issued SAS runs out),\n`until_rotation` (until the agent credentials are replaced and the old ones are\ndisabled at the provider), `new_repository` (shared credentials; only a new\nrepository and new credentials at the provider close it), `server_key_shared`\n(the agents hold the server's own key) or `outside_lodestore` (a local path)."
+          },
+          "hosts_need_agent_update": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Active hosts that cannot refresh a SAS; update them (SAS-issuing repositories only).",
+            "minimum": 0
+          },
+          "revoked_hosts_before_rotation": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Hosts revoked before the last replacement; the old credentials still work at the\nprovider until they are disabled there.",
+            "minimum": 0
+          },
+          "revoked_hosts_since_rotation": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Hosts revoked after the credentials were last replaced (all of them when never replaced).",
+            "minimum": 0
+          },
+          "rotate_via": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The endpoint that replaces the agents' credentials: `agent-key` or `agent-options`."
+          },
+          "status": {
+            "type": "string",
+            "description": "`no_revoked_hosts`, `revoked_hosts_hold_access`, `rotated_disable_old_key_at_provider`,\n`access_expires` or `access_expired`. Replacing credentials in Lodestore stops handing\nthe old ones out; it does not disable them at the provider."
+          }
+        }
+      },
+      "StoragePresetDto": {
+        "type": "object",
+        "required": [
+          "id",
+          "label",
+          "backend",
+          "path_style",
+          "mechanism",
+          "verified",
+          "note"
+        ],
+        "properties": {
+          "backend": {
+            "type": "string"
+          },
+          "endpoint_template": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "mechanism": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string"
+          },
+          "path_style": {
+            "type": "boolean"
+          },
+          "provider": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "region": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "verified": {
+            "type": "boolean"
           }
         }
       },

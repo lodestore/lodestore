@@ -6,13 +6,15 @@ use std::collections::BTreeMap;
 use std::process::Command;
 use std::sync::OnceLock;
 
+use data_encoding::BASE64;
 use lodestore_agent::session::store_location;
 use lodestore_format::keys::MasterKey;
 use lodestore_format::store::RepoLocation;
 use lodestore_proto::agent::v1::server_message::Body as ServerBody;
 use lodestore_server::grpc::agent::location_message;
 use lodestore_server::repos::checks::{
-    agent_option_names, check_agent_options, open_draft, open_parts, server_credential_names,
+    agent_option_names, check_agent_options, open_draft, open_draft_with, open_parts,
+    open_parts_with, server_credential_names,
 };
 use lodestore_server::repos::db::{
     AgentOptions, GuaranteeWrite, Stored, find_repository, replace_agent_options, server_access,
@@ -46,6 +48,9 @@ struct Case {
     agent: BTreeMap<String, String>,
     /// The set a later `PUT agent-options` sends; used only when `agent` is not empty.
     replacement: BTreeMap<String, String>,
+    /// The repository is created the way the wizard does it for a key repository
+    /// on Azure: the agents get a SAS the server signs.
+    vending: bool,
 }
 
 fn private_keys() -> &'static [String; 3] {
@@ -134,6 +139,32 @@ fn azblob() -> impl Strategy<Value = Case> {
                 server_secrets: map(secrets),
                 agent: map(agent),
                 replacement: map(vec![("sas_token", "sv=2&sig=new-sas".to_string())]),
+                vending: false,
+            }
+        })
+}
+
+fn vending_azblob() -> impl Strategy<Value = Case> {
+    (
+        "[a-z0-9]{3,24}",
+        "[a-z0-9][a-z0-9-]{1,30}[a-z0-9]",
+        prop::option::of(word()),
+        prop::collection::vec(any::<u8>(), 64),
+    )
+        .prop_map(|(account, container, root, key)| {
+            let mut public = vec![
+                ("container", container.replace("--", "-a")),
+                ("endpoint", refusing_endpoint()),
+                ("account_name", account),
+            ];
+            public.extend(root.map(|r| ("root", format!("/pub-{r}"))));
+            Case {
+                backend: "azblob",
+                public: map(public),
+                server_secrets: map(vec![("account_key", BASE64.encode(&key))]),
+                agent: BTreeMap::new(),
+                replacement: BTreeMap::new(),
+                vending: true,
             }
         })
 }
@@ -171,6 +202,7 @@ fn gcs() -> impl Strategy<Value = Case> {
                 server_secrets: map(secrets),
                 agent: map(agent),
                 replacement: map(vec![("credential", "new-credential".to_string())]),
+                vending: false,
             }
         })
 }
@@ -214,6 +246,7 @@ fn sftp() -> impl Strategy<Value = Case> {
                     server_secrets: map(vec![("key", server_key.clone())]),
                     agent: map(agent),
                     replacement: map(replacement),
+                    vending: false,
                 }
             },
         )
@@ -230,7 +263,7 @@ async fn run_case(ts: &TestServer, n: usize, case: Case) {
         draft["agent_options"] = json!(case.agent);
     }
     let draft: RepositoryDraft = serde_json::from_value(draft).unwrap();
-    let opened = match open_draft(&draft) {
+    let opened = match open_draft_with(&draft, case.vending) {
         Ok(opened) => opened,
         Err(error) => panic!("the draft was refused: {error:?}\n{case:?}"),
     };
@@ -260,19 +293,32 @@ async fn run_case(ts: &TestServer, n: usize, case: Case) {
     let id = summary.base.id;
 
     let access = server_access(state, &id).await.unwrap();
-    let probed = open_parts(
+    assert_eq!(access.sas_vending, case.vending, "{case:?}");
+    let probed = open_parts_with(
         access.location.clone(),
         access.server_creds.clone(),
         access.agent_creds.clone(),
         access.agent_options.clone(),
+        access.sas_vending,
     )
     .unwrap()
     .agent_location
     .expect("the agent store of this backend has a location");
     let material = writer_material(state, &id).await.unwrap();
     assert_eq!(probed.backend, material.location.backend, "{case:?}");
-    assert_eq!(probed.options, material.location.options, "{case:?}");
     let sent = &probed.options;
+    if case.vending {
+        check_vended(
+            state,
+            &id,
+            &case,
+            &probed.options,
+            &material.location.options,
+        )
+        .await;
+        return;
+    }
+    assert_eq!(probed.options, material.location.options, "{case:?}");
 
     let agent_names = agent_option_names(case.backend);
     assert!(case.agent.keys().all(|k| agent_names.contains(&k.as_str())));
@@ -322,6 +368,85 @@ async fn run_case(ts: &TestServer, n: usize, case: Case) {
     if !case.agent.is_empty() {
         replace_and_push(state, &id, &case).await;
     }
+}
+
+fn sas_pairs(token: &str) -> BTreeMap<String, String> {
+    token
+        .split('&')
+        .map(|pair| {
+            let (name, value) = pair.split_once('=').expect("name=value");
+            (name.to_string(), value.to_string())
+        })
+        .collect()
+}
+
+/// The probe's agent location and the material of a vending repository differ
+/// only in the SAS they were signed with, and both SAS are the narrow one the
+/// server signs; the account key is in neither, nor in the agent's file.
+async fn check_vended(
+    state: &lodestore_server::state::AppState,
+    id: &str,
+    case: &Case,
+    probed: &BTreeMap<String, String>,
+    sent: &BTreeMap<String, String>,
+) {
+    let key = &case.server_secrets["account_key"];
+    for options in [probed, sent] {
+        assert!(!options.contains_key("account_key"), "{case:?}");
+        assert!(
+            !options.values().any(|v| v.contains(key.as_str())),
+            "{case:?}"
+        );
+        let sas = sas_pairs(&options["sas_token"]);
+        assert_eq!(sas["sp"], "rcl", "{case:?}");
+        assert_eq!(sas["sr"], "c", "{case:?}");
+        assert_eq!(sas["sv"], "2022-11-02", "{case:?}");
+        let https_only =
+            lodestore_format::store::azure_sas::sas_https_only(&case.public["endpoint"]);
+        assert_eq!(
+            sas["spr"],
+            if https_only { "https" } else { "https,http" },
+            "{case:?}"
+        );
+    }
+    let without = |options: &BTreeMap<String, String>| {
+        let mut options = options.clone();
+        options.remove("sas_token");
+        options
+    };
+    assert_eq!(without(probed), without(sent), "{case:?}");
+    for name in PUBLISHED {
+        assert_eq!(sent.get(name), case.public.get(name), "{name}: {case:?}");
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let paths = lodestore_agent::Paths {
+        config_dir: dir.path().join("etc"),
+        state_dir: dir.path().join("var"),
+    };
+    std::fs::create_dir_all(&paths.state_dir).unwrap();
+    let mut enrolled = without(sent);
+    enrolled.insert("account_key".into(), key.clone());
+    std::fs::write(
+        paths.repository_json(),
+        serde_json::to_vec(&json!({
+            "repository_id": id,
+            "backend": "azblob",
+            "options": enrolled,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let pushed = location_message(&writer_material(state, id).await.unwrap().location, id);
+    let Some(ServerBody::UpdateLocation(update)) = pushed.body else {
+        panic!("expected UpdateLocation");
+    };
+    store_location(&paths, &update.location.expect("a location")).unwrap();
+    let file = std::fs::read_to_string(paths.repository_json()).unwrap();
+    let file: serde_json::Value = serde_json::from_str(&file).unwrap();
+    assert!(file["options"]["sas_token"].is_string(), "{case:?}");
+    assert!(file["options"].get("account_key").is_none(), "{case:?}");
+    assert!(!file.to_string().contains(key.as_str()), "{case:?}");
 }
 
 /// The agent enrolls with the material, the options are replaced as `PUT
@@ -413,11 +538,14 @@ fn probe_and_agent_locations_agree() {
         ..Config::default()
     });
     let n = std::cell::Cell::new(0);
-    let result = runner.run(&prop_oneof![azblob(), gcs(), sftp()], |case| {
-        n.set(n.get() + 1);
-        rt.block_on(run_case(&ts, n.get(), case));
-        Ok(())
-    });
+    let result = runner.run(
+        &prop_oneof![azblob(), vending_azblob(), gcs(), sftp()],
+        |case| {
+            n.set(n.get() + 1);
+            rt.block_on(run_case(&ts, n.get(), case));
+            Ok(())
+        },
+    );
     rt.block_on(ts.stop());
     result.unwrap();
 }
