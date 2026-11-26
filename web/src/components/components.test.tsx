@@ -401,4 +401,57 @@ describe("toCheckRows", () => {
 		detail("conditional_write", "warn", "unsupported");
 		expect(screen.getByText(/^Not supported\./)).toBeInTheDocument();
 	});
+
+	it("advises Object Lock only on bucket backends", () => {
+		const source = {
+			checks: [{ id: "agent_delete", status: "warn" }],
+			agent_key_state: "can_delete",
+		};
+		const text = (backend: string) => {
+			const [row] = toCheckRows(source, backend);
+			const { container } = render(<div>{row.detail}</div>);
+			return container.textContent;
+		};
+		expect(text("s3")).toMatch(/versioning or Object Lock/);
+		const sftp = text("sftp");
+		expect(sftp).not.toMatch(/Object Lock|versioning/);
+		expect(sftp).toMatch(/Tighten the key's permissions/);
+	});
+
+	it("does not recommend Object Lock where it does not apply", () => {
+		const rowsFor = (error: string) =>
+			toCheckRows(
+				{
+					checks: [{ id: "object_lock", status: "neutral", error }],
+					agent_key_state: "verified",
+				},
+				"sftp",
+			);
+		const { unmount } = render(
+			<CapabilityChecklist
+				rows={rowsFor("not_applicable")}
+				ids={["object_lock"]}
+			/>,
+		);
+		expect(screen.queryByText("Recommended")).toBeNull();
+		expect(screen.getByText("Not applicable")).toBeInTheDocument();
+		unmount();
+		render(<CapabilityChecklist rows={rowsFor("")} ids={["object_lock"]} />);
+		expect(screen.getByText("Recommended")).toBeInTheDocument();
+		expect(screen.getByText("Off")).toBeInTheDocument();
+	});
+
+	it("does not advise versioning when the storage already keeps versions", () => {
+		const [row] = toCheckRows(
+			{
+				checks: [{ id: "agent_delete", status: "warn" }],
+				agent_key_state: "can_overwrite",
+				guarantee_level: "overwrite_keeps_old_version",
+			},
+			"s3",
+		);
+		const { container } = render(<div>{row.detail}</div>);
+		expect(container.textContent).not.toMatch(/enable bucket versioning/);
+		expect(container.textContent).toMatch(/keeps earlier versions/);
+	});
 });

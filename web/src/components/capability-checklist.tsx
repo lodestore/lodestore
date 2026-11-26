@@ -49,12 +49,18 @@ export type CheckRow = {
 	id: CheckId;
 	status: CheckStatus;
 	detail?: ReactNode;
+	statusLabel?: string;
 };
 
-type CheckSource = { checks: CheckDto[]; agent_key_state: string };
+type CheckSource = {
+	checks: CheckDto[];
+	agent_key_state: string;
+	guarantee_level?: string;
+};
 
 const NOT_APPLICABLE = "not_applicable";
 const NOT_SUPPORTED = "not_supported";
+const LOCK_BACKENDS = ["s3", "gcs", "azblob"];
 const STATUSES: CheckStatus[] = ["pass", "warn", "fail", "neutral"];
 
 const capitalize = (text: string) =>
@@ -62,6 +68,7 @@ const capitalize = (text: string) =>
 
 export function agentKeyWarning(
 	source: CheckSource,
+	backend = "s3",
 ): { heading: string; body: string } | undefined {
 	const text = copy.check.detail;
 	const state = source.agent_key_state;
@@ -77,7 +84,13 @@ export function agentKeyWarning(
 			state === "can_delete"
 				? text.agentKeyCanDeleteBody
 				: text.agentKeyCanOverwriteBody,
-			lockOn ? text.agentKeyLockOn : text.agentKeyLockOff,
+			lockOn
+				? text.agentKeyLockOn
+				: source.guarantee_level === "overwrite_keeps_old_version"
+					? text.agentKeyVersioned
+					: LOCK_BACKENDS.includes(backend)
+						? text.agentKeyLockOff
+						: text.agentKeyTighten,
 			text.agentKeyAccept,
 		].join(" "),
 	};
@@ -112,7 +125,7 @@ function detailFor(
 	}
 	if (check.id === "agent_delete") {
 		const warning =
-			check.status === "warn" ? agentKeyWarning(source) : undefined;
+			check.status === "warn" ? agentKeyWarning(source, backend) : undefined;
 		if (warning && brief) return text.agentKeyBriefRow;
 		if (warning) {
 			return (
@@ -150,6 +163,11 @@ export function toCheckRows(
 				id: check.id as CheckId,
 				status,
 				detail: detailFor(check, source, backend, options.brief ?? false),
+				...(check.id === "object_lock" &&
+				status === "neutral" &&
+				(check.error ?? "") === ""
+					? { statusLabel: copy.check.status.off }
+					: {}),
 			},
 		];
 	});
@@ -250,11 +268,13 @@ export function CapabilityChecklist({
 							<ItemContent>
 								<div className="flex flex-wrap items-center gap-2">
 									<ItemTitle>{copy.check.rows[id]}</ItemTitle>
-									{id === "object_lock" && visual && (
-										<Badge variant="outline">
-											{copy.checklist.recommended}
-										</Badge>
-									)}
+									{id === "object_lock" &&
+										visual &&
+										(row.status !== "neutral" || row.statusLabel) && (
+											<Badge variant="outline">
+												{copy.checklist.recommended}
+											</Badge>
+										)}
 								</div>
 								<ItemDescription className="line-clamp-none">
 									{visual ? row.detail : copy.check.rowRunning}
@@ -279,7 +299,7 @@ export function CapabilityChecklist({
 							</ItemContent>
 							{visual && row.status !== "running" && (
 								<ItemActions className={cn("text-xs", visual.tone)}>
-									{copy.check.status[row.status]}
+									{row.statusLabel ?? copy.check.status[row.status]}
 								</ItemActions>
 							)}
 						</Item>

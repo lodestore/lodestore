@@ -377,6 +377,9 @@ export const copy = {
 				"Tighten the key's policy, or enable bucket versioning or Object Lock, and check again.",
 			agentKeyLockOn:
 				"Object Lock is enabled, but whether earlier versions are protected depends on its retention rules. Tightening the key's policy is still recommended.",
+			agentKeyVersioned:
+				"The storage keeps earlier versions, so an overwrite can be undone. Tightening the key's policy is still recommended.",
+			agentKeyTighten: "Tighten the key's permissions and check again.",
 			agentKeyAccept:
 				"You can also continue and accept the risk. This warning stays visible on the repository.",
 			objectLockOn: "Object Lock is enabled on the bucket.",
@@ -393,6 +396,7 @@ export const copy = {
 			warn: "Warning",
 			fail: "Failed",
 			neutral: "Not applicable",
+			off: "Off",
 			stale: "Outdated",
 		},
 		blockedContinue: "Fix the failed checks to continue to the recovery key.",
