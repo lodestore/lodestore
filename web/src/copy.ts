@@ -10,7 +10,14 @@ import { overview } from "@/copy.overview";
 import { policies } from "@/copy.policies";
 import { restore } from "@/copy.restore";
 import { sources } from "@/copy.sources";
-import { connection, presets, rights } from "@/copy.storage";
+import {
+	connection,
+	hostKey,
+	limit,
+	presets,
+	revoke,
+	rights,
+} from "@/copy.storage";
 import { tokens } from "@/copy.tokens";
 import { user } from "@/copy.user";
 import { sentence } from "@/lib/sentence";
@@ -34,6 +41,9 @@ export const copy = {
 	presets,
 	connection,
 	rights,
+	hostKey,
+	limit,
+	revoke,
 	demo: {
 		notAvailable: "Not available in the demo.",
 		banner:
@@ -231,6 +241,7 @@ export const copy = {
 		back: "Back",
 		continueToConnection: "Continue to connection",
 		continueToRights: "Continue to agent rights",
+		stepDescriptionSftp: "Address and host key",
 		continueToKey: "Continue to recovery key",
 		createRepository: "Create repository",
 		openHosts: "Open Hosts",
@@ -294,6 +305,29 @@ export const copy = {
 		},
 		unknownNote: "The check found another limit.",
 		consentLabel: "I understand and want to continue",
+		column: "Guarantee",
+		cardTitle: "What a host can do to backups",
+		measured: "Measured",
+		accepted: "Accepted",
+		checked: "Checked",
+		why: "Why",
+		daily: "daily",
+		checkedPrefix: "Checked",
+		notCheckedFor: (days: number) => `Not checked for ${days} days`,
+		neverChecked: "Never checked",
+		acceptedChecked: "Accepted · checked",
+		lowerThanAccepted: "Lower than accepted",
+		seeAlert: "See alert",
+		limit: "Limit agent rights",
+		checkNow: "Check now",
+		whyBackend: {
+			s3: "The agent key's rights decide what a host can do.",
+			azblob:
+				"Agents get a short SAS signed by the server; its permissions decide.",
+			gcs: "The roles of the service account decide what a host can do.",
+			sftp: "An SFTP user can change a file it holds open.",
+			local: "Any process that can write to the folder can change its files.",
+		},
 		scale: {
 			weak: "Overwrite or delete",
 			keeps: "Overwrite keeps old version",
