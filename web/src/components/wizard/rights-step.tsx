@@ -75,23 +75,21 @@ export function RightsStep({
 			<p>{copy.rights.lead}</p>
 			<div className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_320px] lg:items-start">
 				<div className="flex min-w-0 flex-col gap-6">
-					{!draft.skipRights && (
-						<AgentRightsTasks
-							preset={preset}
-							bucket={draft.bucket.trim()}
-							prefix={draft.prefix.trim()}
-							vendsSas={azureVendsSas(draft)}
-							agent={draft.agent}
-							onAgent={(agent) => onChange({ agent })}
-							disabled={running}
-							conditionalPassed={
-								check.phase === "done" &&
-								check.result.checks.some(
-									(c) => c.id === "conditional_write" && c.status === "pass",
-								)
-							}
-						/>
-					)}
+					<AgentRightsTasks
+						preset={preset}
+						bucket={draft.bucket.trim()}
+						prefix={draft.prefix.trim()}
+						vendsSas={azureVendsSas(draft)}
+						agent={draft.agent}
+						onAgent={(agent) => onChange({ agent, skipRights: false })}
+						disabled={running}
+						conditionalPassed={
+							check.phase === "done" &&
+							check.result.checks.some(
+								(c) => c.id === "conditional_write" && c.status === "pass",
+							)
+						}
+					/>
 					<Task number={3} title={copy.rights.check} done={fresh}>
 						<p className="text-sm text-muted-foreground">
 							{copy.rights.checkBody}

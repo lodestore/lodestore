@@ -96,7 +96,16 @@ describe("agent rights step", () => {
 			access_key_id: "root",
 			secret_access_key: "SERVER-SECRET",
 		});
-		expect(screen.queryByLabelText(/Agent key/)).toBeNull();
+		expect(
+			screen.getByLabelText("Agent key (write-only): Access key ID"),
+		).toHaveValue("");
+		expect(
+			screen.getByRole("heading", { name: "Create the key in MinIO" }),
+		).toBeInTheDocument();
+		expect(
+			screen.getByRole("heading", { name: "Paste the key it printed" }),
+		).toBeInTheDocument();
+		expect(document.querySelectorAll('[data-done="true"]')).toHaveLength(1);
 
 		const next = screen.getByRole("button", {
 			name: "Continue to recovery key",
@@ -114,6 +123,30 @@ describe("agent rights step", () => {
 		expect(
 			screen.getByRole("button", { name: "Continue to recovery key" }),
 		).toBeDisabled();
+		expect(document.querySelectorAll('[data-status="stale"]')).toHaveLength(5);
+	});
+
+	it("returns to the limited key path when the admin types an agent key after skipping", async () => {
+		mockProbe();
+		const user = userEvent.setup();
+		renderApp("/welcome");
+		await toRights(user, /MinIO/);
+		await user.click(
+			screen.getByRole("button", { name: "Skip, use the server key" }),
+		);
+		await screen.findByRole("button", { name: "Use a limited key instead" });
+
+		await user.type(
+			screen.getByLabelText("Agent key (write-only): Access key ID"),
+			"agent",
+		);
+
+		expect(
+			screen.getByRole("button", { name: "Skip, use the server key" }),
+		).toBeInTheDocument();
+		expect(
+			screen.queryByRole("button", { name: "Use a limited key instead" }),
+		).toBeNull();
 		expect(document.querySelectorAll('[data-status="stale"]')).toHaveLength(5);
 	});
 
