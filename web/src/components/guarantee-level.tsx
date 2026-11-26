@@ -55,7 +55,7 @@ export function LevelLine({
 	const good = protective && !warn;
 	const Icon = good ? ShieldCheck : ShieldAlert;
 	return (
-		<span className="inline-flex items-center gap-2 font-semibold">
+		<span className="inline-flex items-start gap-2 font-semibold">
 			<Icon
 				aria-hidden
 				className={cn(

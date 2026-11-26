@@ -72,6 +72,13 @@ describe("repositories list", () => {
 			"Checks",
 			"Actions",
 		]);
+		const header = (name: string) => screen.getByRole("columnheader", { name });
+		expect(header("Guarantee")).not.toHaveClass("hidden");
+		expect(header("Cleanup")).toHaveClass("hidden", "xl:table-cell");
+		expect(header("Agent key")).toHaveClass("hidden", "2xl:table-cell");
+		expect(screen.getByText("Create-only enforced").closest("td")).toHaveClass(
+			"whitespace-normal",
+		);
 		expect(screen.getByText("archive")).toBeInTheDocument();
 		expect(
 			screen.getByText("Host can overwrite or delete"),

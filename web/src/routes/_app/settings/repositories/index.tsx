@@ -63,16 +63,13 @@ const COLUMNS = [
 ];
 COLUMNS.splice(3, 0, ["guarantee", copy.guarantee.column]);
 const WIDE_ONLY = new Set(["agentKey", "lastChecked", "checks"]);
-const LARGE_ONLY = new Set(["backend", "hosts"]);
-const MEDIUM_ONLY = new Set(["location"]);
+const LARGE_ONLY = new Set(["backend", "hosts", "location", "cleanup"]);
 const wideOnly = (key: string) =>
 	WIDE_ONLY.has(key)
-		? "hidden xl:table-cell"
+		? "hidden 2xl:table-cell"
 		: LARGE_ONLY.has(key)
-			? "hidden lg:table-cell"
-			: MEDIUM_ONLY.has(key)
-				? "hidden md:table-cell"
-				: undefined;
+			? "hidden xl:table-cell"
+			: undefined;
 
 function AddRepositoryButton() {
 	return (
@@ -337,7 +334,7 @@ function RepositoriesPage() {
 												<TableCell className={cn("px-4", wideOnly("location"))}>
 													<Location value={repository.location_display} />
 												</TableCell>
-												<TableCell className="px-4">
+												<TableCell className="px-4 md:min-w-56 whitespace-normal">
 													<GuaranteeCell repository={repository} />
 												</TableCell>
 												<TableCell className={cn("px-4", wideOnly("hosts"))}>
@@ -361,7 +358,7 @@ function RepositoriesPage() {
 														copy.common.dash
 													)}
 												</TableCell>
-												<TableCell className="px-4">
+												<TableCell className={cn("px-4", wideOnly("cleanup"))}>
 													<Cleanup repository={repository} />
 												</TableCell>
 												<TableCell className={cn("px-4", wideOnly("checks"))}>

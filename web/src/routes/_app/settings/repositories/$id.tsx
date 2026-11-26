@@ -84,7 +84,7 @@ function RepositoryPage() {
 	const keyWarning =
 		repository &&
 		!guaranteeBannerKind(repository) &&
-		agentKeyWarning(repository);
+		agentKeyWarning(repository, repository.backend);
 
 	const limitable = !!repository && repository.backend !== "local";
 	const access = useStorageAccess(id, { query: { enabled: limitable } });
@@ -96,11 +96,15 @@ function RepositoryPage() {
 		repository.backend === "s3";
 	const canLimit =
 		limitable && (limitTarget(access.data) !== null || instructionOnly);
-	const limitButton = (variant: "default" | "outline", label: string) => (
+	const limitButton = (
+		variant: "default" | "outline",
+		label: string,
+		className?: string,
+	) => (
 		<LimitAgentRightsSheet
 			repositoryId={id}
 			trigger={
-				<Button type="button" variant={variant}>
+				<Button type="button" variant={variant} className={className}>
 					<ShieldCheck aria-hidden />
 					{label}
 				</Button>
@@ -223,7 +227,7 @@ function RepositoryPage() {
 						</CardHeader>
 						{canLimit && (
 							<CardContent>
-								{limitButton("outline", copy.revoke.replaceKey)}
+								{limitButton("outline", copy.revoke.replaceKey, "w-fit")}
 							</CardContent>
 						)}
 					</Card>
