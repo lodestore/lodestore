@@ -164,6 +164,7 @@ describe("repository wizard with a local folder", () => {
 		expect(calls.commit).toEqual([
 			{ password: PASSWORD, recovery_key_last_group: "WXYZ" },
 		]);
+		expect(sessionStorage.getItem("lodestore.wizard.draft")).toBeNull();
 		expect(
 			screen.getByRole("button", { name: "Generate token" }),
 		).toBeInTheDocument();
@@ -613,6 +614,74 @@ describe("repository wizard with S3", () => {
 				"Fix the failed checks to continue to the recovery key.",
 			),
 		).toBeInTheDocument();
+	});
+
+	it("hides the MinIO conditional-write hint once that check passed", async () => {
+		const note = "mc commands for a user without delete.";
+		mockS3(s3Result());
+		const user = userEvent.setup();
+		renderApp("/welcome");
+
+		await toRights(user);
+		expect(await screen.findByText(note)).toBeInTheDocument();
+		await user.click(screen.getByRole("button", CHECK));
+		await screen.findByText("The server key can write.");
+		expect(screen.queryByText(note)).toBeNull();
+
+		mockS3(
+			s3Result({ conditional_write: { status: "warn", error: "unsupported" } }),
+		);
+		await user.type(
+			screen.getByLabelText("Agent key (write-only): Access key ID"),
+			"2",
+		);
+		await user.click(screen.getByRole("button", { name: "Check again" }));
+		await screen.findByText(/Not supported\. Lodestore still works/);
+		expect(screen.getByText(note)).toBeInTheDocument();
+	});
+
+	it("labels a disabled Object Lock as off, not as not applicable", async () => {
+		mockS3(s3Result());
+		const user = userEvent.setup();
+		renderApp("/welcome");
+
+		await toRights(user);
+		await user.click(screen.getByRole("button", CHECK));
+
+		const row = (await screen.findByText(/^Not enabled\. Optional/)).closest(
+			'[data-status="neutral"]',
+		) as HTMLElement;
+		expect(within(row).getByText("Off")).toBeInTheDocument();
+		expect(within(row).queryByText("Not applicable")).toBeNull();
+	});
+
+	it("shows the host key choice as one joined control", async () => {
+		mockServer();
+		server.use(
+			http.post("/api/v1/repositories/check", () =>
+				HttpResponse.json({
+					...s3Result(),
+					host_key: { key: "ssh-ed25519 AAAA", fingerprint: "SHA256:abc" },
+				}),
+			),
+		);
+		const user = userEvent.setup();
+		renderApp("/welcome");
+		await user.click(await screen.findByRole("radio", { name: /SFTP/ }));
+		await user.click(
+			screen.getByRole("button", { name: "Continue to connection" }),
+		);
+		await user.type(await screen.findByLabelText("Address"), "nas:22");
+		await user.click(screen.getByRole("button", { name: "Get host key" }));
+
+		const group = await screen.findByRole("radiogroup", {
+			name: "Is this your server?",
+		});
+		expect(group).toHaveAttribute("data-spacing", "0");
+		await user.click(within(group).getByRole("radio", { name: "It matches" }));
+		expect(
+			within(group).getByRole("radio", { name: "It matches" }),
+		).toBeChecked();
 	});
 
 	it("explains an overwrite-capable key without advising Object Lock when it is on", async () => {

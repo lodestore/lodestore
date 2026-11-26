@@ -63,18 +63,22 @@ function useDebounced(value: string, ms: number) {
 	return debounced;
 }
 
+const NOTE_NEEDS_REJECTED_CONDITION = new Set(["minio", "wasabi"]);
+
 export function Commands({
 	preset,
 	bucket,
 	prefix,
 	user,
 	variant = "wizard",
+	conditionalPassed = false,
 }: {
 	preset: PresetInfo;
 	bucket: string;
 	prefix: string;
 	user: string;
 	variant?: "wizard" | "sheet";
+	conditionalPassed?: boolean;
 }) {
 	const policy = useAgentPolicy(
 		{
@@ -115,7 +119,10 @@ export function Commands({
 	const rights = policy.data.rights;
 	if (!rights) return null;
 	const note =
-		rights.note === "" ? null : variant === "sheet" ? (
+		rights.note === "" ||
+		(conditionalPassed &&
+			NOTE_NEEDS_REJECTED_CONDITION.has(preset.id)) ? null : variant ===
+			"sheet" ? (
 			<Alert>
 				<Info aria-hidden />
 				<AlertDescription>{rights.note}</AlertDescription>
@@ -239,6 +246,7 @@ export function AgentRightsTasks({
 	disabled,
 	vendsSas = false,
 	variant = "wizard",
+	conditionalPassed = false,
 }: {
 	preset: PresetInfo;
 	bucket: string;
@@ -248,6 +256,7 @@ export function AgentRightsTasks({
 	disabled: boolean;
 	vendsSas?: boolean;
 	variant?: "wizard" | "sheet";
+	conditionalPassed?: boolean;
 }) {
 	const filled = agentFilled(preset, agent);
 	const shared = presetUsesServerKey(preset) || vendsSas;
@@ -274,6 +283,7 @@ export function AgentRightsTasks({
 						prefix={prefix}
 						user={user}
 						variant={variant}
+						conditionalPassed={conditionalPassed}
 					/>
 				)}
 			</Task>

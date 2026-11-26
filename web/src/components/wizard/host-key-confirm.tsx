@@ -139,6 +139,8 @@ export function HostKeyConfirm({
 						<ToggleGroup
 							type="single"
 							variant="outline"
+							size="lg"
+							spacing={0}
 							aria-label={copy.hostKey.title}
 							value={matches ? "matches" : offer.mismatch ? "mismatch" : ""}
 							onValueChange={(value) => {
@@ -151,11 +153,17 @@ export function HostKeyConfirm({
 								}
 							}}
 						>
-							<ToggleGroupItem value="matches">
+							<ToggleGroupItem
+								value="matches"
+								className="px-4 data-[state=on]:bg-primary-subtle data-[state=on]:font-semibold data-[state=on]:text-primary-strong"
+							>
 								<Check aria-hidden />
 								{copy.hostKey.matches}
 							</ToggleGroupItem>
-							<ToggleGroupItem value="mismatch">
+							<ToggleGroupItem
+								value="mismatch"
+								className="px-4 data-[state=on]:bg-primary-subtle data-[state=on]:font-semibold data-[state=on]:text-primary-strong"
+							>
 								<X aria-hidden />
 								{copy.hostKey.mismatch}
 							</ToggleGroupItem>

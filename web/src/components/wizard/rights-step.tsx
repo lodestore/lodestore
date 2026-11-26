@@ -84,6 +84,12 @@ export function RightsStep({
 							agent={draft.agent}
 							onAgent={(agent) => onChange({ agent })}
 							disabled={running}
+							conditionalPassed={
+								check.phase === "done" &&
+								check.result.checks.some(
+									(c) => c.id === "conditional_write" && c.status === "pass",
+								)
+							}
 						/>
 					)}
 					<Task number={3} title={copy.rights.check} done={fresh}>

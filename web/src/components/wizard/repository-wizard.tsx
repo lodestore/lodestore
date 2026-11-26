@@ -171,7 +171,9 @@ export function RepositoryWizard({
 		}
 	}
 
-	useEffect(() => saveDraft(draft), [draft]);
+	useEffect(() => {
+		if (!created) saveDraft(draft);
+	}, [draft, created]);
 
 	const first = useRef(true);
 	useEffect(() => {
