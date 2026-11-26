@@ -419,9 +419,7 @@ describe("Hetzner Storage Box", () => {
 		expect(screen.queryByLabelText("Address")).toBeNull();
 		expect(screen.queryByLabelText("User")).toBeNull();
 		await user.type(screen.getByLabelText("Storage Box user"), "u123");
-		expect(
-			screen.getByText("u123.your-storagebox.de:23"),
-		).toBeInTheDocument();
+		expect(screen.getByText("u123.your-storagebox.de:23")).toBeInTheDocument();
 		await user.type(screen.getByLabelText("Directory"), "/backups");
 		await user.type(screen.getByLabelText("Private key"), "BOX-KEY");
 
