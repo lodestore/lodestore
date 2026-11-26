@@ -244,3 +244,19 @@ describe("guarantee age", () => {
 		expect(isBelowAccepted("create_only_enforced", "unchecked")).toBe(false);
 	});
 });
+
+describe("repository page title", () => {
+	it("carries no agent key badge beside the guarantee card", async () => {
+		open({
+			backend: "sftp",
+			agent_key_state: "verified",
+			guarantee_level: "host_can_overwrite_or_delete",
+			guarantee_accepted: "host_can_overwrite_or_delete",
+		});
+		const title = await screen.findByRole("heading", { level: 1 });
+		expect(title.closest("header")).not.toHaveTextContent(
+			"Write-only verified",
+		);
+		expect(screen.queryByText("Write-only verified")).toBeNull();
+	});
+});

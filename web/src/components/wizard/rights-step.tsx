@@ -90,7 +90,11 @@ export function RightsStep({
 							)
 						}
 					/>
-					<Task number={3} title={copy.rights.check} done={fresh}>
+					<Task
+						number={3}
+						title={copy.rights.check}
+						done={fresh && !draft.skipRights}
+					>
 						<p className="text-sm text-muted-foreground">
 							{copy.rights.checkBody}
 						</p>

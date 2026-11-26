@@ -242,6 +242,7 @@ export const copy = {
 		continueToConnection: "Continue to connection",
 		continueToRights: "Continue to agent rights",
 		stepDescriptionSftp: "Address and host key",
+		stepDescriptionAzure: "Container and server key",
 		continueToKey: "Continue to recovery key",
 		createRepository: "Create repository",
 		openHosts: "Open Hosts",
@@ -452,6 +453,7 @@ export const copy = {
 		revokeHost: "Revoke host",
 		hostRevoked: (name: string) => `Host "${name}" revoked.`,
 		revokeTitle: (name: string) => `Revoke host "${name}"?`,
+		revokedTitle: (name: string) => `Host "${name}" is revoked`,
 		revokeBody:
 			"The agent is disconnected immediately and can't reconnect or receive jobs. To use this machine again, reinstall the agent with --force and a new token. After the revoke you see what the host can still reach in the storage of its repository.",
 		replaceKeyLink: "Open the repository",

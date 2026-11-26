@@ -24,6 +24,7 @@ export const connection = {
 	heading: (label: string) => `Connect ${label}`,
 	endpointHelper:
 		"Leave empty for AWS; enter the URL of any other S3-compatible service.",
+	endpointHelperMinio: "The URL of your MinIO server, with its port.",
 	endpointResult: "Endpoint",
 	placeholder: {
 		region: "Region",
@@ -32,6 +33,8 @@ export const connection = {
 	} as Record<string, string>,
 	container: "Container",
 	accountName: "Storage account name",
+	azurePrefixHelper:
+		"Optional. Keeps the repository in a folder of the container.",
 	azureEndpointHelper:
 		"Leave empty for https://<account>.blob.core.windows.net",
 	credentialKind: "Server credential",

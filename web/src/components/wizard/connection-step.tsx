@@ -80,7 +80,11 @@ function S3Fields({
 						<TextField
 							id="s3-endpoint"
 							label={text.endpoint}
-							help={copy.connection.endpointHelper}
+							help={
+								preset.id === "minio"
+									? copy.connection.endpointHelperMinio
+									: copy.connection.endpointHelper
+							}
 							value={draft.endpoint}
 							onChange={(endpoint) => onChange({ endpoint })}
 							disabled={disabled}
@@ -313,7 +317,7 @@ function AzureFields({
 				<TextField
 					id="azure-prefix"
 					label={copy.connection.folder}
-					help={text.prefixHelper}
+					help={copy.connection.azurePrefixHelper}
 					value={draft.prefix}
 					onChange={(prefix) => onChange({ prefix })}
 					disabled={disabled}

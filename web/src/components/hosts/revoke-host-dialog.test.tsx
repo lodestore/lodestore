@@ -92,6 +92,10 @@ describe("revoke host follow-up", () => {
 			),
 		).toBeInTheDocument();
 		expect(
+			within(dialog).getByRole("heading", { name: 'Host "web-1" is revoked' }),
+		).toBeInTheDocument();
+		expect(within(dialog).queryByText(/Revoke host/)).toBeNull();
+		expect(
 			within(dialog).getByRole("button", { name: "Later" }),
 		).toBeInTheDocument();
 		await user.click(

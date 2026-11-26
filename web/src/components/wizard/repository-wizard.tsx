@@ -296,9 +296,11 @@ export function RepositoryWizard({
 			title: copy.wizard.steps[i],
 			description:
 				chosen ||
-				(sftp && id === "connection"
+				(id === "connection" && sftp
 					? copy.wizard.stepDescriptionSftp
-					: copy.wizard.stepDescriptions[i]),
+					: id === "connection" && preset?.backend === "azblob"
+						? copy.wizard.stepDescriptionAzure
+						: copy.wizard.stepDescriptions[i]),
 		};
 	});
 	const back = local ? "connection" : "rights";

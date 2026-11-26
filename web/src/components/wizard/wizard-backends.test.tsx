@@ -480,6 +480,14 @@ describe("Azure Blob Storage", () => {
 		const { bodies } = mockServer();
 		const user = userEvent.setup();
 		renderApp("/welcome");
+		await chooseTile(user, /Azure Blob Storage/);
+		expect(
+			await screen.findByText(
+				"Optional. Keeps the repository in a folder of the container.",
+			),
+		).toBeInTheDocument();
+		expect(screen.getByText("Container and server key")).toBeInTheDocument();
+		await user.click(screen.getByRole("button", { name: "Previous step" }));
 		await connect(user, "Account key");
 
 		expect(screen.getByText(copy.rights.azure)).toBeInTheDocument();

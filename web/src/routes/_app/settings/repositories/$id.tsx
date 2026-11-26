@@ -7,7 +7,6 @@ import {
 	useStoragePresets,
 } from "@/api/gen/endpoints";
 import { agentKeyWarning } from "@/components/capability-checklist";
-import { AgentKeyBadge } from "@/components/repos/agent-key-badge";
 import { CatalogCard } from "@/components/repos/catalog-card";
 import { ChecksCard } from "@/components/repos/checks/checks-card";
 import {
@@ -166,9 +165,6 @@ function RepositoryPage() {
 						>
 							{repository.name}
 						</h1>
-						{repository.backend !== "local" && (
-							<AgentKeyBadge state={repository.agent_key_state} />
-						)}
 					</header>
 
 					<GuaranteeCard

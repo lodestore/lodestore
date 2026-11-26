@@ -68,6 +68,29 @@ async function toRights(user: User, tile: RegExp, account?: string) {
 
 const CONSENT = { name: "I understand and want to continue" };
 
+describe("connection step", () => {
+	it("asks MinIO for its server URL and keeps the AWS hint for Amazon S3", async () => {
+		mockProbe();
+		const user = userEvent.setup();
+		renderApp("/welcome");
+		await user.click(await screen.findByRole("radio", { name: /MinIO/ }));
+		await user.click(
+			screen.getByRole("button", { name: "Continue to connection" }),
+		);
+		expect(
+			await screen.findByText("The URL of your MinIO server, with its port."),
+		).toBeInTheDocument();
+		expect(screen.queryByText(/Leave empty for AWS/)).toBeNull();
+
+		await user.click(screen.getByRole("button", { name: "Previous step" }));
+		await user.click(await screen.findByRole("radio", { name: /Amazon S3/ }));
+		await user.click(
+			screen.getByRole("button", { name: "Continue to connection" }),
+		);
+		expect(await screen.findByText(/Leave empty for AWS/)).toBeInTheDocument();
+	});
+});
+
 describe("agent rights step", () => {
 	it("skips to the server key and asks for consent before continuing", async () => {
 		const bodies = mockProbe();
@@ -105,7 +128,7 @@ describe("agent rights step", () => {
 		expect(
 			screen.getByRole("heading", { name: "Paste the key it printed" }),
 		).toBeInTheDocument();
-		expect(document.querySelectorAll('[data-done="true"]')).toHaveLength(1);
+		expect(document.querySelectorAll('[data-done="true"]')).toHaveLength(0);
 
 		const next = screen.getByRole("button", {
 			name: "Continue to recovery key",

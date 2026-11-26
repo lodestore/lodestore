@@ -149,9 +149,9 @@ export function RevokeHostDialog({
 				<AlertDialogContent onCloseAutoFocus={onCloseAutoFocus}>
 					<AlertDialogHeader>
 						<AlertDialogTitle>
-							{copy.hosts.revokeTitle(
-								followup?.hostname ?? host?.hostname ?? "",
-							)}
+							{followup
+								? copy.hosts.revokedTitle(followup.hostname)
+								: copy.hosts.revokeTitle(host?.hostname ?? "")}
 						</AlertDialogTitle>
 						<AlertDialogDescription>
 							{followup ? followup.text : copy.hosts.revokeBody}
