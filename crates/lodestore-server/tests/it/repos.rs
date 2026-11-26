@@ -551,6 +551,32 @@ async fn sftp_full_check_still_needs_user_and_key() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agent_key_replacement_needs_a_recent_password() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = create_local(&ts, &api, "main").await;
+        let key = json!({ "access_key_id": "AKIDNEW", "secret_access_key": "SECRETNEW" });
+        let path = format!("/api/v1/repositories/{}/agent-key", repo.id);
+
+        let fresh = api.put(&path, &key).await;
+        assert_eq!(fresh.status(), 409, "[{}]", backend.name());
+
+        sqlx::query("UPDATE sessions SET authenticated_at = $1")
+            .bind(lodestore_server::db::now_ms() - 16 * 60_000)
+            .execute(&ts.state().db.pool)
+            .await
+            .unwrap();
+        for target in [path.as_str(), "/api/v1/repositories/missing/agent-key"] {
+            let refused = api.put(target, &key).await;
+            assert_eq!(refused.status(), 403, "{target} [{}]", backend.name());
+            assert_eq!(body(refused).await["code"], "step_up_required");
+        }
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn migration_0037_carries_the_current_level_as_accepted() {
     let cases = [
         ("loc", "local", "unchecked", "host_can_overwrite_or_delete"),

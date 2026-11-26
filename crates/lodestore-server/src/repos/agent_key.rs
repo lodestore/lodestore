@@ -496,12 +496,15 @@ async fn verify_key(
     put,
     tag = "Repositories",
     summary = "Replace agent credentials",
+    description = "Needs the password entered in the last 15 minutes. Replaces the key only after \
+        a check with it passed; the current key stays when the check fails.",
     security(("session" = [], "csrf" = [])),
     path = "/api/v1/repositories/{id}/agent-key",
     params(("id" = String, Path, description = "Repository id")),
     request_body = Credentials,
     responses(
         (status = 200, description = "The key was replaced and sent to the online agents", body = KeyReplaced),
+        (status = 403, description = "`step_up_required`: the password was not entered in the last 15 minutes", body = ErrorBody),
         (status = 404, description = "Unknown repository", body = ErrorBody),
         (status = 409, description = "The repository has no separate agent key", body = ErrorBody),
         (status = 422, description = "The new key could not be verified", body = ErrorBody),
@@ -509,10 +512,11 @@ async fn verify_key(
 )]
 async fn replace_key(
     State(state): State<AppState>,
-    _user: AuthUser,
+    user: AuthUser,
     Path(id): Path<String>,
     Json(new_key): Json<Credentials>,
 ) -> Result<Json<KeyReplaced>, ApiError> {
+    crate::auth::require_recent_password(&user)?;
     let access = load(&state, &id).await?;
     require_s3(&access)?;
     let key: AccessKey = new_key.into();
