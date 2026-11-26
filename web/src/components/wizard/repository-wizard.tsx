@@ -26,6 +26,7 @@ import {
 	choosePreset,
 	connectionReady,
 	type Draft,
+	emptyAgent,
 	newDraft,
 	type PresetInfo,
 	STEPS,
@@ -203,16 +204,14 @@ export function RepositoryWizard({
 		setCheck({ phase: "idle" });
 	}
 
-	async function runCheck() {
+	async function runCheck(next: Draft = draft) {
+		const probe = withoutConsent(next);
 		setCheck({ phase: "running" });
-		setDraft(withoutConsent);
+		setDraft(probe);
 		try {
-			const result = await checkStorage(
-				toApiDraft({ ...draft, acceptWeakerGuarantee: false }),
-				{
-					signal: AbortSignal.timeout(CHECK_TIMEOUT_MS),
-				},
-			);
+			const result = await checkStorage(toApiDraft(probe), {
+				signal: AbortSignal.timeout(CHECK_TIMEOUT_MS),
+			});
 			setCheck({ phase: "done", result, stale: false });
 		} catch (error) {
 			const message = (error instanceof Error ? error.message : "").replace(
@@ -333,7 +332,7 @@ export function RepositoryWizard({
 						preset={preset}
 						onChange={change}
 						check={check}
-						onCheck={runCheck}
+						onCheck={() => void runCheck()}
 						onBack={() => go("storage")}
 						onContinue={() => go(local ? "key" : "rights")}
 					/>
@@ -344,7 +343,10 @@ export function RepositoryWizard({
 						preset={preset}
 						onChange={change}
 						check={check}
-						onCheck={runCheck}
+						onCheck={() => void runCheck()}
+						onSkip={() =>
+							void runCheck({ ...draft, skipRights: true, agent: emptyAgent() })
+						}
 						onBack={() => go("connection")}
 						onContinue={() => go("key")}
 					/>

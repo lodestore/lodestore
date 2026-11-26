@@ -1,10 +1,7 @@
 import { CircleAlert, Info, TriangleAlert } from "lucide-react";
 import { CapabilityChecklist } from "@/components/capability-checklist";
-import {
-	GuaranteeNotes,
-	levelName,
-	UNCHECKED_LEVEL,
-} from "@/components/guarantee-notes";
+import { LevelLine, LevelScale } from "@/components/guarantee-level";
+import { GuaranteeNotes, UNCHECKED_LEVEL } from "@/components/guarantee-notes";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -105,10 +102,15 @@ function DoneResult({
 				rows={checkRows(result, backendOf(draft.preset) ?? "s3", stale)}
 				stale={stale}
 			/>
-			{!stale && !consent && (
-				<div className="flex flex-col gap-1 text-sm">
-					<p>{copy.guarantee.levelLine(levelName(level))}</p>
-					<GuaranteeNotes codes={result.guarantee_notes} />
+			{!stale && (
+				<div className="flex flex-col gap-4">
+					<LevelScale level={level} />
+					<LevelLine level={level} />
+					{!consent && (
+						<div className="text-sm">
+							<GuaranteeNotes codes={result.guarantee_notes} />
+						</div>
+					)}
 				</div>
 			)}
 			{consent && (
@@ -121,6 +123,7 @@ function DoneResult({
 					</AlertTitle>
 					<AlertDescription className="flex flex-col gap-4 [&_p:not(:last-child)]:mb-0">
 						{unchecked && <p>{copy.guarantee.uncheckedBody}</p>}
+						{draft.skipRights && <p>{copy.rights.skippedBody}</p>}
 						<GuaranteeNotes codes={result.guarantee_notes} />
 						{unchecked && (
 							<div>

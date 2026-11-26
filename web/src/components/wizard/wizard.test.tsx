@@ -995,9 +995,10 @@ describe("guarantee consent", () => {
 		await toAccess(user);
 		await user.click(screen.getByRole("button", { name: "Check storage" }));
 
+		expect(await screen.findByText("Create-only")).toBeInTheDocument();
 		expect(
-			await screen.findByText("Guarantee level: Overwrite keeps old version."),
-		).toBeInTheDocument();
+			screen.getAllByText("Overwrite keeps old version").length,
+		).toBeGreaterThan(1);
 		expect(screen.queryByRole("checkbox", CONSENT)).toBeNull();
 		expect(
 			screen.getByRole("button", { name: "Continue to recovery key" }),

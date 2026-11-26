@@ -293,8 +293,13 @@ export const copy = {
 				"The bucket's lifecycle rules could not be read; check that none deletes objects or earlier versions.",
 		},
 		unknownNote: "The check found another limit.",
-		levelLine: (level: string) => `Guarantee level: ${level}.`,
 		consentLabel: "I understand and want to continue",
+		scale: {
+			weak: "Overwrite or delete",
+			keeps: "Overwrite keeps old version",
+			createOnly: "Create-only",
+			notMeasured: "Not measured",
+		},
 		weakTitle: "A host could change or delete backups here",
 		uncheckedTitle: "Lodestore could not measure what a host can do",
 		uncheckedBody:

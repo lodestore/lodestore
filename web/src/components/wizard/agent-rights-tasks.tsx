@@ -1,14 +1,18 @@
-import { Check } from "lucide-react";
+import { Check, TriangleAlert } from "lucide-react";
 import type { ReactNode } from "react";
 import { ApiError } from "@/api/fetcher";
 import { useAgentPolicy } from "@/api/gen/endpoints";
 import { CodeBlock } from "@/components/code-block";
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { copy } from "@/copy";
 import { cn } from "@/lib/utils";
-import type { AgentSecrets, PresetInfo } from "./draft";
+import {
+	type AgentSecrets,
+	type PresetInfo,
+	presetUsesServerKey,
+} from "./draft";
 import { KeyFields } from "./parts";
 import { text } from "./text";
 
@@ -24,7 +28,10 @@ export function Task({
 	children: ReactNode;
 }) {
 	return (
-		<section className="flex gap-4 not-first:border-t not-first:pt-6">
+		<section
+			data-done={done || undefined}
+			className="flex gap-4 not-first:border-t not-first:pt-6"
+		>
 			<span
 				aria-hidden
 				className={cn(
@@ -84,6 +91,17 @@ function Commands({
 	}
 	const rights = policy.data.rights;
 	if (!rights) return null;
+	if (presetUsesServerKey(preset)) {
+		return (
+			<Alert className="text-warning">
+				<TriangleAlert aria-hidden />
+				<AlertTitle>{copy.rights.r2Title}</AlertTitle>
+				<AlertDescription className="whitespace-pre-line">
+					{rights.text}
+				</AlertDescription>
+			</Alert>
+		);
+	}
 	return (
 		<>
 			<CodeBlock text={rights.text} object={copy.rights.commands} />
@@ -116,22 +134,29 @@ export function AgentRightsTasks({
 	disabled: boolean;
 }) {
 	const filled = agent.keyId.trim() !== "" && agent.secret !== "";
+	const shared = presetUsesServerKey(preset);
 	return (
 		<>
-			<Task number={1} title={copy.rights.create(preset.label)} done={filled}>
+			<Task
+				number={1}
+				title={copy.rights.create(preset.label)}
+				done={filled && !shared}
+			>
 				<Commands preset={preset} bucket={bucket} prefix={prefix} />
 			</Task>
-			<Task number={2} title={copy.rights.paste} done={filled}>
-				<KeyFields
-					prefix="agent"
-					legend={text.agentKey}
-					keyId={agent.keyId}
-					secret={agent.secret}
-					onKeyId={(keyId) => onAgent({ ...agent, keyId })}
-					onSecret={(secret) => onAgent({ ...agent, secret })}
-					disabled={disabled}
-				/>
-			</Task>
+			{!shared && (
+				<Task number={2} title={copy.rights.paste} done={filled}>
+					<KeyFields
+						prefix="agent"
+						legend={text.agentKey}
+						keyId={agent.keyId}
+						secret={agent.secret}
+						onKeyId={(keyId) => onAgent({ ...agent, keyId })}
+						onSecret={(secret) => onAgent({ ...agent, secret })}
+						disabled={disabled}
+					/>
+				</Task>
+			)}
 		</>
 	);
 }

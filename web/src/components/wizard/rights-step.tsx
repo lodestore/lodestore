@@ -7,6 +7,7 @@ import {
 	type Draft,
 	needsConsent,
 	type PresetInfo,
+	presetUsesServerKey,
 	rightsReady,
 } from "./draft";
 import { StepCard, StepHeading } from "./parts";
@@ -18,6 +19,7 @@ export function RightsStep({
 	onChange,
 	check,
 	onCheck,
+	onSkip,
 	onBack,
 	onContinue,
 }: {
@@ -26,6 +28,7 @@ export function RightsStep({
 	onChange: (patch: Partial<Draft>) => void;
 	check: CheckState;
 	onCheck: () => void;
+	onSkip: () => void;
 	onBack: () => void;
 	onContinue: () => void;
 }) {
@@ -41,28 +44,46 @@ export function RightsStep({
 			onBack={onBack}
 			backDisabled={running}
 			actions={
-				<Button
-					type="button"
-					disabled={!fresh || blocked || needsAccept}
-					aria-describedby={blocked ? "continue-blocked" : undefined}
-					onClick={onContinue}
-				>
-					{copy.wizard.continueToKey}
-				</Button>
+				<>
+					{!presetUsesServerKey(preset) && (
+						<Button
+							type="button"
+							variant="outline"
+							disabled={running}
+							onClick={
+								draft.skipRights
+									? () => onChange({ skipRights: false })
+									: onSkip
+							}
+						>
+							{draft.skipRights ? copy.rights.useLimited : copy.rights.skip}
+						</Button>
+					)}
+					<Button
+						type="button"
+						disabled={!fresh || blocked || needsAccept}
+						aria-describedby={blocked ? "continue-blocked" : undefined}
+						onClick={onContinue}
+					>
+						{copy.wizard.continueToKey}
+					</Button>
+				</>
 			}
 		>
 			<StepHeading>{copy.rights.title}</StepHeading>
 			<p>{copy.rights.lead}</p>
 			<div className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_320px] lg:items-start">
 				<div className="flex min-w-0 flex-col gap-6">
-					<AgentRightsTasks
-						preset={preset}
-						bucket={draft.bucket.trim()}
-						prefix={draft.prefix.trim()}
-						agent={draft.agent}
-						onAgent={(agent) => onChange({ agent })}
-						disabled={running}
-					/>
+					{!draft.skipRights && (
+						<AgentRightsTasks
+							preset={preset}
+							bucket={draft.bucket.trim()}
+							prefix={draft.prefix.trim()}
+							agent={draft.agent}
+							onAgent={(agent) => onChange({ agent })}
+							disabled={running}
+						/>
+					)}
 					<Task number={3} title={copy.rights.check} done={fresh}>
 						<p className="text-sm text-muted-foreground">
 							{copy.rights.checkBody}

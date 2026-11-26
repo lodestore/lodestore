@@ -52,6 +52,11 @@ export const rights = {
 	commands: "Commands for the new key",
 	loadFailed: "Could not load the commands",
 	retry: "Retry",
+	skip: "Skip, use the server key",
+	useLimited: "Use a limited key instead",
+	skippedBody:
+		"Agents will use the server key. You can limit it later from the repository page.",
+	r2Title: "R2 tokens cannot be limited",
 	result: "Result",
 	resultIdle: "Run the check to see what this key can do.",
 };

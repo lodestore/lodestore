@@ -74,7 +74,7 @@ export type Draft = {
 };
 
 const emptyKey = (): KeyPair => ({ id: "", secret: "" });
-const emptyAgent = (): AgentSecrets => ({ keyId: "", secret: "" });
+export const emptyAgent = (): AgentSecrets => ({ keyId: "", secret: "" });
 
 export const DEFAULT_NAME = "default";
 export const NAME_PATTERN = /^[a-z0-9-]{1,48}$/;
@@ -134,10 +134,12 @@ export function endpointOf(draft: Draft) {
 	);
 }
 
+export function presetUsesServerKey(preset: PresetInfo | null) {
+	return preset?.backend === "s3" && preset.mechanism === "instruction";
+}
+
 export function agentUsesServerKey(draft: Draft) {
-	return (
-		draft.preset?.backend === "s3" && draft.preset.mechanism === "instruction"
-	);
+	return presetUsesServerKey(draft.preset);
 }
 
 export function toAgentPayload(
