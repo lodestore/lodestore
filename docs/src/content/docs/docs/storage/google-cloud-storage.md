@@ -17,6 +17,14 @@ The levels and how they are measured are in [Storage backends and guarantee leve
 | Level the check reports | Create-only enforced; Host can overwrite or delete without `agent_options` (`shared_credentials`) |
 | Tested against | The client on fake-gcs-server. The refusal on the service side is **not tested**, because fake-gcs-server has no IAM. Real Google Cloud Storage: not yet |
 
+## In the web interface
+
+1. **Storage.** Choose the **Google Cloud Storage** tile.
+2. **Connection.** **Bucket**, **Folder** and the server's **Service account key**, the key file in base64 (`base64 -w0 key.json`). The wizard has no field for a custom endpoint, so an emulator or a gateway is not connected through it.
+3. **Agent rights.** The step shows the `gcloud` commands of this page, and the one command that lets the server's own account read the bucket lifecycle. Run them, paste the new service account's key in base64, and choose **Check**.
+
+**Skip, use the server key** makes the agents use the server's service account key. The level then is **Host can overwrite or delete** (`shared_credentials`), you accept it, and only a new repository with a limited key changes that: **Limit agent rights** is not offered for such a repository. For a repository created with its own agent key, the panel replaces that key after your password and a full check, and you delete the old service account key in Google Cloud.
+
 ## Agent rights
 
 `GET /api/v1/agent-policy?preset=google-cloud-storage&bucket=<bucket>` returns `gcloud` commands; the mechanism is `commands`. They create a custom role with `storage.objects.create`, `storage.objects.get` and `storage.objects.list` (no delete, no update), create a service account, bind the role to the bucket, and create a key. The key, base64 encoded (`base64 -w0 agent.json`), is the value of `agent_options.credential`. The answer also carries `server_text`: one command that grants `roles/storage.legacyBucketReader` to the account the server uses (`SERVER_SA_EMAIL`), which the server needs to read the lifecycle. The answer is marked not verified on the live service.

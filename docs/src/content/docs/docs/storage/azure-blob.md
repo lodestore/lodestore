@@ -19,6 +19,14 @@ An agent writes to the container directly. On Azure the server can hand each age
 
 The refusal of `Put Block` and the size limit of a single `Put Blob` were observed on Azurite. They have not been confirmed on the real service, so this page does not rely on them.
 
+## In the web interface
+
+1. **Storage.** Choose the **Azure Blob Storage** tile.
+2. **Connection.** **Storage account name**, **Container**, **Folder**, and **Endpoint** only for a non-default address (empty means `https://<account>.blob.core.windows.net`). Choose the server credential: the **Account key** or a **SAS token** with the rights the server needs.
+3. **Agent rights.** With the account key the step says that Lodestore signs a short SAS without delete for every agent session and there is nothing to run; there is no **Skip** here, and the container must belong to this repository alone. With a SAS as the server credential, the step asks for a second SAS with read, create and list rights only, for the agents; **Skip, use the server key** hands them the server's SAS instead and needs your acceptance of the weaker level. Choose **Check** to see the level.
+
+On the repository page, **Limit agent rights** replaces your own agent SAS after your password and a full check. A repository that gets its SAS from the server has nothing to replace, and one that skipped the step on shared credentials changes only with a new repository.
+
 ## Agent rights
 
 `GET /api/v1/agent-policy?preset=azure-blob` answers with the mechanism `server_issued` and no commands: there is nothing for you to create. The answer is not verified on the live service.

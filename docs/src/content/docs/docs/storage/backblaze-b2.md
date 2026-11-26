@@ -17,6 +17,14 @@ Backblaze B2 is connected through its S3 API with `provider = b2`. The levels an
 | Level the check reports | Overwrite keeps old version at best |
 | Tested against | The client with the B2 preset on MinIO. Real Backblaze B2: not yet |
 
+## In the web interface
+
+1. **Storage.** Choose the **Backblaze B2** tile. The wizard sets `provider = b2` for you.
+2. **Connection.** **Region** (for example `us-west-004`), from which the wizard builds `https://s3.<region>.backblazeb2.com`, then **Bucket**, **Key prefix** and the server key: an application key ID and the key.
+3. **Agent rights.** The step shows the `b2 key create` command of this page with your bucket and prefix. Run it, paste the application key ID and the key it printed, and choose **Check**. The level is **Overwrite keeps old version** at best.
+
+**Skip, use the server key** lets agents use the server's own key; the level then is **Host can overwrite or delete** and the wizard asks you to accept it. On the repository page, **Limit agent rights** opens the same commands in a panel: after your password it checks the new key and switches the agents to it, and you disable the old key at Backblaze.
+
 ## Agent rights
 
 `GET /api/v1/agent-policy?preset=backblaze-b2&bucket=<bucket>&prefix=<prefix>` returns a command; the mechanism is `commands`:

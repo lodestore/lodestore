@@ -8,7 +8,7 @@ This page takes you from nothing to a first backup of one Linux host. It should 
 ## What you need
 
 - A machine with Docker where the server will run. It must be reachable from the host you want to back up on ports 8080 (web interface and API) and 8443 (agents).
-- S3-compatible object storage (AWS S3, MinIO, Ceph and others), a bucket in it, and two access keys: a server key with full access and an agent key without delete rights. The setup wizard shows the exact policy for the agent key.
+- S3-compatible object storage (AWS S3, MinIO, Ceph and others), a bucket in it, and two access keys: a server key with full access and an agent key without delete rights. The setup wizard shows the commands or the policy that create the agent key for your provider.
 - A Linux host with systemd and root access, to back up. It can be the same machine as the server.
 - `minisign` on the machine where you run `lode`, to check its signature in [Restore without the server](#restore-without-the-server). Where to get it: the [package table](/docs/install/binary/#agents-for-new-hosts).
 
@@ -18,7 +18,7 @@ No bucket? See [Using a local or network folder](#using-a-local-or-network-folde
 
 ### Why S3-compatible storage
 
-The setup wizard creates S3-compatible and folder repositories. On S3-compatible storage it gives a host a separate key without delete rights and writes the policy for it, and Object Lock is available there. Those two are what keep a compromised host from destroying its own backups. With Object Lock in COMPLIANCE mode, even the server cannot delete locked data before its retention period ends. Azure Blob Storage, Google Cloud Storage, SFTP and Backblaze B2 can also give agents rights without delete: the server writes the commands, or on Azure signs a short-lived access token for each agent, through the API. Each backend has a page that says what a host can do there, starting with [Azure Blob Storage](/docs/storage/azure-blob/) and [Google Cloud Storage](/docs/storage/google-cloud-storage/).
+The setup wizard has a tile for each storage provider it knows: Amazon S3, MinIO, Wasabi, Backblaze B2, Cloudflare R2, Hetzner Object Storage, Hetzner Storage Box, Azure Blob Storage, Google Cloud Storage, SFTP, and a local path. For most of them it gives a host a separate key without delete rights and writes the policy or the commands that create it, and Object Lock is available on S3-compatible storage. Those two are what keep a compromised host from destroying its own backups. With Object Lock in COMPLIANCE mode, even the server cannot delete locked data before its retention period ends. Where the storage cannot limit a key (Cloudflare R2, a Hetzner Storage Box), the wizard says so and tells you what to do instead; on Azure with the account key the server signs a short-lived access token for each agent, and there is nothing for you to create. Each backend has a page that says what a host can do there and how to connect it in the wizard, starting with [Azure Blob Storage](/docs/storage/azure-blob/) and [Google Cloud Storage](/docs/storage/google-cloud-storage/).
 
 No delete rights does not mean no overwrite. The wizard tries to replace and delete a throwaway object with the agent key and names what a host can do with this storage:
 
@@ -26,6 +26,8 @@ No delete rights does not mean no overwrite. The wizard tries to replace and del
 - **Overwrite keeps old version.** A host can replace an object, but the storage keeps the earlier version and the host cannot delete it. The wizard shows the result and asks for nothing.
 - **Host can overwrite or delete.** A compromised host can replace or delete its backups. The wizard lists why and creates the repository only after you confirm.
 - **Unchecked.** The check could not measure what a host can do. You can check again, or confirm and continue.
+
+The level stays visible after the wizard: see [Where you see the level](#where-you-see-the-level).
 
 A bucket without versioning ends at **Host can overwrite or delete**: the storage lets the agent key replace an object, and whoever steals the key can replace objects with garbage. Turn on versioning on the bucket before the wizard, so that a replaced object keeps its earlier version. On MinIO:
 
@@ -69,12 +71,24 @@ This quickstart uses plain HTTP so that it works on any network. For anything be
 
 ## Set up the first repository
 
-The wizard opens after you sign in. It has four steps:
+The wizard opens after you sign in. It has five steps. When you add a repository later, from **Repositories**, the same wizard runs without the last one.
 
-1. **Storage.** Choose S3-compatible storage and enter the bucket and, for storage other than AWS, the endpoint.
-2. **Access.** Enter the server key and the agent key. Create the agent key first: the wizard shows the policy to attach to it, and checks what the agent key can do: it must be able to write. The result is one of the four levels above; for **Host can overwrite or delete** and **Unchecked** you confirm before you continue.
-3. **Recovery key.** Choose a repository password and save the recovery key. Either one opens the repository even if the server is lost.
-4. **First host.** The wizard shows the install command for the first host. You can also skip this step and use **Add host** later.
+1. **Storage.** Choose a tile: Amazon S3, MinIO, Wasabi, Backblaze B2, Cloudflare R2, Hetzner Object Storage, Hetzner Storage Box, Azure Blob Storage, Google Cloud Storage, SFTP or a local path. Each tile names the way the agent key is limited at that provider. For Ceph and other S3-compatible storage that has no tile, choose Amazon S3 and fill in the **Endpoint** field.
+2. **Connection.** Enter where the storage is and the server key, the key with full access that stays on the server: for S3 the endpoint or region, the bucket and the access key; for Azure the account, the container and the account key; for Google Cloud Storage the bucket and the service account key; for SFTP the address, the directory, the user and the private key. On SFTP the wizard first asks the server for its host key and shows the fingerprint: compare it with the one on your server (`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`) and choose **It matches**. Only then does the wizard ask for the user and the private key, and the private key of the server is not sent before that. For a local path, Connection also checks the folder.
+3. **Agent rights.** The wizard shows the commands or the policy that create an agent key that cannot delete, in the language of your provider. Run them, paste the key they printed, and choose **Check**. The check writes a test object twice and tries to delete it with the agent key, and the result panel shows what a host can do. The result is one of the four levels above; for **Host can overwrite or delete** and **Unchecked** you confirm before you continue. **Skip, use the server key** lets agents use the server key; the wizard then asks you to accept that a host can overwrite or delete its backups. Skip is not offered for Cloudflare R2, where no key can be limited, or for Azure with the account key, where the server signs the access token. Agents of a local path need no key, so the step is not shown.
+4. **Recovery key.** Choose a repository password and save the recovery key. Either one opens the repository even if the server is lost.
+5. **First host.** The wizard shows the install command for the first host. You can also skip this step and use **Add host** later.
+
+### Where you see the level
+
+- The list under **Repositories** has a **Guarantee** column with the measured level and when it was checked. A check older than 48 hours, a repository that was never checked, and a measured level below the one you accepted are marked with a warning.
+- The repository page opens with the card **What a host can do to backups**: the level on its scale, the accepted level, the time of the last check, the reasons, and **Check now**. The server also checks every repository once a day, and an alert fires when the level drops.
+
+### Limit agent rights later
+
+An S3-compatible repository that went through **Skip**, or whose agent key can do more than you want, can be limited from its page. Choose **Limit agent rights**: a panel opens with the same commands as in the wizard. Run them, paste the new key and choose **Check and switch agents**. The panel asks for your password first, then checks the new key and sends it to the agents. The old key keeps working at the provider until you disable it there; the confirmation names the provider. A repository created with its own agent credentials on Google Cloud Storage, SFTP or Azure takes new ones the same way.
+
+Agents of a repository on SFTP, Azure or Google Cloud Storage that skipped the step use the server's own credentials, and only a new repository with a limited key changes that. If you revoke a host that still holds the agent key, the revoke dialog offers **Replace agent key** where replacing it closes the host's access, and opens the same panel.
 
 ## Add a host
 
@@ -242,7 +256,7 @@ The setup link of this server:
 docker logs lodestore-folder 2>&1 | grep 'setup?token='
 ```
 
-Choose **Local folder** in the first step of the wizard and enter `/srv/lodestore-repo`. The continuous integration job does not run this section.
+Choose **Local path** in the first step of the wizard and enter `/srv/lodestore-repo`. The continuous integration job does not run this section.
 
 ## Next steps
 

@@ -17,6 +17,14 @@ Wasabi is S3-compatible. The levels and how they are measured are in [Storage ba
 | Level the check reports | The check measures it: Host can overwrite or delete without versioning, Overwrite keeps old version with it |
 | Tested against | Not verified on the live service. The client and the reader are tried against MinIO only |
 
+## In the web interface
+
+1. **Storage.** Choose the **Wasabi** tile.
+2. **Connection.** **Region**; the wizard builds the endpoint `https://s3.<region>.wasabisys.com` from it and shows it. Then **Bucket**, **Key prefix** and the server key.
+3. **Agent rights.** The step shows the IAM policy of this page. Attach it to a new Wasabi user, paste that user's access key ID and secret and choose **Check**. Without bucket versioning or Object Lock the level is **Host can overwrite or delete**.
+
+**Skip, use the server key** lets agents use the server's own key; the level then is **Host can overwrite or delete** and the wizard asks you to accept it. On the repository page, **Limit agent rights** opens the same commands in a panel: after your password it checks the new key and switches the agents to it, and you disable the old key at Wasabi.
+
 ## Agent rights
 
 `GET /api/v1/agent-policy?preset=wasabi&bucket=<bucket>&prefix=<prefix>` returns an IAM policy; the mechanism is `policy`. It is the policy of [Amazon S3](/docs/storage/aws-s3/) without the `If-None-Match` statement. The endpoint template of the preset is `https://s3.{region}.wasabisys.com`. The answer is marked not verified.
