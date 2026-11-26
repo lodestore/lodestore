@@ -18,7 +18,7 @@ No bucket? See [Using a local or network folder](#using-a-local-or-network-folde
 
 ### Why S3-compatible storage
 
-Only there can a host hold a separate key without delete rights, and only there is Object Lock available. Those two are what keep a compromised host from destroying its own backups. With Object Lock in COMPLIANCE mode, even the server cannot delete locked data before its retention period ends.
+The setup wizard creates S3-compatible and folder repositories. On S3-compatible storage it gives a host a separate key without delete rights and writes the policy for it, and Object Lock is available there. Those two are what keep a compromised host from destroying its own backups. With Object Lock in COMPLIANCE mode, even the server cannot delete locked data before its retention period ends. Azure Blob Storage, Google Cloud Storage, SFTP and Backblaze B2 can also give agents rights without delete: the server writes the commands, or on Azure signs a short-lived access token for each agent, through the API. Each backend has a page that says what a host can do there, starting with [Azure Blob Storage](/docs/storage/azure-blob/) and [Google Cloud Storage](/docs/storage/google-cloud-storage/).
 
 No delete rights does not mean no overwrite. The wizard tries to replace and delete a throwaway object with the agent key and names what a host can do with this storage:
 

@@ -5,6 +5,8 @@ description: The write-only policy for the agent key, the rights of the server k
 
 Lodestore uses two kinds of S3 keys, and the split between them is a security feature. A host that is taken over holds the agent key. That key can add backups and cannot delete them. This recipe shows the policies and then how to add Object Lock, which protects the data even from a key that can delete.
 
+The server writes the same policy, and the commands for other S3 services, on request: `GET /api/v1/agent-policy?preset=<id>` answers for Amazon S3, MinIO, Wasabi, Backblaze B2, Cloudflare R2 and Hetzner Object Storage. The page of each service, such as [Amazon S3](/docs/storage/aws-s3/), [MinIO](/docs/storage/minio/) and [Cloudflare R2](/docs/storage/cloudflare-r2/), says what its key can and cannot do.
+
 :::caution
 Object Lock is checked by automated tests against MinIO, including a lock in `GOVERNANCE` and in `COMPLIANCE` mode. It has **not been verified** on real AWS S3 yet. The behavior of S3 locks is documented by AWS and Lodestore follows it, but until it is verified on AWS, test your setup on a throwaway bucket before you rely on it, and do not use `COMPLIANCE` mode on data you cannot afford to keep for the whole retention period.
 :::
