@@ -3,12 +3,13 @@
 # Builds and runs a nested Proxmox VE 9 lab (one or two nodes) for the Proxmox
 # spikes and end-to-end tests. Needs a Linux host with a usable /dev/kvm.
 #
-#   scripts/pve/nested-pve.sh up [--nodes 1|2] [--dry-run]
+#   scripts/pve/nested-pve.sh up [--nodes 1|2] [--no-join] [--dry-run]
 #   scripts/pve/nested-pve.sh ssh N [command...]
 #   scripts/pve/nested-pve.sh down
 #
 # `up` boots Debian 13 cloud images under qemu-system-x86_64 -enable-kvm, installs
-# proxmox-ve from the no-subscription repository, forms a cluster with --nodes 2,
+# proxmox-ve from the no-subscription repository, forms a cluster with --nodes 2
+# (--no-join creates it on pve1 and leaves `pvecm add` on pve2 to the caller),
 # adds a directory storage `dirstore` and an LVM-thin storage `local-lvm`, and
 # downloads the newest Debian 13 CT template on every node. `--dry-run` prints the
 # steps without running them. `ssh N` opens a root shell on node N. `down` stops the
@@ -41,7 +42,7 @@ cpus=${PVE_NODE_CPUS:-2}
 dry_run=0
 
 usage() {
-  sed -n '3,25p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '3,26p' "$0" | sed 's/^# \{0,1\}//'
   exit 2
 }
 
@@ -234,10 +235,11 @@ install_node() {
 }
 
 cmd_up() {
-  local nodes=1 n pids=() status=0
+  local nodes=1 join=1 n pids=() status=0
   while [ $# -gt 0 ]; do
     case $1 in
       --nodes) nodes=${2:-}; shift 2 ;;
+      --no-join) join=0; shift ;;
       --dry-run) dry_run=1; shift ;;
       *) usage ;;
     esac
@@ -298,8 +300,12 @@ cmd_up() {
   if [ "$nodes" = 2 ]; then
     on_node 1 pvecm create "$CLUSTER_NAME" --link0 "$CLUSTER_NET.1"
     on_node 2 "ssh-keyscan -t ed25519 $CLUSTER_NET.1 >>/root/.ssh/known_hosts"
-    on_node 2 pvecm add "$CLUSTER_NET.1" --link0 "$CLUSTER_NET.2" --use_ssh 1
-    on_node 1 pvecm status
+    if [ "$join" = 1 ]; then
+      on_node 2 pvecm add "$CLUSTER_NET.1" --link0 "$CLUSTER_NET.2" --use_ssh 1
+      on_node 1 pvecm status
+    else
+      echo "pve2 not joined; run: pvecm add $CLUSTER_NET.1 --link0 $CLUSTER_NET.2 --use_ssh 1"
+    fi
   fi
   on_node 1 pvesm add lvmthin local-lvm --vgname pve --thinpool data --content rootdir,images
   on_node 1 pvesm add dir dirstore --path /srv/dirstore --content rootdir,images
