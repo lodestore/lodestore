@@ -597,7 +597,7 @@ describe("Edit labels", () => {
 });
 
 describe("Revoke host", () => {
-	it("warns about the shared key and links to the repository", async () => {
+	it("says the storage access follows the revoke and links to the repository", async () => {
 		mockHosts([makeHost("web-1")]);
 		await openHosts();
 		await screen.findByText("web-1");
@@ -606,9 +606,10 @@ describe("Revoke host", () => {
 		const dialog = await screen.findByRole("alertdialog", {
 			name: 'Revoke host "web-1"?',
 		});
-		expect(dialog).toHaveTextContent("shared by all hosts of this repository");
+		expect(dialog).toHaveTextContent("what the host can still reach");
+		expect(dialog).not.toHaveTextContent("S3 key");
 		expect(
-			within(dialog).getByRole("link", { name: "Replace the agent key" }),
+			within(dialog).getByRole("link", { name: "Open the repository" }),
 		).toHaveAttribute("href", "/settings/repositories/repo-1");
 	});
 

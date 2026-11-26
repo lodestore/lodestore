@@ -453,8 +453,8 @@ export const copy = {
 		hostRevoked: (name: string) => `Host "${name}" revoked.`,
 		revokeTitle: (name: string) => `Revoke host "${name}"?`,
 		revokeBody:
-			"The agent is disconnected immediately and can't reconnect or receive jobs. To use this machine again, reinstall the agent with --force and a new token. The agent S3 key is shared by all hosts of this repository, so a revoked host can still write to the bucket until you replace the key. It cannot read or delete.",
-		replaceKeyLink: "Replace the agent key",
+			"The agent is disconnected immediately and can't reconnect or receive jobs. To use this machine again, reinstall the agent with --force and a new token. After the revoke you see what the host can still reach in the storage of its repository.",
+		replaceKeyLink: "Open the repository",
 		actionsFor: (name: string) => `Actions for ${name}`,
 		columns: {
 			host: "Host",
