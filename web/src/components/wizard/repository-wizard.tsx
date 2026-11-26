@@ -18,15 +18,16 @@ import {
 import { Button } from "@/components/ui/button";
 import { copy } from "@/copy";
 import { repositoriesQuery } from "@/lib/session";
-import { AccessStep } from "./access-step";
 import { ConnectExistingStep } from "./connect-existing-step";
+import { ConnectionStep } from "./connection-step";
 import {
 	BACKENDS,
-	type Backend,
 	type CheckState,
+	choosePreset,
+	connectionReady,
 	type Draft,
 	newDraft,
-	resetBackend,
+	type PresetInfo,
 	STEPS,
 	type Step,
 	toApiDraft,
@@ -34,29 +35,51 @@ import {
 } from "./draft";
 import { FirstHostStep } from "./first-host-step";
 import { RecoveryKeyStep } from "./recovery-key-step";
+import { RightsStep } from "./rights-step";
 import { StorageStep } from "./storage-step";
 import { text } from "./text";
 
 const STORAGE_KEY = "lodestore.wizard.draft";
 const PERSISTED = [
 	"name",
-	"backend",
+	"preset",
 	"endpoint",
 	"region",
 	"bucket",
 	"prefix",
 	"pathStyle",
 	"path",
+	"templateValues",
 ] as const satisfies readonly (keyof Draft)[];
+
+function parsePreset(value: unknown): PresetInfo | null {
+	if (value === null || typeof value !== "object") return null;
+	const p = value as Record<string, unknown>;
+	const backend = BACKENDS.find((b) => b === p.backend);
+	if (!backend || typeof p.id !== "string" || typeof p.label !== "string") {
+		return null;
+	}
+	const optional = (v: unknown) => (typeof v === "string" ? v : null);
+	return {
+		id: p.id,
+		label: p.label,
+		backend,
+		endpoint_template: optional(p.endpoint_template),
+		region: optional(p.region),
+		path_style: p.path_style === true,
+		provider: optional(p.provider),
+		mechanism: typeof p.mechanism === "string" ? p.mechanism : "",
+	};
+}
 
 export function loadDraft(): Draft {
 	const draft = newDraft();
 	try {
 		const stored = JSON.parse(sessionStorage.getItem(STORAGE_KEY) ?? "null");
 		if (stored === null || typeof stored !== "object") return draft;
-		const backend = BACKENDS.find((b) => b === stored.backend);
-		if (!backend) return draft;
-		draft.backend = backend;
+		const preset = parsePreset(stored.preset);
+		if (!preset) return draft;
+		draft.preset = preset;
 		for (const key of [
 			"name",
 			"endpoint",
@@ -69,6 +92,12 @@ export function loadDraft(): Draft {
 		}
 		if (typeof stored.pathStyle === "boolean")
 			draft.pathStyle = stored.pathStyle;
+		const values = stored.templateValues;
+		if (values !== null && typeof values === "object") {
+			for (const [key, value] of Object.entries(values)) {
+				if (typeof value === "string") draft.templateValues[key] = value;
+			}
+		}
 	} catch {
 		return newDraft();
 	}
@@ -115,8 +144,12 @@ export function RepositoryWizard({
 	const [rebuilding, setRebuilding] = useState(false);
 	const [confirmExit, setConfirmExit] = useState(false);
 
-	const steps = mode === "welcome" ? STEPS : STEPS.slice(0, 3);
+	const local = draft.preset?.backend === "local";
+	const steps = (mode === "welcome" ? STEPS : STEPS.slice(0, 4)).filter(
+		(id) => !(local && id === "rights"),
+	);
 	const current: Step = step ?? "storage";
+	const preset = draft.preset;
 	const checked =
 		check.phase === "done" && !check.stale && !check.result.blocking;
 
@@ -140,7 +173,12 @@ export function RepositoryWizard({
 		first.current = false;
 		const allowed =
 			current === "storage" ||
-			(current === "access" && !fresh) ||
+			(current === "connection" && !fresh && preset !== null) ||
+			(current === "rights" &&
+				!fresh &&
+				!local &&
+				preset !== null &&
+				connectionReady(draft)) ||
 			(current === "key" && checked) ||
 			(current === "host" && created !== undefined && mode === "welcome");
 		if (!allowed) go("storage", true);
@@ -157,12 +195,11 @@ export function RepositoryWizard({
 	function weakerGuarantee(result: CheckResult) {
 		setDraft(withoutConsent);
 		setCheck({ phase: "done", result, stale: false });
-		go("access");
+		go(local ? "connection" : "rights");
 	}
 
-	function chooseBackend(backend: Backend) {
-		if (backend === draft.backend) return;
-		setDraft((d) => resetBackend(d, backend));
+	function selectPreset(next: PresetInfo) {
+		setDraft((d) => choosePreset(d, next));
 		setCheck({ phase: "idle" });
 	}
 
@@ -234,14 +271,23 @@ export function RepositoryWizard({
 	}
 
 	const wide =
-		(current === "access" && draft.backend === "s3") || current === "host";
-	const stepInfo = steps.map((id) => {
+		current === "storage" || current === "rights" || current === "host";
+	const stepInfo = steps.map((id, position) => {
 		const i = STEPS.indexOf(id);
+		const chosen =
+			position < steps.indexOf(current)
+				? id === "storage"
+					? preset?.label
+					: id === "connection"
+						? draft.bucket.trim() || draft.path.trim()
+						: undefined
+				: undefined;
 		return {
 			title: copy.wizard.steps[i],
-			description: copy.wizard.stepDescriptions[i],
+			description: chosen || copy.wizard.stepDescriptions[i],
 		};
 	});
+	const back = local ? "connection" : "rights";
 
 	return (
 		<WizardLayout
@@ -277,17 +323,29 @@ export function RepositoryWizard({
 					<StorageStep
 						draft={draft}
 						onChange={change}
-						onBackend={chooseBackend}
-						onContinue={() => go("access")}
+						onPreset={selectPreset}
+						onContinue={() => go("connection")}
 					/>
 				)}
-				{current === "access" && (
-					<AccessStep
+				{current === "connection" && preset && (
+					<ConnectionStep
 						draft={draft}
+						preset={preset}
 						onChange={change}
 						check={check}
 						onCheck={runCheck}
 						onBack={() => go("storage")}
+						onContinue={() => go(local ? "key" : "rights")}
+					/>
+				)}
+				{current === "rights" && preset && (
+					<RightsStep
+						draft={draft}
+						preset={preset}
+						onChange={change}
+						check={check}
+						onCheck={runCheck}
+						onBack={() => go("connection")}
 						onContinue={() => go("key")}
 					/>
 				)}
@@ -296,7 +354,7 @@ export function RepositoryWizard({
 					(check.result.existing_repository ? (
 						<ConnectExistingStep
 							draft={draft}
-							onBack={() => go("access")}
+							onBack={() => go(back)}
 							onWeaker={weakerGuarantee}
 							onConnected={(repository) =>
 								void finish(repository, copy.existingRepo.connected, true)
@@ -305,7 +363,7 @@ export function RepositoryWizard({
 					) : (
 						<RecoveryKeyStep
 							draft={draft}
-							onBack={() => go("access")}
+							onBack={() => go(back)}
 							onWeaker={weakerGuarantee}
 							onCreated={(repository) =>
 								void finish(

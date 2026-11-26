@@ -10,6 +10,7 @@ import { overview } from "@/copy.overview";
 import { policies } from "@/copy.policies";
 import { restore } from "@/copy.restore";
 import { sources } from "@/copy.sources";
+import { connection, presets, rights } from "@/copy.storage";
 import { tokens } from "@/copy.tokens";
 import { user } from "@/copy.user";
 import { sentence } from "@/lib/sentence";
@@ -30,6 +31,9 @@ export const copy = {
 	user,
 	hostBackup,
 	snapshots,
+	presets,
+	connection,
+	rights,
 	demo: {
 		notAvailable: "Not available in the demo.",
 		banner:
@@ -131,22 +135,9 @@ export const copy = {
 		password: "Password",
 	},
 	access: {
-		serverKey: {
-			title: "Server key",
-			body: "Full access. Stays on the server to manage and clean up the repository.",
-		},
-		agentKey: {
-			title: "Agent key",
-			body: "Write-only. Sent to every host so it can upload backups.",
-		},
-		writeOnlyBadge: "Write-only",
 		whyWriteOnly: {
 			title: "Why write-only?",
 			body: "If a host is ever compromised, the attacker can add data but cannot delete or read your backups. Deleting data is done by the server only.",
-		},
-		verify: {
-			title: "Verify access",
-			body: "Lodestore tries each permission once with a small test object, then removes it with the server key.",
 		},
 	},
 	checklist: {
@@ -229,10 +220,17 @@ export const copy = {
 	wizard: {
 		title: "Set up your first repository",
 		subtitle:
-			"Four steps: choose storage, check access, save the recovery key, add a host. About 5 minutes.",
-		steps: ["Storage", "Access", "Recovery key", "First host"],
+			"Five steps: choose storage, connect it, give agents a key that cannot delete, save the recovery key, add a host. About 5 minutes.",
+		steps: [
+			"Storage",
+			"Connection",
+			"Agent rights",
+			"Recovery key",
+			"First host",
+		],
 		back: "Back",
-		continueToAccess: "Continue to access",
+		continueToConnection: "Continue to connection",
+		continueToRights: "Continue to agent rights",
 		continueToKey: "Continue to recovery key",
 		createRepository: "Create repository",
 		openHosts: "Open Hosts",
@@ -241,10 +239,11 @@ export const copy = {
 		discardChanges: "Discard changes",
 		keepCurrentKey: "Keep current key",
 		stepDescriptions: [
-			"Choose where backups live",
-			"Give Lodestore two keys",
-			"Save the way back in",
-			"Connect a machine",
+			"Provider and name",
+			"Bucket and server key",
+			"A key that cannot delete",
+			"Restore without the server",
+			"Install the agent",
 		],
 		progress: (n: number, total: number) => `Step ${n} of ${total}`,
 		progressLabel: "Progress",
@@ -261,8 +260,6 @@ export const copy = {
 		completed: "completed",
 	},
 	backend: {
-		s3: "S3-compatible storage such as AWS S3, MinIO or Ceph.",
-		local: "Local folder. A path both the server and the agent can see.",
 		twoKeys:
 			"Two keys. The server key has full access and manages the repository. The agent key can only write, so a compromised host cannot delete backups.",
 	},

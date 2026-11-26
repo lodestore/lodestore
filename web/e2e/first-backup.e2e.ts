@@ -70,13 +70,23 @@ test("setup, add host, policy, backup and restore through the UI", async ({
 	});
 
 	await test.step("repository: storage", async () => {
-		await a11y(page, page.getByRole("heading", { name: "Choose storage" }));
+		await a11y(page, page.getByRole("heading", { name: "Connect storage" }));
 		await page.locator("#repository-name").fill("e2e");
-		await page.locator("#backend-s3").check();
-		await page.getByRole("button", { name: wizard.continueToAccess }).click();
+		await page.locator("#preset-minio").check();
+		await page
+			.getByRole("button", { name: wizard.continueToConnection })
+			.click();
 	});
 
-	await test.step("repository: access", async () => {
+	await test.step("repository: connection", async () => {
+		await page.locator("#s3-endpoint").fill(stand("E2E_S3_ENDPOINT"));
+		await page.locator("#s3-bucket").fill(stand("E2E_BUCKET"));
+		await page.locator("#server-key-id").fill(stand("E2E_MINIO_USER"));
+		await page.locator("#server-key-secret").fill(stand("E2E_MINIO_PASSWORD"));
+		await page.getByRole("button", { name: wizard.continueToRights }).click();
+	});
+
+	await test.step("repository: agent rights", async () => {
 		const policy = await page.request.get(
 			`/api/v1/agent-policy?bucket=${stand("E2E_BUCKET")}`,
 		);
@@ -87,14 +97,12 @@ test("setup, add host, policy, backup and restore through the UI", async ({
 			agentSecret,
 		);
 
-		await page.locator("#s3-endpoint").fill(stand("E2E_S3_ENDPOINT"));
-		await page.locator("#s3-bucket").fill(stand("E2E_BUCKET"));
-		await page.locator("#server-key-id").fill(stand("E2E_MINIO_USER"));
-		await page.locator("#server-key-secret").fill(stand("E2E_MINIO_PASSWORD"));
 		await page.locator("#agent-key-id").fill(agentAccess);
 		await page.locator("#agent-key-secret").fill(agentSecret);
-		await a11y(page, page.getByRole("heading", { name: "Check access" }));
-		await page.getByRole("button", { name: "Check storage" }).click();
+		await a11y(page, page.getByRole("heading", { name: copy.rights.title }));
+		await page
+			.getByRole("button", { name: copy.rights.checkButton, exact: true })
+			.click();
 		await page
 			.getByRole("button", { name: wizard.continueToKey })
 			.click({ timeout: 90_000 });

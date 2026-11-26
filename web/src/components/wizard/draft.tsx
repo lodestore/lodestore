@@ -1,12 +1,23 @@
-import type { CheckResult, RepositoryDraft } from "@/api/gen/model";
+import type {
+	CheckResult,
+	RepositoryDraft,
+	StoragePresetDto,
+} from "@/api/gen/model";
 import {
 	CHECK_IDS,
 	type CheckRow,
 	toCheckRows,
 } from "@/components/capability-checklist";
 import { UNCHECKED_LEVEL, WEAK_LEVEL } from "@/components/guarantee-notes";
+import { copy } from "@/copy";
 
-export const STEPS = ["storage", "access", "key", "host"] as const;
+export const STEPS = [
+	"storage",
+	"connection",
+	"rights",
+	"key",
+	"host",
+] as const;
 export type Step = (typeof STEPS)[number];
 
 export function parseStep(value: unknown): Step | undefined {
@@ -16,23 +27,54 @@ export function parseStep(value: unknown): Step | undefined {
 export const BACKENDS = ["s3", "local"] as const;
 export type Backend = (typeof BACKENDS)[number];
 
+export type PresetInfo = Pick<
+	StoragePresetDto,
+	| "id"
+	| "label"
+	| "backend"
+	| "endpoint_template"
+	| "region"
+	| "path_style"
+	| "provider"
+	| "mechanism"
+>;
+
+export const LOCAL_PRESET: PresetInfo = {
+	id: "local",
+	label: copy.presets.local,
+	backend: "local",
+	endpoint_template: null,
+	region: null,
+	path_style: false,
+	provider: null,
+	mechanism: "none",
+};
+
+export function backendOf(preset: PresetInfo | null): Backend | undefined {
+	return BACKENDS.find((b) => b === preset?.backend);
+}
+
 export type KeyPair = { id: string; secret: string };
+export type AgentSecrets = { keyId: string; secret: string };
 
 export type Draft = {
 	name: string;
-	backend: Backend;
+	preset: PresetInfo | null;
 	endpoint: string;
 	region: string;
 	bucket: string;
 	prefix: string;
 	pathStyle: boolean | null;
 	path: string;
+	templateValues: Record<string, string>;
 	serverKey: KeyPair;
-	agentKey: KeyPair;
+	agent: AgentSecrets;
+	skipRights: boolean;
 	acceptWeakerGuarantee: boolean;
 };
 
 const emptyKey = (): KeyPair => ({ id: "", secret: "" });
+const emptyAgent = (): AgentSecrets => ({ keyId: "", secret: "" });
 
 export const DEFAULT_NAME = "default";
 export const NAME_PATTERN = /^[a-z0-9-]{1,48}$/;
@@ -40,15 +82,17 @@ export const NAME_PATTERN = /^[a-z0-9-]{1,48}$/;
 export function newDraft(): Draft {
 	return {
 		name: DEFAULT_NAME,
-		backend: "s3",
+		preset: null,
 		endpoint: "",
 		region: "",
 		bucket: "",
 		prefix: "",
 		pathStyle: null,
 		path: "",
+		templateValues: {},
 		serverKey: emptyKey(),
-		agentKey: emptyKey(),
+		agent: emptyAgent(),
+		skipRights: false,
 		acceptWeakerGuarantee: false,
 	};
 }
@@ -57,12 +101,56 @@ export function withoutSecrets(draft: Draft): Draft {
 	return {
 		...draft,
 		serverKey: emptyKey(),
-		agentKey: emptyKey(),
+		agent: emptyAgent(),
 	};
 }
 
-export function resetBackend(draft: Draft, backend: Backend): Draft {
-	return { ...newDraft(), name: draft.name, backend };
+export function choosePreset(draft: Draft, preset: PresetInfo): Draft {
+	return {
+		...newDraft(),
+		name: draft.name,
+		preset,
+		pathStyle: preset.path_style,
+		region: preset.region ?? "",
+	};
+}
+
+export function placeholdersOf(template: string | null | undefined) {
+	return [...(template ?? "").matchAll(/\{(\w+)\}/g)].map((m) => m[1]);
+}
+
+function placeholderValue(draft: Draft, name: string) {
+	return (
+		name === "region" ? draft.region : (draft.templateValues[name] ?? "")
+	).trim();
+}
+
+export function endpointOf(draft: Draft) {
+	const template = draft.preset?.endpoint_template;
+	if (!template) return draft.endpoint.trim();
+	return template.replace(
+		/\{(\w+)\}/g,
+		(token, name: string) => placeholderValue(draft, name) || token,
+	);
+}
+
+export function agentUsesServerKey(draft: Draft) {
+	return (
+		draft.preset?.backend === "s3" && draft.preset.mechanism === "instruction"
+	);
+}
+
+export function toAgentPayload(
+	backend: Backend,
+	agent: AgentSecrets,
+): Pick<RepositoryDraft, "agent_credentials"> {
+	if (backend !== "s3") return {};
+	return {
+		agent_credentials: {
+			access_key_id: agent.keyId.trim(),
+			secret_access_key: agent.secret,
+		},
+	};
 }
 
 export function toApiDraft(draft: Draft): RepositoryDraft {
@@ -74,24 +162,27 @@ export function toApiDraft(draft: Draft): RepositoryDraft {
 		const trimmed = value.trim();
 		if (trimmed !== "") options[key] = trimmed;
 	};
-	if (draft.backend === "s3") {
+	const { preset } = draft;
+	if (preset?.backend === "s3") {
 		put("bucket", draft.bucket);
 		put("region", draft.region);
-		put("endpoint", draft.endpoint);
+		put("endpoint", endpointOf(draft));
 		put("prefix", draft.prefix);
 		if (draft.pathStyle !== null) options.path_style = String(draft.pathStyle);
+		if (preset.provider) options.provider = preset.provider;
+		const server = {
+			access_key_id: draft.serverKey.id.trim(),
+			secret_access_key: draft.serverKey.secret,
+		};
+		const shared = draft.skipRights || agentUsesServerKey(draft);
 		return {
 			name: draft.name,
 			...accept,
 			location: { backend: "s3", options },
-			server_credentials: {
-				access_key_id: draft.serverKey.id.trim(),
-				secret_access_key: draft.serverKey.secret,
-			},
-			agent_credentials: {
-				access_key_id: draft.agentKey.id.trim(),
-				secret_access_key: draft.agentKey.secret,
-			},
+			server_credentials: server,
+			...(shared
+				? { agent_credentials: server }
+				: toAgentPayload("s3", draft.agent)),
 		};
 	}
 	put("path", draft.path);
@@ -102,14 +193,26 @@ export function toApiDraft(draft: Draft): RepositoryDraft {
 	};
 }
 
-export function accessReady(draft: Draft) {
-	if (draft.backend === "local") return draft.path.trim() !== "";
+export function connectionReady(draft: Draft) {
+	const { preset } = draft;
+	if (!preset) return false;
+	if (preset.backend === "local") return draft.path.trim() !== "";
 	return (
 		draft.bucket.trim() !== "" &&
 		draft.serverKey.id.trim() !== "" &&
 		draft.serverKey.secret !== "" &&
-		draft.agentKey.id.trim() !== "" &&
-		draft.agentKey.secret !== ""
+		placeholdersOf(preset.endpoint_template).every(
+			(name) => placeholderValue(draft, name) !== "",
+		)
+	);
+}
+
+export function rightsReady(draft: Draft) {
+	if (draft.preset?.backend !== "s3") return true;
+	return (
+		draft.skipRights ||
+		agentUsesServerKey(draft) ||
+		(draft.agent.keyId.trim() !== "" && draft.agent.secret !== "")
 	);
 }
 
@@ -122,7 +225,7 @@ export function needsConsent(result: CheckResult) {
 
 export function checkRows(
 	result: CheckResult,
-	backend: Backend,
+	backend: string,
 	stale: boolean,
 ): CheckRow[] {
 	const rows = toCheckRows(result, backend);
