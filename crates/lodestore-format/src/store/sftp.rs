@@ -299,6 +299,11 @@ fn parse_endpoint(endpoint: &str) -> Result<(String, u16)> {
             "invalid SFTP endpoint {endpoint:?}; use host[:port]"
         ))
     };
+    if endpoint.contains("://") {
+        return Err(Error::InvalidInput(format!(
+            "invalid SFTP endpoint {endpoint:?}; use host[:port], without ssh://"
+        )));
+    }
     let (host, port) = if let Some(rest) = endpoint.strip_prefix('[') {
         let (host, tail) = rest.split_once(']').ok_or_else(bad)?;
         match tail {
@@ -1449,6 +1454,26 @@ mod tests {
         for bad in ["", ":22", "host:", "host:x", "host:70000", "[::1", "[::1]x"] {
             assert!(parse_endpoint(bad).is_err(), "{bad:?}");
         }
+        for schemed in ["ssh://host:23", "sftp://host", "ssh://[::1]:23", "x://"] {
+            match parse_endpoint(schemed) {
+                Err(Error::InvalidInput(m)) => assert!(m.contains("without ssh://"), "{m}"),
+                other => panic!("{schemed:?}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn storage_box_preset_address_parses_to_port_23() {
+        let template = crate::store::policy::STORAGE_PRESETS
+            .iter()
+            .find(|p| p.id == "hetzner-storage-box")
+            .and_then(|p| p.endpoint_template)
+            .expect("the Storage Box preset has an address template");
+        let address = template.replace("{user}", "u123");
+        assert_eq!(
+            parse_endpoint(&address).unwrap(),
+            ("u123.your-storagebox.de".into(), 23)
+        );
     }
 
     #[test]

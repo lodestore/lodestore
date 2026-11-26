@@ -94,7 +94,7 @@ export const storagePresets = [
 		"sftp",
 		"instruction",
 		"A sub-account with the repository directory as its base.",
-		{ endpoint_template: "ssh://{user}.your-storagebox.de:23" },
+		{ endpoint_template: "{user}.your-storagebox.de:23" },
 	),
 	preset(
 		"azure-blob",
