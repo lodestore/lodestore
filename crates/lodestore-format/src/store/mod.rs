@@ -371,6 +371,16 @@ impl Store {
         }
     }
 
+    /// The directories a probe writes into, made with these credentials. Object
+    /// stores have none.
+    async fn ensure_dirs_for_probe(&self, prefixes: &[&str]) -> std::result::Result<(), BlobError> {
+        match self {
+            Store::Local(s) => s.ensure_prefixes(prefixes).await,
+            Store::S3(_) | Store::Opendal(_) => Ok(()),
+            Store::Sftp(s) => s.ensure_probe_dirs(prefixes).await,
+        }
+    }
+
     async fn overwrite_for_probe(
         &self,
         key: &str,

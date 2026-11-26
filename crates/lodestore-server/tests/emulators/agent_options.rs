@@ -30,12 +30,11 @@ fn notes(result: &Value) -> Vec<&str> {
         .collect()
 }
 
-/// Leaves only the repository root, as the wizard's agent rights step does.
-fn empty_root(sshd: &SshdServer) {
+fn in_root(sshd: &SshdServer, script: &str) -> String {
     let root = format!("/srv/repo{}", sshd.root());
     let out = std::process::Command::new("docker")
         .args(["exec", sshd.container(), "sh", "-c"])
-        .arg(format!("rm -rf {root}/* && ls -A {root}"))
+        .arg(format!("cd {root} && {script}"))
         .output()
         .expect("docker exec");
     assert!(
@@ -43,11 +42,19 @@ fn empty_root(sshd: &SshdServer) {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(
-        out.stdout.is_empty(),
-        "{}",
-        String::from_utf8_lossy(&out.stdout)
-    );
+    String::from_utf8(out.stdout).unwrap()
+}
+
+/// Leaves only the repository root, as the wizard's agent rights step does.
+fn empty_root(sshd: &SshdServer) {
+    let left = in_root(sshd, "rm -rf ./* && ls -A");
+    assert!(left.is_empty(), "{left}");
+}
+
+/// A check creates only the directories its own probe objects live in.
+fn assert_only_probe_dirs(sshd: &SshdServer) {
+    let found = in_root(sshd, "find . -mindepth 1 -type d | sort");
+    assert_eq!(found, "./index\n./packs\n./snapshots\n./tmp\n");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -74,6 +81,7 @@ async fn agent_options_sftp_restricted_user_is_measured_by_its_own_rights() {
         checked["guarantee_level"],
         GuaranteeLevel::HostCanOverwriteOrDelete.as_str()
     );
+    assert_only_probe_dirs(&sshd);
 
     let id = create(&api, &draft).await;
 
@@ -121,6 +129,7 @@ async fn agent_options_sftp_skip_starts_from_an_empty_root() {
     assert_eq!(checked["checks"][0]["id"], "write", "{checked}");
     assert_eq!(checked["checks"][0]["status"], "pass", "{checked}");
     assert!(notes(&checked).contains(&"shared_credentials"), "{checked}");
+    assert_only_probe_dirs(&sshd);
 
     create(&api, &draft).await;
     ts.stop().await;
