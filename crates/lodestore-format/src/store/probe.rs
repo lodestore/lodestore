@@ -373,13 +373,33 @@ fn own_error_text(store: &Store) -> bool {
 
 const SHOWN_MAX_CHARS: usize = 300;
 
-/// A store's own message, with control characters blanked and the length
-/// bounded: an SFTP server's status text is part of it.
+/// Bidi controls and zero-width characters: they reorder or hide text.
+fn is_invisible_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061C}'
+            | '\u{00AD}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}'
+    )
+}
+
+/// A store's own message, with control and invisible format characters
+/// blanked and the length bounded: an SFTP server's status text is part of it.
 fn shown(message: &str) -> String {
     message
         .chars()
         .take(SHOWN_MAX_CHARS)
-        .map(|c| if c.is_control() { ' ' } else { c })
+        .map(|c| {
+            if c.is_control() || is_invisible_format(c) {
+                ' '
+            } else {
+                c
+            }
+        })
         .collect()
 }
 
@@ -880,6 +900,16 @@ mod tests {
             r.check(CheckId::List).error.as_deref(),
             Some("the storage is temporarily unavailable")
         );
+    }
+
+    #[test]
+    fn shown_blanks_invisible_format_characters() {
+        let hidden = "\u{061C}\u{00AD}\u{200B}\u{200F}\u{202A}\u{202E}\u{2060}\u{2064}\u{2066}\u{2069}\u{FEFF}";
+        assert_eq!(
+            shown(&format!("denied\u{202E}txt.exe\u{200B}!{hidden}")),
+            format!("denied txt.exe !{}", " ".repeat(hidden.chars().count()))
+        );
+        assert_eq!(shown("dossier refusé"), "dossier refusé");
     }
 
     fn report_at(level: GuaranteeLevel) -> ProbeReport {
