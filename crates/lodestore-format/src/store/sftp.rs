@@ -301,7 +301,7 @@ fn parse_endpoint(endpoint: &str) -> Result<(String, u16)> {
     };
     if endpoint.contains("://") {
         return Err(Error::InvalidInput(format!(
-            "invalid SFTP endpoint {endpoint:?}; use host[:port], without ssh://"
+            "invalid SFTP endpoint {endpoint:?}; use host[:port], without ssh:// or sftp://"
         )));
     }
     let (host, port) = if let Some(rest) = endpoint.strip_prefix('[') {
