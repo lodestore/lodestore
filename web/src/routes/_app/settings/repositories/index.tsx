@@ -13,6 +13,7 @@ import { PathText } from "@/components/path-text";
 import { RelativeTime } from "@/components/relative-time";
 import { AgentKeyBadge } from "@/components/repos/agent-key-badge";
 import { CHECKS_ANCHOR } from "@/components/repos/checks/checks-card";
+import { GuaranteeCell } from "@/components/repos/guarantee-cell";
 import { RECLAIM_ANCHOR } from "@/components/repos/reclaim/reclaim-card";
 import { SettingsNav } from "@/components/settings/settings-nav";
 import { StatusBadge } from "@/components/status-badge";
@@ -56,24 +57,22 @@ export const Route = createFileRoute("/_app/settings/repositories/")({
 	component: RepositoriesPage,
 });
 
-function levelBadge(level: string): string | undefined {
-	return level === "create_only_enforced"
-		? undefined
-		: (copy.guarantee.levels as Record<string, string>)[level];
-}
-
 const COLUMNS = [
 	...Object.entries(copy.repos.columns),
 	["checks", copy.checks.repoColumn],
 ];
+COLUMNS.splice(3, 0, ["guarantee", copy.guarantee.column]);
 const WIDE_ONLY = new Set(["agentKey", "lastChecked", "checks"]);
 const LARGE_ONLY = new Set(["backend", "hosts"]);
+const MEDIUM_ONLY = new Set(["location"]);
 const wideOnly = (key: string) =>
 	WIDE_ONLY.has(key)
 		? "hidden xl:table-cell"
 		: LARGE_ONLY.has(key)
 			? "hidden lg:table-cell"
-			: undefined;
+			: MEDIUM_ONLY.has(key)
+				? "hidden md:table-cell"
+				: undefined;
 
 function AddRepositoryButton() {
 	return (
@@ -331,19 +330,15 @@ function RepositoriesPage() {
 													</Link>
 												</TableCell>
 												<TableCell className={cn("px-4", wideOnly("backend"))}>
-													<div className="flex gap-1">
-														<Badge variant="secondary">
-															{repository.backend}
-														</Badge>
-														{levelBadge(repository.guarantee_level) && (
-															<Badge variant="outline">
-																{levelBadge(repository.guarantee_level)}
-															</Badge>
-														)}
-													</div>
+													<Badge variant="secondary">
+														{repository.backend}
+													</Badge>
+												</TableCell>
+												<TableCell className={cn("px-4", wideOnly("location"))}>
+													<Location value={repository.location_display} />
 												</TableCell>
 												<TableCell className="px-4">
-													<Location value={repository.location_display} />
+													<GuaranteeCell repository={repository} />
 												</TableCell>
 												<TableCell className={cn("px-4", wideOnly("hosts"))}>
 													{repository.hosts_count}

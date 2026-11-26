@@ -11,6 +11,7 @@ import {
 	GuaranteeBanner,
 	guaranteeBannerKind,
 } from "@/components/repos/guarantee-banner";
+import { GuaranteeCard } from "@/components/repos/guarantee-card";
 import { ReclaimCard } from "@/components/repos/reclaim/reclaim-card";
 import { ReplaceAgentKeyDialog } from "@/components/repos/replace-agent-key-dialog";
 import { StorageChecksCard } from "@/components/repos/storage-checks-card";
@@ -143,6 +144,8 @@ function RepositoryPage() {
 							<AgentKeyBadge state={repository.agent_key_state} />
 						)}
 					</header>
+
+					<GuaranteeCard repository={repository} />
 
 					<GuaranteeBanner repository={repository} />
 

@@ -4,6 +4,11 @@ import { HttpResponse, http } from "msw";
 import { describe, expect, it } from "vitest";
 import { renderApp, repository, useSignedIn } from "@/test/app";
 import { server } from "@/test/server";
+import {
+	GUARANTEE_STALE_MS,
+	guaranteeAge,
+	isBelowAccepted,
+} from "./guarantee-banner";
 
 const base = {
 	...repository,
@@ -68,7 +73,7 @@ describe("guarantee banner", () => {
 		expect(
 			await screen.findByText("A host could change or delete backups here"),
 		).toBeInTheDocument();
-		expect(screen.getByText("A host can delete backups.")).toBeInTheDocument();
+		expect(screen.getAllByText("A host can delete backups.")).toHaveLength(2);
 		expect(
 			screen.queryByRole("button", { name: "Accept the new level" }),
 		).toBeNull();
@@ -180,10 +185,62 @@ describe("guarantee banner", () => {
 			await screen.findByText("Notes on this storage"),
 		).toBeInTheDocument();
 		expect(
-			screen.getByText(/lifecycle rules could not be read/),
-		).toBeInTheDocument();
+			screen.getAllByText(/lifecycle rules could not be read/),
+		).toHaveLength(2);
 		expect(
 			screen.queryByRole("button", { name: "Accept the new level" }),
 		).toBeNull();
+	});
+});
+
+describe("guarantee age", () => {
+	const NOW = 1_800_000_000_000;
+	const fresh = {
+		guarantee_level: "create_only_enforced",
+		guarantee_accepted: "create_only_enforced",
+		guarantee_checked_at: NOW - 1000,
+	};
+
+	it("warns only past 48 hours", () => {
+		const at = (ms: number | null) =>
+			guaranteeAge({ ...fresh, guarantee_checked_at: ms }, NOW);
+		expect(at(NOW - GUARANTEE_STALE_MS)).toBe("checked");
+		expect(at(NOW - GUARANTEE_STALE_MS - 1)).toBe("stale");
+		expect(at(null)).toBe("never");
+	});
+
+	it("tells an unmeasured level without a date from a measured one", () => {
+		const unchecked = {
+			...fresh,
+			guarantee_level: "unchecked",
+			guarantee_checked_at: null,
+		};
+		expect(guaranteeAge(unchecked, NOW)).toBe("none");
+	});
+
+	it("prefers the downgrade over the age", () => {
+		const lower = {
+			guarantee_level: "host_can_overwrite_or_delete",
+			guarantee_accepted: "create_only_enforced",
+			guarantee_checked_at: null,
+		};
+		expect(guaranteeAge(lower, NOW)).toBe("lower");
+	});
+
+	it("marks an accepted weak level and orders levels by strength", () => {
+		const weak = {
+			guarantee_level: "host_can_overwrite_or_delete",
+			guarantee_accepted: "host_can_overwrite_or_delete",
+			guarantee_checked_at: NOW - 1000,
+		};
+		expect(guaranteeAge(weak, NOW)).toBe("accepted");
+		expect(isBelowAccepted("unchecked", "create_only_enforced")).toBe(false);
+		expect(isBelowAccepted("host_can_overwrite_or_delete", "unchecked")).toBe(
+			true,
+		);
+		expect(
+			isBelowAccepted("overwrite_keeps_old_version", "create_only_enforced"),
+		).toBe(true);
+		expect(isBelowAccepted("create_only_enforced", "unchecked")).toBe(false);
 	});
 });

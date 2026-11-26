@@ -64,6 +64,7 @@ describe("repositories list", () => {
 			"Name",
 			"Backend",
 			"Location",
+			"Guarantee",
 			"Hosts",
 			"Agent key",
 			"Last checked",
@@ -75,7 +76,7 @@ describe("repositories list", () => {
 		expect(
 			screen.getByText("Host can overwrite or delete"),
 		).toBeInTheDocument();
-		expect(screen.queryByText("Create-only enforced")).not.toBeInTheDocument();
+		expect(screen.getByText("Create-only enforced")).toBeInTheDocument();
 		expect(screen.getByText("Can delete")).toBeInTheDocument();
 		expect(screen.getByText("Not checked")).toBeInTheDocument();
 		expect(screen.getByText("s3://bucket/prefix")).toBeInTheDocument();
@@ -84,27 +85,60 @@ describe("repositories list", () => {
 		).toHaveAttribute("href", "/settings/repositories/new");
 	});
 
-	it("badges every level except create-only enforced, unchecked included", async () => {
+	it("shows the level of every repository with how long ago it was checked", async () => {
+		const row = (name: string, extra: Record<string, unknown>) => ({
+			...repository,
+			id: name,
+			name,
+			guarantee_checked_at: Date.now() - 3 * 3_600_000,
+			...extra,
+		});
 		useSignedIn({
 			repositories: [
-				s3Repository,
-				azureRepository,
-				{
-					...azureRepository,
-					id: "repo-3",
-					name: "unmeasured",
+				row("fresh", {}),
+				row("old", { guarantee_checked_at: Date.now() - 3 * DAY - 1000 }),
+				row("never", { guarantee_checked_at: null }),
+				row("lower", { guarantee_level: "host_can_overwrite_or_delete" }),
+				row("weak", {
+					guarantee_level: "host_can_overwrite_or_delete",
+					guarantee_accepted: "host_can_overwrite_or_delete",
+				}),
+				row("unmeasured", {
 					guarantee_level: "unchecked",
-				},
+					guarantee_accepted: "unchecked",
+					guarantee_checked_at: null,
+				}),
 			],
 		});
 		renderApp("/settings/repositories");
 
-		expect(await screen.findByText("unmeasured")).toBeInTheDocument();
-		expect(screen.getByText("Unchecked")).toBeInTheDocument();
+		const cell = async (name: string) =>
+			within(
+				(await screen.findByRole("link", { name })).closest(
+					"tr",
+				) as HTMLElement,
+			);
+		const fresh = await cell("fresh");
+		expect(fresh.getByText("Create-only enforced")).toBeInTheDocument();
+		expect(fresh.getByText("3 hours ago")).toBeInTheDocument();
 		expect(
-			screen.getByText("Host can overwrite or delete"),
+			(await cell("old")).getByText("Not checked for 3 days"),
 		).toBeInTheDocument();
-		expect(screen.queryByText("Create-only enforced")).not.toBeInTheDocument();
+		expect(
+			(await cell("never")).getByText("Never checked"),
+		).toBeInTheDocument();
+		const lower = await cell("lower");
+		expect(lower.getByText("Lower than accepted")).toBeInTheDocument();
+		expect(lower.getByRole("link", { name: "See alert" })).toHaveAttribute(
+			"href",
+			"/settings/repositories/lower#guarantee",
+		);
+		expect(
+			(await cell("weak")).getByText(/^Accepted · checked/),
+		).toBeInTheDocument();
+		expect(
+			(await cell("unmeasured")).getByText("Unchecked"),
+		).toBeInTheDocument();
 	});
 
 	it("shows the empty state when the list becomes empty", async () => {
@@ -404,6 +438,80 @@ describe("repository page", () => {
 
 		expect(await screen.findByText("just now")).toBeInTheDocument();
 		expect(mock.rechecks()).toBe(1);
+	});
+
+	it("shows what a host can do in a card under the title and measures again on Check now", async () => {
+		useSignedIn({ repositories: [s3Repository] });
+		let checkedAt: number | null = null;
+		let rechecks = 0;
+		server.use(
+			http.get("/api/v1/repositories/repo-1", () =>
+				HttpResponse.json({
+					...detail,
+					guarantee_checked_at: checkedAt,
+					guarantee_notes: ["agent_can_overwrite"],
+				}),
+			),
+			http.post("/api/v1/repositories/repo-1/check", () => {
+				rechecks += 1;
+				checkedAt = Date.now();
+				return HttpResponse.json({
+					existing_repository: true,
+					blocking: false,
+					agent_key_state: "can_delete",
+					checks: [],
+				});
+			}),
+			http.get("/api/v1/agent-policy", () =>
+				HttpResponse.json({ iam_json: "{}", minio_commands: "mc" }),
+			),
+		);
+		renderApp("/settings/repositories/repo-1");
+		const user = userEvent.setup();
+
+		const title = await screen.findByRole("heading", {
+			name: "What a host can do to backups",
+		});
+		const card = within(title.closest("#guarantee") as HTMLElement);
+		expect(card.getAllByText("Create-only enforced")).toHaveLength(2);
+		expect(card.getByText("Never checked")).toBeInTheDocument();
+		expect(
+			card.getByText(
+				"A host can replace backups, and the storage keeps no earlier version.",
+			),
+		).toBeInTheDocument();
+
+		await user.click(card.getByRole("button", { name: "Check now" }));
+
+		expect(await card.findByText(/just now/)).toHaveTextContent("just now");
+		expect(card.queryByText("Never checked")).toBeNull();
+		expect(rechecks).toBe(1);
+	});
+
+	it("explains the backend when there are no notes, and shows an unmeasured level as such", async () => {
+		useSignedIn({ repositories: [s3Repository] });
+		server.use(
+			http.get("/api/v1/repositories/repo-1", () =>
+				HttpResponse.json({
+					...detail,
+					guarantee_level: "unchecked",
+					guarantee_accepted: "unchecked",
+				}),
+			),
+			http.get("/api/v1/agent-policy", () =>
+				HttpResponse.json({ iam_json: "{}", minio_commands: "mc" }),
+			),
+		);
+		renderApp("/settings/repositories/repo-1");
+
+		const title = await screen.findByRole("heading", {
+			name: "What a host can do to backups",
+		});
+		const card = within(title.closest("#guarantee") as HTMLElement);
+		expect(card.getByText("Not measured")).toBeInTheDocument();
+		expect(
+			card.getByText("The agent key's rights decide what a host can do."),
+		).toBeInTheDocument();
 	});
 
 	it("shows the agent policy for the bucket of the repository", async () => {
