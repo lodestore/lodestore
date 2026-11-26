@@ -17,6 +17,14 @@ The agents of an S3 repository write with an agent key that is separate from the
 | Level the check reports | Create-only enforced; Host can overwrite or delete when the key can delete or overwrite |
 | Tested against | MinIO (pinned). The `Deny` statement of the policy has no test, and real AWS: not yet |
 
+## In the web interface
+
+1. **Storage.** Choose the **Amazon S3** tile. For Ceph and other S3-compatible storage that has no tile of its own, choose it too and fill in **Endpoint**.
+2. **Connection.** **Endpoint** (empty for AWS), **Region**, **Bucket**, **Key prefix** and the path-style switch, then the server key: an access key ID and a secret with full access to the bucket.
+3. **Agent rights.** The step shows the IAM policy of this page with your bucket and prefix filled in. Attach it to a new IAM user, create an access key for that user, paste the access key ID and the secret, and choose **Check**. The Result panel lists the write, list and conditional-write checks, the agent key permissions and a Bucket group with **Object Lock**, **Versioning** and **Lifecycle rules**, and ends with the level.
+
+**Skip, use the server key** lets agents use the server's own key; the level then is **Host can overwrite or delete** and the wizard asks you to accept it. On the repository page, **Limit agent rights** opens the same commands in a panel: after your password it checks the new key and switches the agents to it, and you disable the old key at IAM.
+
 ## Agent rights
 
 `GET /api/v1/agent-policy?preset=aws-s3&bucket=<bucket>&prefix=<prefix>` returns the IAM policy as text; the mechanism is `policy`. The policy lets the key add objects under `packs/`, `index/` and `snapshots/`, read `config`, `index/` and `locks/`, and list `index/` and `locks/`. It contains no delete right and no write under `locks/`, and a final `Deny` refuses any `PutObject` without `If-None-Match`. The answer is marked not verified on the live service.
