@@ -36,6 +36,7 @@ type Mock = {
 	puts: { path: string; body: unknown }[];
 	policy: URLSearchParams[];
 	stepUps: number;
+	hostKey: { checks: number; puts: unknown[] };
 };
 
 function mockRepository(
@@ -44,9 +45,16 @@ function mockRepository(
 		access?: Record<string, unknown>;
 		reply?: () => Response;
 		replyBody?: Record<string, unknown>;
+		rights?: { mechanism: string; text: string };
+		offer?: Record<string, unknown>;
 	} = {},
 ): Mock {
-	const mock: Mock = { puts: [], policy: [], stepUps: 0 };
+	const mock: Mock = {
+		puts: [],
+		policy: [],
+		stepUps: 0,
+		hostKey: { checks: 0, puts: [] },
+	};
 	const put =
 		(path: string) =>
 		async ({ request }: { request: Request }) => {
@@ -74,17 +82,30 @@ function mockRepository(
 				iam_json: "{}",
 				minio_commands: "mc",
 				rights: {
-					mechanism: "policy",
+					mechanism: options.rights?.mechanism ?? "policy",
 					note: "",
 					preset: new URL(request.url).searchParams.get("preset"),
 					server_text: null,
-					text: "COMMANDS",
+					text: options.rights?.text ?? "COMMANDS",
 					verified: true,
 				},
 			});
 		}),
 		http.put("/api/v1/repositories/repo-1/agent-key", put("agent-key")),
 		http.put("/api/v1/repositories/repo-1/agent-options", put("agent-options")),
+		http.post("/api/v1/repositories/repo-1/host-key/check", () => {
+			mock.hostKey.checks += 1;
+			return HttpResponse.json(options.offer);
+		}),
+		http.put("/api/v1/repositories/repo-1/host-key", async ({ request }) => {
+			mock.hostKey.puts.push(await request.json());
+			return HttpResponse.json({
+				fingerprint: "SHA256:new",
+				needs_update: 0,
+				offline: 0,
+				online_notified: 1,
+			});
+		}),
 		http.post("/api/v1/auth/step-up", () => {
 			mock.stepUps += 1;
 			return new HttpResponse(null, { status: 204 });
@@ -265,5 +286,318 @@ describe("limit agent rights on the repository page", () => {
 		expect(
 			screen.queryByRole("button", { name: "Limit agent rights" }),
 		).toBeNull();
+	});
+});
+
+const sftpDetail = detailOf("sftp", {
+	endpoint: "ssh://backup.example.com:22",
+	user: "srv",
+	root: "/backups",
+});
+const optionsAccess = { rotate_via: "agent-options" };
+
+describe("limit agent rights with agent options", () => {
+	afterEach(() => {
+		toast.dismiss();
+	});
+
+	it("SFTP: asks for the password first, then sends the user and key to agent-options", async () => {
+		const mock = mockRepository(sftpDetail, { access: optionsAccess });
+		const user = userEvent.setup();
+		const { sheet } = await openSheet(user);
+
+		expect(await within(sheet).findByText("COMMANDS")).toBeInTheDocument();
+		expect(mock.policy[0]?.get("preset")).toBe("sftp");
+		await user.type(within(sheet).getByLabelText("Private key"), "PRIVATE-KEY");
+		await user.click(submit(sheet));
+		expect(mock.puts).toHaveLength(0);
+		await confirmPassword(user);
+
+		expect(
+			await screen.findByText(
+				"Agents switched to the new key. Disable the old one at SFTP (OpenSSH).",
+			),
+		).toBeInTheDocument();
+		expect(mock.puts).toEqual([
+			{
+				path: "agent-options",
+				body: {
+					agent_options: { user: "lodestore-agent", key: "PRIVATE-KEY" },
+				},
+			},
+		]);
+	});
+
+	it("cancel step-up -> no PUT for agent-options", async () => {
+		const mock = mockRepository(sftpDetail, { access: optionsAccess });
+		const user = userEvent.setup();
+		const { sheet } = await openSheet(user);
+		await user.type(await within(sheet).findByLabelText("Private key"), "K");
+		await user.click(submit(sheet));
+		const dialog = await screen.findByRole("dialog", {
+			name: "Confirm your password",
+		});
+		await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+		await waitFor(() =>
+			expect(
+				screen.queryByRole("dialog", { name: "Confirm your password" }),
+			).toBeNull(),
+		);
+		expect(mock.puts).toHaveLength(0);
+		expect(screen.queryByText(/Agents switched/)).toBeNull();
+		expect(within(sheet).queryByRole("alert")).toBeNull();
+		expect(sheet).toBeInTheDocument();
+	});
+
+	it("a server step_up_required that is cancelled shows neither an alert nor a toast", async () => {
+		const mock = mockRepository(sftpDetail, {
+			access: optionsAccess,
+			reply: () => apiError(403, "step_up_required", "password required"),
+		});
+		const user = userEvent.setup();
+		const { sheet } = await openSheet(user);
+		await user.type(await within(sheet).findByLabelText("Private key"), "K");
+		await user.click(submit(sheet));
+		await confirmPassword(user);
+		const again = await screen.findByRole("dialog", {
+			name: "Confirm your password",
+		});
+		await user.click(within(again).getByRole("button", { name: "Cancel" }));
+
+		await waitFor(() =>
+			expect(
+				screen.queryByRole("dialog", { name: "Confirm your password" }),
+			).toBeNull(),
+		);
+		expect(mock.puts).toHaveLength(1);
+		expect(within(sheet).queryByRole("alert")).toBeNull();
+		expect(screen.queryByText(/Agents switched/)).toBeNull();
+	});
+
+	it("tells how many online agents are too old to take the new key", async () => {
+		mockRepository(sftpDetail, {
+			access: optionsAccess,
+			replyBody: {
+				agent_key_state: "verified",
+				guarantee_level: "create_only_enforced",
+				needs_update: 2,
+				offline: 0,
+				online_notified: 1,
+			},
+		});
+		const user = userEvent.setup();
+		const { sheet } = await openSheet(user);
+		await user.type(await within(sheet).findByLabelText("Private key"), "K");
+		await user.click(submit(sheet));
+		await confirmPassword(user);
+
+		expect(
+			await screen.findByText(
+				/2 online agents are too old to take the new key; update them\./,
+			),
+		).toBeInTheDocument();
+	});
+
+	it("GCS sends the service account key", async () => {
+		const mock = mockRepository(detailOf("gcs", { bucket: "b", root: "/r" }), {
+			access: optionsAccess,
+		});
+		const user = userEvent.setup();
+		const { sheet } = await openSheet(user);
+		await user.type(
+			await within(sheet).findByLabelText("Service account key"),
+			"SA-KEY",
+		);
+		await user.click(submit(sheet));
+		await confirmPassword(user);
+
+		await screen.findByText(/Agents switched to the new key/);
+		expect(mock.puts).toEqual([
+			{
+				path: "agent-options",
+				body: { agent_options: { credential: "SA-KEY" } },
+			},
+		]);
+	});
+
+	it("Azure with its own SAS sends the SAS token", async () => {
+		const mock = mockRepository(
+			detailOf("azblob", { account_name: "acct", container: "c" }),
+			{ access: optionsAccess },
+		);
+		const user = userEvent.setup();
+		const { sheet } = await openSheet(user);
+		await user.type(
+			await within(sheet).findByLabelText("SAS token"),
+			"sv=1&sig=x",
+		);
+		await user.click(submit(sheet));
+		await confirmPassword(user);
+
+		await screen.findByText(/Agents switched to the new key/);
+		expect(mock.puts).toEqual([
+			{
+				path: "agent-options",
+				body: { agent_options: { sas_token: "sv=1&sig=x" } },
+			},
+		]);
+	});
+
+	it("R2 shows the bucket lock instruction and only a Close button", async () => {
+		const mock = mockRepository(
+			detailOf("s3", {
+				bucket: "b",
+				endpoint: "https://abc123.r2.cloudflarestorage.com",
+			}),
+			{
+				access: { after_revoke: "server_key_shared", rotate_via: null },
+				rights: { mechanism: "instruction", text: "TURN ON BUCKET LOCK" },
+			},
+		);
+		const user = userEvent.setup();
+		const { sheet } = await openSheet(user);
+
+		expect(
+			await within(sheet).findByText("R2 tokens cannot be limited"),
+		).toBeInTheDocument();
+		expect(within(sheet).getByText("TURN ON BUCKET LOCK")).toBeInTheDocument();
+		expect(mock.policy[0]?.get("preset")).toBe("cloudflare-r2");
+		expect(
+			within(sheet).queryByRole("button", { name: "Check and switch agents" }),
+		).toBeNull();
+		await user.click(
+			within(sheet).getAllByRole("button", { name: "Close" })[0],
+		);
+		await waitFor(() =>
+			expect(
+				screen.queryByRole("dialog", { name: "Limit agent rights" }),
+			).toBeNull(),
+		);
+		expect(mock.puts).toHaveLength(0);
+	});
+
+	it.each([
+		["GCS on shared credentials", "gcs", { bucket: "b" }, "new_repository"],
+		[
+			"Azure with a SAS issued by the server",
+			"azblob",
+			{ container: "c" },
+			"expires",
+		],
+	])(
+		"%s has no Limit agent rights button",
+		async (_name, backend, options, afterRevoke) => {
+			mockRepository(detailOf(backend, options), {
+				access: { after_revoke: afterRevoke, rotate_via: null },
+			});
+			renderApp("/settings/repositories/repo-1");
+
+			await screen.findByText("What a host can do to backups");
+			await waitFor(() =>
+				expect(
+					screen.queryByRole("button", { name: "Limit agent rights" }),
+				).toBeNull(),
+			);
+			expect(
+				screen.queryByRole("button", { name: "Replace agent key" }),
+			).toBeNull();
+		},
+	);
+});
+
+describe("check host key again", () => {
+	afterEach(() => {
+		toast.dismiss();
+	});
+
+	const changed = {
+		key: "ssh-ed25519 NEWKEY",
+		fingerprint: "SHA256:new-fingerprint",
+		pinned_fingerprint: "SHA256:old-fingerprint",
+		matches: false,
+	};
+
+	it("is offered for SFTP only", async () => {
+		mockRepository(s3Detail);
+		renderApp("/settings/repositories/repo-1");
+		await screen.findByText("What a host can do to backups");
+		expect(
+			screen.queryByRole("button", { name: "Check host key again" }),
+		).toBeNull();
+	});
+
+	it("says so when the server presents the pinned key", async () => {
+		const mock = mockRepository(sftpDetail, {
+			access: optionsAccess,
+			offer: {
+				...changed,
+				matches: true,
+				fingerprint: "SHA256:old-fingerprint",
+			},
+		});
+		renderApp("/settings/repositories/repo-1");
+		const user = userEvent.setup();
+		await user.click(
+			await screen.findByRole("button", { name: "Check host key again" }),
+		);
+
+		expect(
+			await screen.findByText("The server presents the pinned key."),
+		).toBeInTheDocument();
+		expect(mock.hostKey.checks).toBe(1);
+		expect(screen.queryByRole("dialog")).toBeNull();
+	});
+
+	it("host key changed dialog keeps the pinned key without a request", async () => {
+		const mock = mockRepository(sftpDetail, {
+			access: optionsAccess,
+			offer: changed,
+		});
+		renderApp("/settings/repositories/repo-1");
+		const user = userEvent.setup();
+		await user.click(
+			await screen.findByRole("button", { name: "Check host key again" }),
+		);
+
+		const dialog = await screen.findByRole("dialog", {
+			name: "The server's host key changed",
+		});
+		expect(
+			within(dialog).getByText("SHA256:old-fingerprint"),
+		).toBeInTheDocument();
+		expect(
+			within(dialog).getByText("SHA256:new-fingerprint"),
+		).toBeInTheDocument();
+		await user.click(
+			within(dialog).getByRole("button", { name: "Keep the pinned key" }),
+		);
+
+		await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+		expect(mock.hostKey.puts).toHaveLength(0);
+	});
+
+	it("host key changed dialog trusts the new key", async () => {
+		const mock = mockRepository(sftpDetail, {
+			access: optionsAccess,
+			offer: changed,
+		});
+		renderApp("/settings/repositories/repo-1");
+		const user = userEvent.setup();
+		await user.click(
+			await screen.findByRole("button", { name: "Check host key again" }),
+		);
+		const dialog = await screen.findByRole("dialog", {
+			name: "The server's host key changed",
+		});
+		await user.click(
+			within(dialog).getByRole("button", { name: "Trust the new key" }),
+		);
+
+		expect(
+			await screen.findByText("Agents now trust the new host key."),
+		).toBeInTheDocument();
+		expect(mock.hostKey.puts).toEqual([{ host_key: "ssh-ed25519 NEWKEY" }]);
+		await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 	});
 });

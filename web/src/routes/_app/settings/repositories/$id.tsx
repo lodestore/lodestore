@@ -15,6 +15,7 @@ import {
 	guaranteeBannerKind,
 } from "@/components/repos/guarantee-banner";
 import { GuaranteeCard } from "@/components/repos/guarantee-card";
+import { HostKeyRecheck } from "@/components/repos/host-key-recheck";
 import {
 	LimitAgentRightsSheet,
 	limitTarget,
@@ -169,13 +170,18 @@ function RepositoryPage() {
 					<GuaranteeCard
 						repository={repository}
 						actions={
-							canLimit &&
-							limitButton(
-								repository.guarantee_level === "create_only_enforced"
-									? "outline"
-									: "default",
-								copy.guarantee.limit,
-							)
+							<>
+								{canLimit &&
+									limitButton(
+										repository.guarantee_level === "create_only_enforced"
+											? "outline"
+											: "default",
+										copy.guarantee.limit,
+									)}
+								{repository.backend === "sftp" && (
+									<HostKeyRecheck repositoryId={repository.id} />
+								)}
+							</>
 						}
 					/>
 
