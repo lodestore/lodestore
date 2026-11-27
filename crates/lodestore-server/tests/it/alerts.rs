@@ -2332,3 +2332,58 @@ async fn pve_plugin_missing_unknown_list() {
         env.stop().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn alerts_instance_overdue_ignores_fresh_files_snapshot() {
+    for backend in backends() {
+        let name = backend.name();
+        let env = Env::start(&backend).await;
+        let now = now_ms();
+        env.host("h1", "web-1").await;
+        env.policy("daily", "h1", DAILY).await;
+        env.snapshot("f1", "h1", "daily", now - MINUTE).await;
+        env.ct_policy("cts", "h1", "200").await;
+        env.ct_facts("h1", &[200], false, now).await;
+        let key = env.ct_snapshot("s1", "h1", "cts", 200, now - 3 * DAY).await;
+
+        env.tick(now).await;
+        assert_eq!(
+            env.firing_keys("no_recent_backup").await,
+            [format!("no_recent_backup:h1:cts:{key}")],
+            "[{name}]"
+        );
+        env.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn alerts_last_snapshot_of_a_host_is_the_files_one() {
+    for backend in backends() {
+        let name = backend.name();
+        let env = Env::start(&backend).await;
+        let now = now_ms();
+        env.host("h1", "web-1").await;
+        env.policy("daily", "h1", DAILY).await;
+        env.snapshot("f1", "h1", "daily", now - 2 * HOUR).await;
+        env.ct_policy("cts", "h1", "200").await;
+        env.ct_facts("h1", &[200], false, now).await;
+        env.ct_snapshot("s1", "h1", "cts", 200, now - MINUTE).await;
+
+        let inputs = alerts::inputs::gather(env.ts.state(), now).await.unwrap();
+        let last = inputs.hosts[0].last_snapshot.as_ref().unwrap();
+        assert_eq!(last.time_ms, now - 2 * HOUR, "[{name}]");
+
+        env.host("h2", "ct-only").await;
+        env.ct_policy("cts2", "h2", "200").await;
+        env.ct_facts("h2", &[200], false, now).await;
+        env.ct_snapshot("s2", "h2", "cts2", 200, now - MINUTE).await;
+        let inputs = alerts::inputs::gather(env.ts.state(), now).await.unwrap();
+        let only = inputs.hosts.iter().find(|h| h.host_id == "h2").unwrap();
+        assert_eq!(
+            only.last_snapshot.as_ref().unwrap().time_ms,
+            now - MINUTE,
+            "[{name}]"
+        );
+        env.stop().await;
+    }
+}

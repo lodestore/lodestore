@@ -789,30 +789,41 @@ pub async fn record_gone(
     Ok(())
 }
 
-// shortcut: the newest snapshot of any source of the host; split it per source when other sources back up (phase 22).
+/// The newest snapshot of the files of each host; a host that backs up no files shows its newest instance snapshot, so the size of a container never stands for the files of the host.
 async fn last_snapshots(state: &AppState) -> anyhow::Result<HashMap<String, SnapshotFacts>> {
     let rows = sqlx::query(
-        "SELECT s.host_id, s.received_at, s.stats_json FROM snapshots s JOIN ( \
-             SELECT host_id, MAX(received_at) AS at FROM snapshots \
+        "SELECT s.host_id, s.source_ref, s.received_at, s.stats_json FROM snapshots s JOIN ( \
+             SELECT host_id, source_ref, MAX(received_at) AS at FROM snapshots \
              WHERE incomplete = 0 AND verified_at IS NOT NULL AND host_id IS NOT NULL \
-             GROUP BY host_id \
-         ) l ON l.host_id = s.host_id AND l.at = s.received_at \
+             GROUP BY host_id, source_ref \
+         ) l ON l.host_id = s.host_id AND l.source_ref = s.source_ref AND l.at = s.received_at \
          WHERE s.incomplete = 0 AND s.verified_at IS NOT NULL",
     )
     .fetch_all(&state.db.pool)
     .await
     .context("reading the last snapshots")?;
-    let mut out = HashMap::new();
+    let mut out: HashMap<String, (bool, SnapshotFacts)> = HashMap::new();
     for row in &rows {
         let stats: Value =
             serde_json::from_str(&row.try_get::<String, _>("stats_json")?).unwrap_or(Value::Null);
-        out.entry(row.try_get("host_id")?).or_insert(SnapshotFacts {
+        let files = row.try_get::<String, _>("source_ref")?.is_empty();
+        let found = SnapshotFacts {
             time_ms: row.try_get("received_at")?,
             bytes_total: stats["bytes_total"].as_u64().unwrap_or(0),
             bytes_added: stats["bytes_added"].as_u64().unwrap_or(0),
-        });
+        };
+        let host: String = row.try_get("host_id")?;
+        let better = out
+            .get(&host)
+            .is_none_or(|(was_files, was)| (files, found.time_ms) > (*was_files, was.time_ms));
+        if better {
+            out.insert(host, (files, found));
+        }
     }
-    Ok(out)
+    Ok(out
+        .into_iter()
+        .map(|(host, (_, facts))| (host, facts))
+        .collect())
 }
 
 /// The list of a host that is fresh and not cut short; anything else says nothing about absence.
