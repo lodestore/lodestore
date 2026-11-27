@@ -30,18 +30,22 @@ const SPACE_CHECK_EVERY: u64 = 64 << 20;
 /// Entries besides files, folders and symlinks that a restore leaves out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkipSpecial {
-    /// Character and block devices.
+    /// Character and block devices, but not the 0:0 character device an
+    /// overlayfs whiteout is: without it a deleted file of a lower layer
+    /// comes back.
     Devices,
     /// Devices, FIFOs and every other node type.
     All,
 }
 
 impl SkipSpecial {
-    fn skips(self, ty: pb::NodeType) -> bool {
+    fn skips(self, ty: pb::NodeType, rdev: u64) -> bool {
         match self {
-            SkipSpecial::Devices => {
-                matches!(ty, pb::NodeType::Chardev | pb::NodeType::Blockdev)
-            }
+            SkipSpecial::Devices => match ty {
+                pb::NodeType::Blockdev => true,
+                pb::NodeType::Chardev => rdev != 0,
+                _ => false,
+            },
             SkipSpecial::All => ty != pb::NodeType::Symlink,
         }
     }
@@ -409,10 +413,16 @@ impl Restorer {
     /// Translates owners, ACLs and capabilities from the container's view
     /// in `map` to the node's before they are applied. Without
     /// `restore_owners` it changes nothing; capabilities still need
-    /// `keep_privileges`.
-    pub fn with_id_shift(mut self, map: IdMap) -> Self {
+    /// `keep_privileges`. A map with a range onto host id 0 is refused: it
+    /// would give container ids, and version 2 capabilities, the node's root.
+    pub fn with_id_shift(mut self, map: IdMap) -> Result<Self> {
+        if map.ranges().iter().any(|r| r.host == 0) {
+            return Err(Error::InvalidInput(
+                "the container id map maps a container id to root on the node".into(),
+            ));
+        }
         self.id_shift = Some(map);
-        self
+        Ok(self)
     }
 
     /// Whether the opened target can be written, asked of the open folder
@@ -1042,7 +1052,7 @@ impl Restorer {
             return Ok(());
         }
         let ty = pb::NodeType::try_from(node.r#type).unwrap_or_default();
-        if self.skip_special.is_some_and(|s| s.skips(ty)) {
+        if self.skip_special.is_some_and(|s| s.skips(ty, node.rdev)) {
             self.stats.special_skipped += 1;
             self.unapplied.push(Unapplied {
                 path: self.path_of(&node.name),
@@ -1362,6 +1372,7 @@ mod tests {
             name: name.as_bytes().to_vec(),
             r#type: ty as i32,
             mode: 0o666,
+            rdev: 0x0103,
             ..Default::default()
         };
         let specials = [
@@ -1397,6 +1408,56 @@ mod tests {
             std::fs::remove_file(tmp.path().join("link")).unwrap();
             let _ = std::fs::remove_file(tmp.path().join("fifo"));
         }
+    }
+
+    #[test]
+    fn id_shift_refuses_a_map_onto_node_root() {
+        use crate::ct::{IdKind, IdRange};
+        let tmp = tempfile::tempdir().unwrap();
+        let range = |kind, host| IdRange {
+            kind,
+            ct: 0,
+            host,
+            count: 65_536,
+        };
+        for kind in [IdKind::User, IdKind::Group] {
+            let other = match kind {
+                IdKind::User => IdKind::Group,
+                IdKind::Group => IdKind::User,
+            };
+            let map = IdMap::new(vec![range(kind, 0), range(other, 100_000)]).unwrap();
+            let restorer = Restorer::open(tmp.path(), settings()).unwrap();
+            assert!(restorer.with_id_shift(map).is_err(), "{kind:?}");
+        }
+        let restorer = Restorer::open(tmp.path(), settings()).unwrap();
+        assert!(
+            restorer
+                .with_id_shift(IdMap::default_unprivileged())
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn skip_devices_keeps_overlay_whiteouts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let whiteout = pb::Node {
+            name: b"deleted".to_vec(),
+            r#type: pb::NodeType::Chardev as i32,
+            mode: 0o600,
+            rdev: 0,
+            ..Default::default()
+        };
+        let mut restorer = Restorer::open(tmp.path(), settings())
+            .unwrap()
+            .skip_special_files(SkipSpecial::Devices);
+        restorer.create_other(&whiteout).unwrap();
+        assert_eq!(restorer.stats().special_skipped, 0);
+        assert!(
+            !restorer
+                .take_unapplied()
+                .iter()
+                .any(|u| u.what == "special file")
+        );
     }
 
     #[test]

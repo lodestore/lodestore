@@ -1065,10 +1065,12 @@ async fn ct_restore_pct_fails_cleans_staging() {
     assert!(lab.staging_clean(&lab.staging_default()));
 
     let base = lab.staging_default();
-    let stale = base.join("ab".repeat(16));
-    write(&stale.join("fs/etc/hostname"), "x\n");
+    let stale = base.join(format!("lodestore-restore-{}", "ab".repeat(16)));
+    write(&stale.join("data/fs/etc/hostname"), "x\n");
     fs::create_dir_all(base.join("not-a-restore")).unwrap();
-    let held = base.join("cd".repeat(16));
+    let unrelated = base.join("ef".repeat(16));
+    write(&unrelated.join("keep"), "x\n");
+    let held = base.join(format!("lodestore-restore-{}", "cd".repeat(16)));
     fs::create_dir_all(&held).unwrap();
     let lock = rustix::fs::open(
         held.join(".lock"),
@@ -1087,6 +1089,10 @@ async fn ct_restore_pct_fails_cleans_staging() {
     assert!(!stale.exists());
     assert!(base.join("not-a-restore").exists());
     assert!(
+        unrelated.join("keep").exists(),
+        "a folder without the prefix is never removed"
+    );
+    assert!(
         held.exists(),
         "a folder whose lock a live process holds stays"
     );
@@ -1095,6 +1101,154 @@ async fn ct_restore_pct_fails_cleans_staging() {
     child.wait().unwrap();
     clean_stale_staging(&base);
     assert!(!held.exists());
+}
+
+/// Changes the plan entry named `name`.
+fn edit_entry(snap: &mut Snap, name: &[u8], edit: impl Fn(&mut Node, &mut Vec<ChunkLoc>)) {
+    let mut found = false;
+    for item in &mut snap.batches[0].items {
+        if let Some(Kind::Entry(e)) = &mut item.kind {
+            let mut node = Node::decode(e.node.as_slice()).unwrap();
+            if node.name == name {
+                edit(&mut node, &mut e.chunks);
+                e.node = node.encode_to_vec();
+                found = true;
+            }
+        }
+    }
+    assert!(found, "no entry {}", String::from_utf8_lossy(name));
+}
+
+/// An entry that failed to restore leaves the staging copy incomplete:
+/// neither a new container nor a replace is started from it.
+#[tokio::test(flavor = "multi_thread")]
+async fn ct_restore_incomplete_staging_refused() {
+    let lab = Lab::new().await;
+    lab.allow_replace();
+    let bad_name = Node {
+        name: b"a/b".to_vec(),
+        r#type: NodeType::File as i32,
+        mode: 0o644,
+        ..Default::default()
+    };
+    let corrupt = |snap: &mut Snap| {
+        edit_entry(snap, b"hostname", |_, chunks| chunks[0].id[0] ^= 1);
+    };
+    for replace_it in [false, true] {
+        let (uid, guest) = if replace_it {
+            lab.target(Some(UID_X), UUID, "");
+            (Some(UID_X), replace(UID_X, None))
+        } else {
+            (None, new_ct(105))
+        };
+        let config = snapshot_config(uid, "");
+        let mut corrupted = lab.snapshot(&config, None, |_| {}, &[]).await;
+        corrupt(&mut corrupted);
+        let rejected = lab
+            .snapshot(&config, None, |_| {}, &[("etc", bad_name.clone())])
+            .await;
+        let no_etc = lab
+            .snapshot(
+                &config,
+                None,
+                |root| fs::remove_dir_all(root.join("etc")).unwrap(),
+                &[],
+            )
+            .await;
+        for snap in [&corrupted, &rejected, &no_etc] {
+            let ran = lab.run(snap, lab.spec(snap, guest.clone())).await;
+            failed_with(&ran, "restore_incomplete");
+            assert!(ran.argv.is_none(), "{:?}", ran.done);
+            assert!(lab.staging_clean(&lab.staging_default()));
+        }
+    }
+}
+
+/// `pct restore --force` destroys the target's snapshots and the volumes
+/// only they use, which the confirmation does not show.
+#[tokio::test(flavor = "multi_thread")]
+async fn ct_restore_replace_target_with_snapshots_refused() {
+    let lab = Lab::new().await;
+    lab.allow_replace();
+    let snap = lab
+        .snapshot(&snapshot_config(Some(UID_X), ""), None, |_| {}, &[])
+        .await;
+    lab.target(
+        Some(UID_X),
+        UUID,
+        "\n[snap1]\narch: amd64\nhostname: ct200\nrootfs: local-lvm:vm-200-disk-0,size=8G\nsnaptime: 1700000001\n",
+    );
+    let ran = lab.run(&snap, lab.spec(&snap, replace(UID_X, None))).await;
+    failed_with(&ran, "guest_target_has_snapshots");
+    assert!(ran.argv.is_none());
+    assert!(!lab.staging_default().exists());
+
+    lab.target(Some(UID_X), UUID, "\n[pve:pending]\nmemory: 1024\n");
+    let ran = lab.run(&snap, lab.spec(&snap, replace(UID_X, None))).await;
+    succeeded(&ran);
+}
+
+/// A `.lock` in the plan lands outside the staging folder's lock: the
+/// folder stays held while `pct` runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn ct_restore_planted_lock_keeps_staging_held() {
+    let lab = Lab::new().await;
+    lab.pct_script_with(None, true);
+    let mut snap = lab
+        .snapshot(&snapshot_config(None, ""), None, |_| {}, &[])
+        .await;
+    let lock = Node {
+        name: b".lock".to_vec(),
+        r#type: NodeType::Fifo as i32,
+        mode: 0o600,
+        ..Default::default()
+    };
+    snap.batches[0].items.insert(
+        0,
+        PlanItem {
+            kind: Some(Kind::Entry(PlanEntry {
+                node: lock.encode_to_vec(),
+                chunks: Vec::new(),
+                more: false,
+            })),
+        },
+    );
+    let base = lab.staging_default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let inspect = move || {
+        let dirs: Vec<PathBuf> = fs::read_dir(&base)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        clean_stale_staging(&base);
+        tx.send(dirs.iter().all(|d| d.exists())).unwrap();
+    };
+    let ran = lab
+        .run_gated(&snap, lab.spec(&snap, new_ct(105)), inspect)
+        .await;
+    assert!(
+        rx.recv().unwrap(),
+        "the staging folder was removed while pct ran"
+    );
+    succeeded(&ran);
+}
+
+/// A FIFO as `pct.conf` is refused instead of blocking the agent.
+#[tokio::test(flavor = "multi_thread")]
+async fn ct_restore_config_fifo_refused() {
+    let lab = Lab::new().await;
+    let mut snap = lab
+        .snapshot(&snapshot_config(None, ""), None, |_| {}, &[])
+        .await;
+    edit_entry(&mut snap, b"pct.conf", |node, chunks| {
+        node.r#type = NodeType::Fifo as i32;
+        node.size = 0;
+        chunks.clear();
+    });
+    let ran = lab.run(&snap, lab.spec(&snap, new_ct(105))).await;
+    failed_with(&ran, "restore_config_invalid");
+    assert!(ran.argv.is_none());
+    assert!(lab.staging_clean(&lab.staging_default()));
 }
 
 #[derive(Debug, Clone)]
@@ -1321,7 +1475,7 @@ fn pve_root_staging_matches_snapshot() {
                 let mut dirs = fs::read_dir(&base).unwrap().map(|e| e.unwrap().path());
                 let staging = dirs.next().unwrap();
                 assert!(dirs.next().is_none());
-                tx.send(describe(&staging.join("fs"))).unwrap();
+                tx.send(describe(&staging.join("data/fs"))).unwrap();
             };
             let spec = lab.spec(&snap, new_ct(105));
             let ran = rt.block_on(lab.run_gated(&snap, spec, inspect));

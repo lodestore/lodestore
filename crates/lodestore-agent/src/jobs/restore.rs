@@ -475,15 +475,15 @@ impl<'a, F: PackFetcher> Attempt<'a, F> {
             Some((root, rest)) => Restorer::open_in(root, rest, prepared.settings()),
             None => Restorer::open(&prepared.target, prepared.settings()),
         };
-        let opened = opened.map(|r| {
+        let opened = opened.and_then(|r| {
             let r = match &prepared.id_shift {
-                Some(map) if prepared.restore_owners => r.with_id_shift(map.clone()),
+                Some(map) if prepared.restore_owners => r.with_id_shift(map.clone())?,
                 _ => r,
             };
-            match prepared.guest {
+            Ok(match prepared.guest {
                 Some((skip, reserve)) => r.skip_special_files(skip).with_space_reserve(reserve),
                 None => r,
-            }
+            })
         });
         let restorer = opened.map_err(|e| match e {
             Error::Io(e) => io_abort(&e, &format!("cannot open {target}")),

@@ -23,7 +23,7 @@ use lodestore_proto::agent::v1::{
     ConfigLine, DroppedConfigKey, ExpectedGuest, GuestRestoreResult, GuestTarget, JobFinished,
     JobOutcome, RestoreSpec,
 };
-use rustix::fs::{FlockOperation, Mode, OFlags, flock, openat};
+use rustix::fs::{AtFlags, FileType, FlockOperation, Mode, OFlags, flock, openat, statat};
 use tokio::process::Command;
 
 use super::JobCtx;
@@ -41,7 +41,12 @@ use crate::pve::{STORAGE_ID, TOKEN_ENV};
 
 /// The default staging folder below the agent's state folder.
 pub const STAGING_DIR: &str = DEFAULT_GUEST_STAGING_DIR;
+/// Staging folders are named `{STAGING_PREFIX}{id}`; only these are ever
+/// cleaned up, as the staging folder may be shared with other files.
+const STAGING_PREFIX: &str = "lodestore-restore-";
 const LOCK_FILE: &str = ".lock";
+/// The folder the snapshot is restored into, beside the lock.
+const DATA_DIR: &str = "data";
 /// The cluster file system and its database: staging there would fill both.
 const FORBIDDEN_STAGING: [&str; 2] = ["/etc/pve", "/var/lib/pve-cluster"];
 const POLL: Duration = Duration::from_millis(50);
@@ -96,7 +101,7 @@ async fn restore<P: PlanSource, F: PackFetcher>(
             &format!("cannot create a staging folder in {}: {e}", base.display()),
         )
     })?;
-    let prepared = Prepared::staging(spec, staging.dir.clone(), options.space_reserve)
+    let prepared = Prepared::staging(spec, staging.data.clone(), options.space_reserve)
         .map_err(|a| refuse(a.code, &a.message))?;
     let mut finished = execute_prepared(ctx, &prepared, plan, fetch, options).await;
     let ok = [JobOutcome::Succeeded, JobOutcome::Warnings]
@@ -104,6 +109,21 @@ async fn restore<P: PlanSource, F: PackFetcher>(
         .any(|o| *o as i32 == finished.outcome);
     if !ok {
         return Err(Box::new(finished));
+    }
+    // Warnings (owners as a regular user, skipped devices) leave a usable
+    // copy; an entry that was not restored does not.
+    if finished.errors_total > 0 {
+        let mut refused = refuse(
+            "restore_incomplete",
+            &format!(
+                "{} entries of the snapshot could not be restored into the staging folder. CT {} was not restored.",
+                finished.errors_total, guest.vmid
+            ),
+        );
+        refused.errors_total = finished.errors_total;
+        refused.warnings_total = finished.warnings_total;
+        refused.restore = finished.restore.take();
+        return Err(refused);
     }
     let report = hand_over(ctx, pve, guest, &checked, &staging).await?;
     finished.restore.get_or_insert_with(Default::default).guest = Some(report);
@@ -216,9 +236,19 @@ fn target_changed(vmid: u32, what: &str) -> Refused {
 }
 
 /// A container that runs or that HA manages is never replaced: the agent
-/// does not stop it, and HA would start it right after the restore.
+/// does not stop it, and HA would start it right after the restore. Nor
+/// is one with snapshots: `pct restore --force` deletes them and the
+/// volumes only they use, which the confirmation does not show.
 fn check_live(facts: &CtTargetFacts) -> Result<(), Refused> {
     let (vmid, name) = (facts.vmid, &facts.name);
+    if facts.has_snapshots {
+        return Err(refuse(
+            "guest_target_has_snapshots",
+            &format!(
+                "CT {vmid} · {name} has snapshots, and replacing it would delete them. Remove its snapshots in Proxmox or restore as a new container."
+            ),
+        ));
+    }
     if facts.running {
         return Err(refuse(
             "guest_running",
@@ -268,7 +298,7 @@ async fn hand_over(
     staging: &Staging,
 ) -> Result<GuestRestoreResult, Refused> {
     let vmid = guest.vmid;
-    let (config, firewall) = staged_config(&staging.dir)?;
+    let (config, firewall) = staged_config(&staging.data)?;
     let target = if guest.in_place {
         Some(recheck_target(ctx, pve, guest, checked)?)
     } else {
@@ -323,7 +353,7 @@ async fn hand_over(
     if mismatch_flag {
         args.extend(["--allow-identity-mismatch", "1"].map(String::from));
     }
-    pct_restore(ctx, pve, &args, &staging.id, &filtered, &staging.dir).await?;
+    pct_restore(ctx, pve, &args, &staging.id, &filtered, &staging.data).await?;
 
     let created = std::fs::read(conf_path(pve, &checked.node, vmid))
         .ok()
@@ -388,12 +418,27 @@ fn staged_config(dir: &Path) -> Result<(Vec<u8>, Option<Vec<u8>>), Refused> {
             &format!("cannot open the staging folder: {e}"),
         )
     })?;
-    openat(&root, "fs", flags | OFlags::DIRECTORY, Mode::empty())
+    let fs = openat(&root, "fs", flags | OFlags::DIRECTORY, Mode::empty())
         .map_err(|e| not_ct(format!("/fs is not a folder: {e}")))?;
+    let has_etc = statat(&fs, "etc", AtFlags::SYMLINK_NOFOLLOW)
+        .is_ok_and(|st| FileType::from_raw_mode(st.st_mode) == FileType::Directory);
+    if !has_etc {
+        return Err(refuse(
+            "restore_incomplete",
+            "The container root of the snapshot has no /etc, so it was empty or not mounted when it was backed up. Nothing was restored.",
+        ));
+    }
     let config_dir = openat(&root, "config", flags | OFlags::DIRECTORY, Mode::empty())
         .map_err(|e| not_ct(format!("/config is not a folder: {e}")))?;
     let read = |name: &str| -> io::Result<Vec<u8>> {
-        let fd = openat(&config_dir, name, flags, Mode::empty())?;
+        // Non-blocking, so a FIFO cannot hold the open; it is refused below.
+        let fd = openat(&config_dir, name, flags | OFlags::NONBLOCK, Mode::empty())?;
+        if FileType::from_raw_mode(rustix::fs::fstat(&fd)?.st_mode) != FileType::RegularFile {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{name} is not a regular file"),
+            ));
+        }
         let mut bytes = Vec::new();
         std::fs::File::from(fd)
             .take(MAX_CT_CONFIG_BYTES as u64 + 1)
@@ -551,13 +596,15 @@ async fn pct_restore(
     }
 }
 
-/// `{base}/{id}`, 0700, with a `.lock` held for as long as the restore
+/// `{base}/{STAGING_PREFIX}{id}`, 0700, with a `.lock` held for as long as the restore
 /// runs. The lock's descriptor is inherited by `pct`, so a `pct` left over
 /// from an agent that died keeps its folder; the folder is removed when the
-/// restore ends, however it ends.
+/// restore ends, however it ends. The snapshot goes into `data` beside the
+/// lock, so nothing in it can replace the lock.
 struct Staging {
     id: String,
     dir: PathBuf,
+    data: PathBuf,
     _lock: OwnedFd,
 }
 
@@ -570,7 +617,7 @@ impl Staging {
         let mut raw = [0u8; 16];
         getrandom::fill(&mut raw).map_err(|e| io::Error::other(e.to_string()))?;
         let id: String = raw.iter().map(|b| format!("{b:02x}")).collect();
-        let dir = base.join(&id);
+        let dir = base.join(format!("{STAGING_PREFIX}{id}"));
         std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
         let lock = rustix::fs::open(
@@ -578,16 +625,23 @@ impl Staging {
             OFlags::CREATE | OFlags::EXCL | OFlags::RDWR | OFlags::NOFOLLOW,
             Mode::RUSR | Mode::WUSR,
         )
-        .and_then(|fd| flock(&fd, FlockOperation::LockExclusive).map(|()| fd));
-        match lock {
+        .and_then(|fd| flock(&fd, FlockOperation::LockExclusive).map(|()| fd))
+        .map_err(io::Error::from);
+        let data = dir.join(DATA_DIR);
+        let made = lock.and_then(|lock| {
+            std::fs::DirBuilder::new().mode(0o700).create(&data)?;
+            Ok(lock)
+        });
+        match made {
             Ok(lock) => Ok(Staging {
                 id,
                 dir,
+                data,
                 _lock: lock,
             }),
             Err(e) => {
                 let _ = std::fs::remove_dir_all(&dir);
-                Err(e.into())
+                Err(e)
             }
         }
     }
@@ -603,8 +657,10 @@ impl Drop for Staging {
     }
 }
 
-fn is_restore_id(name: &str) -> bool {
-    name.len() == 32 && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+fn is_staging_name(name: &str) -> bool {
+    name.strip_prefix(STAGING_PREFIX).is_some_and(|id| {
+        id.len() == 32 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    })
 }
 
 /// The staging folder `base` as it resolves on this node: an absolute path
@@ -658,8 +714,8 @@ fn resolve(path: &Path) -> PathBuf {
 }
 
 /// Removes the staging folders under `base` a restore left behind: those
-/// whose `.lock` no live process holds. Only folders named like a restore
-/// id are touched, and nothing is followed through a symlink.
+/// whose `.lock` no live process holds. Only folders named like a staging
+/// folder are touched, and nothing is followed through a symlink.
 pub fn clean_stale_staging(base: &Path) {
     let Ok(entries) = std::fs::read_dir(base) else {
         return;
@@ -667,7 +723,7 @@ pub fn clean_stale_staging(base: &Path) {
     for entry in entries.flatten() {
         let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
         let name = entry.file_name();
-        if !is_dir || !name.to_str().is_some_and(is_restore_id) {
+        if !is_dir || !name.to_str().is_some_and(is_staging_name) {
             continue;
         }
         let dir = entry.path();
@@ -718,9 +774,17 @@ mod tests {
     }
 
     #[test]
-    fn restore_ids() {
-        assert!(is_restore_id(&"ab".repeat(16)));
-        assert!(!is_restore_id(&"AB".repeat(16)));
-        assert!(!is_restore_id("lost+found"));
+    fn staging_names() {
+        assert!(is_staging_name(&format!(
+            "lodestore-restore-{}",
+            "ab".repeat(16)
+        )));
+        assert!(!is_staging_name(&format!(
+            "lodestore-restore-{}",
+            "AB".repeat(16)
+        )));
+        assert!(!is_staging_name(&"ab".repeat(16)));
+        assert!(!is_staging_name("lodestore-restore-"));
+        assert!(!is_staging_name("lost+found"));
     }
 }

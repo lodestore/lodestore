@@ -356,12 +356,29 @@ pub(crate) fn parse_pools(text: &str) -> HashMap<u32, String> {
 /// Reads lines up to the first `[section]` line: snapshot sections after it
 /// can hold hundreds of KiB of history that discovery never needs.
 pub(crate) fn read_main_section(reader: impl BufRead, limit: u64) -> io::Result<String> {
+    read_sections(reader, limit).map(|(main, _)| main)
+}
+
+/// The main section, and whether a snapshot section follows it. Reading
+/// stops at the first snapshot section; sections named `pve:…` (pending
+/// changes) are not snapshots and are passed over, within `limit` bytes.
+fn read_sections(reader: impl BufRead, limit: u64) -> io::Result<(String, bool)> {
     let mut reader = reader.take(limit.saturating_add(1));
     let (mut main, mut line) = (Vec::new(), Vec::new());
+    let mut in_main = true;
     loop {
         line.clear();
-        if reader.read_until(b'\n', &mut line)? == 0 || line.first() == Some(&b'[') {
-            break;
+        if reader.read_until(b'\n', &mut line)? == 0 {
+            return Ok((String::from_utf8_lossy(&main).into_owned(), false));
+        }
+        if line.first() == Some(&b'[') {
+            in_main = false;
+            if !line.contains(&b':') {
+                return Ok((String::from_utf8_lossy(&main).into_owned(), true));
+            }
+        }
+        if !in_main {
+            continue;
         }
         main.extend_from_slice(&line);
         if main.len() as u64 > limit {
@@ -371,7 +388,6 @@ pub(crate) fn read_main_section(reader: impl BufRead, limit: u64) -> io::Result<
             ));
         }
     }
-    Ok(String::from_utf8_lossy(&main).into_owned())
 }
 
 fn read_conf(path: &Path) -> io::Result<String> {
@@ -725,6 +741,9 @@ pub(crate) struct CtTargetFacts {
     pub running: bool,
     pub ha_managed: bool,
     pub unprivileged: bool,
+    /// The configuration has a snapshot section; only the check before a
+    /// replace reads that far.
+    pub has_snapshots: bool,
 }
 
 fn ct_facts(
@@ -745,6 +764,7 @@ fn ct_facts(
         running: ct_running(roots, vmid),
         ha_managed: ha.contains(&vmid),
         unprivileged: conf.unprivileged,
+        has_snapshots: false,
     }
 }
 
@@ -768,8 +788,10 @@ pub(crate) fn ct_target_facts(
         .join(node)
         .join("lxc")
         .join(format!("{vmid}.conf"));
-    let conf = match read_conf(&conf_path) {
-        Ok(text) => parse_guest_conf(&text),
+    let read = open_nofollow(&conf_path)
+        .and_then(|f| read_sections(BufReader::new(f), MAX_GUEST_CONF_BYTES));
+    let (conf, has_snapshots) = match read {
+        Ok((text, snapshots)) => (parse_guest_conf(&text), snapshots),
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(failed("the container config")(e)),
     };
@@ -780,7 +802,10 @@ pub(crate) fn ct_target_facts(
         Instance::Keep(uuid) | Instance::Adopt(uuid) => uuid,
         Instance::New => String::new(),
     };
-    Ok(Some(ct_facts(roots, vmid, &conf, &ha, uuid)))
+    Ok(Some(CtTargetFacts {
+        has_snapshots,
+        ..ct_facts(roots, vmid, &conf, &ha, uuid)
+    }))
 }
 
 /// The saved id of a container and the `meta uid` it was given with; the uid
@@ -2190,6 +2215,21 @@ mod tests {
             self.read.set(self.read.get() + n);
             Ok(n)
         }
+    }
+
+    #[test]
+    fn sections_tell_snapshots_from_pending_changes() {
+        let read = |text: &str| read_sections(io::Cursor::new(text), MAX_GUEST_CONF_BYTES).unwrap();
+        assert_eq!(read("a: b\n"), ("a: b\n".into(), false));
+        assert_eq!(
+            read("a: b\n[pve:pending]\nc: d\n"),
+            ("a: b\n".into(), false)
+        );
+        assert_eq!(
+            read("a: b\n[pve:pending]\nc: d\n[snap1]\na: c\n"),
+            ("a: b\n".into(), true)
+        );
+        assert_eq!(read("a: b\n[snap1]\n"), ("a: b\n".into(), true));
     }
 
     #[test]

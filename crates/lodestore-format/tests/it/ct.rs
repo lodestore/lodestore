@@ -188,34 +188,53 @@ async fn ct_owner_names_empty() {
     }
 }
 
+/// vzdump adds `--exclude=lost+found` only when its tar runs in the
+/// container's user namespace, that is for a container with an id map.
 #[tokio::test]
 async fn ct_walk_skips_lost_found_and_sockets_like_vzdump() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (repo_dir, root) = (tmp.path().join("repo"), tmp.path().join("ct"));
-    fs::create_dir(&repo_dir).unwrap();
-    container_tree(&root);
-    fs::create_dir_all(root.join("lost+found")).unwrap();
-    fs::write(root.join("lost+found/#123"), b"x").unwrap();
-    fs::create_dir_all(root.join("data/lost+found")).unwrap();
-    fs::create_dir_all(root.join("run")).unwrap();
-    let _socket = std::os::unix::net::UnixListener::bind(root.join("run/s")).unwrap();
-    let store = init_repo(&repo_dir).await;
-    let mut w = writer(&store).await;
-    let p = pending(&mut w, &root, backup(privileged())).await;
-    assert_eq!(p.stats().files_new, 3, "two files of the tree and pct.conf");
-    let id = p.commit(&mut w).await.unwrap().snapshot_id;
-    let mut r = reader(&store).await;
-    let names = |nodes: Vec<pb::Node>| nodes.into_iter().map(|n| n.name).collect::<Vec<_>>();
-    let top = names(r.list_dir(&id, b"/fs").await.unwrap());
-    assert!(!top.contains(&b"lost+found".to_vec()), "{top:?}");
-    assert!(top.contains(&b"data".to_vec()));
-    assert!(r.list_dir(&id, b"/fs/data").await.unwrap().is_empty());
-    assert!(r.list_dir(&id, b"/fs/run").await.unwrap().is_empty());
-    let manifest = r.snapshot(&id).await.unwrap();
-    assert_eq!(
-        manifest.warnings_total, 0,
-        "sockets are skipped without a warning"
-    );
+    let uid = rustix::process::getuid().as_raw();
+    let gid = rustix::process::getgid().as_raw();
+    let one = |kind, host| IdRange {
+        kind,
+        ct: 0,
+        host,
+        count: 1,
+    };
+    let mapped = CtMeta {
+        mode: CtMode::Snapshot,
+        unprivileged: true,
+        idmap: Some(IdMap::new(vec![one(IdKind::User, uid), one(IdKind::Group, gid)]).unwrap()),
+    };
+    for (meta, skipped) in [(privileged(), false), (mapped, true)] {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo_dir, root) = (tmp.path().join("repo"), tmp.path().join("ct"));
+        fs::create_dir(&repo_dir).unwrap();
+        container_tree(&root);
+        fs::create_dir_all(root.join("lost+found")).unwrap();
+        fs::write(root.join("lost+found/#123"), b"x").unwrap();
+        fs::create_dir_all(root.join("data/lost+found")).unwrap();
+        fs::create_dir_all(root.join("run")).unwrap();
+        let _socket = std::os::unix::net::UnixListener::bind(root.join("run/s")).unwrap();
+        let store = init_repo(&repo_dir).await;
+        let mut w = writer(&store).await;
+        let p = pending(&mut w, &root, backup(meta)).await;
+        let files = if skipped { 3 } else { 4 };
+        assert_eq!(p.stats().files_new, files, "skipped: {skipped}");
+        let id = p.commit(&mut w).await.unwrap().snapshot_id;
+        let mut r = reader(&store).await;
+        let names = |nodes: Vec<pb::Node>| nodes.into_iter().map(|n| n.name).collect::<Vec<_>>();
+        let top = names(r.list_dir(&id, b"/fs").await.unwrap());
+        assert_eq!(top.contains(&b"lost+found".to_vec()), !skipped, "{top:?}");
+        assert!(top.contains(&b"data".to_vec()));
+        let data = names(r.list_dir(&id, b"/fs/data").await.unwrap());
+        assert_eq!(data.contains(&b"lost+found".to_vec()), !skipped, "{data:?}");
+        assert!(r.list_dir(&id, b"/fs/run").await.unwrap().is_empty());
+        let manifest = r.snapshot(&id).await.unwrap();
+        assert_eq!(
+            manifest.warnings_total, 0,
+            "sockets are skipped without a warning"
+        );
+    }
 }
 
 #[tokio::test]
@@ -698,7 +717,11 @@ fn ct_restore_shift() {
         xattrs: vec![
             xattr(
                 ACL_ACCESS,
-                acl(&[(ACL_USER, 4, 1000), (ACL_GROUP, 4, 1001)]),
+                acl(&[
+                    (ACL_USER, 4, 1000),
+                    (ACL_GROUP, 4, 1001),
+                    (ACL_USER, 7, 70_000),
+                ]),
             ),
             xattr(CAPABILITY, to_ct),
             xattr(b"system.posix_acl_default", vec![1, 2, 3]),
@@ -709,17 +732,90 @@ fn ct_restore_shift() {
     let mut unmapped = 0;
     let dropped = shift_node(&mut node, Direction::CtToHost, &map, &mut unmapped);
     assert_eq!(node.uid, 100_005);
-    assert_eq!(node.gid, OVERFLOW_ID);
-    assert_eq!(unmapped, 1);
+    // An id outside the map is the container's overflow id, never the node's.
+    assert_eq!(node.gid, 100_000 + OVERFLOW_ID);
+    assert_eq!(unmapped, 2);
     assert_eq!(
         parse_acl(&node.xattrs[0].value),
-        [(ACL_USER, 4, 101_000), (ACL_GROUP, 4, 101_001)]
+        [
+            (ACL_USER, 4, 101_000),
+            (ACL_GROUP, 4, 101_001),
+            (ACL_USER, 7, 100_000 + OVERFLOW_ID)
+        ]
     );
     assert_eq!(node.xattrs[1].value, caps_v3(100_000));
     assert_eq!(node.xattrs[2].name, b"user.x");
     assert_eq!(node.xattrs.len(), 3);
     assert_eq!(dropped.len(), 1);
     assert_eq!(dropped[0].0, b"system.posix_acl_default");
+}
+
+/// A map without the overflow id: an ACL entry outside it is left out and
+/// reported, never given to the node's 65534.
+#[test]
+fn ct_restore_shift_without_overflow_id() {
+    let range = |kind| IdRange {
+        kind,
+        ct: 0,
+        host: 100_000,
+        count: 1000,
+    };
+    let map = IdMap::new(vec![range(IdKind::User), range(IdKind::Group)]).unwrap();
+    let mut node = pb::Node {
+        uid: 5,
+        gid: 5,
+        xattrs: vec![pb::Xattr {
+            name: ACL_ACCESS.to_vec(),
+            value: acl(&[
+                (ACL_USER_OBJ, 6, UNDEFINED),
+                (ACL_USER, 7, 65_534),
+                (ACL_USER, 4, 7),
+                (ACL_OTHER, 0, UNDEFINED),
+            ]),
+        }],
+        ..Default::default()
+    };
+    let mut unmapped = 0;
+    let dropped = shift_node(&mut node, Direction::CtToHost, &map, &mut unmapped);
+    assert_eq!((node.uid, node.gid), (100_005, 100_005));
+    assert_eq!(
+        parse_acl(&node.xattrs[0].value),
+        [
+            (ACL_USER_OBJ, 6, UNDEFINED),
+            (ACL_USER, 4, 100_007),
+            (ACL_OTHER, 0, UNDEFINED)
+        ]
+    );
+    assert_eq!(unmapped, 1);
+    assert_eq!(dropped.len(), 1, "{dropped:?}");
+    assert_eq!(dropped[0].0, ACL_ACCESS);
+
+    let mut owner = pb::Node {
+        uid: 70_000,
+        ..Default::default()
+    };
+    shift_node(&mut owner, Direction::CtToHost, &map, &mut 0);
+    assert_eq!(owner.uid, OVERFLOW_ID);
+    let mut out = Vec::new();
+    let dir = tempfile::tempdir().unwrap();
+    let fd = std::fs::File::open(dir.path()).unwrap();
+    lodestore_format::fs::meta::apply_metadata(
+        &lodestore_format::fs::meta::Target::Fd(std::os::fd::AsFd::as_fd(&fd)),
+        &pb::Node {
+            uid: 70_000,
+            ..Default::default()
+        },
+        b"d",
+        true,
+        false,
+        Some(&map),
+        &mut out,
+    );
+    assert!(
+        out.iter()
+            .any(|u| u.what == "owner" && u.error.contains("id map")),
+        "{out:?}"
+    );
 }
 
 /// Without root the walk still applies the map: the test's own ids are
@@ -839,7 +935,8 @@ async fn idmap_root_backup_restore() {
     };
     let mut restorer = Restorer::open(&target, settings)
         .unwrap()
-        .with_id_shift(IdMap::default_unprivileged());
+        .with_id_shift(IdMap::default_unprivileged())
+        .unwrap();
     let mut sink = restorer.begin_file(node).unwrap().unwrap();
     sink.write(&content).unwrap();
     restorer.finish_file(sink, node).unwrap();
