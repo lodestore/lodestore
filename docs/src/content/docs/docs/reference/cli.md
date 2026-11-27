@@ -452,3 +452,28 @@ The memory of the checks is in `$XDG_CACHE_HOME/lode/<repository id>/` (`$HOME/.
 `lode backup --writer-keys` cannot check the backup, so in such a repository it exits with an error and writes nothing. It also refuses when the key cannot read `locks/`, so it cannot tell, unless `--no-gc-check` says no server cleans up the repository, and on a machine that remembers the repository was upgraded. Back up through the agent (`lode backup --stdin` over its socket), or use the password or recovery key. In a repository no 0.2 server has opened, `--writer-keys` works as before and nothing checks the backup.
 
 `lode backup --stdin` through the agent is signed by the server for the host of the agent; see [Agent local socket](/docs/reference/local-socket/).
+
+## Proxmox VE node
+
+`lodestore-agent pve install` prepares a Proxmox VE node for container backups. Run it as root on every node of the cluster, after the agent is installed there:
+
+```sh
+lodestore-agent pve install
+```
+
+It installs the Lodestore storage plugin and backup provider into `/usr/share/perl5`, reloads `pvedaemon`, `pveproxy`, `pvestatd` and `pvescheduler`, and writes the node's marker into `/etc/pve/lodestore/plugin/`. Then it waits until every node of the cluster has a marker with the same plugin and pve-manager 9.2.33 or newer, printing one line per node (`ready`, `waiting` or `outdated (...)`), and only then adds the `lodestore` storage (`pvesm add lodestore lodestore --content backup --prune-backups keep-all=1`). The storage is added once for the cluster, by whichever waiting node gets there first; running the command again changes nothing that is already in place.
+
+| Flag | Meaning |
+|------|---------|
+| `--allow-guest-in-place` | Allow restoring a container over an existing one on this node: sets `restore.allow_guest_in_place: true` in this node's `agent.yaml` and restarts the agent. Other nodes keep their own setting, and the server cannot change it. Rewriting `agent.yaml` drops its comments |
+| `--wait-seconds N` | How long to wait for the other nodes, default 600 |
+| `--config-dir DIR` | Where `agent.yaml` is, default `/etc/lodestore` |
+
+Every node needs pve-manager 9.2.33 or newer. Install the plugin on a new node before you join it with `pvecm add`: a node without the plugin drops the `lodestore` section of the shared `storage.cfg` the first time it writes that file. Run the command again on a node after an agent update, when the alert `pve_plugin_missing` is open for it, or when a job failed with `protocol_mismatch`.
+
+| Code | Meaning |
+|------|---------|
+| 0 | The plugin is on every node and the storage exists |
+| 1 | A file, a command or `storage.cfg` failed; the message says which |
+| 2 | Refused: not root, not a Proxmox VE node, or pve-manager older than 9.2.33 |
+| 3 | Not every node got ready within `--wait-seconds`; the message lists the nodes where the command still has to run |
