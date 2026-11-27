@@ -666,3 +666,62 @@ async fn guest_not_local_redispatch_same_scope_selected() {
         ts.stop().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn guest_jobs_expand_once_under_concurrent_passes() {
+    use lodestore_server::grpc::dispatch::expand_guest_job;
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let host = enroll(&ts, &api, &repo, "pve1").await;
+        seed_policy(&ts, &repo, "cts", &[&host], "[200, 201, 202]").await;
+        seed_policy(&ts, &repo, "cts2", &[&host], "[200, 201, 202]").await;
+        let stale = run_now(&api, "cts").await;
+        let racing = run_now(&api, "cts2").await;
+        seed_facts(&ts, &host, &ct_facts(0, true, &[200, 201, 202])).await;
+        let stored = lodestore_server::sources::load(ts.state(), &host.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let guests: Vec<_> = stored
+            .discovery
+            .proxmox
+            .as_ref()
+            .unwrap()
+            .guests
+            .iter()
+            .collect();
+
+        // A second pass that read the row before the first one expanded it.
+        let first = expand_guest_job(ts.state(), &stale, &guests).await.unwrap();
+        let second = expand_guest_job(ts.state(), &stale, &guests).await.unwrap();
+        assert_eq!(first.map(|i| i.vmid), Some(200));
+        assert!(second.is_none(), "[{}]", backend.name());
+
+        // SQLite serializes writers, so only Postgres can run two passes at once.
+        if backend.name() == "postgres" {
+            let (a, b) = tokio::join!(
+                expand_guest_job(ts.state(), &racing, &guests),
+                expand_guest_job(ts.state(), &racing, &guests),
+            );
+            let won = [a.unwrap(), b.unwrap()].into_iter().flatten().count();
+            assert_eq!(won, 1, "[{}]", backend.name());
+        } else {
+            let won = expand_guest_job(ts.state(), &racing, &guests).await;
+            assert!(won.unwrap().is_some());
+        }
+
+        let pool = &ts.state().db.pool;
+        for policy in ["cts", "cts2"] {
+            let queued = |vmid| (key_of(vmid), "queued".to_string());
+            assert_eq!(
+                refs(pool, policy).await,
+                [queued(200), queued(201), queued(202)],
+                "[{}] {policy}",
+                backend.name()
+            );
+        }
+        ts.stop().await;
+    }
+}

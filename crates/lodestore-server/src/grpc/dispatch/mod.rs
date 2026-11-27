@@ -649,16 +649,29 @@ pub(crate) fn guest_meta(guest: &Guest) -> String {
 /// The selector job becomes the job of the first selected container without an
 /// active job; the others get queued jobs of their own with the same policy,
 /// spec, origin and queue time. `None`: every selected container is already in
-/// progress, so the job is cancelled, or it is no longer queued.
-async fn expand_guest_job(
+/// progress, so the job is cancelled, or it is no longer a queued selector job:
+/// another pass expanded it first, or raced it to one of the containers.
+#[doc(hidden)]
+pub async fn expand_guest_job(
     state: &AppState,
     job_id: &str,
     guests: &[&Guest],
 ) -> anyhow::Result<Option<SourceInstance>> {
+    match expand_selector(state, job_id, guests).await {
+        Err(sqlx::Error::Database(db)) if db.is_unique_violation() => Ok(None),
+        result => Ok(result?),
+    }
+}
+
+async fn expand_selector(
+    state: &AppState,
+    job_id: &str,
+    guests: &[&Guest],
+) -> sqlx::Result<Option<SourceInstance>> {
     let mut tx = state.db.pool.begin().await?;
     let Some(row) = sqlx::query(
         "SELECT host_id, policy_id, policy_name, spec, queued_at, origin FROM jobs \
-         WHERE id = $1 AND state = 'queued'",
+         WHERE id = $1 AND state = 'queued' AND source_ref = ''",
     )
     .bind(job_id)
     .fetch_optional(&mut *tx)
@@ -672,11 +685,12 @@ async fn expand_guest_job(
     for guest in guests {
         let busy = sqlx::query(
             "SELECT 1 FROM jobs WHERE host_id = $1 AND policy_id = $2 AND source_ref = $3 \
-             AND state IN ('queued', 'assigned', 'running')",
+             AND state IN ('queued', 'assigned', 'running') AND id <> $4",
         )
         .bind(&host_id)
         .bind(&policy_id)
         .bind(&guest.key)
+        .bind(job_id)
         .fetch_optional(&mut *tx)
         .await?
         .is_some();
@@ -688,7 +702,7 @@ async fn expand_guest_job(
         sqlx::query(
             "UPDATE jobs SET state = 'cancelled', finished_at = $1, error_code = 'coalesced', \
              error_message = 'Every selected container already has a job in progress.' \
-             WHERE id = $2 AND state = 'queued'",
+             WHERE id = $2 AND state = 'queued' AND source_ref = ''",
         )
         .bind(now_ms())
         .bind(job_id)
@@ -701,12 +715,19 @@ async fn expand_guest_job(
     let policy_name: Option<String> = row.try_get("policy_name")?;
     let queued_at: i64 = row.try_get("queued_at")?;
     let origin: String = row.try_get("origin")?;
-    sqlx::query("UPDATE jobs SET source_ref = $1, source_meta_json = $2 WHERE id = $3")
-        .bind(&first.key)
-        .bind(guest_meta(first))
-        .bind(job_id)
-        .execute(&mut *tx)
-        .await?;
+    let claimed = sqlx::query(
+        "UPDATE jobs SET source_ref = $1, source_meta_json = $2 \
+         WHERE id = $3 AND state = 'queued' AND source_ref = ''",
+    )
+    .bind(&first.key)
+    .bind(guest_meta(first))
+    .bind(job_id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if claimed == 0 {
+        return Ok(None);
+    }
     for guest in rest {
         insert_guest_job(
             &mut tx,
