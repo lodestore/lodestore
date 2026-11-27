@@ -7,8 +7,9 @@ ready:
   - Server as a container, a static binary or a Helm chart
   - SQLite catalog by default, PostgreSQL for production
 limits:
-  - title: Proxmox VM and CT backup
+  - title: Proxmox VM backup
     status: Next
+    note: Proxmox VE containers come with the next release.
   - title: Kubernetes operator
     status: Next
   - title: Native database backup (PostgreSQL first)

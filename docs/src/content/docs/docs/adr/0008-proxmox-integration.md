@@ -39,7 +39,7 @@ backups to this storage are started by Lodestore; start this backup from Lodesto
 
 A job from the GUI or the API (through `pveproxy` and `pvedaemon`) and a scheduled job from Datacenter → Backup (`pvescheduler`) carry no token and fail with this text in their task log. A `pvesh create /nodes/{node}/vzdump` run as root also keeps the environment of its caller, because `pvesh` runs the API handler in its own process; the agent does not use it.
 
-`--protected 0` overrides `protected: 1` from the node's `vzdump.conf`; without it a node that marks every backup protected (common with PBS) fails every Lodestore backup, because the plugin does not support the attribute. Of the other keys of `vzdump.conf`, `exclude-path` and the standard excludes are applied by the agent (see "CT walk"), `bwlimit` arrives as `bandwidth-limit` in bytes per second and is applied to the agent's reads, `tmpdir` is the place of the copy in suspend mode, and `script` (a hook) runs as for any vzdump job. `--remove 0` keeps vzdump from pruning: deletion is the server's (see "Install and cluster").
+`--protected 0` overrides `protected: 1` from the node's `vzdump.conf`; without it a node that marks every backup protected (common with PBS) fails every Lodestore backup, because the plugin does not support the attribute. Of the other keys of `vzdump.conf`, `exclude-path` and the standard excludes are applied by the agent (see "CT walk"), `bwlimit` arrives as `bandwidth-limit` in bytes per second (the agent does not apply it to its reads yet), `tmpdir` is the place of the copy in suspend mode, and `script` (a hook) runs as for any vzdump job. `--remove 0` keeps vzdump from pruning: deletion is the server's (see "Install and cluster").
 
 ### Socket protocol
 
@@ -121,17 +121,17 @@ The type of a mount point comes from the parsed `volume`, by the rule of `classi
 
 For `netN` the filter keeps an allowlist of subkeys. `bridge` must exist on the target node (`/sys/class/net/{bridge}/bridge`, present for a Linux bridge and for an applied SDN vnet); otherwise the interface is dropped. `hwaddr` and `firewall` come from Proxmox VE for a new container (a new MAC, firewall off) and from the target for a replacement. The network connections that stay are shown in the preview and the report. `features` keeps `nesting=1` only. `meta` is kept as it is. A key repeated in the main section keeps its last line, as Proxmox VE does, so the filtered configuration has the identity Proxmox VE reads from the snapshot's.
 
-A differential test on the nested lab feeds a corpus of hostile configurations through the filter and then through `PVE::LXC::Config::parse_pct_config` and asserts that every mount point is of type `volume` and that no `lxc`, `hookscript`, `dev*` or `env` key and no feature other than `nesting` survives (25-15).
+A differential test on the nested lab feeds a corpus of hostile configurations through the filter and then through `PVE::LXC::Config::parse_pct_config` and asserts that every mount point is of type `volume` and that no `lxc`, `hookscript`, `dev*` or `env` key and no feature other than `nesting` survives ([How we test](/docs/security/how-we-test/#proxmox-ve-containers-on-a-nested-lab)).
 
 ### Install and cluster
 
-`lodestore-agent pve install` installs the two Perl files atomically on its node, then writes a marker into pmxcfs, `/etc/pve/lodestore/plugin/{node}`, with `{agent_version} {provider_protocol} {blake3 of both Perl files} {pve_manager_version}`. It waits until every node of `/etc/pve/.members` has a marker with the same plugin version and pve-manager 9.2.33 or later, and only then adds the storage:
+`lodestore-agent pve install` installs the two Perl files atomically on its node, reloads `pvedaemon`, `pveproxy`, `pvestatd` and `pvescheduler` (`systemctl reload-or-restart`), then writes a marker into pmxcfs, `/etc/pve/lodestore/plugin/{node}`, with `{agent_version} {provider_protocol} {blake3 of both Perl files} {pve_manager_version}`. It waits until every node of `/etc/pve/.members` has a marker with the same plugin version and pve-manager 9.2.33 or later, and only then adds the storage:
 
 ```
-pvesm add lodestore lodestore --prune-backups keep-all=1
+pvesm add lodestore lodestore --content backup --prune-backups keep-all=1
 ```
 
-and reloads `pvedaemon`, `pveproxy`, `pvestatd` and `pvescheduler` (`systemctl reload-or-restart`). The waiting is required: a node without the plugin skips the section of the shared `storage.cfg` ("skip section 'lodestore': unsupported type"), and the first write of `storage.cfg` from that node (any `pvesm add` or GUI change) rewrites the file without it, for the whole cluster. The same happens with a node that joins the cluster later. The reload is required too: the CLI tools load the plugin at start, the long-running services only after a reload.
+The reload runs on every run, before the marker, also when the files did not change, so that a run after a failure completes it. The waiting is required: a node without the plugin skips the section of the shared `storage.cfg` ("skip section 'lodestore': unsupported type"), and the first write of `storage.cfg` from that node (any `pvesm add` or GUI change) rewrites the file without it, for the whole cluster. The same happens with a node that joins the cluster later. The reload is required too: the CLI tools load the plugin at start, the long-running services only after a reload.
 
 `free_image` and `prune_backups` of the plugin refuse ("deletion is managed by the Lodestore server"), so neither the GUI nor vzdump can delete through it. A Proxmox VE cluster is one zone of trust: root on any node can change `/etc/pve` and the plugin files of every node.
 
@@ -150,7 +150,7 @@ Without the server or an agent, a container is recovered with `lode` and Proxmox
 3. `tar --numeric-owner --acls --xattrs -cpf /var/lib/vz/dump/vzdump-lxc-{vmid}-{date}.tar -C fs .`
 4. `pct restore {vmid} /var/lib/vz/dump/vzdump-lxc-{vmid}-{date}.tar --storage {st} --unprivileged 1 --unique 1`
 
-The tree is in the container's view, so the files keep their owners once Proxmox VE unpacks the archive in the container's namespace. The end-to-end test runs this path (25-15).
+The tree is in the container's view, so the files keep their owners once Proxmox VE unpacks the archive in the container's namespace. The end-to-end test runs this path ([How we test](/docs/security/how-we-test/#proxmox-ve-containers-on-a-nested-lab)).
 
 ## Names
 
