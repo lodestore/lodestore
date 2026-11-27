@@ -65,6 +65,8 @@ struct MembersCluster {
 
 #[derive(Deserialize)]
 struct VmList {
+    /// pmxcfs leaves the key out while the cluster has no guest.
+    #[serde(default)]
     ids: HashMap<String, VmListEntry>,
 }
 
@@ -1313,6 +1315,16 @@ mod tests {
         pve.write(".members", r#"{"version": 3}"#);
         assert!(pve.scan().is_err(), ".members without nodename");
         unchanged();
+    }
+
+    #[test]
+    fn vmlist_of_a_node_without_guests_has_no_ids() {
+        let pve = Pve::new();
+        pve.members("pve1", None);
+        pve.write(".vmlist", "{\n\"version\": 1\n}\n");
+        let found = pve.found();
+        assert!(found.proxmox.guests.is_empty());
+        assert!(!found.truncated);
     }
 
     #[test]
