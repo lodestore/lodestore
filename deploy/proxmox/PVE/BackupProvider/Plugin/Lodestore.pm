@@ -16,6 +16,7 @@ use base qw(PVE::BackupProvider::Plugin::Base);
 
 use constant PROTOCOL => 1;
 use constant DEFAULT_SOCKET => '/run/lodestore/agent.sock';
+use constant AGENT_CONFIG => '/etc/lodestore/agent.yaml';
 
 my $json = JSON::PP->new->utf8->canonical;
 
@@ -26,9 +27,29 @@ sub untaint {
     return $value =~ $pattern ? $1 : undef;
 }
 
+my $SOCKET_PATH = qr{^(/[A-Za-z0-9._/-]+)\z};
+
+sub agent_config {
+    return AGENT_CONFIG;
+}
+
+# The top-level `socket:` of agent.yaml, for callers that vzdump did not start
+# and so have no LODESTORE_AGENT_SOCKET (pvestatd, pvedaemon).
+sub configured_socket {
+    open(my $fh, '<', agent_config()) or return undef;
+    my $path;
+    while (my $line = <$fh>) {
+        next if $line !~ /^socket:[ \t]*(['"]?)([^'"#\s]+)\1[ \t]*(?:#.*)?$/;
+        $path = untaint($2, $SOCKET_PATH);
+        last;
+    }
+    close($fh);
+    return $path;
+}
+
 sub socket_path {
-    my $path = untaint($ENV{LODESTORE_AGENT_SOCKET}, qr{^(/[A-Za-z0-9._/-]+)\z});
-    return $path // DEFAULT_SOCKET;
+    return untaint($ENV{LODESTORE_AGENT_SOCKET}, $SOCKET_PATH) // configured_socket()
+        // DEFAULT_SOCKET;
 }
 
 sub job_token {

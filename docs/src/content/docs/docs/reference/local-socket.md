@@ -92,7 +92,7 @@ The snapshot written through the agent has no parent snapshot, because the agent
 
 ## Proxmox provider operations
 
-On a Proxmox VE node the agent installs a backup provider (a Perl module that vzdump and `pct restore` load through the `lodestore` storage). The provider only passes messages: it holds no repository key and writes no backup data. It talks to the agent over this socket with these operations:
+On a Proxmox VE node the agent installs a backup provider (a Perl module that vzdump and `pct restore` load through the `lodestore` storage). The provider only passes messages: it holds no repository key and writes no backup data. The provider and the storage plugin find the socket in `LODESTORE_AGENT_SOCKET`, which the agent sets for the processes it starts, then in `socket` of `/etc/lodestore/agent.yaml`, then at `/run/lodestore/agent.sock`. The storage counts as active only while a connection to the socket succeeds, so a socket file left by a stopped agent does not. It talks to the agent over this socket with these operations:
 
 | `op` | Called when | Fields besides `v` and `token` |
 | --- | --- | --- |

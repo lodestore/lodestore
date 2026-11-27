@@ -540,6 +540,58 @@ fn pve_plugin_refuses_deletion() {
     assert!(run("18").contains("api: 17"));
 }
 
+#[test]
+fn pve_plugin_finds_the_agent_socket_as_the_provider_does() {
+    let proxmox = proxmox_dir();
+    let dir = short_socket_dir();
+    let live = dir.path().join("live.sock");
+    let stale = dir.path().join("stale.sock");
+    let _listener = std::os::unix::net::UnixListener::bind(&live).unwrap();
+    drop(std::os::unix::net::UnixListener::bind(&stale).unwrap());
+    let config = dir.path().join("agent.yaml");
+    let script = r#"
+        use PVE::Storage::Custom::LodestorePlugin;
+        no warnings 'redefine';
+        *PVE::BackupProvider::Plugin::Lodestore::agent_config = sub { $ENV{TEST_AGENT_CONFIG} };
+        my $p = 'PVE::Storage::Custom::LodestorePlugin';
+        my $active = ($p->status('lodestore', {}, {}))[3];
+        my $ok = eval { $p->activate_storage('lodestore', {}, {}) } ? 'yes' : "no: $@";
+        print "active=$active activate=$ok\n";
+    "#;
+    let run = |yaml: &str, env: Option<&Path>| {
+        std::fs::write(&config, yaml).unwrap();
+        let mut command = std::process::Command::new("perl");
+        command
+            .arg("-I")
+            .arg(proxmox.join("t/stubs"))
+            .arg("-I")
+            .arg(&proxmox)
+            .arg("-e")
+            .arg(script)
+            .env("TEST_AGENT_CONFIG", &config)
+            .env_remove("LODESTORE_AGENT_SOCKET");
+        if let Some(path) = env {
+            command.env("LODESTORE_AGENT_SOCKET", path);
+        }
+        let output = command.output().expect("perl is needed for these tests");
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let up = "active=1 activate=yes\n";
+    let yaml = |path: &Path| format!("server: https://x\nsocket: {}\n", path.display());
+    assert_eq!(run(&yaml(&live), None), up);
+    assert_eq!(run(&format!("socket: '{}'\n", live.display()), None), up);
+    assert_eq!(run("", Some(&live)), up);
+    assert_eq!(run(&yaml(&stale), Some(&live)), up, "the environment wins");
+    for (yaml_text, env) in [(yaml(&stale), None), (yaml(&live), Some(stale.as_path()))] {
+        let out = run(&yaml_text, env);
+        assert!(
+            out.starts_with("active=0 activate=no: the Lodestore agent is not running"),
+            "a stale socket file is no agent: {out}"
+        );
+    }
+}
+
 const RESTORE_ID: &str = "0123456789abcdef0123456789abcdef";
 
 struct PctRun {
