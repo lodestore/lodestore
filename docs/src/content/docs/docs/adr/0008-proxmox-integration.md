@@ -135,7 +135,7 @@ and reloads `pvedaemon`, `pveproxy`, `pvestatd` and `pvescheduler` (`systemctl r
 
 `free_image` and `prune_backups` of the plugin refuse ("deletion is managed by the Lodestore server"), so neither the GUI nor vzdump can delete through it. A Proxmox VE cluster is one zone of trust: root on any node can change `/etc/pve` and the plugin files of every node.
 
-The health of the plugin is checked at every discovery and before every backup: the files are in place, their hash matches the marker and the protocol is supported. Nodes of `.members` without a marker are reported in the facts. The server does not hand a container job to a node without the plugin (`guest_plugin_missing`) and opens the warning `pve_plugin_missing`. The docs say to install the plugin on a new node before `pvecm add`.
+The health of the plugin is checked at every discovery and before every backup: the files are in place, their hash matches the marker and the protocol is supported. Nodes of `.members` without a marker are reported in the facts. The server does not hand a container job to a node without the plugin (`guest_plugin_missing`) and opens the warning `pve_plugin_missing` for clusters that a guest policy covers. The docs say to install the plugin on a new node before `pvecm add`.
 
 ### Job model
 

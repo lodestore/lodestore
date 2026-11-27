@@ -2181,6 +2181,7 @@ async fn pve_plugin_missing_node_without_marker() {
         let t0 = now_ms();
         env.host("h1", "pve-01").await;
         env.host("h2", "pve-02").await;
+        env.ct_policy("cts", "h1", "200").await;
         let members =
             |third: &'static str| [("pve-01", MARKER), ("pve-02", MARKER), ("pve-03", third)];
         for (host, node) in [("h1", "pve-01"), ("h2", "pve-02")] {
@@ -2224,12 +2225,42 @@ async fn pve_plugin_missing_node_without_marker() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pve_plugin_missing_needs_a_guest_policy() {
+    for backend in backends() {
+        let name = backend.name();
+        let env = Env::start(&backend).await;
+        let t0 = now_ms();
+        env.host("h1", "pve-01").await;
+        let members = [("pve-01", MARKER), ("pve-03", "")];
+        env.pve_facts("h1", ("c1", "pve-01"), &members, (false, false), false, t0)
+            .await;
+        env.tick(t0).await;
+        assert!(env.plugin_alerts("firing").await.is_empty(), "[{name}]");
+
+        env.ct_policy("cts", "h1", "200").await;
+        env.pve_facts(
+            "h1",
+            ("c1", "pve-01"),
+            &members,
+            (false, false),
+            false,
+            t0 + HOUR,
+        )
+        .await;
+        env.tick(t0 + HOUR).await;
+        assert_eq!(env.plugin_alerts("firing").await.len(), 2, "[{name}]");
+        env.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pve_plugin_missing_host_unhealthy() {
     for backend in backends() {
         let name = backend.name();
         let env = Env::start(&backend).await;
         let t0 = now_ms();
         env.host("h2", "pve-02").await;
+        env.ct_policy("cts", "h2", "200").await;
         let members = [("pve-01", MARKER), ("pve-02", MARKER)];
         env.pve_facts("h2", ("c1", "pve-02"), &members, (false, false), false, t0)
             .await;
@@ -2280,6 +2311,7 @@ async fn pve_plugin_missing_unknown_list() {
         let env = Env::start(&backend).await;
         let t0 = now_ms();
         env.host("h1", "pve-01").await;
+        env.ct_policy("cts", "h1", "200").await;
         let members = [("pve-01", MARKER), ("pve-03", "")];
         env.pve_facts("h1", ("c1", "pve-01"), &members, (true, true), false, t0)
             .await;

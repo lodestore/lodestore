@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use anyhow::Context;
 use lodestore_policy::BackupPolicy;
 use lodestore_policy::jiff::Timestamp;
-use lodestore_policy::source;
+use lodestore_policy::source::{self, Source};
 use serde_json::Value;
 use sqlx::Row;
 
@@ -37,6 +37,8 @@ pub struct Inputs {
     pub plugins: Vec<PluginFinding>,
     /// Names of the Proxmox clusters and nodes whose plugin state was read this pass.
     pub plugin_scopes: HashSet<String>,
+    /// Hosts a Proxmox guest policy applies to; the plugin alert watches only their clusters.
+    pub guest_policy_hosts: HashSet<String>,
 }
 
 /// A guest that was protected and is not any more.
@@ -918,6 +920,15 @@ async fn watch_guests(
     for agent in load_agents(state).await? {
         let host = agent.row.id.as_str();
         let stored = tracked.remove(host).unwrap_or_default();
+        let guest_policy = !unreadable.is_empty()
+            || policies
+                .iter()
+                .filter(|p| agent.row.applies(&p.repository_id, &p.policy.spec.selector))
+                .filter_map(|p| source::normalized(&p.policy.spec.source))
+                .any(|s| matches!(s, Source::ProxmoxCt(_) | Source::ProxmoxVm(_)));
+        if guest_policy {
+            inputs.guest_policy_hosts.insert(host.to_owned());
+        }
         let list = complete_list(sources, host, now_ms).filter(|_| unreadable.is_empty());
         let unselected: Vec<&Guest> = list
             .and_then(|s| s.discovery.proxmox.as_ref())
@@ -969,7 +980,7 @@ async fn watch_guests(
     Ok(())
 }
 
-/// Plugin state of the Proxmox nodes. The facts of a cluster come from its hosts with a fresh, complete list; the host with the smallest node name carries the alert of a node that has no agent of its own.
+/// Plugin state of the Proxmox nodes of clusters that a guest policy covers. The facts of a cluster come from its hosts with a fresh, complete list; the host with the smallest node name carries the alert of a node that has no agent of its own.
 fn watch_plugins(sources: &HashMap<String, AgentSources>, inputs: &mut Inputs, now_ms: i64) {
     let mut scopes: BTreeMap<&str, Vec<(String, &str, &ProxmoxNode)>> = BTreeMap::new();
     for host in &inputs.hosts {
@@ -991,6 +1002,12 @@ fn watch_plugins(sources: &HashMap<String, AgentSources>, inputs: &mut Inputs, n
     let mut seen = HashSet::new();
     for (scope, mut hosts) in scopes {
         seen.insert(scope.to_owned());
+        if !hosts
+            .iter()
+            .any(|(_, host, _)| inputs.guest_policy_hosts.contains(*host))
+        {
+            continue;
+        }
         hosts.sort_by(|a, b| (a.0.is_empty(), &a.0, a.1).cmp(&(b.0.is_empty(), &b.0, b.1)));
         let carrier = hosts[0].1;
         let view = hosts[0].2;
