@@ -1,4 +1,5 @@
 pub mod api;
+pub mod guest_restore;
 pub mod restore;
 
 use std::collections::{BTreeMap, HashSet};
@@ -259,6 +260,8 @@ pub struct RestoreInfo {
     pub other_repository: bool,
     pub items: u64,
     pub started_by: String,
+    /// The guest the restore creates or replaces; absent for a restore of files.
+    pub guest: Option<guest_restore::GuestRestoreInfo>,
 }
 
 #[derive(Serialize, Deserialize, ToSchema, Default)]
@@ -269,6 +272,8 @@ pub struct RestoreResultDto {
     pub skipped: u64,
     pub files: u64,
     pub bytes: u64,
+    /// What the agent reports about the guest it restored.
+    pub guest: Option<guest_restore::GuestResultDto>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -1137,6 +1142,12 @@ fn restore_info(record: RestoreRecord, target_repository: &str) -> RestoreInfo {
         in_place: record.in_place,
         restore_owners: record.restore_owners,
         started_by: record.started_by,
+        guest: record.guest.map(|g| guest_restore::GuestRestoreInfo {
+            node: g.node,
+            vmid: g.vmid,
+            storage: g.storage,
+            replace: g.replace,
+        }),
     }
 }
 

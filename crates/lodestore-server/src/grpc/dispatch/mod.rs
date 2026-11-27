@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::catalog::RepositoryUnavailable;
 use crate::db::now_ms;
-use crate::grpc::registry::{CAP_GC, CAP_LIMITS, CAP_RESTORE};
+use crate::grpc::registry::{CAP_GC, CAP_GUEST_RESTORE_CT, CAP_LIMITS, CAP_RESTORE};
 use crate::jobs::restore::RestoreRecord;
 use crate::jobs::source_of;
 use crate::maintenance::attest::load_distrusted;
@@ -215,6 +215,19 @@ pub async fn assign_queued(state: &AppState, only_agent: Option<&str>) -> anyhow
             let record = row
                 .try_get::<Option<String>, _>("restore_json")?
                 .and_then(|json| serde_json::from_str::<RestoreRecord>(&json).ok());
+            // A guest restore goes only to an agent that declares `guest_restore_ct_v1`.
+            if record.as_ref().is_some_and(|r| r.guest.is_some())
+                && !state.registry.supports(&host_id, CAP_GUEST_RESTORE_CT)
+            {
+                fail_job(
+                    state,
+                    &job_id,
+                    "restore_agent_outdated",
+                    "Update the agent on this host to restore containers to it.",
+                )
+                .await?;
+                continue;
+            }
             if record
                 .as_ref()
                 .is_some_and(|r| r.started_by.starts_with("token:"))

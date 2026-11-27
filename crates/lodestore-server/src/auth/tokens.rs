@@ -160,6 +160,13 @@ impl ScopeName for RestoreWrite {
     const NAME: &'static str = "restore:host or restore:in-place";
 }
 
+pub struct RestoreGuestWrite;
+
+impl ScopeName for RestoreGuestWrite {
+    const SCOPES: &'static [Scope] = &[Scope::RestoreGuest, Scope::RestoreGuestInPlace];
+    const NAME: &'static str = "restore:guest or restore:guest-in-place";
+}
+
 #[derive(Debug, Clone)]
 pub enum Principal {
     Session(AuthUser),

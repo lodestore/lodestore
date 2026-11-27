@@ -50,6 +50,31 @@ pub struct RestoreRecord {
     /// The disk to restore whole as `NAME.img`; absent for a restore of files.
     #[serde(default)]
     pub image: Option<String>,
+    /// The guest to create or replace; absent for a restore of files.
+    #[serde(default)]
+    pub guest: Option<GuestRestoreRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GuestRestoreRecord {
+    pub node: String,
+    pub vmid: u32,
+    pub storage: String,
+    pub replace: bool,
+    /// The target of a replace as the user confirmed it.
+    pub expected: Option<ExpectedTarget>,
+    /// (uid of the snapshot, uid of the target), empty for none.
+    pub confirm_other_guest: Option<(String, String)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExpectedTarget {
+    pub vmid: u32,
+    pub name: String,
+    pub pve_uid: String,
+    pub pve_rtime: u64,
+    pub instance_uuid: String,
+    pub volumes: Vec<crate::sources::VolumeLine>,
 }
 
 impl RestoreRecord {
@@ -317,6 +342,7 @@ pub async fn enqueue_restore_checked(
         restore_owners: req.restore_owners,
         started_by: started_by.to_string(),
         image,
+        guest: None,
     };
     let spec = RestoreSpec {
         snapshot_id: req.snapshot_id,
@@ -329,16 +355,25 @@ pub async fn enqueue_restore_checked(
         target: None,
         ..Default::default()
     };
+    insert_restore_job(state, &req.target_host_id, &spec, &record).await
+}
+
+pub(crate) async fn insert_restore_job(
+    state: &AppState,
+    host_id: &str,
+    spec: &RestoreSpec,
+    record: &RestoreRecord,
+) -> Result<String, ApiError> {
     let id = uuid::Uuid::now_v7().to_string();
     sqlx::query(
         "INSERT INTO jobs (id, host_id, source, state, spec, queued_at, kind, restore_json) \
          VALUES ($1, $2, 'manual', 'queued', $3, $4, 'restore', $5)",
     )
     .bind(&id)
-    .bind(&req.target_host_id)
+    .bind(host_id)
     .bind(spec.encode_to_vec())
     .bind(now_ms())
-    .bind(serde_json::to_string(&record).map_err(anyhow::Error::from)?)
+    .bind(serde_json::to_string(record).map_err(anyhow::Error::from)?)
     .execute(&state.db.pool)
     .await?;
     Ok(id)
