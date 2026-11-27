@@ -89,17 +89,17 @@ fn failed(what: &str) -> impl FnOnce(io::Error) -> ScanFailed + '_ {
     move |e| ScanFailed(format!("{what} cannot be read: {e}"))
 }
 
-fn node_name_valid(name: &str) -> bool {
+pub(crate) fn node_name_valid(name: &str) -> bool {
     (1..=63).contains(&name.len()) && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
-struct MembersFile {
-    node: String,
+pub(crate) struct MembersFile {
+    pub node: String,
     cluster: Option<String>,
-    nodes: BTreeMap<String, bool>,
+    pub nodes: BTreeMap<String, bool>,
 }
 
-fn parse_members(bytes: &[u8]) -> Result<MembersFile, ScanFailed> {
+pub(crate) fn parse_members(bytes: &[u8]) -> Result<MembersFile, ScanFailed> {
     let members: Members = serde_json::from_slice(bytes)
         .map_err(|e| ScanFailed(format!(".members cannot be parsed: {e}")))?;
     if !node_name_valid(&members.nodename) {
@@ -685,7 +685,7 @@ fn next_vmid(roots: &ScanRoots, used: &HashSet<u32>, truncated: &mut bool) -> u3
 }
 
 /// The version of the installed `pve-manager` from the dpkg database.
-fn pve_manager_version(path: &Path) -> String {
+pub(crate) fn pve_manager_version(path: &Path) -> String {
     let Ok(file) = open_nofollow(path) else {
         return String::new();
     };

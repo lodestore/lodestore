@@ -4,7 +4,7 @@
 //! servers are asked over their local sockets (see `database`).
 
 mod database;
-mod proxmox;
+pub(crate) mod proxmox;
 
 use std::fs::File;
 use std::future::Future;

@@ -93,6 +93,15 @@ pub fn write_private_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         .parent()
         .ok_or_else(|| std::io::Error::other("path has no parent directory"))?;
     ensure_dir(dir)?;
+    write_atomic(path, bytes, 0o600)
+}
+
+/// Replaces `path` with `bytes` through a temporary file in the same
+/// directory, so a reader sees the old or the new content, never a mix.
+pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("path has no parent directory"))?;
     let name = path
         .file_name()
         .ok_or_else(|| std::io::Error::other("path has no file name"))?
@@ -102,9 +111,9 @@ pub fn write_private_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         .write(true)
         .create(true)
         .truncate(true)
-        .mode(0o600)
+        .mode(mode)
         .open(&tmp)?;
-    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    file.set_permissions(std::fs::Permissions::from_mode(mode))?;
     file.write_all(bytes)?;
     file.sync_all()?;
     std::fs::rename(&tmp, path)?;
