@@ -5,12 +5,12 @@
 use std::cmp::Ordering;
 use std::fmt;
 use std::io::{self, Write};
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::discovery::proxmox::{
-    PLUGIN_FILE, PLUGIN_MARKER_DIR, PROVIDER_FILE, node_name_valid, parse_members,
+    DPKG_STATUS, PLUGIN_FILE, PLUGIN_MARKER_DIR, PROVIDER_FILE, node_name_valid, parse_members,
     pve_manager_version,
 };
 use crate::discovery::{MAX_PLUGIN_MARKER, MAX_PVE_FILE_BYTES, read_bounded};
@@ -28,6 +28,14 @@ pub(crate) const PROVIDER_SOURCE: &str =
 const SERVICES: [&str; 4] = ["pvedaemon", "pveproxy", "pvestatd", "pvescheduler"];
 const MAX_PERL_FILE: u64 = 1 << 20;
 const MAX_AGENT_YAML: u64 = 1 << 20;
+/// The directories of Debian's `@INC` that come before `/usr/share/perl5`,
+/// relative to the system root; `*` is the versioned subdirectory.
+const PERL_INC_BEFORE: [&str; 4] = [
+    "etc/perl",
+    "usr/local/lib/x86_64-linux-gnu/perl/*",
+    "usr/local/share/perl/*",
+    "usr/lib/x86_64-linux-gnu/perl5/*",
+];
 const POLL: Duration = Duration::from_secs(2);
 const PRINT_EVERY: Duration = Duration::from_secs(30);
 
@@ -210,6 +218,9 @@ pub enum PluginHealth {
     Changed,
     /// The marker names a provider protocol this agent does not speak.
     Unsupported,
+    /// Perl may load other code: a copy of a file earlier in `@INC`, or a
+    /// file or directory that someone other than root can change.
+    Untrusted,
 }
 
 impl PluginHealth {
@@ -232,19 +243,81 @@ pub fn plugin_health(pve: &Path, perl: &Path, node: &str) -> PluginHealth {
     let Ok(Some(line)) = read_marker(pve, node) else {
         return PluginHealth::Missing;
     };
+    let sys = system_root(perl);
+    if let Some(path) = shadowing_copy(sys).or_else(|| writable_by_others(perl)) {
+        tracing::warn!(
+            path = %path.display(),
+            "Perl may load other code than the Lodestore plugin files; remove the copy or make it writable by root only, then run lodestore-agent pve install"
+        );
+        return PluginHealth::Untrusted;
+    }
     let Some(marker) = parse_marker(&line) else {
         return PluginHealth::Changed;
     };
     let hash = plugin_hash(&plugin, &provider);
+    let pve_manager = pve_manager_version(&sys.join(&DPKG_STATUS[1..]));
     if marker.hash != hash {
         PluginHealth::Changed
     } else if !(MIN_PROVIDER_PROTOCOL..=PROVIDER_PROTOCOL).contains(&marker.protocol) {
         PluginHealth::Unsupported
-    } else if hash != embedded_plugin_hash() {
+    } else if hash != embedded_plugin_hash()
+        || (!pve_manager.is_empty() && pve_manager != marker.pve_manager)
+    {
         PluginHealth::Outdated
     } else {
         PluginHealth::Ok
     }
+}
+
+/// `/` for `/usr/share/perl5`; for a root elsewhere (tests), its parent.
+fn system_root(perl: &Path) -> &Path {
+    let root = if perl.ends_with("usr/share/perl5") {
+        perl.ancestors().nth(3)
+    } else {
+        perl.parent()
+    };
+    root.unwrap_or(perl)
+}
+
+/// A plugin file in a directory Perl searches before the installed one.
+fn shadowing_copy(sys: &Path) -> Option<PathBuf> {
+    PERL_INC_BEFORE
+        .iter()
+        .flat_map(|entry| match entry.strip_suffix("/*") {
+            Some(base) => std::fs::read_dir(sys.join(base))
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| e.path())
+                .collect(),
+            None => vec![sys.join(entry)],
+        })
+        .flat_map(|dir| [dir.join(PLUGIN_FILE), dir.join(PROVIDER_FILE)])
+        .find(|path| std::fs::symlink_metadata(path).is_ok())
+}
+
+/// Whether someone other than root can change `meta`'s file. The agent's own
+/// uid counts as root so tests run unprivileged; in production it is root.
+fn unsafe_owner_or_mode(meta: &std::fs::Metadata) -> bool {
+    let uid = meta.uid();
+    meta.file_type().is_symlink()
+        || (uid != 0 && uid != rustix::process::geteuid().as_raw())
+        || meta.mode() & 0o022 != 0
+}
+
+/// The first plugin file, or directory from it up to `perl`, that someone
+/// other than root can change.
+fn writable_by_others(perl: &Path) -> Option<PathBuf> {
+    [PLUGIN_FILE, PROVIDER_FILE]
+        .iter()
+        .flat_map(|rel| {
+            let file = perl.join(rel);
+            file.ancestors()
+                .take_while(|p| p.starts_with(perl))
+                .map(Path::to_path_buf)
+                .collect::<Vec<_>>()
+        })
+        .find(|p| std::fs::symlink_metadata(p).is_ok_and(|m| unsafe_owner_or_mode(&m)))
 }
 
 /// Sets `restore.allow_guest_in_place: true` in this node's `agent.yaml` and
@@ -357,20 +430,43 @@ fn new_enough(version: &str) -> bool {
     !version.is_empty() && compare_versions(version, MIN_PVE_MANAGER) != Ordering::Less
 }
 
-/// Writes `bytes` unless the file already holds exactly them.
-fn put_file(path: &Path, bytes: &[u8], mode: u32) -> Result<bool, InstallError> {
-    match read_bounded(path, bytes.len() as u64) {
-        Ok(current) if current == bytes => return Ok(false),
-        _ => {}
+/// Writes `root/rel` unless it already holds exactly `bytes`, then makes it
+/// and its directories up to `root` writable by root only.
+fn put_file(root: &Path, rel: &str, bytes: &[u8], mode: u32) -> Result<bool, InstallError> {
+    let path = root.join(rel);
+    let same = matches!(read_bounded(&path, bytes.len() as u64), Ok(current) if current == bytes);
+    if !same {
+        let dir = path.parent().expect("a file under the root");
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o755)
+            .create(dir)
+            .map_err(failed(dir.display()))?;
+        write_atomic(&path, bytes, mode).map_err(failed(path.display()))?;
     }
-    let dir = path.parent().expect("a file under the root");
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o755)
-        .create(dir)
-        .map_err(failed(dir.display()))?;
-    write_atomic(path, bytes, mode).map_err(failed(path.display()))?;
-    Ok(true)
+    for p in path.ancestors().take_while(|p| p.starts_with(root)) {
+        let meta = std::fs::symlink_metadata(p).map_err(failed(p.display()))?;
+        if meta.file_type().is_symlink() {
+            return Err(InstallError::Failed(format!(
+                "{} is a symbolic link; replace it with a directory",
+                p.display()
+            )));
+        }
+        if meta.uid() != 0 && rustix::process::geteuid().is_root() {
+            rustix::fs::chown(p, Some(rustix::fs::Uid::ROOT), None)
+                .map_err(|e| failed(p.display())(e.into()))?;
+        }
+        let want = if p == path {
+            mode
+        } else {
+            meta.mode() & 0o7777 & !0o022
+        };
+        if meta.mode() & 0o7777 != want {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(want))
+                .map_err(failed(p.display()))?;
+        }
+    }
+    Ok(!same)
 }
 
 /// pmxcfs takes `mkdir`, writes and `rename`, but sets the modes itself and
@@ -475,7 +571,7 @@ pub fn install(
         (PLUGIN_FILE, PLUGIN_SOURCE),
         (PROVIDER_FILE, PROVIDER_SOURCE),
     ] {
-        put_file(&roots.perl.join(rel), source.as_bytes(), 0o644)?;
+        put_file(&roots.perl, rel, source.as_bytes(), 0o644)?;
     }
     let mut reload = vec!["systemctl", "reload-or-restart"];
     reload.extend(SERVICES);
@@ -595,10 +691,11 @@ mod tests {
             let roots = InstallRoots {
                 pve: tmp.path().join("pve"),
                 perl: tmp.path().join("perl5"),
-                dpkg_status: tmp.path().join("dpkg-status"),
+                dpkg_status: tmp.path().join(&DPKG_STATUS[1..]),
                 agent_yaml: tmp.path().join("etc/agent.yaml"),
             };
             std::fs::create_dir_all(&roots.pve).unwrap();
+            std::fs::create_dir_all(roots.dpkg_status.parent().unwrap()).unwrap();
             let members = serde_json::json!({
                 "nodename": "pve-01",
                 "version": 5,
@@ -972,6 +1069,109 @@ mod tests {
 
         std::fs::remove_file(pve.join("lodestore/plugin/pve-01")).unwrap();
         assert_eq!(plugin_health(pve, perl, "pve-01"), PluginHealth::Missing);
+    }
+
+    fn installed() -> Cluster {
+        let cluster = ready_cluster();
+        cluster
+            .run(Duration::from_secs(5), &Recorder::default())
+            .0
+            .unwrap();
+        let (pve, perl) = (&cluster.roots.pve, &cluster.roots.perl);
+        assert_eq!(plugin_health(pve, perl, "pve-01"), PluginHealth::Ok);
+        cluster
+    }
+
+    #[test]
+    fn pve_plugin_health_sees_shadowing_copies() {
+        let cluster = installed();
+        let (pve, perl) = (&cluster.roots.pve, &cluster.roots.perl);
+        let sys = perl.parent().unwrap();
+        for (dir, rel) in [
+            ("etc/perl", PLUGIN_FILE),
+            ("usr/local/lib/x86_64-linux-gnu/perl/5.40.1", PROVIDER_FILE),
+            ("usr/local/share/perl/5.40.1", PLUGIN_FILE),
+            ("usr/lib/x86_64-linux-gnu/perl5/5.40", PROVIDER_FILE),
+        ] {
+            let copy = sys.join(dir).join(rel);
+            std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
+            std::fs::write(&copy, "package Other;\n").unwrap();
+            assert_eq!(
+                plugin_health(pve, perl, "pve-01"),
+                PluginHealth::Untrusted,
+                "{dir}"
+            );
+            assert!(!PluginHealth::Untrusted.usable());
+            std::fs::remove_file(&copy).unwrap();
+        }
+        assert_eq!(plugin_health(pve, perl, "pve-01"), PluginHealth::Ok);
+    }
+
+    #[test]
+    fn pve_plugin_health_wants_files_only_root_can_write() {
+        let cluster = installed();
+        let (pve, perl) = (&cluster.roots.pve, &cluster.roots.perl);
+        let set = |path: &Path, mode: u32| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        let plugin = perl.join(PLUGIN_FILE);
+        for (path, mode, back) in [
+            (plugin.clone(), 0o664, 0o644),
+            (plugin.parent().unwrap().to_path_buf(), 0o777, 0o755),
+            (perl.join("PVE"), 0o775, 0o755),
+            (perl.clone(), 0o757, 0o755),
+        ] {
+            set(&path, mode);
+            assert_eq!(
+                plugin_health(pve, perl, "pve-01"),
+                PluginHealth::Untrusted,
+                "{}",
+                path.display()
+            );
+            cluster
+                .run(Duration::from_secs(5), &Recorder::default())
+                .0
+                .unwrap();
+            assert_eq!(plugin_health(pve, perl, "pve-01"), PluginHealth::Ok);
+            let mode_now = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode_now, back, "{}", path.display());
+        }
+    }
+
+    #[test]
+    #[ignore = "needs root"]
+    fn pve_root_plugin_health_wants_root_owned_files() {
+        let cluster = installed();
+        let (pve, perl) = (&cluster.roots.pve, &cluster.roots.perl);
+        let nobody = Some(rustix::fs::Uid::from_raw(65534));
+        for path in [perl.join(PROVIDER_FILE), perl.join("PVE/BackupProvider")] {
+            rustix::fs::chown(&path, nobody, None).unwrap();
+            assert_eq!(
+                plugin_health(pve, perl, "pve-01"),
+                PluginHealth::Untrusted,
+                "{}",
+                path.display()
+            );
+            cluster
+                .run(Duration::from_secs(5), &Recorder::default())
+                .0
+                .unwrap();
+            assert_eq!(std::fs::metadata(&path).unwrap().uid(), 0);
+            assert_eq!(plugin_health(pve, perl, "pve-01"), PluginHealth::Ok);
+        }
+    }
+
+    #[test]
+    fn pve_plugin_health_outdated_after_pve_upgrade() {
+        let cluster = installed();
+        let (pve, perl) = (&cluster.roots.pve, &cluster.roots.perl);
+        std::fs::write(&cluster.roots.dpkg_status, dpkg_status("9.3.1")).unwrap();
+        assert_eq!(plugin_health(pve, perl, "pve-01"), PluginHealth::Outdated);
+        cluster
+            .run(Duration::from_secs(5), &Recorder::default())
+            .0
+            .unwrap();
+        assert_eq!(plugin_health(pve, perl, "pve-01"), PluginHealth::Ok);
     }
 
     #[test]

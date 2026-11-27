@@ -9,13 +9,13 @@ package PVE::Storage::Custom::LodestorePlugin;
 use strict;
 use warnings;
 
+use IO::Socket::UNIX;
 use PVE::Storage;
 use PVE::Storage::Plugin;
 use PVE::BackupProvider::Plugin::Lodestore;
 
 use base qw(PVE::Storage::Plugin);
 
-use constant SOCKET => '/run/lodestore/agent.sock';
 use constant STAGING => '/var/lib/lodestore/pve-staging';
 
 my $NOT_SUPPORTED = "not supported by Lodestore storage\n";
@@ -73,8 +73,14 @@ sub path {
     return (STAGING . "/$name", $vmid, $type);
 }
 
+# A socket file left behind by an agent that stopped does not count.
 sub agent_running {
-    return -S SOCKET;
+    my $sock = IO::Socket::UNIX->new(
+        Peer => PVE::BackupProvider::Plugin::Lodestore::socket_path(),
+        Timeout => 2,
+    ) or return 0;
+    close($sock);
+    return 1;
 }
 
 sub status {

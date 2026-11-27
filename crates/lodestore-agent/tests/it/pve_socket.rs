@@ -392,6 +392,39 @@ async fn pve_socket_idle_first_line() {
     assert_eq!(reply["code"], "bad_request", "{reply}");
 }
 
+/// Connects `count` times as `nobody`. Only the calling thread changes its
+/// uid: the raw syscall, unlike `setuid(3)`, does not reach the other threads.
+fn connect_as_nobody(path: &Path, count: usize) -> Vec<Client> {
+    let path = path.to_path_buf();
+    std::thread::spawn(move || {
+        let nobody: libc::uid_t = 65534;
+        // SAFETY: a plain syscall on this thread's own credentials.
+        let rc = unsafe { libc::syscall(libc::SYS_setresuid, nobody, nobody, nobody) };
+        assert_eq!(rc, 0, "{}", std::io::Error::last_os_error());
+        (0..count).map(|_| Client::connect(&path)).collect()
+    })
+    .join()
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs root"]
+async fn pve_root_socket_idle_non_root_cannot_starve_root() {
+    use std::os::unix::fs::PermissionsExt;
+    let run = start_with(PveSessions::new(0)).await;
+    for path in [run.socket.parent().unwrap(), &run.socket] {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o777)).unwrap();
+    }
+    let (token, _session) = run.pve.register_backup(200);
+    run.pve.set_spawned_pid(&token, std::process::id());
+    let _idle = connect_as_nobody(&run.socket, MAX_HANDLERS);
+    let mut over = connect_as_nobody(&run.socket, 1);
+    assert_eq!(code(&over[0].recv()), "busy");
+
+    let mut client = Client::connect(&run.socket);
+    assert_eq!(client.ask(&job_check(&token))["ok"], true);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn pve_socket_session_limit() {
     let run = start().await;
@@ -505,6 +538,58 @@ fn pve_plugin_refuses_deletion() {
     assert!(out.contains("api: 17"));
     assert!(run("12").contains("api: 12"));
     assert!(run("18").contains("api: 17"));
+}
+
+#[test]
+fn pve_plugin_finds_the_agent_socket_as_the_provider_does() {
+    let proxmox = proxmox_dir();
+    let dir = short_socket_dir();
+    let live = dir.path().join("live.sock");
+    let stale = dir.path().join("stale.sock");
+    let _listener = std::os::unix::net::UnixListener::bind(&live).unwrap();
+    drop(std::os::unix::net::UnixListener::bind(&stale).unwrap());
+    let config = dir.path().join("agent.yaml");
+    let script = r#"
+        use PVE::Storage::Custom::LodestorePlugin;
+        no warnings 'redefine';
+        *PVE::BackupProvider::Plugin::Lodestore::agent_config = sub { $ENV{TEST_AGENT_CONFIG} };
+        my $p = 'PVE::Storage::Custom::LodestorePlugin';
+        my $active = ($p->status('lodestore', {}, {}))[3];
+        my $ok = eval { $p->activate_storage('lodestore', {}, {}) } ? 'yes' : "no: $@";
+        print "active=$active activate=$ok\n";
+    "#;
+    let run = |yaml: &str, env: Option<&Path>| {
+        std::fs::write(&config, yaml).unwrap();
+        let mut command = std::process::Command::new("perl");
+        command
+            .arg("-I")
+            .arg(proxmox.join("t/stubs"))
+            .arg("-I")
+            .arg(&proxmox)
+            .arg("-e")
+            .arg(script)
+            .env("TEST_AGENT_CONFIG", &config)
+            .env_remove("LODESTORE_AGENT_SOCKET");
+        if let Some(path) = env {
+            command.env("LODESTORE_AGENT_SOCKET", path);
+        }
+        let output = command.output().expect("perl is needed for these tests");
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let up = "active=1 activate=yes\n";
+    let yaml = |path: &Path| format!("server: https://x\nsocket: {}\n", path.display());
+    assert_eq!(run(&yaml(&live), None), up);
+    assert_eq!(run(&format!("socket: '{}'\n", live.display()), None), up);
+    assert_eq!(run("", Some(&live)), up);
+    assert_eq!(run(&yaml(&stale), Some(&live)), up, "the environment wins");
+    for (yaml_text, env) in [(yaml(&stale), None), (yaml(&live), Some(stale.as_path()))] {
+        let out = run(&yaml_text, env);
+        assert!(
+            out.starts_with("active=0 activate=no: the Lodestore agent is not running"),
+            "a stale socket file is no agent: {out}"
+        );
+    }
 }
 
 const RESTORE_ID: &str = "0123456789abcdef0123456789abcdef";

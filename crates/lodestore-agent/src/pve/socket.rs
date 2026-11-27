@@ -211,6 +211,10 @@ impl PveSessions {
         self
     }
 
+    pub(crate) fn required_uid(&self) -> u32 {
+        self.required_uid
+    }
+
     pub(crate) fn first_line_timeout(&self) -> Duration {
         self.first_line
     }
@@ -337,6 +341,19 @@ impl PveSessions {
         peer: Peer,
     ) {
         let _ = stream.set_write_timeout(Some(REPLY_WAIT));
+        if peer.uid != self.required_uid {
+            tracing::warn!(
+                code = "forbidden",
+                uid = peer.uid,
+                pid = peer.pid,
+                "refused a Proxmox provider request"
+            );
+            send(
+                &stream,
+                &failure("forbidden", "only root may use this operation"),
+            );
+            return;
+        }
         let Some(_slot) = self.acquire() else {
             send(
                 &stream,
@@ -784,6 +801,20 @@ mod tests {
         let token = Token::generate();
         assert!(!format!("{token:?}").contains(token.expose()));
         assert!(is_token(token.expose()));
+    }
+
+    #[test]
+    fn non_root_is_refused_before_taking_a_slot() {
+        let sessions = Arc::new(PveSessions::new(0));
+        sessions.live.store(MAX_PVE_SESSIONS, Ordering::Release);
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let first = br#"{"v":1,"op":"pve_job_check","token":"x"}"#.to_vec();
+        sessions.serve_connection(ours, first, Peer { uid: 1, pid: None });
+        let mut reply = String::new();
+        BufReader::new(theirs).read_line(&mut reply).unwrap();
+        let reply: Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(reply["code"], "forbidden", "{reply}");
+        assert_eq!(sessions.live.load(Ordering::Acquire), MAX_PVE_SESSIONS);
     }
 
     #[test]

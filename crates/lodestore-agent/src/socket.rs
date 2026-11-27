@@ -243,7 +243,9 @@ pub async fn serve_with(
         }
     };
     tracing::info!(socket = %path.display(), "local socket ready");
-    let live = Arc::new(AtomicUsize::new(0));
+    // Root (the provider) has slots of its own, so other members of the
+    // socket group cannot hold them all with idle connections.
+    let (root_live, live) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
     loop {
         let accepted = tokio::select! {
             () = shutdown.cancelled() => break,
@@ -270,6 +272,11 @@ pub async fn serve_with(
         if stream.set_nonblocking(false).is_err() {
             continue;
         }
+        let live = if cred.uid() == pve.required_uid() {
+            &root_live
+        } else {
+            &live
+        };
         if live.fetch_add(1, Ordering::AcqRel) >= MAX_HANDLERS {
             live.fetch_sub(1, Ordering::AcqRel);
             let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
@@ -278,7 +285,7 @@ pub async fn serve_with(
         }
         let hub = Arc::clone(&hub);
         let pve = Arc::clone(&pve);
-        let guard = HandlerGuard(Arc::clone(&live));
+        let guard = HandlerGuard(Arc::clone(live));
         let peer = Peer {
             uid: cred.uid(),
             pid: cred.pid().and_then(|p| u32::try_from(p).ok()),

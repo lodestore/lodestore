@@ -49,7 +49,7 @@ One line of JSON ending in `\n`, at most 4096 bytes including the newline. Unkno
 | `name` | Name of the file inside the snapshot: 1 to 1024 bytes, no `/`, no NUL, not `.` or `..` |
 | `policy` | Optional policy name; adds the tag `policy=<name>` to the snapshot. The agent does not check it. The server keeps the name on the job only when the policy is in the repository of the agent and selects this host, and checks that again when the job finishes. Otherwise the job runs without a policy, and the server refuses the snapshot with the tag `policy=<name>`: the job ends `failed` with `snapshot_policy_mismatch` and the snapshot is not linked to the job |
 
-The header must arrive within 5 seconds. A connection that sends nothing in that time gets `bad_request` and is closed, so idle connections do not hold one of the 16 connection slots.
+The header must arrive within 5 seconds. A connection that sends nothing in that time gets `bad_request` and is closed, so idle connections do not hold a connection slot for long. Root has 16 slots of its own for connections that have not sent their first line yet; every other caller shares another 16. A connection past them gets `busy`.
 
 ### Frames
 
@@ -92,7 +92,7 @@ The snapshot written through the agent has no parent snapshot, because the agent
 
 ## Proxmox provider operations
 
-On a Proxmox VE node the agent installs a backup provider (a Perl module that vzdump and `pct restore` load through the `lodestore` storage). The provider only passes messages: it holds no repository key and writes no backup data. It talks to the agent over this socket with these operations:
+On a Proxmox VE node the agent installs a backup provider (a Perl module that vzdump and `pct restore` load through the `lodestore` storage). The provider only passes messages: it holds no repository key and writes no backup data. The provider and the storage plugin find the socket in `LODESTORE_AGENT_SOCKET`, which the agent sets for the processes it starts, then in `socket` of `/etc/lodestore/agent.yaml`, then at `/run/lodestore/agent.sock`. The storage counts as active only while a connection to the socket succeeds, so a socket file left by a stopped agent does not. It talks to the agent over this socket with these operations:
 
 | `op` | Called when | Fields besides `v` and `token` |
 | --- | --- | --- |
@@ -123,7 +123,7 @@ One JSON object per line, in both directions, at most 262 144 bytes per line. Ev
 
 A reply is `{"ok":true,...}` or `{"ok":false,"code":"...","message":"..."}`. `pve_ct_finish` answers with `archive_size`, `pve_restore_config` with `config`, and `pve_restore_open` with `directory`. After a refusal, and after `pve_job_check`, `pve_ct_finish` and the restore operations, the agent closes the connection.
 
-The first line of a connection must arrive within 5 seconds, like the header of `backup_stdin`. At most 8 provider connections are served at the same time; a ninth gets `busy`. They count apart from the connections of `backup_stdin`, so neither kind can use up the slots of the other.
+The first line of a connection must arrive within 5 seconds, like the header of `backup_stdin`. At most 8 provider connections are served at the same time; a ninth gets `busy`. They count apart from the connections of `backup_stdin`. Only root gets a provider slot, and a caller that is not root cannot take one of the 16 slots root has for its first line, so no other member of the `lodestore` group can keep the provider out.
 
 ### Refusal codes
 
