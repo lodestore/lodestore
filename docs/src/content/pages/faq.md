@@ -74,4 +74,4 @@ The server has two ports. Port 8080 serves the web interface and the API over pl
 
 ### What does Lodestore not do yet?
 
-Not yet: agents for Windows and macOS, backup of Proxmox VMs and containers, a Kubernetes operator, native database backup (today, dump the database in a pre-backup hook), roles for teams (RBAC) and single sign-on, and storage such as WebDAV. The [roadmap](/roadmap/) lists what is next and what is later.
+Not yet: agents for Windows and macOS, backup of Proxmox VMs (Proxmox VE containers come with the next release, see [Proxmox VE containers](/docs/guides/proxmox-containers/)), a Kubernetes operator, native database backup (today, dump the database in a pre-backup hook), roles for teams (RBAC) and single sign-on, and storage such as WebDAV. The [roadmap](/roadmap/) lists what is next and what is later.

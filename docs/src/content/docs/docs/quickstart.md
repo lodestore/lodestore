@@ -12,7 +12,7 @@ This page takes you from nothing to a first backup of one Linux host. It should 
 - A Linux host with systemd and root access, to back up. It can be the same machine as the server.
 - `minisign` on the machine where you run `lode`, to check its signature in [Restore without the server](#restore-without-the-server). Where to get it: the [package table](/docs/install/binary/#agents-for-new-hosts).
 
-Know before you install: version 0.x backs up Linux hosts only (x86_64 and arm64), with no Windows or macOS agent. It does not yet back up Proxmox VMs and containers or Kubernetes, has no native database backup (today, dump the database in a pre-backup hook), no roles (RBAC) or single sign-on, and keeps repositories in S3-compatible storage or a folder, with Azure Blob Storage, Google Cloud Storage, SFTP and Backblaze B2 arriving in the next release and no WebDAV; see [Storage backends](/docs/reference/storage/). See the [roadmap](/roadmap/).
+Know before you install: version 0.x backs up Linux hosts only (x86_64 and arm64), with no Windows or macOS agent. Proxmox VE containers are backed up from the next release ([Proxmox VE containers](/docs/guides/proxmox-containers/)); it does not yet back up Proxmox VMs or Kubernetes, has no native database backup (today, dump the database in a pre-backup hook), no roles (RBAC) or single sign-on, and keeps repositories in S3-compatible storage or a folder, with Azure Blob Storage, Google Cloud Storage, SFTP and Backblaze B2 arriving in the next release and no WebDAV; see [Storage backends](/docs/reference/storage/). See the [roadmap](/roadmap/).
 
 No bucket? See [Using a local or network folder](#using-a-local-or-network-folder).
 

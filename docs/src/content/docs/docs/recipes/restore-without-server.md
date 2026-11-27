@@ -118,6 +118,10 @@ Stop every virtual machine and process that uses the device first: `lode` refuse
 
 A `lode` of 0.2 or earlier reads the snapshot only by its id and restores the segments as files. `lode restore ID:/disks/NAME --target ./segments` and then `cat ./segments/* > NAME.img` give the image.
 
+## Restore a Proxmox VE container
+
+A container snapshot restores like any snapshot: `lode restore ID --target DIR` gives `DIR/fs`, the files of the container with the owners it sees, and `DIR/config/pct.conf`, its configuration. To get a running container back, pack the tree as a vzdump archive and restore it with `pct restore` on a Proxmox VE node. The four steps, and what to remove from the configuration first, are in [Proxmox VE containers, Without the server](/docs/guides/proxmox-containers/#without-the-server). Restore into a folder that only root can read: uid 0 of the container is root of the machine you restore on.
+
 ## The password and where it is read from
 
 `lode` takes the secret from the first of: `--password-file`, `--password-command`, `LODE_PASSWORD_FILE`, `LODE_PASSWORD`, or a prompt on a terminal. A value that starts with `lode-rk1-` is a recovery key, whichever way it arrives. Prefer a file: `LODE_PASSWORD` is visible to every process that can read the environment of `lode`.

@@ -469,7 +469,7 @@ It installs the Lodestore storage plugin and backup provider into `/usr/share/pe
 | `--wait-seconds N` | How long to wait for the other nodes, default 600 |
 | `--config-dir DIR` | Where `agent.yaml` is, default `/etc/lodestore` |
 
-Every node needs pve-manager 9.2.33 or newer. Install the plugin on a new node before you join it with `pvecm add`: a node without the plugin drops the `lodestore` section of the shared `storage.cfg` the first time it writes that file. Run the command again on a node after an agent update, when the alert `pve_plugin_missing` is open for it, or when a job failed with `protocol_mismatch`.
+How backups and restores of containers work is in [Proxmox VE containers](/docs/guides/proxmox-containers/). Every node needs pve-manager 9.2.33 or newer. Install the plugin on a new node before you join it with `pvecm add`: a node without the plugin drops the `lodestore` section of the shared `storage.cfg` the first time it writes that file. Run the command again on a node after an agent update, when the alert `pve_plugin_missing` is open for it, or when a job failed with `protocol_mismatch`.
 
 | Code | Meaning |
 |------|---------|

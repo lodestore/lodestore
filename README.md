@@ -29,6 +29,7 @@ Lodestore is a backup system for fleets of Linux hosts. A lightweight agent on e
 - **Hosts that cannot delete their own backups.** An agent writes with rights that have no delete: the server generates them for S3 services that can restrict a key, for Google Cloud Storage and for Backblaze B2, and on Azure Blob Storage it signs a short-lived access token for each agent. Deletion and cleanup run only on the server, and work with S3 Object Lock and versioning. In COMPLIANCE mode, even the server cannot delete locked data before its retention period ends. So far MinIO and SFTP have been tried on the real service; the other backends are tested on emulators, and [Storage backends](https://lodestore.dev/docs/reference/storage/#verification-status) says which.
 - **API tokens with narrow scopes.** Restoring files onto a host, restoring over the original files, changing backup hooks and deleting snapshots are separate scopes. The agent writes restored files only into folders its own configuration allows.
 - **One place to run many hosts.** Schedules and retention as YAML policies, alerts to Telegram, Slack, email and webhooks, Prometheus metrics, a fleet-wide search for a file across every host's snapshots, and agent updates that the agent installs only after checking a signature.
+- **Proxmox VE containers.** From the next release, the agent on a Proxmox VE node backs up its containers straight to the same storage, deduplicated with the files of your hosts, and restores a whole container as a new one or single files from it. Even without the server, `lode` and `pct restore` bring a container back. [Proxmox VE containers](https://lodestore.dev/docs/guides/proxmox-containers/)
 - **Cleanup that is safe around running backups.** Two-phase garbage collection: mark, wait longer than the longest backup, check again, then delete. A dry run is always available.
 - **Encrypted and deduplicated.** Data is deduplicated across the snapshots and hosts of a repository, compressed, then encrypted with XChaCha20-Poly1305 before they leave the host. File names are not readable in the bucket either.
 - **One server binary with a web interface.** Run it as a Docker image, a static binary or a Helm chart, with SQLite by default and PostgreSQL for production.
@@ -83,7 +84,7 @@ Repositories live on S3-compatible object storage (AWS S3, MinIO, Ceph and other
 
 ## Version 0.2 and roadmap
 
-Version 0.2 backs up files and directories on Linux (x86_64 and arm64). Databases are covered by [dumping them in a pre-backup hook](https://lodestore.dev/docs/recipes/database-backup-hook/).
+Version 0.2 backs up files and directories on Linux (x86_64 and arm64). Databases are covered by [dumping them in a pre-backup hook](https://lodestore.dev/docs/recipes/database-backup-hook/). Proxmox VE containers come with the next release.
 
 What works today, what is next and what comes later is on the public roadmap: <https://lodestore.dev/roadmap/>
 
@@ -93,7 +94,7 @@ Everything below lives on the project site, <https://lodestore.dev>, along with 
 
 - [Quickstart](https://lodestore.dev/docs/quickstart/), [roadmap](https://lodestore.dev/roadmap/) and [FAQ](https://lodestore.dev/faq/)
 - [Restore without the server](https://lodestore.dev/docs/recipes/restore-without-server/) and [storage backends](https://lodestore.dev/docs/reference/storage/)
-- [Policies and retention](https://lodestore.dev/docs/guides/policies/), [alerts](https://lodestore.dev/docs/guides/alerts/), [cleanup](https://lodestore.dev/docs/guides/gc/)
+- [Policies and retention](https://lodestore.dev/docs/guides/policies/), [alerts](https://lodestore.dev/docs/guides/alerts/), [cleanup](https://lodestore.dev/docs/guides/gc/), [Proxmox VE containers](https://lodestore.dev/docs/guides/proxmox-containers/)
 - [Threat model](https://lodestore.dev/docs/security/threat-model/) and [how we test data safety](https://lodestore.dev/docs/security/how-we-test/)
 - Comparisons: [restic](https://lodestore.dev/compare/restic/), [Bareos](https://lodestore.dev/compare/bareos/), [Plakar](https://lodestore.dev/compare/plakar/), [Proxmox Backup Server](https://lodestore.dev/compare/proxmox-backup-server/), [Kopia](https://lodestore.dev/compare/kopia/), [Backrest](https://lodestore.dev/compare/backrest/)
 
