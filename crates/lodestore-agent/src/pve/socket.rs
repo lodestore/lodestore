@@ -420,11 +420,7 @@ struct Conn<'a> {
 impl Conn<'_> {
     fn run(&mut self, first: Vec<u8>) {
         let mut line = first;
-        loop {
-            match self.message(&line) {
-                Flow::Continue => {}
-                Flow::Close => break,
-            }
+        while let Flow::Continue = self.message(&line) {
             line = match self.next_line() {
                 Ok(Some(line)) => line,
                 Ok(None) => break,
@@ -719,6 +715,7 @@ fn check_info(info: &Info) -> Result<(), Rejection> {
 
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
+#[allow(clippy::enum_variant_names)]
 enum Request {
     PveJobCheck {
         token: String,

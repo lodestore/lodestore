@@ -26,7 +26,9 @@ The agent reads the caller's user and group id from the connection (`SO_PEERCRED
 
 ## Operations
 
-The socket offers exactly one operation, `backup_stdin`. It cannot read data, start a file backup, run hooks or print keys or credentials. Anything else is answered with `error` / `unsupported` and the connection is closed.
+For a user the socket offers one operation, `backup_stdin`. It cannot read data, start a file backup, run hooks or print keys or credentials. Anything else is answered with `error` / `unsupported` and the connection is closed.
+
+The operations whose names start with `pve_` belong to the Proxmox VE backup provider of the agent; see [Proxmox provider operations](#proxmox-provider-operations). Nobody else needs them, and the agent refuses them to every caller that is not that provider.
 
 ## Protocol, version 1
 
@@ -47,7 +49,7 @@ One line of JSON ending in `\n`, at most 4096 bytes including the newline. Unkno
 | `name` | Name of the file inside the snapshot: 1 to 1024 bytes, no `/`, no NUL, not `.` or `..` |
 | `policy` | Optional policy name; adds the tag `policy=<name>` to the snapshot. The agent does not check it. The server keeps the name on the job only when the policy is in the repository of the agent and selects this host, and checks that again when the job finishes. Otherwise the job runs without a policy, and the server refuses the snapshot with the tag `policy=<name>`: the job ends `failed` with `snapshot_policy_mismatch` and the snapshot is not linked to the job |
 
-The header must arrive within 10 seconds.
+The header must arrive within 5 seconds. A connection that sends nothing in that time gets `bad_request` and is closed, so idle connections do not hold one of the 16 connection slots.
 
 ### Frames
 
@@ -87,3 +89,55 @@ The server signs the snapshot of a stream that went through the agent, after it 
 A stream has a fixed time limit of 12 hours. A stream that is still being written after that is stopped and writes no snapshot (`time_limit`). The `maxRuntime` of the policy named in the header does not apply to it: the agent does not know the policies, and the limit is what lets garbage collection prove that no running backup references data about to be deleted. Backups that need longer than 12 hours have to run as policy jobs.
 
 The snapshot written through the agent has no parent snapshot, because the agent cannot read the repository.
+
+## Proxmox provider operations
+
+On a Proxmox VE node the agent installs a backup provider (a Perl module that vzdump and `pct restore` load through the `lodestore` storage). The provider only passes messages: it holds no repository key and writes no backup data. It talks to the agent over this socket with these operations:
+
+| `op` | Called when | Fields besides `v` and `token` |
+| --- | --- | --- |
+| `pve_job_check` | vzdump starts a job for the storage | none |
+| `pve_ct_open` | vzdump has prepared a container backup | `vmid`, `info` (what vzdump passes as `$info`: `directory`, `sources`, `backup-user-id`, and when present `bandwidth-limit`, `firewall-config`, `guest-uid`, `guest-rtime`, `cluster-id`) |
+| `pve_ct_data` | vzdump hands over the container configuration | `config` (UTF-8 text), `excludes` |
+| `pve_ct_finish` | vzdump ends the backup | `success`, `error` |
+| `pve_restore_config` | `pct restore` asks for the configuration of the snapshot (twice per restore) | `restore_id` |
+| `pve_restore_open` | `pct restore` asks where the files are | `restore_id` |
+| `pve_restore_close` | `pct restore` is done with the files | `restore_id` |
+
+You do not call these operations. The agent serves them only when all of this holds:
+
+- The caller is root (`SO_PEERCRED`).
+- `token` is the token of a job the agent started, 64 lowercase hex digits. The agent gives it to the process it starts in the environment variable `LODESTORE_JOB_TOKEN`, one token per container and per restore, and compares it in constant time. The token never appears in the agent's log, in a reply or in the provider's output.
+- The token was issued for this `vmid`, or for this `restore_id`.
+- The calling process descends from the process the agent started for the job.
+
+A backup runs over one connection: `pve_ct_open`, then `pve_ct_data`, then `pve_ct_finish`. The agent answers `pve_ct_data` when it has finished reading the container, and `pve_ct_finish` when the snapshot is committed or dropped. A token opens one backup connection only. The restore operations each use a connection of their own, and the agent returns for `pve_restore_config` exactly the bytes it registered for the restore, so the two calls of one restore always agree. The reply never carries firewall rules: the snapshot's firewall configuration is not restored, because Proxmox VE writes whatever the provider returns for it into `/etc/pve/firewall/{vmid}.fw` without checking it.
+
+### Messages
+
+One JSON object per line, in both directions, at most 262 144 bytes per line. Every request carries `"v"`, the provider protocol version, which is `1` today. A request from a provider outside the range the agent supports is refused with `protocol_mismatch` and the text `run lodestore-agent pve install on this node`: update the plugin files of the node.
+
+```json
+{"v":1,"op":"pve_job_check","token":"<job token>"}
+```
+
+A reply is `{"ok":true,...}` or `{"ok":false,"code":"...","message":"..."}`. `pve_ct_finish` answers with `archive_size`, `pve_restore_config` with `config`, and `pve_restore_open` with `directory`. After a refusal, and after `pve_job_check`, `pve_ct_finish` and the restore operations, the agent closes the connection.
+
+The first line of a connection must arrive within 5 seconds, like the header of `backup_stdin`. At most 8 provider connections are served at the same time; a ninth gets `busy`. They count apart from the connections of `backup_stdin`, so neither kind can use up the slots of the other.
+
+### Refusal codes
+
+| Code | Meaning |
+| --- | --- |
+| `forbidden` | The caller is not root |
+| `bad_token` | The token is malformed, unknown, no longer valid, or already used for a backup connection |
+| `wrong_guest` | The token was issued for another guest or another restore |
+| `wrong_process` | The calling process is not part of the job |
+| `protocol_mismatch` | The provider's protocol version is outside the supported range |
+| `bad_request` | A malformed, missing or oversized field, a line over the limit, or a message out of order |
+| `unsupported` | An unknown `pve_` operation |
+| `busy` | Too many provider connections |
+| `refused` | The agent declined the step; `message` says why |
+| `aborted` | The job is no longer running on the agent |
+
+A backup that does not come from Lodestore (the Proxmox VE GUI, Datacenter → Backup, a vzdump started by hand) has no token and fails in the provider with `backups to this storage are started by Lodestore; start this backup from Lodestore`. Deleting backups is refused too: the storage plugin answers `deletion is managed by the Lodestore server`, and the agent has no operation that deletes data.

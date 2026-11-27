@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use lodestore_agent::jobs::JobHub;
 use lodestore_agent::pve::socket::{
-    BackupEvent, MAX_PVE_LINE, MAX_PVE_SESSIONS, PveSessions, Token,
+    BackupEvent, MAX_PVE_LINE, MAX_PVE_SESSIONS, PveSessions, RestoreEvent, Token,
 };
 use lodestore_agent::pve::{PROVIDER_PROTOCOL, TOKEN_ENV};
 use lodestore_agent::socket::{self, MAX_HANDLERS};
@@ -505,4 +505,150 @@ fn pve_plugin_refuses_deletion() {
     assert!(out.contains("api: 17"));
     assert!(run("12").contains("api: 12"));
     assert!(run("18").contains("api: 17"));
+}
+
+const RESTORE_ID: &str = "0123456789abcdef0123456789abcdef";
+
+struct PctRun {
+    output: std::process::Output,
+    out_config: PathBuf,
+    out_argv: PathBuf,
+    out_fw: PathBuf,
+    copy_to: PathBuf,
+}
+
+async fn fake_pct(run: &Running, volid: &str, token: Option<&Token>) -> PctRun {
+    let tmp = run.tmp.path();
+    let paths = PctRun {
+        output: std::process::Output {
+            status: std::process::ExitStatus::default(),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        },
+        out_config: tmp.join("out.conf"),
+        out_argv: tmp.join("out.argv"),
+        out_fw: tmp.join("out.fw"),
+        copy_to: tmp.join("copy"),
+    };
+    std::fs::create_dir_all(&paths.copy_to).unwrap();
+    let scenario = tmp.join("pct.json");
+    std::fs::write(
+        &scenario,
+        json!({"out_config": paths.out_config, "out_argv": paths.out_argv,
+            "out_fw": paths.out_fw, "copy_to": paths.copy_to})
+        .to_string(),
+    )
+    .unwrap();
+    let proxmox = proxmox_dir();
+    let mut command = Command::new("perl");
+    command
+        .arg("-I")
+        .arg(proxmox.join("t/stubs"))
+        .arg("-I")
+        .arg(&proxmox)
+        .arg(proxmox.join("t/fake-pct.pl"))
+        .args(["restore", "105", volid, "--unique", "1", "--start", "0"])
+        .env_remove(TOKEN_ENV)
+        .env("LODESTORE_AGENT_SOCKET", &run.socket)
+        .env("LODESTORE_FAKE_PCT", &scenario)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(token) = token {
+        command.env(TOKEN_ENV, token.expose());
+    }
+    let child = command.spawn().expect("perl is needed for these tests");
+    if let Some(token) = token {
+        run.pve.set_spawned_pid(token, child.id().unwrap());
+    }
+    PctRun {
+        output: child.wait_with_output().await.unwrap(),
+        ..paths
+    }
+}
+
+fn restore_staging(run: &Running) -> PathBuf {
+    let dir = run.tmp.path().join("staging");
+    std::fs::create_dir_all(dir.join("etc")).unwrap();
+    std::fs::write(dir.join("etc/hostname"), "ct105\n").unwrap();
+    dir
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pve_socket_restore_config_stable() {
+    let run = start().await;
+    let staging = restore_staging(&run);
+    let config = "arch: amd64\ndescription: caf\u{e9} \u{2603}\nhostname: ct105\n".as_bytes();
+    let (token, mut session) =
+        run.pve
+            .register_restore(RESTORE_ID, config.to_vec(), staging.clone());
+    let volid = format!("lodestore:backup/restore/{RESTORE_ID}");
+    let pct = fake_pct(&run, &volid, Some(&token)).await;
+    let stderr = String::from_utf8_lossy(&pct.output.stderr);
+    assert!(pct.output.status.success(), "{stderr}");
+    assert_eq!(std::fs::read(&pct.out_config).unwrap(), config);
+    assert_eq!(
+        std::fs::read_to_string(pct.copy_to.join("etc/hostname")).unwrap(),
+        "ct105\n"
+    );
+    let argv: Vec<String> = serde_json::from_slice(&std::fs::read(&pct.out_argv).unwrap()).unwrap();
+    assert_eq!(argv[..3], ["restore", "105", volid.as_str()]);
+    assert_eq!(session.events.recv().await, Some(RestoreEvent::Opened));
+    assert_eq!(session.events.recv().await, Some(RestoreEvent::Closed));
+    assert!(!String::from_utf8_lossy(&pct.output.stdout).contains(token.expose()));
+    assert!(!stderr.contains(token.expose()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pve_socket_restore_unknown_id() {
+    let run = start().await;
+    let staging = restore_staging(&run);
+    let (token, mut session) =
+        run.pve
+            .register_restore(RESTORE_ID, b"hostname: ct105\n".to_vec(), staging);
+    let other = "f".repeat(32);
+    let pct = fake_pct(
+        &run,
+        &format!("lodestore:backup/restore/{other}"),
+        Some(&token),
+    )
+    .await;
+    let stderr = String::from_utf8_lossy(&pct.output.stderr);
+    assert!(!pct.output.status.success());
+    assert!(stderr.contains("wrong_guest"), "{stderr}");
+    assert!(!pct.out_config.exists());
+
+    let (backup_token, _backup) = run.pve.register_backup(105);
+    let volid = format!("lodestore:backup/restore/{RESTORE_ID}");
+    let pct = fake_pct(&run, &volid, Some(&backup_token)).await;
+    assert!(!pct.output.status.success());
+    assert!(String::from_utf8_lossy(&pct.output.stderr).contains("wrong_guest"));
+
+    let pct = fake_pct(&run, &volid, None).await;
+    let stderr = String::from_utf8_lossy(&pct.output.stderr);
+    assert!(!pct.output.status.success());
+    assert!(stderr.contains("started by Lodestore"), "{stderr}");
+    assert!(session.events.try_recv().is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pve_socket_restore_no_firewall() {
+    let run = start().await;
+    let staging = restore_staging(&run);
+    let (token, _session) =
+        run.pve
+            .register_restore(RESTORE_ID, b"hostname: ct105\n".to_vec(), staging);
+    let mut client = Client::connect(&run.socket);
+    let reply = client.ask(&request(
+        "pve_restore_config",
+        &token,
+        json!({"restore_id": RESTORE_ID}),
+    ));
+    assert_eq!(reply["ok"], true, "{reply}");
+    assert!(reply.get("firewall").is_none(), "{reply}");
+
+    let volid = format!("lodestore:backup/restore/{RESTORE_ID}");
+    let pct = fake_pct(&run, &volid, Some(&token)).await;
+    assert!(pct.output.status.success());
+    assert!(pct.out_config.exists());
+    assert!(!pct.out_fw.exists());
 }

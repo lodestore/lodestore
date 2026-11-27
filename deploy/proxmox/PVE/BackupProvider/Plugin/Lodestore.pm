@@ -32,10 +32,12 @@ sub socket_path {
 }
 
 sub job_token {
-    my $token = untaint($ENV{LODESTORE_JOB_TOKEN}, qr/^([0-9a-f]{64})\z/);
-    die "backups to this storage are started by Lodestore; start this backup from Lodestore\n"
-        if !defined($token);
-    return $token;
+    return untaint($ENV{LODESTORE_JOB_TOKEN}, qr/^([0-9a-f]{64})\z/);
+}
+
+sub required_token {
+    return job_token()
+        // die "restores from this storage are started by Lodestore; start this restore from Lodestore\n";
 }
 
 sub agent_connect {
@@ -64,7 +66,7 @@ sub request {
 sub call {
     my ($op, %args) = @_;
     my $sock = agent_connect();
-    my $answer = eval { request($sock, $op, token => job_token(), %args) };
+    my $answer = eval { request($sock, $op, token => required_token(), %args) };
     my $error = $@;
     close($sock);
     die $error if $error;
@@ -117,6 +119,8 @@ sub provider_name {
 
 sub job_init {
     my ($self, $start_time) = @_;
+    die "backups to this storage are started by Lodestore; start this backup from Lodestore\n"
+        if !defined(job_token());
     call('pve_job_check');
     return;
 }
@@ -145,7 +149,7 @@ sub backup_container_prepare {
     my $sock = agent_connect();
     eval {
         request($sock, 'pve_ct_open',
-            token => job_token(), vmid => $vmid + 0, info => info_message($info));
+            token => required_token(), vmid => $vmid + 0, info => info_message($info));
     };
     if (my $error = $@) {
         close($sock);
@@ -159,7 +163,7 @@ sub backup_container {
     my ($self, $vmid, $guest_config, $exclude_patterns, $info) = @_;
     my $sock = $self->{sock} // die "the backup was not prepared\n";
     request($sock, 'pve_ct_data',
-        token => job_token(),
+        token => required_token(),
         config => text($guest_config),
         excludes => [map { "$_" } @{ $exclude_patterns // [] }]);
     return;
@@ -171,7 +175,7 @@ sub backup_cleanup {
     return { stats => { 'archive-size' => 0 } } if !defined($sock);
     my $answer = eval {
         request($sock, 'pve_ct_finish',
-            token => job_token(),
+            token => required_token(),
             success => ($success ? JSON::PP::true : JSON::PP::false),
             error => (ref($info) eq 'HASH' && defined($info->{error}) ? "$info->{error}" : undef));
     };
