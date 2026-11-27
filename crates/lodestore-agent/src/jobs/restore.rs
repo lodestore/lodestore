@@ -14,7 +14,10 @@ use std::time::Duration;
 
 use lodestore_format::Error;
 use lodestore_format::crypto::{BLOB_TYPE_DATA, BlobId, RepoId};
-use lodestore_format::fs::restore::{Overwrite, RestoreSettings, Restorer, is_empty_below};
+use lodestore_format::ct::IdMap;
+use lodestore_format::fs::restore::{
+    Overwrite, RestoreSettings, Restorer, SkipSpecial, SpaceReserve, is_empty_below,
+};
 use lodestore_format::keys::cdc_seed;
 use lodestore_format::pb::{Node, NodeType};
 use lodestore_format::reader::open_chunk;
@@ -36,6 +39,8 @@ use crate::config::AgentSettings;
 use crate::shared_channel::SharedChannel;
 
 const CANCEL_POLL: Duration = Duration::from_millis(50);
+/// Skipped special entries listed one by one in the job log; the rest is a count.
+const MAX_SPECIAL_REPORTED: usize = 16;
 pub(super) const MAX_PLAN_MESSAGE: usize = 8 << 20;
 const PLAN_PAUSES: [Duration; 3] = [
     Duration::from_secs(1),
@@ -138,6 +143,8 @@ pub struct RestoreOptions {
     pub roots: Vec<PathBuf>,
     /// Whether a restore in place is allowed on this host.
     pub allow_in_place: bool,
+    /// Free space a restore of a container snapshot's files leaves.
+    pub space_reserve: SpaceReserve,
 }
 
 impl Default for RestoreOptions {
@@ -147,6 +154,7 @@ impl Default for RestoreOptions {
             plan_pauses: PLAN_PAUSES.to_vec(),
             roots: Vec::new(),
             allow_in_place: false,
+            space_reserve: SpaceReserve::DEFAULT,
         }
     }
 }
@@ -206,6 +214,12 @@ struct Prepared {
     overwrite: Overwrite,
     restore_owners: bool,
     stop_if_not_empty: bool,
+    /// The container's id map; owners are shifted by it to the node's ids.
+    id_shift: Option<IdMap>,
+    /// Files of a container snapshot: no special entries, free space kept.
+    guest: Option<SpaceReserve>,
+    /// The topmost folder of the target that did not exist before the restore.
+    created: Option<PathBuf>,
 }
 
 impl Prepared {
@@ -227,8 +241,35 @@ impl Prepared {
         let k_id = <[u8; 32]>::try_from(spec.k_id.as_slice())
             .map(Zeroizing::new)
             .map_err(|_| invalid("chunk key"))?;
+        let id_shift = if spec.ct_idmap.is_empty() {
+            None
+        } else {
+            Some(IdMap::parse_canonical(&spec.ct_idmap).map_err(|_| {
+                abort(
+                    "restore_failed",
+                    "the container idmap of the snapshot is invalid",
+                )
+            })?)
+        };
+        // A range that starts at host id 0 maps a container id to the node's root.
+        if id_shift
+            .as_ref()
+            .is_some_and(|m| m.ranges().iter().any(|r| r.host == 0))
+        {
+            return Err(abort(
+                "restore_failed",
+                "the container idmap of the snapshot maps a container id to root on the node",
+            ));
+        }
+        if spec.in_place && (id_shift.is_some() || spec.guest_snapshot) {
+            return Err(abort(
+                "restore_failed",
+                "a container snapshot cannot be restored in place",
+            ));
+        }
         let policy = ConflictPolicy::try_from(spec.conflict).unwrap_or_default();
         let mut confined = None;
+        let mut created = None;
         let target = if spec.in_place {
             if !options.allow_in_place {
                 return Err(abort(
@@ -276,6 +317,7 @@ impl Prepared {
                     ),
                 ));
             };
+            created = first_missing(root, rest);
             confined = Some((root.clone(), rest.to_path_buf()));
             path
         };
@@ -292,6 +334,9 @@ impl Prepared {
             },
             restore_owners: spec.restore_owners,
             stop_if_not_empty: policy == ConflictPolicy::StopIfNotEmpty,
+            id_shift,
+            guest: spec.guest_snapshot.then_some(options.space_reserve),
+            created,
         })
     }
 
@@ -328,8 +373,21 @@ impl Prepared {
     }
 }
 
+/// The first folder from `root` down to `root/rest` that does not exist.
+fn first_missing(root: &std::path::Path, rest: &std::path::Path) -> Option<PathBuf> {
+    let mut path = root.to_path_buf();
+    for part in rest.components() {
+        path.push(part);
+        if std::fs::symlink_metadata(&path).is_err_and(|e| e.kind() == ErrorKind::NotFound) {
+            return Some(path);
+        }
+    }
+    None
+}
+
 fn unapplied_kind(what: &str) -> &'static str {
     match what {
+        "special file" => "special_file",
         "owner" => "owner_not_applied",
         "times" => "time_not_applied",
         "hardlink" => "link_not_created",
@@ -352,6 +410,7 @@ struct Attempt<'a, F> {
     skip_depth: usize,
     errors: u64,
     warnings: u64,
+    special_reported: usize,
 }
 
 impl<'a, F: PackFetcher> Attempt<'a, F> {
@@ -366,6 +425,18 @@ impl<'a, F: PackFetcher> Attempt<'a, F> {
             Some((root, rest)) => Restorer::open_in(root, rest, prepared.settings()),
             None => Restorer::open(&prepared.target, prepared.settings()),
         };
+        let opened = opened.map(|r| {
+            let r = match &prepared.id_shift {
+                Some(map) if prepared.restore_owners => r.with_id_shift(map.clone()),
+                _ => r,
+            };
+            match prepared.guest {
+                Some(reserve) => r
+                    .skip_special_files(SkipSpecial::All)
+                    .with_space_reserve(reserve),
+                None => r,
+            }
+        });
         let restorer = opened.map_err(|e| match e {
             Error::Io(e) => io_abort(&e, &format!("cannot open {target}")),
             other => abort("restore_failed", other.to_string()),
@@ -399,6 +470,7 @@ impl<'a, F: PackFetcher> Attempt<'a, F> {
             skip_depth: 0,
             errors,
             warnings,
+            special_reported: 0,
         })
     }
 
@@ -554,6 +626,16 @@ impl<'a, F: PackFetcher> Attempt<'a, F> {
             }
             Error::Io(_) => "restore_entry_failed",
             Error::Interrupted => return Err(Stop::Cancelled),
+            Error::NoSpace { free, reserve } => {
+                return Err(abort(
+                    "restore_no_space",
+                    format!(
+                        "not enough free space on {}: {free} bytes free, {reserve} bytes must stay free",
+                        self.prepared.target.display()
+                    ),
+                )
+                .into());
+            }
             Error::Corrupt { .. } | Error::Crypto => "restore_integrity",
             other => return Err(abort("restore_failed", other.to_string()).into()),
         };
@@ -570,6 +652,12 @@ impl<'a, F: PackFetcher> Attempt<'a, F> {
 
     fn flush(&mut self) {
         for u in self.restorer.take_unapplied() {
+            if u.what == "special file" {
+                if self.special_reported == MAX_SPECIAL_REPORTED {
+                    continue;
+                }
+                self.special_reported += 1;
+            }
             self.warnings += 1;
             self.ctx.event(
                 JobEventLevel::Warning,
@@ -738,6 +826,7 @@ impl<'a, F: PackFetcher> Attempt<'a, F> {
                 skipped: stats.skipped,
                 files: stats.created + stats.overwritten,
                 bytes: stats.bytes,
+                special_skipped: stats.special_skipped,
                 ..Default::default()
             }),
             errors_total: self.errors,
@@ -851,6 +940,19 @@ pub async fn execute_with<P: PlanSource, F: PackFetcher>(
             }
             Err(Stop::Abort(a)) => {
                 let mut finished = attempt.finished(JobOutcome::Failed);
+                drop(attempt);
+                if a.code == "restore_no_space"
+                    && let Some(dir) = &prepared.created
+                    && let Err(e) = std::fs::remove_dir_all(dir)
+                {
+                    ctx.event(
+                        JobEventLevel::Warning,
+                        "restore_cleanup_failed",
+                        dir.as_os_str().as_encoded_bytes(),
+                        "",
+                        &format!("cannot remove the folder this restore created: {e}"),
+                    );
+                }
                 finished.error_code = a.code.into();
                 finished.error_message = a.message;
                 return finished;
