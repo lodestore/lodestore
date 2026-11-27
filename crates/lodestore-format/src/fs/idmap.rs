@@ -2,7 +2,7 @@
 //! "CT walk"): `st_uid`/`st_gid`, the ids in POSIX ACL xattrs and the root id
 //! of file capabilities, the way the kernel translates them for a reader in
 //! the container's user namespace. An id outside the map becomes
-//! [`OVERFLOW_ID`] and is counted.
+//! [`OVERFLOW_ID`] of the other view and is counted.
 
 use crate::ct::{IdKind, IdMap};
 use crate::error::{Error, Result};
@@ -36,16 +36,34 @@ pub enum Direction {
 }
 
 /// One id in the other view; outside the map it is [`OVERFLOW_ID`] and
-/// `unmapped` grows by one.
+/// `unmapped` grows by one. Onto the node that is the node id of the
+/// container's [`OVERFLOW_ID`], what the container shows for the id; only
+/// when the map has none either is it the node's own [`OVERFLOW_ID`].
 pub fn translate_id(map: &IdMap, kind: IdKind, dir: Direction, id: u32, unmapped: &mut u64) -> u32 {
+    shift_id(map, kind, dir, id, unmapped).unwrap_or(OVERFLOW_ID)
+}
+
+/// [`translate_id`], with `None` where the node has no id for the
+/// container's view of it.
+fn shift_id(map: &IdMap, kind: IdKind, dir: Direction, id: u32, unmapped: &mut u64) -> Option<u32> {
     let mapped = match dir {
         Direction::HostToCt => map.to_ct(kind, id),
         Direction::CtToHost => map.to_host(kind, id),
     };
-    mapped.unwrap_or_else(|| {
-        *unmapped += 1;
-        OVERFLOW_ID
-    })
+    if mapped.is_some() {
+        return mapped;
+    }
+    *unmapped += 1;
+    match dir {
+        Direction::HostToCt => Some(OVERFLOW_ID),
+        Direction::CtToHost => map.to_host(kind, OVERFLOW_ID),
+    }
+}
+
+/// Whether the owner `id` of the container has no node id at all: it falls
+/// back to the node's [`OVERFLOW_ID`].
+pub(crate) fn owner_lost(map: &IdMap, kind: IdKind, id: u32) -> bool {
+    shift_id(map, kind, Direction::CtToHost, id, &mut 0).is_none()
 }
 
 fn u16_at(blob: &[u8], at: usize) -> Option<u16> {
@@ -63,13 +81,24 @@ fn bad_acl(reason: &str) -> Error {
 /// A POSIX ACL xattr (version 2: a u32 header, then entries of tag u16,
 /// perm u16, id u32, all little-endian) with the ids of its named user and
 /// group entries translated. An entry outside the map becomes
-/// [`OVERFLOW_ID`] on its own; only a malformed blob fails.
+/// [`OVERFLOW_ID`] of the other view on its own; onto the node, an entry
+/// with no such id is left out. Only a malformed blob fails.
 pub fn translate_acl(
     blob: &[u8],
     dir: Direction,
     map: &IdMap,
     unmapped: &mut u64,
 ) -> Result<Vec<u8>> {
+    shift_acl(blob, dir, map, unmapped).map(|(out, _)| out)
+}
+
+/// [`translate_acl`] and how many entries it left out.
+fn shift_acl(
+    blob: &[u8],
+    dir: Direction,
+    map: &IdMap,
+    unmapped: &mut u64,
+) -> Result<(Vec<u8>, usize)> {
     if u32_at(blob, 0) != Some(ACL_VERSION) {
         return Err(bad_acl("not a version 2 ACL"));
     }
@@ -77,20 +106,27 @@ pub fn translate_acl(
     if entries.len() % ACL_ENTRY_LEN != 0 {
         return Err(bad_acl("the length is not a whole number of entries"));
     }
-    let mut out = blob.to_vec();
-    for at in (ACL_HEADER_LEN..blob.len()).step_by(ACL_ENTRY_LEN) {
-        let kind = match u16_at(blob, at) {
+    let mut out = Vec::with_capacity(blob.len());
+    out.extend_from_slice(&ACL_VERSION.to_le_bytes());
+    let mut left_out = 0;
+    for entry in entries.as_chunks::<ACL_ENTRY_LEN>().0 {
+        let kind = match u16_at(entry, 0) {
             Some(ACL_USER) => IdKind::User,
             Some(ACL_GROUP) => IdKind::Group,
-            _ => continue,
+            _ => {
+                out.extend_from_slice(entry);
+                continue;
+            }
         };
-        let id = u32_at(blob, at + 4).ok_or_else(|| bad_acl("truncated entry"))?;
-        let new = translate_id(map, kind, dir, id, unmapped);
-        out.get_mut(at + 4..at + 8)
-            .ok_or_else(|| bad_acl("truncated entry"))?
-            .copy_from_slice(&new.to_le_bytes());
+        let id = u32_at(entry, 4).ok_or_else(|| bad_acl("truncated entry"))?;
+        let Some(new) = shift_id(map, kind, dir, id, unmapped) else {
+            left_out += 1;
+            continue;
+        };
+        out.extend_from_slice(entry.get(..4).ok_or_else(|| bad_acl("truncated entry"))?);
+        out.extend_from_slice(&new.to_le_bytes());
     }
-    Ok(out)
+    Ok((out, left_out))
 }
 
 fn bad_caps(reason: &str) -> Error {
@@ -142,8 +178,8 @@ pub fn translate_caps(
 
 /// Translates the owner and the id-carrying xattrs of `node` in place.
 /// A malformed ACL or capability xattr is removed and returned with the
-/// reason; capabilities whose root id is outside the map are removed and
-/// only counted in `unmapped`.
+/// reason, as is an ACL that lost entries; capabilities whose root id is
+/// outside the map are removed and only counted in `unmapped`.
 pub fn shift_node(
     node: &mut pb::Node,
     dir: Direction,
@@ -155,7 +191,17 @@ pub fn shift_node(
     let mut dropped = Vec::new();
     node.xattrs.retain_mut(|x| {
         let translated = if x.name == ACL_ACCESS || x.name == ACL_DEFAULT {
-            translate_acl(&x.value, dir, map, unmapped).map(Some)
+            shift_acl(&x.value, dir, map, unmapped).map(|(value, left_out)| {
+                if left_out > 0 {
+                    dropped.push((
+                        x.name.clone(),
+                        Error::InvalidInput(format!(
+                            "{left_out} entries name an id the container's id map has no node id for; they were left out"
+                        )),
+                    ));
+                }
+                Some(value)
+            })
         } else if x.name == CAPABILITY {
             translate_caps(&x.value, dir, map, unmapped)
         } else {

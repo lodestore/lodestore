@@ -15,9 +15,9 @@ use rustix::fs::{
 use rustix::io::Errno;
 
 use super::conv;
-use super::idmap::{Direction, shift_node};
+use super::idmap::{Direction, OVERFLOW_ID, owner_lost, shift_node};
 use super::restore::Unapplied;
-use crate::ct::IdMap;
+use crate::ct::{IdKind, IdMap};
 use crate::pb;
 
 fn grow(
@@ -195,6 +195,15 @@ pub fn apply_metadata(
     let shifted;
     let node = match shift {
         Some(map) if owners => {
+            if owner_lost(map, IdKind::User, node.uid) || owner_lost(map, IdKind::Group, node.gid) {
+                out.push(Unapplied {
+                    path: path.to_vec(),
+                    what: "owner".into(),
+                    error: format!(
+                        "the container's id map has no node id for this owner or for {OVERFLOW_ID}; it was set to {OVERFLOW_ID} of the node"
+                    ),
+                });
+            }
             let mut copy = node.clone();
             let mut unmapped = 0;
             for (name, e) in shift_node(&mut copy, Direction::CtToHost, map, &mut unmapped) {

@@ -717,7 +717,11 @@ fn ct_restore_shift() {
         xattrs: vec![
             xattr(
                 ACL_ACCESS,
-                acl(&[(ACL_USER, 4, 1000), (ACL_GROUP, 4, 1001)]),
+                acl(&[
+                    (ACL_USER, 4, 1000),
+                    (ACL_GROUP, 4, 1001),
+                    (ACL_USER, 7, 70_000),
+                ]),
             ),
             xattr(CAPABILITY, to_ct),
             xattr(b"system.posix_acl_default", vec![1, 2, 3]),
@@ -728,17 +732,90 @@ fn ct_restore_shift() {
     let mut unmapped = 0;
     let dropped = shift_node(&mut node, Direction::CtToHost, &map, &mut unmapped);
     assert_eq!(node.uid, 100_005);
-    assert_eq!(node.gid, OVERFLOW_ID);
-    assert_eq!(unmapped, 1);
+    // An id outside the map is the container's overflow id, never the node's.
+    assert_eq!(node.gid, 100_000 + OVERFLOW_ID);
+    assert_eq!(unmapped, 2);
     assert_eq!(
         parse_acl(&node.xattrs[0].value),
-        [(ACL_USER, 4, 101_000), (ACL_GROUP, 4, 101_001)]
+        [
+            (ACL_USER, 4, 101_000),
+            (ACL_GROUP, 4, 101_001),
+            (ACL_USER, 7, 100_000 + OVERFLOW_ID)
+        ]
     );
     assert_eq!(node.xattrs[1].value, caps_v3(100_000));
     assert_eq!(node.xattrs[2].name, b"user.x");
     assert_eq!(node.xattrs.len(), 3);
     assert_eq!(dropped.len(), 1);
     assert_eq!(dropped[0].0, b"system.posix_acl_default");
+}
+
+/// A map without the overflow id: an ACL entry outside it is left out and
+/// reported, never given to the node's 65534.
+#[test]
+fn ct_restore_shift_without_overflow_id() {
+    let range = |kind| IdRange {
+        kind,
+        ct: 0,
+        host: 100_000,
+        count: 1000,
+    };
+    let map = IdMap::new(vec![range(IdKind::User), range(IdKind::Group)]).unwrap();
+    let mut node = pb::Node {
+        uid: 5,
+        gid: 5,
+        xattrs: vec![pb::Xattr {
+            name: ACL_ACCESS.to_vec(),
+            value: acl(&[
+                (ACL_USER_OBJ, 6, UNDEFINED),
+                (ACL_USER, 7, 65_534),
+                (ACL_USER, 4, 7),
+                (ACL_OTHER, 0, UNDEFINED),
+            ]),
+        }],
+        ..Default::default()
+    };
+    let mut unmapped = 0;
+    let dropped = shift_node(&mut node, Direction::CtToHost, &map, &mut unmapped);
+    assert_eq!((node.uid, node.gid), (100_005, 100_005));
+    assert_eq!(
+        parse_acl(&node.xattrs[0].value),
+        [
+            (ACL_USER_OBJ, 6, UNDEFINED),
+            (ACL_USER, 4, 100_007),
+            (ACL_OTHER, 0, UNDEFINED)
+        ]
+    );
+    assert_eq!(unmapped, 1);
+    assert_eq!(dropped.len(), 1, "{dropped:?}");
+    assert_eq!(dropped[0].0, ACL_ACCESS);
+
+    let mut owner = pb::Node {
+        uid: 70_000,
+        ..Default::default()
+    };
+    shift_node(&mut owner, Direction::CtToHost, &map, &mut 0);
+    assert_eq!(owner.uid, OVERFLOW_ID);
+    let mut out = Vec::new();
+    let dir = tempfile::tempdir().unwrap();
+    let fd = std::fs::File::open(dir.path()).unwrap();
+    lodestore_format::fs::meta::apply_metadata(
+        &lodestore_format::fs::meta::Target::Fd(std::os::fd::AsFd::as_fd(&fd)),
+        &pb::Node {
+            uid: 70_000,
+            ..Default::default()
+        },
+        b"d",
+        true,
+        false,
+        Some(&map),
+        &mut out,
+    );
+    assert!(
+        out.iter()
+            .any(|u| u.what == "owner" && u.error.contains("id map")),
+        "{out:?}"
+    );
 }
 
 /// Without root the walk still applies the map: the test's own ids are
