@@ -1986,7 +1986,11 @@ mod tests {
         assert_eq!(facts(&pve), (true, true));
 
         pve.touch(&pve.perl, PLUGIN_FILE, "package x;");
-        assert_eq!(facts(&pve), (false, false), "the files differ from the marker");
+        assert_eq!(
+            facts(&pve),
+            (false, false),
+            "the files differ from the marker"
+        );
         pve.touch(&pve.perl, PROVIDER_FILE, "package y;");
         let old = plugin_hash(b"package x;", b"package y;");
         pve.write("lodestore/plugin/pve1", &format!("1.0 1 {old} 9.3.1\n"));

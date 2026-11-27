@@ -821,7 +821,10 @@ mod tests {
         let cluster = Cluster::new("9.2.32");
         cluster.marker("pve-02", &good_marker("9.3.1"));
         let commands = Recorder::default();
-        let error = cluster.run(Duration::from_secs(5), &commands).0.unwrap_err();
+        let error = cluster
+            .run(Duration::from_secs(5), &commands)
+            .0
+            .unwrap_err();
         assert_eq!(error.exit_code(), 2);
         assert!(
             error
@@ -834,7 +837,10 @@ mod tests {
         assert!(commands.0.lock().unwrap().is_empty());
 
         std::fs::remove_file(cluster.roots.pve.join(".members")).unwrap();
-        let error = cluster.run(Duration::from_secs(5), &commands).0.unwrap_err();
+        let error = cluster
+            .run(Duration::from_secs(5), &commands)
+            .0
+            .unwrap_err();
         assert_eq!(error.exit_code(), 2, "not a Proxmox VE node: {error}");
     }
 
@@ -873,7 +879,12 @@ mod tests {
         install(&cluster.roots, &options, &Racer(&cfg), &mut io::sink()).unwrap();
 
         std::fs::write(&cfg, "dir: lodestore\n\tpath /srv\n").unwrap();
-        let error = install(&cluster.roots, &options, &Recorder::default(), &mut io::sink());
+        let error = install(
+            &cluster.roots,
+            &options,
+            &Recorder::default(),
+            &mut io::sink(),
+        );
         assert_eq!(error.unwrap_err().exit_code(), 1);
     }
 
@@ -916,7 +927,10 @@ mod tests {
             .run_with(Duration::from_secs(5), true, &commands)
             .0
             .unwrap();
-        assert!(restarts(&commands).is_empty(), "a key already set is left alone");
+        assert!(
+            restarts(&commands).is_empty(),
+            "a key already set is left alone"
+        );
 
         std::fs::write(yaml, "restore: [1]\n").unwrap();
         let (result, _) = cluster.run_with(Duration::from_secs(5), true, &Recorder::default());
@@ -944,7 +958,10 @@ mod tests {
 
         let hash = embedded_plugin_hash();
         cluster.marker("pve-01", &format!("0.2.0 0 {hash} 9.2.33"));
-        assert_eq!(plugin_health(pve, perl, "pve-01"), PluginHealth::Unsupported);
+        assert_eq!(
+            plugin_health(pve, perl, "pve-01"),
+            PluginHealth::Unsupported
+        );
 
         let (old_plugin, old_provider) = ("package Old::Plugin;\n", "package Old::Provider;\n");
         std::fs::write(&plugin, old_plugin).unwrap();
@@ -965,7 +982,12 @@ mod tests {
             (1, "abc", "9.3.1")
         );
         assert_eq!(m.to_string(), "0.2.0 1 abc 9.3.1");
-        for bad in ["", "0.2.0 1 abc", "0.2.0 x abc 9.3.1", "0.2.0 1 abc 9.3.1 extra"] {
+        for bad in [
+            "",
+            "0.2.0 1 abc",
+            "0.2.0 x abc 9.3.1",
+            "0.2.0 1 abc 9.3.1 extra",
+        ] {
             assert_eq!(parse_marker(bad), None, "{bad:?}");
         }
     }
