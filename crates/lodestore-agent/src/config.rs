@@ -17,11 +17,20 @@ pub struct RestoreSettings {
     pub allowed_restore_roots: Option<Vec<PathBuf>>,
     pub allow_in_place: bool,
     pub allow_guest_in_place: bool,
+    pub guest_staging_dir: Option<PathBuf>,
 }
 
 pub const DEFAULT_RESTORE_DIR: &str = "restore";
+pub const DEFAULT_GUEST_STAGING_DIR: &str = "pve-staging";
 
 impl RestoreSettings {
+    /// Where a guest restore stages the files it hands to Proxmox VE.
+    pub fn guest_staging_dir(&self, paths: &Paths) -> PathBuf {
+        self.guest_staging_dir
+            .clone()
+            .unwrap_or_else(|| paths.state_dir.join(DEFAULT_GUEST_STAGING_DIR))
+    }
+
     pub fn roots(&self, paths: &Paths) -> Vec<PathBuf> {
         let Some(list) = &self.allowed_restore_roots else {
             return vec![paths.state_dir.join(DEFAULT_RESTORE_DIR)];
@@ -124,12 +133,16 @@ mod tests {
         );
         assert!(!settings.restore.allow_in_place);
         assert!(!settings.restore.allow_guest_in_place);
+        assert_eq!(
+            settings.restore.guest_staging_dir(&paths),
+            paths.state_dir.join("pve-staging")
+        );
     }
 
     #[test]
     fn restore_settings_explicit_list() {
         let (_tmp, paths, settings) = load(
-            "restore:\n  allowed_restore_roots: [/srv/r, /mnt/x]\n  allow_in_place: true\n  allow_guest_in_place: true\n",
+            "restore:\n  allowed_restore_roots: [/srv/r, /mnt/x]\n  allow_in_place: true\n  allow_guest_in_place: true\n  guest_staging_dir: /srv/staging\n",
         );
         assert_eq!(
             settings.restore.roots(&paths),
@@ -137,6 +150,10 @@ mod tests {
         );
         assert!(settings.restore.allow_in_place);
         assert!(settings.restore.allow_guest_in_place);
+        assert_eq!(
+            settings.restore.guest_staging_dir(&paths),
+            PathBuf::from("/srv/staging")
+        );
 
         let (_tmp, paths, settings) = load("restore:\n  allowed_restore_roots: []\n");
         assert!(settings.restore.roots(&paths).is_empty());

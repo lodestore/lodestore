@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
+use lodestore_format::guest_config::guest_identity;
 use lodestore_proto::agent::v1::{
     ClusterNode, ConfigLine, GuestKind, ProxmoxFacts, ProxmoxGuest, ProxmoxStorage,
 };
@@ -22,6 +23,7 @@ use crate::pve::install::{PluginHealth, plugin_health};
 
 const VMIDS: std::ops::RangeInclusive<u32> = 100..=999_999_999;
 const MAX_DPKG_STATUS_BYTES: u64 = 64 << 20;
+pub(crate) const DPKG_STATUS: &str = "/var/lib/dpkg/status";
 
 pub(crate) const PLUGIN_FILE: &str = "PVE/Storage/Custom/LodestorePlugin.pm";
 pub(crate) const PROVIDER_FILE: &str = "PVE/BackupProvider/Plugin/Lodestore.pm";
@@ -194,14 +196,12 @@ fn split_tags(value: &str) -> Vec<String> {
 /// start of a line, so a `#name:` line of the description is not a name.
 pub(crate) fn parse_guest_conf(text: &str) -> GuestConf {
     let mut conf = GuestConf::default();
-    let mut meta = None;
     for line in text.lines() {
         let Some((key, value)) = line.split_once(':') else {
             continue;
         };
         let value = value.trim();
         match key {
-            "meta" => meta = Some(value),
             "unprivileged" if !conf.unprivileged => conf.unprivileged = value == "1",
             _ if is_volume_key(key) => {
                 if conf.volumes.len() >= MAX_GUEST_VOLUMES || value.len() > MAX_VOLUME_LINE {
@@ -222,8 +222,8 @@ pub(crate) fn parse_guest_conf(text: &str) -> GuestConf {
             _ => {}
         }
     }
-    if let Some((uid, rtime)) = meta.and_then(parse_meta) {
-        (conf.pve_uid, conf.pve_rtime) = (Some(uid), rtime);
+    if let Some(id) = guest_identity(text.as_bytes()) {
+        (conf.pve_uid, conf.pve_rtime) = (Some(id.uid), id.rtime.unwrap_or(0));
     }
     conf
 }
@@ -235,32 +235,6 @@ fn is_volume_key(key: &str) -> bool {
     key == "rootfs"
         || digits
             .is_some_and(|d| (1..=3).contains(&d.len()) && d.bytes().all(|b| b.is_ascii_digit()))
-}
-
-/// `uid` and `rtime` of a `meta:` line, as `PVE::GuestIdentity` reads them: a
-/// repeated member or a uid that is not 20 base32 characters makes the whole
-/// line invalid, which is the same as no uid.
-fn parse_meta(value: &str) -> Option<(String, u64)> {
-    let (mut uid, mut rtime) = (None, None);
-    for member in value.split(',') {
-        let (key, member_value) = member.trim().split_once('=')?;
-        let slot = match key {
-            "uid" => &mut uid,
-            "rtime" => &mut rtime,
-            _ => continue,
-        };
-        if slot.replace(member_value).is_some() {
-            return None;
-        }
-    }
-    let uid = uid?;
-    let valid = uid.len() == 20 && uid.bytes().all(|b| matches!(b, b'a'..=b'z' | b'2'..=b'7'));
-    valid.then(|| {
-        (
-            uid.to_string(),
-            rtime.and_then(|t| t.parse().ok()).unwrap_or(0),
-        )
-    })
 }
 
 fn storage_id_valid(id: &str) -> bool {
@@ -602,7 +576,9 @@ fn iface_name_valid(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
-fn bridges(roots: &ScanRoots, truncated: &mut bool) -> Vec<String> {
+/// The bridges of the node: interfaces under `{sys}/class/net` with a
+/// `bridge` folder.
+pub(crate) fn bridges(roots: &ScanRoots, truncated: &mut bool) -> Vec<String> {
     let dir = roots.sys.join("class/net");
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
@@ -623,6 +599,23 @@ fn bridges(roots: &ScanRoots, truncated: &mut bool) -> Vec<String> {
         *truncated = true;
     }
     names
+}
+
+/// Whether any guest of the cluster has `vmid`, by `.vmlist`.
+pub(crate) fn vmid_used(roots: &ScanRoots, vmid: u32) -> Result<bool, ScanFailed> {
+    let bytes =
+        read_bounded(&roots.pve.join(".vmlist"), MAX_PVE_FILE_BYTES).map_err(failed(".vmlist"))?;
+    Ok(parse_vmlist(&bytes, "")?.used.contains(&vmid))
+}
+
+/// The storages `node` can use, as `storage.cfg` lists them.
+pub(crate) fn node_storages(
+    roots: &ScanRoots,
+    node: &str,
+) -> Result<Vec<ProxmoxStorage>, ScanFailed> {
+    let bytes = read_bounded(&roots.pve.join("storage.cfg"), MAX_PVE_FILE_BYTES)
+        .map_err(failed("storage.cfg"))?;
+    Ok(parse_storages(&String::from_utf8_lossy(&bytes), node).0)
 }
 
 fn ct_running(roots: &ScanRoots, vmid: u32) -> bool {
@@ -721,7 +714,6 @@ fn clip_version(version: String) -> String {
 /// expected and the current state are compared by the same code.
 #[derive(Debug, Clone)]
 #[cfg_attr(test, derive(PartialEq))]
-#[cfg_attr(not(test), expect(dead_code))]
 pub(crate) struct CtTargetFacts {
     pub vmid: u32,
     pub name: String,
@@ -759,7 +751,6 @@ fn ct_facts(
 /// The container `vmid` on this node as the scan would report it; `Ok(None)`
 /// when it has no config here. `instance_uuid` is empty when the saved id
 /// belongs to another `meta uid`, or there is none yet.
-#[cfg_attr(not(test), expect(dead_code))]
 pub(crate) fn ct_target_facts(
     roots: &ScanRoots,
     ids_path: &Path,

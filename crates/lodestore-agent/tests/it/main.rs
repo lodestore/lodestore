@@ -3,6 +3,7 @@ mod adv_support;
 mod common;
 
 mod ct_backup;
+mod ct_restore;
 mod deadline;
 mod distrusted;
 mod hooks;

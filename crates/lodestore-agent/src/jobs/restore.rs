@@ -25,6 +25,7 @@ use lodestore_format::tree::validate_name;
 use lodestore_proto::agent::v1 as proto;
 use lodestore_proto::agent::v1::agent_client::AgentClient;
 use lodestore_proto::agent::v1::plan_item::Kind as ItemKind;
+use lodestore_proto::agent::v1::restore_spec::Target;
 use lodestore_proto::agent::v1::{
     ChunkLoc, ConflictPolicy, JobEventLevel, JobFinished, JobOutcome, JobPhaseKind,
     RestorePlanBatch, RestorePlanRequest, RestoreSpec,
@@ -34,7 +35,7 @@ use tonic::{Code, Streaming};
 use zeroize::{Zeroize, Zeroizing};
 
 use super::fetch::{FetchError, Fetchers, PackAccess, PackFetcher, Span, coalesce};
-use super::{JobCtx, ProgressCell, failed, now_ms};
+use super::{JobCtx, ProgressCell, ct_restore, failed, now_ms};
 use crate::config::AgentSettings;
 use crate::shared_channel::SharedChannel;
 
@@ -159,9 +160,9 @@ impl Default for RestoreOptions {
     }
 }
 
-struct Abort {
-    code: &'static str,
-    message: String,
+pub(super) struct Abort {
+    pub(super) code: &'static str,
+    pub(super) message: String,
 }
 
 fn abort(code: &'static str, message: impl Into<String>) -> Abort {
@@ -204,7 +205,7 @@ async fn unless_cancelled<T>(flag: &AtomicBool, work: impl Future<Output = T>) -
     }
 }
 
-struct Prepared {
+pub(super) struct Prepared {
     snapshot: String,
     repo_id: RepoId,
     k_id: Zeroizing<[u8; 32]>,
@@ -214,15 +215,70 @@ struct Prepared {
     overwrite: Overwrite,
     restore_owners: bool,
     stop_if_not_empty: bool,
+    keep_privileges: bool,
     /// The container's id map; owners are shifted by it to the node's ids.
     id_shift: Option<IdMap>,
-    /// Files of a container snapshot: no special entries, free space kept.
-    guest: Option<SpaceReserve>,
+    /// Files of a container snapshot: these special entries left out, free space kept.
+    guest: Option<(SkipSpecial, SpaceReserve)>,
+    /// The files of the plan must fit above the reserve before the first is written.
+    precheck_space: bool,
     /// The topmost folder of the target that did not exist before the restore.
     created: Option<PathBuf>,
 }
 
+fn invalid(what: &str) -> Abort {
+    abort(
+        "restore_failed",
+        format!("the restore spec is invalid: {what}"),
+    )
+}
+
+fn repo_keys(spec: &RestoreSpec) -> Result<(RepoId, Zeroizing<[u8; 32]>), Abort> {
+    let repo_id =
+        RepoId::try_from(spec.source_repo_id.as_slice()).map_err(|_| invalid("repository id"))?;
+    let k_id = <[u8; 32]>::try_from(spec.k_id.as_slice())
+        .map(Zeroizing::new)
+        .map_err(|_| invalid("chunk key"))?;
+    Ok((repo_id, k_id))
+}
+
+fn no_space(target: &std::path::Path, free: u64, reserve: u64) -> Abort {
+    abort(
+        "restore_no_space",
+        format!(
+            "not enough free space on {}: {free} bytes free, {reserve} bytes must stay free",
+            target.display()
+        ),
+    )
+}
+
 impl Prepared {
+    /// A guest restore's staging folder `dir`, filled as the container sees
+    /// its files: owners and privileges kept, no device nodes, free space kept.
+    pub(super) fn staging(
+        spec: &RestoreSpec,
+        dir: PathBuf,
+        reserve: SpaceReserve,
+    ) -> Result<Self, Abort> {
+        let (repo_id, k_id) = repo_keys(spec)?;
+        Ok(Prepared {
+            snapshot: spec.snapshot_id.clone(),
+            repo_id,
+            k_id,
+            target: dir,
+            confined: None,
+            in_place: false,
+            overwrite: Overwrite::IfChanged,
+            restore_owners: true,
+            stop_if_not_empty: false,
+            keep_privileges: true,
+            id_shift: None,
+            guest: Some((SkipSpecial::Devices, reserve)),
+            precheck_space: true,
+            created: None,
+        })
+    }
+
     fn new(spec: &RestoreSpec, options: &RestoreOptions) -> Result<Self, Abort> {
         if spec.target.is_some() {
             return Err(abort(
@@ -230,17 +286,7 @@ impl Prepared {
                 "unsupported restore target: this agent restores only files",
             ));
         }
-        let invalid = |what: &str| {
-            abort(
-                "restore_failed",
-                format!("the restore spec is invalid: {what}"),
-            )
-        };
-        let repo_id = RepoId::try_from(spec.source_repo_id.as_slice())
-            .map_err(|_| invalid("repository id"))?;
-        let k_id = <[u8; 32]>::try_from(spec.k_id.as_slice())
-            .map(Zeroizing::new)
-            .map_err(|_| invalid("chunk key"))?;
+        let (repo_id, k_id) = repo_keys(spec)?;
         let id_shift = if spec.ct_idmap.is_empty() {
             None
         } else {
@@ -334,8 +380,12 @@ impl Prepared {
             },
             restore_owners: spec.restore_owners,
             stop_if_not_empty: policy == ConflictPolicy::StopIfNotEmpty,
+            keep_privileges: spec.in_place,
             id_shift,
-            guest: spec.guest_snapshot.then_some(options.space_reserve),
+            guest: spec
+                .guest_snapshot
+                .then_some((SkipSpecial::All, options.space_reserve)),
+            precheck_space: false,
             created,
         })
     }
@@ -368,7 +418,7 @@ impl Prepared {
             k_id: self.k_id.clone(),
             seed: cdc_seed(&self.k_id),
             restore_owners: self.restore_owners,
-            keep_privileges: self.in_place,
+            keep_privileges: self.keep_privileges,
         }
     }
 }
@@ -431,9 +481,7 @@ impl<'a, F: PackFetcher> Attempt<'a, F> {
                 _ => r,
             };
             match prepared.guest {
-                Some(reserve) => r
-                    .skip_special_files(SkipSpecial::All)
-                    .with_space_reserve(reserve),
+                Some((skip, reserve)) => r.skip_special_files(skip).with_space_reserve(reserve),
                 None => r,
             }
         });
@@ -494,6 +542,7 @@ impl<'a, F: PackFetcher> Attempt<'a, F> {
                 if let Some(totals) = &batch.totals {
                     self.cell.files_total.store(totals.files, Ordering::Relaxed);
                     self.cell.bytes_total.store(totals.bytes, Ordering::Relaxed);
+                    self.precheck_space(totals.bytes)?;
                 }
                 self.cell.scan_done.store(true, Ordering::Relaxed);
                 self.ctx.phase(JobPhaseKind::RestoreFiles, "");
@@ -512,6 +561,24 @@ impl<'a, F: PackFetcher> Attempt<'a, F> {
         self.ctx.phase(JobPhaseKind::RestoreMetadata, "");
         self.flush();
         Ok(())
+    }
+
+    fn precheck_space(&self, bytes: u64) -> Result<(), Abort> {
+        let (Some((_, reserve)), true) = (self.prepared.guest, self.prepared.precheck_space) else {
+            return Ok(());
+        };
+        let target = &self.prepared.target;
+        let dir = std::fs::File::open(target)
+            .map_err(|e| io_abort(&e, &format!("cannot open {}", target.display())))?;
+        match reserve.check(&dir, bytes) {
+            Ok(()) => Ok(()),
+            Err(Error::NoSpace { free, reserve }) => Err(no_space(target, free, reserve)),
+            Err(Error::Io(e)) => Err(io_abort(
+                &e,
+                &format!("cannot measure {}", target.display()),
+            )),
+            Err(other) => Err(abort("restore_failed", other.to_string())),
+        }
     }
 
     fn check_cancel(&self) -> Result<(), Stop> {
@@ -627,14 +694,7 @@ impl<'a, F: PackFetcher> Attempt<'a, F> {
             Error::Io(_) => "restore_entry_failed",
             Error::Interrupted => return Err(Stop::Cancelled),
             Error::NoSpace { free, reserve } => {
-                return Err(abort(
-                    "restore_no_space",
-                    format!(
-                        "not enough free space on {}: {free} bytes free, {reserve} bytes must stay free",
-                        self.prepared.target.display()
-                    ),
-                )
-                .into());
+                return Err(no_space(&self.prepared.target, *free, *reserve).into());
             }
             Error::Corrupt { .. } | Error::Crypto => "restore_integrity",
             other => return Err(abort("restore_failed", other.to_string()).into()),
@@ -857,7 +917,7 @@ fn decode(raw: &[u8]) -> Result<Node, Stop> {
         .map_err(|_| abort("restore_failed", "the plan has an unreadable entry").into())
 }
 
-fn stopped(ctx: &JobCtx, mut finished: JobFinished) -> JobFinished {
+pub(super) fn stopped(ctx: &JobCtx, mut finished: JobFinished) -> JobFinished {
     let (outcome, code, text) = if ctx.cancelled() {
         (
             JobOutcome::Cancelled,
@@ -885,10 +945,24 @@ pub async fn execute_with<P: PlanSource, F: PackFetcher>(
     fetch: &F,
     options: &RestoreOptions,
 ) -> JobFinished {
+    if let Some(Target::Guest(guest)) = &spec.target {
+        return ct_restore::run(ctx, spec, guest, plan, fetch, options).await;
+    }
     let prepared = match Prepared::new(spec, options).and_then(|p| p.check_empty().map(|()| p)) {
         Ok(p) => p,
         Err(a) => return failed(a.code, &a.message),
     };
+    execute_prepared(ctx, &prepared, plan, fetch, options).await
+}
+
+/// Runs the plan into the target `prepared` describes.
+pub(super) async fn execute_prepared<P: PlanSource, F: PackFetcher>(
+    ctx: &JobCtx,
+    prepared: &Prepared,
+    plan: &mut P,
+    fetch: &F,
+    options: &RestoreOptions,
+) -> JobFinished {
     tracing::info!(job_id = ctx.job_id(), snapshot = %prepared.snapshot, "restore started");
     let mut restarts = 0;
     let mut broken: Option<String> = None;
@@ -925,7 +999,7 @@ pub async fn execute_with<P: PlanSource, F: PackFetcher>(
                 Err(PlanError::Fatal(why)) => return failed("restore_failed", &why),
             }
         }
-        let mut attempt = match Attempt::new(ctx, &prepared, fetch, carried) {
+        let mut attempt = match Attempt::new(ctx, prepared, fetch, carried) {
             Ok(a) => a,
             Err(a) => return failed(a.code, &a.message),
         };

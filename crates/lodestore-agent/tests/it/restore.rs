@@ -2317,8 +2317,13 @@ async fn restore_refuses_a_target_it_cannot_run() {
             let f = finished_of(&msgs, &id).unwrap();
             let case = format!("{target:?} destination={by_destination} in_place={in_place}");
             assert_eq!(f.outcome, JobOutcome::Failed as i32, "{case} {msgs:?}");
+            // A guest target goes to the container restore, which this hub is not set up for.
+            let expected = match target {
+                Target::Guest(_) => "not set up for Proxmox VE containers",
+                Target::Database(_) => "unsupported restore target",
+            };
             assert!(
-                f.error_message.contains("unsupported restore target"),
+                f.error_message.contains(expected),
                 "{case} {}",
                 f.error_message
             );

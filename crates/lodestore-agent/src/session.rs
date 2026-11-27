@@ -37,7 +37,7 @@ const STABLE_STREAM: Duration = Duration::from_secs(60);
 const RENEW_RETRY: Duration = Duration::from_secs(60);
 const MAX_SKEW_SECS: i64 = 300;
 const JOBS_DRAIN: Duration = Duration::from_secs(30);
-pub const CAPABILITIES: [&str; 10] = [
+pub const CAPABILITIES: [&str; 11] = [
     "restore_v1",
     "limits_v1",
     "gc_v1",
@@ -48,6 +48,7 @@ pub const CAPABILITIES: [&str; 10] = [
     "host_key_v1",
     "location_v1",
     "sas_refresh_v1",
+    "guest_restore_ct_v1",
 ];
 const CAP_UPDATE: &str = "update_v1";
 
@@ -142,6 +143,11 @@ pub async fn run_with(
         Ok(StartAction::Continue) => {}
         Err(error) => tracing::warn!(%error, "the update state could not be checked at start"),
     }
+    let (paths, pve_root) = (args.paths.clone(), discovery.pve_root.clone());
+    let _ = tokio::task::spawn_blocking(move || {
+        crate::jobs::ct_restore::clean_stale_staging_at_start(&paths, &pve_root);
+    })
+    .await;
     let hub = JobHub::open(&args.paths, &first.agent_id)?;
     hub.set_net(args.net.clone());
     let socket_stop = args.shutdown.child_token();
@@ -152,6 +158,7 @@ pub async fn run_with(
         commands: PveCommands::default(),
         pve_root: discovery.pve_root.clone(),
         perl_root: discovery.perl_root.clone(),
+        sys_root: discovery.sys_root.clone(),
         socket: socket_path.clone(),
     });
     tokio::spawn(socket::serve_with(
