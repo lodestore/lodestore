@@ -935,7 +935,8 @@ async fn idmap_root_backup_restore() {
     };
     let mut restorer = Restorer::open(&target, settings)
         .unwrap()
-        .with_id_shift(IdMap::default_unprivileged());
+        .with_id_shift(IdMap::default_unprivileged())
+        .unwrap();
     let mut sink = restorer.begin_file(node).unwrap().unwrap();
     sink.write(&content).unwrap();
     restorer.finish_file(sink, node).unwrap();

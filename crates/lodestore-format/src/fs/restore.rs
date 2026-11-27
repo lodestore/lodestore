@@ -413,10 +413,16 @@ impl Restorer {
     /// Translates owners, ACLs and capabilities from the container's view
     /// in `map` to the node's before they are applied. Without
     /// `restore_owners` it changes nothing; capabilities still need
-    /// `keep_privileges`.
-    pub fn with_id_shift(mut self, map: IdMap) -> Self {
+    /// `keep_privileges`. A map with a range onto host id 0 is refused: it
+    /// would give container ids, and version 2 capabilities, the node's root.
+    pub fn with_id_shift(mut self, map: IdMap) -> Result<Self> {
+        if map.ranges().iter().any(|r| r.host == 0) {
+            return Err(Error::InvalidInput(
+                "the container id map maps a container id to root on the node".into(),
+            ));
+        }
         self.id_shift = Some(map);
-        self
+        Ok(self)
     }
 
     /// Whether the opened target can be written, asked of the open folder
@@ -1402,6 +1408,33 @@ mod tests {
             std::fs::remove_file(tmp.path().join("link")).unwrap();
             let _ = std::fs::remove_file(tmp.path().join("fifo"));
         }
+    }
+
+    #[test]
+    fn id_shift_refuses_a_map_onto_node_root() {
+        use crate::ct::{IdKind, IdRange};
+        let tmp = tempfile::tempdir().unwrap();
+        let range = |kind, host| IdRange {
+            kind,
+            ct: 0,
+            host,
+            count: 65_536,
+        };
+        for kind in [IdKind::User, IdKind::Group] {
+            let other = match kind {
+                IdKind::User => IdKind::Group,
+                IdKind::Group => IdKind::User,
+            };
+            let map = IdMap::new(vec![range(kind, 0), range(other, 100_000)]).unwrap();
+            let restorer = Restorer::open(tmp.path(), settings()).unwrap();
+            assert!(restorer.with_id_shift(map).is_err(), "{kind:?}");
+        }
+        let restorer = Restorer::open(tmp.path(), settings()).unwrap();
+        assert!(
+            restorer
+                .with_id_shift(IdMap::default_unprivileged())
+                .is_ok()
+        );
     }
 
     #[test]
