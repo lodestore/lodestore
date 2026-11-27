@@ -16,6 +16,7 @@ pub struct HookSettings {
 pub struct RestoreSettings {
     pub allowed_restore_roots: Option<Vec<PathBuf>>,
     pub allow_in_place: bool,
+    pub allow_guest_in_place: bool,
 }
 
 pub const DEFAULT_RESTORE_DIR: &str = "restore";
@@ -122,17 +123,20 @@ mod tests {
             vec![paths.state_dir.join("restore")]
         );
         assert!(!settings.restore.allow_in_place);
+        assert!(!settings.restore.allow_guest_in_place);
     }
 
     #[test]
     fn restore_settings_explicit_list() {
-        let (_tmp, paths, settings) =
-            load("restore:\n  allowed_restore_roots: [/srv/r, /mnt/x]\n  allow_in_place: true\n");
+        let (_tmp, paths, settings) = load(
+            "restore:\n  allowed_restore_roots: [/srv/r, /mnt/x]\n  allow_in_place: true\n  allow_guest_in_place: true\n",
+        );
         assert_eq!(
             settings.restore.roots(&paths),
             vec![PathBuf::from("/srv/r"), PathBuf::from("/mnt/x")]
         );
         assert!(settings.restore.allow_in_place);
+        assert!(settings.restore.allow_guest_in_place);
 
         let (_tmp, paths, settings) = load("restore:\n  allowed_restore_roots: []\n");
         assert!(settings.restore.roots(&paths).is_empty());

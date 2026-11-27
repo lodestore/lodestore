@@ -8,7 +8,7 @@ use lodestore_agent::{EnrollArgs, NetOptions};
 use lodestore_proto::agent::v1::agent_message::Body as AgentBody;
 use lodestore_proto::agent::v1::{
     Database, DatabaseKind, DatabaseServer, GuestKind, Heartbeat, ProxmoxFacts, ProxmoxGuest,
-    SourceFacts,
+    ProxmoxStorage, SourceFacts,
 };
 use lodestore_server::db::now_ms;
 use lodestore_server::sources::{self, Discovery};
@@ -51,6 +51,7 @@ fn node(guests: Vec<ProxmoxGuest>) -> SourceFacts {
             cluster: "pve-prod".to_string(),
             node: "pve1".to_string(),
             guests,
+            ..Default::default()
         }),
         ..Default::default()
     }
@@ -792,6 +793,52 @@ async fn sources_options_require_policies_read() {
         let mut unknown = body.clone();
         unknown["repository"] = "nowhere".into();
         assert_eq!(api.post(OPTIONS, &unknown).await.status(), 422);
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn storages_are_clipped() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let host = enroll(&ts, &api, &repo, "host-a").await;
+        let storage = |id: String, content: &[&str]| ProxmoxStorage {
+            id,
+            r#type: "dir".to_string(),
+            content: content.iter().map(|c| c.to_string()).collect(),
+            shared: false,
+        };
+        let mut list: Vec<ProxmoxStorage> = (0..100)
+            .map(|i| storage(format!("s{i}"), &["rootdir"]))
+            .collect();
+        list.insert(0, storage("9bad".to_string(), &["rootdir"]));
+        list.insert(
+            1,
+            storage(
+                "wide".to_string(),
+                &[
+                    "images", "rootdir", "vztmpl", "iso", "backup", "snippets", "import", "bogus",
+                ],
+            ),
+        );
+        let mut facts = node(Vec::new());
+        facts.proxmox.as_mut().unwrap().storages = list;
+
+        let mut last = None;
+        sources::record(ts.state(), &host.id, &facts, &mut last, now_ms())
+            .await
+            .unwrap();
+        let stored = sources::load(ts.state(), &host.id).await.unwrap().unwrap();
+        let discovery = stored.discovery;
+        assert!(discovery.truncated);
+        let storages = &discovery.proxmox.unwrap().storages;
+        assert_eq!(storages.len(), sources::MAX_STORAGES);
+        assert_eq!(storages[0].id, "wide");
+        assert_eq!(storages[0].content.len(), 7);
+        assert!(storages.iter().all(|s| s.id != "9bad"));
+
         ts.stop().await;
     }
 }

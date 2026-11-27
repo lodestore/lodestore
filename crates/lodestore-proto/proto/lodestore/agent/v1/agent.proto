@@ -177,6 +177,37 @@ message ProxmoxFacts {
   string cluster = 1;
   string node = 2;
   repeated ProxmoxGuest guests = 3;
+  // Storages this node can use, as the cluster storage.cfg lists them.
+  repeated ProxmoxStorage storages = 4;
+  repeated ClusterNode nodes = 5;
+  // The plugin files and this node's marker are in place.
+  bool plugin_installed = 6;
+  // restore.allow_guest_in_place of this agent. Information only.
+  bool guest_in_place_allowed = 7;
+  // The smallest free VMID of the cluster in the next-id range; 0 when unknown.
+  uint32 next_vmid = 8;
+  string pve_version = 9;
+  bool plugin_current = 10;
+  repeated string bridges = 11;
+}
+
+message ClusterNode {
+  string name = 1;
+  bool online = 2;
+  // The content of /etc/pve/lodestore/plugin/{name}; empty without a marker.
+  string plugin_marker = 3;
+}
+
+message ConfigLine {
+  string key = 1;
+  string value = 2;
+}
+
+message ProxmoxStorage {
+  string id = 1;
+  string type = 2;
+  repeated string content = 3;
+  bool shared = 4;
 }
 
 enum GuestKind {
@@ -192,6 +223,15 @@ message ProxmoxGuest {
   string uuid = 4;
   string pool = 5;
   repeated string tags = 6;
+  bool running = 7;
+  bool unprivileged = 8;
+  // The `meta uid` of a container; empty when it has none.
+  string pve_uid = 9;
+  uint64 pve_rtime = 10;
+  bool ha_managed = 11;
+  // The rootfs, mpN and unusedN lines of the config, as written.
+  repeated ConfigLine volumes = 12;
+  bool volumes_truncated = 13;
 }
 
 enum DatabaseKind {
@@ -256,6 +296,14 @@ message JobSpec {
   repeated bytes distrusted_shards = 13;
   // What the policy backs up when it is not files. Absent: the files in paths.
   SourceSelector source = 14;
+  // Set by the server for a job of one guest or database instance; the agent backs up only this instance.
+  SourceInstance instance = 15;
+}
+
+message SourceInstance {
+  // The canonical source key of the instance.
+  string key = 1;
+  uint32 vmid = 2;
 }
 
 message SourceSelector {
@@ -446,6 +494,10 @@ message RestoreSpec {
     GuestTarget guest = 8;
     DatabaseTarget database = 9;
   }
+  // The canonical idmap of a container snapshot, from its metadata. Set for a files restore with owners; the agent shifts owners by it.
+  string ct_idmap = 10;
+  // The snapshot is of a container; the agent creates no device nodes, FIFOs or sockets from it.
+  bool guest_snapshot = 11;
 }
 
 message GuestTarget {
@@ -454,6 +506,27 @@ message GuestTarget {
   uint32 vmid = 2;
   // Write over the live guest.
   bool in_place = 3;
+  // The storage for the volumes of the guest to create.
+  string storage = 4;
+  // For a replace: the target as the user confirmed it. The agent refuses with guest_target_changed if the guest differs right before the restore.
+  ExpectedGuest expected = 5;
+  // Set when the user confirmed replacing the guest with a snapshot of another guest; valid only for exactly these two uids.
+  OtherGuestConfirmation confirm_other_guest = 6;
+}
+
+message ExpectedGuest {
+  uint32 vmid = 1;
+  string name = 2;
+  // Empty: the target has no uid.
+  string pve_uid = 3;
+  uint64 pve_rtime = 4;
+  string instance_uuid = 5;
+  repeated ConfigLine volumes = 6;
+}
+
+message OtherGuestConfirmation {
+  string snapshot_pve_uid = 1;
+  string target_pve_uid = 2;
 }
 
 message DatabaseTarget {
@@ -469,6 +542,29 @@ message RestoreStats {
   uint64 skipped = 3;
   uint64 files = 4;
   uint64 bytes = 5;
+  // Set by a guest restore.
+  GuestRestoreResult guest = 6;
+  // Device nodes, FIFOs and sockets left out of a container files restore.
+  uint64 special_skipped = 7;
+}
+
+message DroppedConfigKey {
+  string key = 1;
+  string value = 2;
+  string reason = 3;
+}
+
+message GuestRestoreResult {
+  uint32 vmid = 1;
+  string node = 2;
+  string storage = 3;
+  bool replaced = 4;
+  repeated DroppedConfigKey dropped = 5;
+  repeated string new_mac_nets = 6;
+  bool unprivileged = 7;
+  uint32 root_host_uid = 8;
+  string name = 9;
+  repeated ConfigLine network = 10;
 }
 
 message RestorePlanRequest {

@@ -2491,6 +2491,7 @@ fn vm_facts(age_ms: u64, truncated: bool, vmids: &[u32]) -> SourceFacts {
                     ..Default::default()
                 })
                 .collect(),
+            ..Default::default()
         }),
         ..Default::default()
     }
@@ -2662,6 +2663,7 @@ fn tagged_guest(kind: GuestKind, vmid: u32, pool: &str, tags: &[&str]) -> Proxmo
         uuid: format!("{vmid:08}-1111-4111-8111-111111111111"),
         pool: pool.to_string(),
         tags: tags.iter().map(|t| t.to_string()).collect(),
+        ..Default::default()
     }
 }
 
@@ -2673,6 +2675,7 @@ fn node_facts(age_ms: u64, truncated: bool, guests: Vec<ProxmoxGuest>) -> Source
             cluster: "pve-prod".to_string(),
             node: "pve1".to_string(),
             guests,
+            ..Default::default()
         }),
         ..Default::default()
     }

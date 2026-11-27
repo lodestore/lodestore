@@ -895,6 +895,7 @@ async fn restore_plan_finished_stores_counters() {
                     skipped: 3,
                     files: 3,
                     bytes: 10,
+                    ..Default::default()
                 }),
                 finished_at_ms: now_ms(),
                 ..Default::default()

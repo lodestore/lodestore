@@ -327,6 +327,7 @@ pub async fn enqueue_restore_checked(
         conflict: req.conflict as i32,
         restore_owners: req.restore_owners,
         target: None,
+        ..Default::default()
     };
     let id = uuid::Uuid::now_v7().to_string();
     sqlx::query(
