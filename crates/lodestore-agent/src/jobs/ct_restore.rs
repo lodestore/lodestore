@@ -42,6 +42,8 @@ use crate::pve::{STORAGE_ID, TOKEN_ENV};
 /// The default staging folder below the agent's state folder.
 pub const STAGING_DIR: &str = DEFAULT_GUEST_STAGING_DIR;
 const LOCK_FILE: &str = ".lock";
+/// The folder the snapshot is restored into, beside the lock.
+const DATA_DIR: &str = "data";
 /// The cluster file system and its database: staging there would fill both.
 const FORBIDDEN_STAGING: [&str; 2] = ["/etc/pve", "/var/lib/pve-cluster"];
 const POLL: Duration = Duration::from_millis(50);
@@ -96,7 +98,7 @@ async fn restore<P: PlanSource, F: PackFetcher>(
             &format!("cannot create a staging folder in {}: {e}", base.display()),
         )
     })?;
-    let prepared = Prepared::staging(spec, staging.dir.clone(), options.space_reserve)
+    let prepared = Prepared::staging(spec, staging.data.clone(), options.space_reserve)
         .map_err(|a| refuse(a.code, &a.message))?;
     let mut finished = execute_prepared(ctx, &prepared, plan, fetch, options).await;
     let ok = [JobOutcome::Succeeded, JobOutcome::Warnings]
@@ -293,7 +295,7 @@ async fn hand_over(
     staging: &Staging,
 ) -> Result<GuestRestoreResult, Refused> {
     let vmid = guest.vmid;
-    let (config, firewall) = staged_config(&staging.dir)?;
+    let (config, firewall) = staged_config(&staging.data)?;
     let target = if guest.in_place {
         Some(recheck_target(ctx, pve, guest, checked)?)
     } else {
@@ -348,7 +350,7 @@ async fn hand_over(
     if mismatch_flag {
         args.extend(["--allow-identity-mismatch", "1"].map(String::from));
     }
-    pct_restore(ctx, pve, &args, &staging.id, &filtered, &staging.dir).await?;
+    pct_restore(ctx, pve, &args, &staging.id, &filtered, &staging.data).await?;
 
     let created = std::fs::read(conf_path(pve, &checked.node, vmid))
         .ok()
@@ -587,10 +589,12 @@ async fn pct_restore(
 /// `{base}/{id}`, 0700, with a `.lock` held for as long as the restore
 /// runs. The lock's descriptor is inherited by `pct`, so a `pct` left over
 /// from an agent that died keeps its folder; the folder is removed when the
-/// restore ends, however it ends.
+/// restore ends, however it ends. The snapshot goes into `data` beside the
+/// lock, so nothing in it can replace the lock.
 struct Staging {
     id: String,
     dir: PathBuf,
+    data: PathBuf,
     _lock: OwnedFd,
 }
 
@@ -611,16 +615,23 @@ impl Staging {
             OFlags::CREATE | OFlags::EXCL | OFlags::RDWR | OFlags::NOFOLLOW,
             Mode::RUSR | Mode::WUSR,
         )
-        .and_then(|fd| flock(&fd, FlockOperation::LockExclusive).map(|()| fd));
-        match lock {
+        .and_then(|fd| flock(&fd, FlockOperation::LockExclusive).map(|()| fd))
+        .map_err(io::Error::from);
+        let data = dir.join(DATA_DIR);
+        let made = lock.and_then(|lock| {
+            std::fs::DirBuilder::new().mode(0o700).create(&data)?;
+            Ok(lock)
+        });
+        match made {
             Ok(lock) => Ok(Staging {
                 id,
                 dir,
+                data,
                 _lock: lock,
             }),
             Err(e) => {
                 let _ = std::fs::remove_dir_all(&dir);
-                Err(e.into())
+                Err(e)
             }
         }
     }

@@ -1182,6 +1182,51 @@ async fn ct_restore_replace_target_with_snapshots_refused() {
     succeeded(&ran);
 }
 
+/// A `.lock` in the plan lands outside the staging folder's lock: the
+/// folder stays held while `pct` runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn ct_restore_planted_lock_keeps_staging_held() {
+    let lab = Lab::new().await;
+    lab.pct_script_with(None, true);
+    let mut snap = lab
+        .snapshot(&snapshot_config(None, ""), None, |_| {}, &[])
+        .await;
+    let lock = Node {
+        name: b".lock".to_vec(),
+        r#type: NodeType::Fifo as i32,
+        mode: 0o600,
+        ..Default::default()
+    };
+    snap.batches[0].items.insert(
+        0,
+        PlanItem {
+            kind: Some(Kind::Entry(PlanEntry {
+                node: lock.encode_to_vec(),
+                chunks: Vec::new(),
+                more: false,
+            })),
+        },
+    );
+    let base = lab.staging_default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let inspect = move || {
+        let dirs: Vec<PathBuf> = fs::read_dir(&base)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        clean_stale_staging(&base);
+        tx.send(dirs.iter().all(|d| d.exists())).unwrap();
+    };
+    let ran = lab
+        .run_gated(&snap, lab.spec(&snap, new_ct(105)), inspect)
+        .await;
+    assert!(
+        rx.recv().unwrap(),
+        "the staging folder was removed while pct ran"
+    );
+    succeeded(&ran);
+}
+
 #[derive(Debug, Clone)]
 enum Planted {
     File(Vec<u8>, bool),
@@ -1406,7 +1451,7 @@ fn pve_root_staging_matches_snapshot() {
                 let mut dirs = fs::read_dir(&base).unwrap().map(|e| e.unwrap().path());
                 let staging = dirs.next().unwrap();
                 assert!(dirs.next().is_none());
-                tx.send(describe(&staging.join("fs"))).unwrap();
+                tx.send(describe(&staging.join("data/fs"))).unwrap();
             };
             let spec = lab.spec(&snap, new_ct(105));
             let ran = rt.block_on(lab.run_gated(&snap, spec, inspect));
