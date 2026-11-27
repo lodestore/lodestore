@@ -2366,6 +2366,7 @@ async fn migration_0033_marks_existing_rows_as_files() {
         let pool = ts.state().db.pool.clone();
         let name = backend.name();
         for column in [
+            "DROP INDEX jobs_coalesce_idx",
             "ALTER TABLE jobs DROP COLUMN source_ref",
             "ALTER TABLE jobs DROP COLUMN source_meta_json",
             "ALTER TABLE snapshots DROP COLUMN source_type",
