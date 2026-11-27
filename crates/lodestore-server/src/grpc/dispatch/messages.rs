@@ -559,15 +559,17 @@ async fn apply_finished(
         .is_some_and(|kind| kind == "restore");
     let stats = if is_restore {
         f.restore.as_ref().map(|r| {
-            serde_json::json!({
+            let mut stats = serde_json::json!({
                 "created": r.created,
                 "overwritten": r.overwritten,
                 "skipped": r.skipped,
                 "files": r.files,
                 "bytes": r.bytes,
-                "guest": r.guest.as_ref().map(crate::jobs::guest_restore::guest_result),
-            })
-            .to_string()
+            });
+            if let Some(guest) = &r.guest {
+                stats["guest"] = serde_json::json!(crate::jobs::guest_restore::guest_result(guest));
+            }
+            stats.to_string()
         })
     } else {
         f.stats.as_ref().map(|s| {
