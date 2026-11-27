@@ -1158,6 +1158,30 @@ async fn ct_restore_incomplete_staging_refused() {
     }
 }
 
+/// `pct restore --force` destroys the target's snapshots and the volumes
+/// only they use, which the confirmation does not show.
+#[tokio::test(flavor = "multi_thread")]
+async fn ct_restore_replace_target_with_snapshots_refused() {
+    let lab = Lab::new().await;
+    lab.allow_replace();
+    let snap = lab
+        .snapshot(&snapshot_config(Some(UID_X), ""), None, |_| {}, &[])
+        .await;
+    lab.target(
+        Some(UID_X),
+        UUID,
+        "\n[snap1]\narch: amd64\nhostname: ct200\nrootfs: local-lvm:vm-200-disk-0,size=8G\nsnaptime: 1700000001\n",
+    );
+    let ran = lab.run(&snap, lab.spec(&snap, replace(UID_X, None))).await;
+    failed_with(&ran, "guest_target_has_snapshots");
+    assert!(ran.argv.is_none());
+    assert!(!lab.staging_default().exists());
+
+    lab.target(Some(UID_X), UUID, "\n[pve:pending]\nmemory: 1024\n");
+    let ran = lab.run(&snap, lab.spec(&snap, replace(UID_X, None))).await;
+    succeeded(&ran);
+}
+
 #[derive(Debug, Clone)]
 enum Planted {
     File(Vec<u8>, bool),

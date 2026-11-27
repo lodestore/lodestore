@@ -231,9 +231,19 @@ fn target_changed(vmid: u32, what: &str) -> Refused {
 }
 
 /// A container that runs or that HA manages is never replaced: the agent
-/// does not stop it, and HA would start it right after the restore.
+/// does not stop it, and HA would start it right after the restore. Nor
+/// is one with snapshots: `pct restore --force` deletes them and the
+/// volumes only they use, which the confirmation does not show.
 fn check_live(facts: &CtTargetFacts) -> Result<(), Refused> {
     let (vmid, name) = (facts.vmid, &facts.name);
+    if facts.has_snapshots {
+        return Err(refuse(
+            "guest_target_has_snapshots",
+            &format!(
+                "CT {vmid} · {name} has snapshots, and replacing it would delete them. Remove its snapshots in Proxmox or restore as a new container."
+            ),
+        ));
+    }
     if facts.running {
         return Err(refuse(
             "guest_running",
