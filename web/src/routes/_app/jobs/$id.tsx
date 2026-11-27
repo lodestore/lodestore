@@ -126,11 +126,15 @@ function JobNotices({ job }: { job: JobDetail }) {
 }
 
 function ContainerSubline({ job }: { job: JobDetail }) {
-	const { source, target } = useContainerLabels(job);
-	const text = job.restore?.guest?.replace
+	const { source } = useContainerLabels(job);
+	const guest = job.restore?.guest;
+	const text = guest?.replace
 		? copy.jobs.detail.containerReplace
 		: copy.jobs.detail.containerRestore;
-	return text(source ?? copy.restore.header.container(null), target);
+	return text(
+		source ?? copy.restore.header.container(null),
+		copy.restore.header.container(guest?.vmid),
+	);
 }
 
 function JobSubline({ job }: { job: JobDetail }) {

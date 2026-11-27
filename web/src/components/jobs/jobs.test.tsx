@@ -1286,7 +1286,7 @@ describe("Container restore job page", () => {
 		);
 		await openJob();
 		expect(
-			await screen.findByText("Restore of CT 200 · dns as CT 105 · dns"),
+			await screen.findByText("Restore of CT 200 · dns as CT 105"),
 		).toBeVisible();
 		const job = (await screen.findByRole("heading", { name: "Job" })).closest(
 			"[data-slot=card]",
@@ -1318,7 +1318,9 @@ describe("Container restore job page", () => {
 			within(dropped).getByText(/Add them back in Proxmox if you trust them/),
 		).toBeVisible();
 		expect(
-			within(dropped).getByRole("link", { name: "About restored containers" }),
+			within(dropped).getByRole("link", {
+				name: "Why Lodestore drops these keys",
+			}),
 		).toHaveAttribute(
 			"href",
 			"https://lodestore.dev/docs/guides/proxmox-containers/",
@@ -1358,7 +1360,7 @@ describe("Container restore job page", () => {
 		).toBeVisible();
 		expect(screen.queryByText(/New MAC addresses/)).toBeNull();
 		expect(
-			screen.getByText("Restore of CT 200 · dns over CT 105 · dns"),
+			screen.getByText("Restore of CT 200 · dns over CT 105"),
 		).toBeVisible();
 	});
 

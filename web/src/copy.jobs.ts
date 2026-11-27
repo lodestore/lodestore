@@ -290,7 +290,7 @@ export const jobs = {
 		droppedTitle: (n: number) => `Config keys not restored · ${n}`,
 		droppedHint: "Add them back in Proxmox if you trust them.",
 		droppedCut: (shown: number) => `Showing the first ${shown}.`,
-		docsLabel: "About restored containers",
+		docsLabel: "Why Lodestore drops these keys",
 		docsUrl: "https://lodestore.dev/docs/guides/proxmox-containers/",
 		networkKept: "Network interfaces kept",
 		containerEffects: {

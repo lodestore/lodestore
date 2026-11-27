@@ -461,23 +461,21 @@ function RestoreForm({
 									</SelectContent>
 								</Select>
 							</div>
-							<div className="flex flex-col gap-2">
-								<div className="flex items-center gap-2">
-									<Switch
-										id={`${id}-owners`}
-										checked={owners}
-										onCheckedChange={setOwners}
-									/>
-									<Label htmlFor={`${id}-owners`}>{text.owners}</Label>
-								</div>
-								{shiftedTo != null && (
-									<p className="text-sm text-muted-foreground">
-										{text.ownersShifted(container?.vmid, shiftedTo)}
-									</p>
-								)}
+							<div className="flex items-center gap-2">
+								<Switch
+									id={`${id}-owners`}
+									checked={owners}
+									onCheckedChange={setOwners}
+								/>
+								<Label htmlFor={`${id}-owners`}>{text.owners}</Label>
 							</div>
 						</CollapsibleContent>
 					</Collapsible>
+					{shiftedTo != null && (
+						<p className="text-sm text-muted-foreground">
+							{text.ownersShifted(container?.vmid, shiftedTo)}
+						</p>
+					)}
 				</div>
 
 				{restore.isError && (

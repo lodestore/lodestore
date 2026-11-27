@@ -668,7 +668,7 @@ function ContainerDroppedCard({ job }: { job: JobDetail }) {
 					<h2>{c.droppedTitle(total)}</h2>
 				</CardTitle>
 			</CardHeader>
-			<CardContent className="flex flex-col gap-3">
+			<CardContent className="flex flex-col gap-4">
 				<DroppedKeys dropped={dropped} />
 				{total > dropped.length && (
 					<p className="text-sm text-muted-foreground">
