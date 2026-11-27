@@ -188,34 +188,53 @@ async fn ct_owner_names_empty() {
     }
 }
 
+/// vzdump adds `--exclude=lost+found` only when its tar runs in the
+/// container's user namespace, that is for a container with an id map.
 #[tokio::test]
 async fn ct_walk_skips_lost_found_and_sockets_like_vzdump() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (repo_dir, root) = (tmp.path().join("repo"), tmp.path().join("ct"));
-    fs::create_dir(&repo_dir).unwrap();
-    container_tree(&root);
-    fs::create_dir_all(root.join("lost+found")).unwrap();
-    fs::write(root.join("lost+found/#123"), b"x").unwrap();
-    fs::create_dir_all(root.join("data/lost+found")).unwrap();
-    fs::create_dir_all(root.join("run")).unwrap();
-    let _socket = std::os::unix::net::UnixListener::bind(root.join("run/s")).unwrap();
-    let store = init_repo(&repo_dir).await;
-    let mut w = writer(&store).await;
-    let p = pending(&mut w, &root, backup(privileged())).await;
-    assert_eq!(p.stats().files_new, 3, "two files of the tree and pct.conf");
-    let id = p.commit(&mut w).await.unwrap().snapshot_id;
-    let mut r = reader(&store).await;
-    let names = |nodes: Vec<pb::Node>| nodes.into_iter().map(|n| n.name).collect::<Vec<_>>();
-    let top = names(r.list_dir(&id, b"/fs").await.unwrap());
-    assert!(!top.contains(&b"lost+found".to_vec()), "{top:?}");
-    assert!(top.contains(&b"data".to_vec()));
-    assert!(r.list_dir(&id, b"/fs/data").await.unwrap().is_empty());
-    assert!(r.list_dir(&id, b"/fs/run").await.unwrap().is_empty());
-    let manifest = r.snapshot(&id).await.unwrap();
-    assert_eq!(
-        manifest.warnings_total, 0,
-        "sockets are skipped without a warning"
-    );
+    let uid = rustix::process::getuid().as_raw();
+    let gid = rustix::process::getgid().as_raw();
+    let one = |kind, host| IdRange {
+        kind,
+        ct: 0,
+        host,
+        count: 1,
+    };
+    let mapped = CtMeta {
+        mode: CtMode::Snapshot,
+        unprivileged: true,
+        idmap: Some(IdMap::new(vec![one(IdKind::User, uid), one(IdKind::Group, gid)]).unwrap()),
+    };
+    for (meta, skipped) in [(privileged(), false), (mapped, true)] {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo_dir, root) = (tmp.path().join("repo"), tmp.path().join("ct"));
+        fs::create_dir(&repo_dir).unwrap();
+        container_tree(&root);
+        fs::create_dir_all(root.join("lost+found")).unwrap();
+        fs::write(root.join("lost+found/#123"), b"x").unwrap();
+        fs::create_dir_all(root.join("data/lost+found")).unwrap();
+        fs::create_dir_all(root.join("run")).unwrap();
+        let _socket = std::os::unix::net::UnixListener::bind(root.join("run/s")).unwrap();
+        let store = init_repo(&repo_dir).await;
+        let mut w = writer(&store).await;
+        let p = pending(&mut w, &root, backup(meta)).await;
+        let files = if skipped { 3 } else { 4 };
+        assert_eq!(p.stats().files_new, files, "skipped: {skipped}");
+        let id = p.commit(&mut w).await.unwrap().snapshot_id;
+        let mut r = reader(&store).await;
+        let names = |nodes: Vec<pb::Node>| nodes.into_iter().map(|n| n.name).collect::<Vec<_>>();
+        let top = names(r.list_dir(&id, b"/fs").await.unwrap());
+        assert_eq!(top.contains(&b"lost+found".to_vec()), !skipped, "{top:?}");
+        assert!(top.contains(&b"data".to_vec()));
+        let data = names(r.list_dir(&id, b"/fs/data").await.unwrap());
+        assert_eq!(data.contains(&b"lost+found".to_vec()), !skipped, "{data:?}");
+        assert!(r.list_dir(&id, b"/fs/run").await.unwrap().is_empty());
+        let manifest = r.snapshot(&id).await.unwrap();
+        assert_eq!(
+            manifest.warnings_total, 0,
+            "sockets are skipped without a warning"
+        );
+    }
 }
 
 #[tokio::test]

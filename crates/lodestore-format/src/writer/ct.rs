@@ -44,10 +44,12 @@ pub(super) struct CtWalk {
 }
 
 impl CtWalk {
-    /// Like the `tar` of vzdump, the walk leaves out every `lost+found` and
-    /// every socket.
-    pub(super) fn skipped(path: &[u8], st: &Stat) -> bool {
-        path.ends_with(b"/lost+found") || FileType::from_raw_mode(st.st_mode) == FileType::Socket
+    /// Like the `tar` of vzdump, the walk leaves out every socket, and every
+    /// `lost+found` when the container has an id map: only then does vzdump
+    /// run its `tar` in the user namespace with `--exclude=lost+found`.
+    pub(super) fn skipped(&self, path: &[u8], st: &Stat) -> bool {
+        (self.idmap.is_some() && path.ends_with(b"/lost+found"))
+            || FileType::from_raw_mode(st.st_mode) == FileType::Socket
     }
 
     /// The path an exclude pattern of the container sees: below `/fs`.

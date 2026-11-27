@@ -1334,8 +1334,8 @@ impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
     }
 
     fn excluded(&self, path: &[u8], st: &Stat) -> bool {
-        let path = if self.ct.is_some() {
-            if ct::CtWalk::skipped(path, st) {
+        let path = if let Some(walk) = &self.ct {
+            if walk.skipped(path, st) {
                 return true;
             }
             ct::CtWalk::inner(path)
