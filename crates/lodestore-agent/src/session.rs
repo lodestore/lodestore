@@ -20,6 +20,8 @@ use crate::connect::channel;
 use crate::discovery::{self, Discovery};
 use crate::identity::{AgentConfig, Identity, Paths, load_pair, replace_pair, write_json_file};
 use crate::jobs::JobHub;
+use crate::pve::ROOT_UID;
+use crate::pve::socket::PveSessions;
 use crate::shared_channel::SharedChannel;
 use crate::update::control::{
     Action, SWITCHING_WAIT, UpdateControl, deliver, send_switching, status,
@@ -141,8 +143,10 @@ pub async fn run_with(
     let hub = JobHub::open(&args.paths, &first.agent_id)?;
     hub.set_net(args.net.clone());
     let socket_stop = args.shutdown.child_token();
-    tokio::spawn(socket::serve(
+    let pve = Arc::new(PveSessions::new(ROOT_UID));
+    tokio::spawn(socket::serve_with(
         Arc::clone(&hub),
+        pve,
         AgentSettings::load(&args.paths).socket_path(),
         socket_stop.clone(),
     ));

@@ -1,6 +1,8 @@
-//! The agent's local unix socket. It offers one operation, `backup_stdin`: a
+//! The agent's local unix socket. Its one user operation is `backup_stdin`: a
 //! user on the host streams data in and the agent writes it to the repository
-//! with its own keys. See `docs/src/content/docs/docs/reference/local-socket.md` for the protocol.
+//! with its own keys. The `pve_*` operations belong to the Proxmox VE provider
+//! (see `crate::pve::socket`). See `docs/src/content/docs/docs/reference/local-socket.md`
+//! for the protocol.
 
 use std::io::Read;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, PermissionsExt};
@@ -15,14 +17,16 @@ use tokio::net::UnixListener;
 use tokio_util::sync::CancellationToken;
 
 use crate::jobs::{JobHub, stream};
+use crate::pve::ROOT_UID;
+use crate::pve::socket::{MAX_PVE_LINE, Peer, PveSessions};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const OP_BACKUP_STDIN: &str = "backup_stdin";
 pub const MAX_HEADER: usize = 4096;
 const SOCKET_GROUP: &str = "lodestore";
-const HEADER_WAIT: Duration = Duration::from_secs(10);
+pub const FIRST_LINE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_POLICY: usize = 128;
-const MAX_HANDLERS: usize = 16;
+pub const MAX_HANDLERS: usize = 16;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -46,10 +50,10 @@ fn rejection(code: &'static str, message: impl Into<String>) -> Rejection {
     }
 }
 
-fn read_header(stream: &mut UnixStream) -> Result<StdinHeader, Rejection> {
+fn read_line(stream: &mut UnixStream, limit: usize, wait: Duration) -> Result<Vec<u8>, Rejection> {
     let mut line = Vec::new();
     let mut byte = [0u8; 1];
-    let deadline = Instant::now() + HEADER_WAIT;
+    let deadline = Instant::now() + wait;
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
@@ -76,17 +80,26 @@ fn read_header(stream: &mut UnixStream) -> Result<StdinHeader, Rejection> {
             }
         }
         if byte[0] == b'\n' {
-            break;
+            return Ok(line);
         }
-        if line.len() + 1 >= MAX_HEADER {
+        if line.len() + 1 >= limit {
             return Err(rejection(
                 "bad_request",
-                format!("the header is longer than {MAX_HEADER} bytes"),
+                format!("the header is longer than {limit} bytes"),
             ));
         }
         line.push(byte[0]);
     }
-    let header: StdinHeader = serde_json::from_slice(&line)
+}
+
+fn parse_header(line: &[u8]) -> Result<StdinHeader, Rejection> {
+    if line.len() + 1 >= MAX_HEADER {
+        return Err(rejection(
+            "bad_request",
+            format!("the header is longer than {MAX_HEADER} bytes"),
+        ));
+    }
+    let header: StdinHeader = serde_json::from_slice(line)
         .map_err(|e| rejection("bad_request", format!("the header is not valid: {e}")))?;
     if header.op != OP_BACKUP_STDIN {
         return Err(rejection(
@@ -117,10 +130,39 @@ fn read_header(stream: &mut UnixStream) -> Result<StdinHeader, Rejection> {
     Ok(header)
 }
 
-fn handle(hub: &Arc<JobHub>, mut stream: UnixStream, uid: u32, gid: u32, guard: HandlerGuard) {
-    match read_header(&mut stream) {
+fn is_pve_op(line: &[u8]) -> bool {
+    #[derive(Deserialize)]
+    struct Op {
+        op: String,
+    }
+    serde_json::from_slice::<Op>(line).is_ok_and(|o| o.op.starts_with("pve_"))
+}
+
+fn handle(
+    hub: &Arc<JobHub>,
+    pve: &Arc<PveSessions>,
+    mut stream: UnixStream,
+    peer: Peer,
+    gid: u32,
+    guard: HandlerGuard,
+) {
+    let line = match read_line(&mut stream, MAX_PVE_LINE, pve.first_line_timeout()) {
+        Ok(line) => line,
+        Err(r) => {
+            drop(guard);
+            stream::reply_error(&stream, r.code, &r.message);
+            return;
+        }
+    };
+    if is_pve_op(&line) {
+        // The long provider session must not hold a slot of the stdin streams.
+        drop(guard);
+        pve.serve_connection(stream, line, peer);
+        return;
+    }
+    match parse_header(&line) {
         Ok(header) => {
-            hub.submit_stdin(header, uid, gid, stream);
+            hub.submit_stdin(header, peer.uid, gid, stream);
             drop(guard);
         }
         Err(r) => {
@@ -179,9 +221,20 @@ impl Drop for HandlerGuard {
     }
 }
 
+/// Listens on `path` until `shutdown`, serving the Proxmox provider to root
+/// only.
+pub async fn serve(hub: Arc<JobHub>, path: std::path::PathBuf, shutdown: CancellationToken) {
+    serve_with(hub, Arc::new(PveSessions::new(ROOT_UID)), path, shutdown).await;
+}
+
 /// Listens on `path` until `shutdown`. A socket that cannot be bound is
 /// logged and left alone: backups through the server do not depend on it.
-pub async fn serve(hub: Arc<JobHub>, path: std::path::PathBuf, shutdown: CancellationToken) {
+pub async fn serve_with(
+    hub: Arc<JobHub>,
+    pve: Arc<PveSessions>,
+    path: std::path::PathBuf,
+    shutdown: CancellationToken,
+) {
     let listener = match bind(&path) {
         Ok(listener) => listener,
         Err(error) => {
@@ -224,10 +277,16 @@ pub async fn serve(hub: Arc<JobHub>, path: std::path::PathBuf, shutdown: Cancell
             continue;
         }
         let hub = Arc::clone(&hub);
+        let pve = Arc::clone(&pve);
         let guard = HandlerGuard(Arc::clone(&live));
+        let peer = Peer {
+            uid: cred.uid(),
+            pid: cred.pid().and_then(|p| u32::try_from(p).ok()),
+        };
+        let gid = cred.gid();
         let spawned = std::thread::Builder::new()
             .name("socket-conn".into())
-            .spawn(move || handle(&hub, stream, cred.uid(), cred.gid(), guard));
+            .spawn(move || handle(&hub, &pve, stream, peer, gid, guard));
         if let Err(error) = spawned {
             tracing::warn!(%error, "cannot serve a local connection");
         }

@@ -48,6 +48,7 @@ All notable changes to Lodestore are recorded here. The format follows [Keep a C
 
 ### Changed
 
+- The agent's local socket waits 5 seconds (it was 10) for the first line of a connection, so a connection that stays silent frees its slot sooner. It also serves the `pve_*` operations of the Proxmox VE backup provider, to root only and with a job token; see [Agent local socket](https://lodestore.dev/docs/reference/local-socket/#proxmox-provider-operations).
 - The wizard step Access is split into **Connection** and **Agent rights**, and the dialog and the policy panel for replacing the agent key are replaced by the **Limit agent rights** panel.
 - `PUT /api/v1/repositories/{id}/agent-key` needs a session that entered its password in the last 15 minutes and answers `403` `step_up_required` otherwise.
 - The first contact with an SFTP server needs only its address; it no longer asks for a user or a key.
