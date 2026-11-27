@@ -18,6 +18,7 @@ use super::{
 };
 use super::{clip, open_nofollow, read_bounded};
 use crate::identity::write_private_file;
+use crate::pve::install::{PluginHealth, plugin_health};
 
 const VMIDS: std::ops::RangeInclusive<u32> = 100..=999_999_999;
 const MAX_DPKG_STATUS_BYTES: u64 = 64 << 20;
@@ -594,16 +595,6 @@ fn cluster_nodes(
     nodes
 }
 
-fn is_file(path: &Path) -> bool {
-    std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file())
-}
-
-fn plugin_installed(roots: &ScanRoots, node: &str) -> bool {
-    is_file(&roots.perl.join(PLUGIN_FILE))
-        && is_file(&roots.perl.join(PROVIDER_FILE))
-        && is_file(&roots.pve.join(PLUGIN_MARKER_DIR).join(node))
-}
-
 fn iface_name_valid(name: &str) -> bool {
     (1..=15).contains(&name.len())
         && name
@@ -1052,7 +1043,7 @@ fn scan_with(
             guests.retain(|g| !fresh.contains(&g.uuid));
         }
     }
-    let plugin_installed = plugin_installed(roots, &node);
+    let plugin = plugin_health(&roots.pve, &roots.perl, &node);
     Ok(Some(Found {
         proxmox: ProxmoxFacts {
             cluster,
@@ -1060,11 +1051,11 @@ fn scan_with(
             guests,
             storages,
             nodes,
-            plugin_installed,
+            plugin_installed: plugin.usable(),
             guest_in_place_allowed,
             next_vmid,
             pve_version: pve_manager_version(&roots.dpkg_status),
-            plugin_current: false,
+            plugin_current: plugin == PluginHealth::Ok,
             bridges,
         },
         truncated,
@@ -1108,6 +1099,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::pve::install::{PLUGIN_SOURCE, PROVIDER_SOURCE, embedded_plugin_hash, plugin_hash};
 
     pub(super) struct Pve {
         _tmp: tempfile::TempDir,
@@ -1981,12 +1973,24 @@ mod tests {
         let pve = Pve::new();
         pve.members("pve1", None);
         pve.vmlist(&[]);
-        assert!(!pve.found().proxmox.plugin_installed);
+        let facts = |pve: &Pve| {
+            let p = pve.found().proxmox;
+            (p.plugin_installed, p.plugin_current)
+        };
+        assert_eq!(facts(&pve), (false, false));
+        pve.touch(&pve.perl, PLUGIN_FILE, PLUGIN_SOURCE);
+        pve.touch(&pve.perl, PROVIDER_FILE, PROVIDER_SOURCE);
+        assert_eq!(facts(&pve), (false, false), "no marker yet");
+        let hash = embedded_plugin_hash();
+        pve.write("lodestore/plugin/pve1", &format!("1.0 1 {hash} 9.3.1\n"));
+        assert_eq!(facts(&pve), (true, true));
+
         pve.touch(&pve.perl, PLUGIN_FILE, "package x;");
+        assert_eq!(facts(&pve), (false, false), "the files differ from the marker");
         pve.touch(&pve.perl, PROVIDER_FILE, "package y;");
-        assert!(!pve.found().proxmox.plugin_installed, "no marker yet");
-        pve.write("lodestore/plugin/pve1", "1.0 1 abc 9.3.1\n");
-        assert!(pve.found().proxmox.plugin_installed);
+        let old = plugin_hash(b"package x;", b"package y;");
+        pve.write("lodestore/plugin/pve1", &format!("1.0 1 {old} 9.3.1\n"));
+        assert_eq!(facts(&pve), (true, false), "another agent's plugin");
 
         let provider = pve.perl.join(PROVIDER_FILE);
         std::fs::remove_file(&provider).unwrap();

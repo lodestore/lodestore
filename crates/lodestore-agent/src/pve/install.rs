@@ -5,7 +5,7 @@
 use std::cmp::Ordering;
 use std::fmt;
 use std::io::{self, Write};
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -14,17 +14,20 @@ use crate::discovery::proxmox::{
     pve_manager_version,
 };
 use crate::discovery::{MAX_PLUGIN_MARKER, MAX_PVE_FILE_BYTES, read_bounded};
-use crate::identity::write_atomic;
-use crate::pve::{PROVIDER_PROTOCOL, STORAGE_ID};
+use crate::identity::{write_atomic, write_private_file};
+use crate::pve::{MIN_PROVIDER_PROTOCOL, PROVIDER_PROTOCOL, STORAGE_ID};
+use crate::update::switch::SERVICE;
 
 pub const MIN_PVE_MANAGER: &str = "9.2.33";
 
-const PLUGIN_SOURCE: &str =
+pub(crate) const PLUGIN_SOURCE: &str =
     include_str!("../../../../deploy/proxmox/PVE/Storage/Custom/LodestorePlugin.pm");
-const PROVIDER_SOURCE: &str =
+pub(crate) const PROVIDER_SOURCE: &str =
     include_str!("../../../../deploy/proxmox/PVE/BackupProvider/Plugin/Lodestore.pm");
 
 const SERVICES: [&str; 4] = ["pvedaemon", "pveproxy", "pvestatd", "pvescheduler"];
+const MAX_PERL_FILE: u64 = 1 << 20;
+const MAX_AGENT_YAML: u64 = 1 << 20;
 const POLL: Duration = Duration::from_secs(2);
 const PRINT_EVERY: Duration = Duration::from_secs(30);
 
@@ -166,7 +169,7 @@ pub fn parse_marker(line: &str) -> Option<Marker> {
     parts.next().is_none().then_some(marker)
 }
 
-fn plugin_hash(plugin: &[u8], provider: &[u8]) -> String {
+pub(crate) fn plugin_hash(plugin: &[u8], provider: &[u8]) -> String {
     let mut hasher = blake3::Hasher::new();
     for file in [plugin, provider] {
         hasher.update(&(file.len() as u64).to_le_bytes());
@@ -193,6 +196,100 @@ fn read_marker(pve: &Path, node: &str) -> io::Result<Option<String>> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e),
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginHealth {
+    /// The files of this agent, recorded in the marker.
+    Ok,
+    /// Recorded in the marker and working, but not the files of this agent.
+    Outdated,
+    /// A file or the marker of this node is not there.
+    Missing,
+    /// The files are not the ones the marker records.
+    Changed,
+    /// The marker names a provider protocol this agent does not speak.
+    Unsupported,
+}
+
+impl PluginHealth {
+    /// Whether vzdump can use the provider on this node.
+    pub fn usable(self) -> bool {
+        matches!(self, PluginHealth::Ok | PluginHealth::Outdated)
+    }
+}
+
+/// The state of the plugin on `node`, from the Perl files under `perl` and
+/// the marker under `pve`. Reads files only, so discovery and every container
+/// job can call it.
+pub fn plugin_health(pve: &Path, perl: &Path, node: &str) -> PluginHealth {
+    let (Ok(plugin), Ok(provider)) = (
+        read_bounded(&perl.join(PLUGIN_FILE), MAX_PERL_FILE),
+        read_bounded(&perl.join(PROVIDER_FILE), MAX_PERL_FILE),
+    ) else {
+        return PluginHealth::Missing;
+    };
+    let Ok(Some(line)) = read_marker(pve, node) else {
+        return PluginHealth::Missing;
+    };
+    let Some(marker) = parse_marker(&line) else {
+        return PluginHealth::Changed;
+    };
+    let hash = plugin_hash(&plugin, &provider);
+    if marker.hash != hash {
+        PluginHealth::Changed
+    } else if !(MIN_PROVIDER_PROTOCOL..=PROVIDER_PROTOCOL).contains(&marker.protocol) {
+        PluginHealth::Unsupported
+    } else if hash != embedded_plugin_hash() {
+        PluginHealth::Outdated
+    } else {
+        PluginHealth::Ok
+    }
+}
+
+/// Sets `restore.allow_guest_in_place: true` in this node's `agent.yaml` and
+/// restarts the agent. Only a root shell on the node gets here; the server
+/// has no path to this file.
+fn allow_guest_in_place(
+    path: &Path,
+    commands: &dyn Commands,
+    out: &mut dyn Write,
+) -> Result<(), InstallError> {
+    use yaml_serde::Value;
+    let invalid = |e: &dyn fmt::Display| InstallError::Failed(format!("{}: {e}", path.display()));
+    let (mut doc, mode) = match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() => {
+            let bytes = read_bounded(path, MAX_AGENT_YAML).map_err(failed(path.display()))?;
+            let text = String::from_utf8(bytes).map_err(|e| invalid(&e))?;
+            let doc: Value = yaml_serde::from_str(&text).map_err(|e| invalid(&e))?;
+            (doc, Some(meta.permissions().mode() & 0o7777))
+        }
+        Ok(_) => return Err(invalid(&"not a regular file")),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => (Value::Null, None),
+        Err(e) => return Err(failed(path.display())(e)),
+    };
+    if doc["restore"]["allow_guest_in_place"] == Value::Bool(true) {
+        return Ok(());
+    }
+    let mapping = |v: &Value| matches!(v, Value::Null | Value::Mapping(_));
+    if !mapping(&doc) || !mapping(&doc["restore"]) {
+        return Err(invalid(&"the file and its `restore` key must be mappings"));
+    }
+    doc["restore"]["allow_guest_in_place"] = Value::Bool(true);
+    let text = yaml_serde::to_string(&doc).map_err(|e| invalid(&e))?;
+    match mode {
+        Some(mode) => write_atomic(path, text.as_bytes(), mode),
+        None => write_private_file(path, text.as_bytes()),
+    }
+    .map_err(failed(path.display()))?;
+    let _ = writeln!(
+        out,
+        "set restore.allow_guest_in_place: true in {} (comments in that file are not kept)",
+        path.display()
+    );
+    commands
+        .run(&["systemctl", "try-restart", SERVICE])
+        .map_err(|e| InstallError::Failed(e.to_string()))
 }
 
 /// The comparison of Debian versions (`dpkg --compare-versions`).
@@ -393,6 +490,9 @@ pub fn install(
         pve_manager: version,
     };
     put_marker(&roots.pve, &members.node, &marker.to_string())?;
+    if options.allow_guest_in_place {
+        allow_guest_in_place(&roots.agent_yaml, commands, out)?;
+    }
 
     let started = Instant::now();
     let mut printed: Option<Instant> = None;
@@ -524,9 +624,18 @@ mod tests {
             wait: Duration,
             commands: &Recorder,
         ) -> (Result<InstallReport, InstallError>, String) {
+            self.run_with(wait, false, commands)
+        }
+
+        pub fn run_with(
+            &self,
+            wait: Duration,
+            allow_guest_in_place: bool,
+            commands: &Recorder,
+        ) -> (Result<InstallReport, InstallError>, String) {
             let mut out = Vec::new();
             let options = InstallOptions {
-                allow_guest_in_place: false,
+                allow_guest_in_place,
                 wait,
             };
             let result = install(&self.roots, &options, commands, &mut out);
@@ -654,6 +763,210 @@ mod tests {
             ("9.2.033", "9.2.33", Equal),
         ] {
             assert_eq!(compare_versions(a, b), want, "{a} vs {b}");
+        }
+    }
+
+    fn ready_cluster() -> Cluster {
+        let cluster = Cluster::new("9.2.33");
+        cluster.marker("pve-02", &good_marker("9.3.1"));
+        cluster
+    }
+
+    fn file_identity(path: &Path) -> (u64, std::time::SystemTime) {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::metadata(path).unwrap();
+        (meta.ino(), meta.modified().unwrap())
+    }
+
+    fn restarts(commands: &Recorder) -> Vec<Vec<String>> {
+        commands
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|argv| argv[1] == "try-restart")
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn pve_install_idempotent() {
+        let cluster = ready_cluster();
+        let commands = Recorder::default();
+        cluster.run(Duration::from_secs(5), &commands).0.unwrap();
+        assert_eq!(commands.pvesm_calls(), 1);
+        std::fs::write(
+            cluster.roots.pve.join("storage.cfg"),
+            "dir: local\n\tpath /var/lib/vz\n\nlodestore: lodestore\n\tcontent backup\n\tprune-backups keep-all=1\n",
+        )
+        .unwrap();
+        let files = [
+            cluster.roots.perl.join(PLUGIN_FILE),
+            cluster.roots.perl.join(PROVIDER_FILE),
+            cluster.roots.pve.join("lodestore/plugin/pve-01"),
+        ];
+        let before: Vec<_> = files.iter().map(|f| file_identity(f)).collect();
+        std::thread::sleep(Duration::from_millis(20));
+
+        let again = Recorder::default();
+        let (result, _) = cluster.run(Duration::from_secs(5), &again);
+        assert_eq!(result.unwrap().nodes.len(), 2);
+        assert_eq!(again.pvesm_calls(), 0);
+        let after: Vec<_> = files.iter().map(|f| file_identity(f)).collect();
+        assert_eq!(before, after, "nothing is rewritten");
+    }
+
+    #[test]
+    fn pve_install_refuses_old_pve() {
+        let cluster = Cluster::new("9.2.32");
+        cluster.marker("pve-02", &good_marker("9.3.1"));
+        let commands = Recorder::default();
+        let error = cluster.run(Duration::from_secs(5), &commands).0.unwrap_err();
+        assert_eq!(error.exit_code(), 2);
+        assert!(
+            error
+                .to_string()
+                .contains("pve-manager 9.2.33 or newer; this node has 9.2.32"),
+            "{error}"
+        );
+        assert!(!cluster.roots.perl.join(PLUGIN_FILE).exists());
+        assert!(!cluster.roots.pve.join("lodestore/plugin/pve-01").exists());
+        assert!(commands.0.lock().unwrap().is_empty());
+
+        std::fs::remove_file(cluster.roots.pve.join(".members")).unwrap();
+        let error = cluster.run(Duration::from_secs(5), &commands).0.unwrap_err();
+        assert_eq!(error.exit_code(), 2, "not a Proxmox VE node: {error}");
+    }
+
+    #[test]
+    fn pve_install_outdated_marker() {
+        let cluster = Cluster::new("9.2.33");
+        cluster.marker("pve-02", "0.1.0 1 0123abcd 9.3.1");
+        let commands = Recorder::default();
+        let (result, out) = cluster.run(Duration::from_secs(2), &commands);
+        assert_eq!(result.unwrap_err().exit_code(), 3);
+        assert!(
+            out.contains("pve-02: outdated (plugin of agent 0.1.0)"),
+            "{out}"
+        );
+        assert_eq!(commands.pvesm_calls(), 0);
+    }
+
+    #[test]
+    fn pve_install_adds_the_storage_another_node_added_first() {
+        struct Racer<'a>(&'a Path);
+        impl Commands for Racer<'_> {
+            fn run(&self, argv: &[&str]) -> anyhow::Result<()> {
+                if argv[0] == "pvesm" {
+                    std::fs::write(self.0, "lodestore: lodestore\n\tcontent backup\n")?;
+                    anyhow::bail!("storage ID 'lodestore' already defined");
+                }
+                Ok(())
+            }
+        }
+        let cluster = ready_cluster();
+        let cfg = cluster.roots.pve.join("storage.cfg");
+        let options = InstallOptions {
+            allow_guest_in_place: false,
+            wait: Duration::from_secs(5),
+        };
+        install(&cluster.roots, &options, &Racer(&cfg), &mut io::sink()).unwrap();
+
+        std::fs::write(&cfg, "dir: lodestore\n\tpath /srv\n").unwrap();
+        let error = install(&cluster.roots, &options, &Recorder::default(), &mut io::sink());
+        assert_eq!(error.unwrap_err().exit_code(), 1);
+    }
+
+    #[test]
+    fn pve_install_sets_in_place_key_locally() {
+        let cluster = ready_cluster();
+        let yaml = &cluster.roots.agent_yaml;
+        std::fs::create_dir_all(yaml.parent().unwrap()).unwrap();
+        std::fs::write(yaml, "hooks: {allow_inline: true}\n").unwrap();
+        std::fs::set_permissions(yaml, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let paths = crate::Paths {
+            config_dir: yaml.parent().unwrap().to_path_buf(),
+            state_dir: yaml.parent().unwrap().join("state"),
+        };
+
+        let commands = Recorder::default();
+        cluster.run(Duration::from_secs(5), &commands).0.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(yaml).unwrap(),
+            "hooks: {allow_inline: true}\n"
+        );
+        assert!(restarts(&commands).is_empty());
+
+        let commands = Recorder::default();
+        let (result, out) = cluster.run_with(Duration::from_secs(5), true, &commands);
+        result.unwrap();
+        assert!(out.contains("comments in that file are not kept"), "{out}");
+        let settings = crate::config::AgentSettings::load(&paths);
+        assert!(settings.restore.allow_guest_in_place);
+        assert!(settings.hooks.allow_inline);
+        let mode = std::fs::metadata(yaml).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(
+            restarts(&commands),
+            [vec!["systemctl", "try-restart", "lodestore-agent.service"]]
+        );
+
+        let commands = Recorder::default();
+        cluster
+            .run_with(Duration::from_secs(5), true, &commands)
+            .0
+            .unwrap();
+        assert!(restarts(&commands).is_empty(), "a key already set is left alone");
+
+        std::fs::write(yaml, "restore: [1]\n").unwrap();
+        let (result, _) = cluster.run_with(Duration::from_secs(5), true, &Recorder::default());
+        assert_eq!(result.unwrap_err().exit_code(), 1);
+        assert_eq!(std::fs::read_to_string(yaml).unwrap(), "restore: [1]\n");
+    }
+
+    #[test]
+    fn pve_plugin_health() {
+        let cluster = ready_cluster();
+        let (pve, perl) = (&cluster.roots.pve, &cluster.roots.perl);
+        assert_eq!(plugin_health(pve, perl, "pve-01"), PluginHealth::Missing);
+        cluster
+            .run(Duration::from_secs(5), &Recorder::default())
+            .0
+            .unwrap();
+        assert_eq!(plugin_health(pve, perl, "pve-01"), PluginHealth::Ok);
+        assert!(PluginHealth::Ok.usable() && PluginHealth::Outdated.usable());
+
+        let plugin = perl.join(PLUGIN_FILE);
+        std::fs::write(&plugin, format!("{PLUGIN_SOURCE}# edited\n")).unwrap();
+        assert_eq!(plugin_health(pve, perl, "pve-01"), PluginHealth::Changed);
+        assert!(!PluginHealth::Changed.usable());
+        std::fs::write(&plugin, PLUGIN_SOURCE).unwrap();
+
+        let hash = embedded_plugin_hash();
+        cluster.marker("pve-01", &format!("0.2.0 0 {hash} 9.2.33"));
+        assert_eq!(plugin_health(pve, perl, "pve-01"), PluginHealth::Unsupported);
+
+        let (old_plugin, old_provider) = ("package Old::Plugin;\n", "package Old::Provider;\n");
+        std::fs::write(&plugin, old_plugin).unwrap();
+        std::fs::write(perl.join(PROVIDER_FILE), old_provider).unwrap();
+        let old = plugin_hash(old_plugin.as_bytes(), old_provider.as_bytes());
+        cluster.marker("pve-01", &format!("0.1.0 1 {old} 9.2.33"));
+        assert_eq!(plugin_health(pve, perl, "pve-01"), PluginHealth::Outdated);
+
+        std::fs::remove_file(pve.join("lodestore/plugin/pve-01")).unwrap();
+        assert_eq!(plugin_health(pve, perl, "pve-01"), PluginHealth::Missing);
+    }
+
+    #[test]
+    fn pve_install_parses_markers() {
+        let m = parse_marker("0.2.0 1 abc 9.3.1").unwrap();
+        assert_eq!(
+            (m.protocol, m.hash.as_str(), m.pve_manager.as_str()),
+            (1, "abc", "9.3.1")
+        );
+        assert_eq!(m.to_string(), "0.2.0 1 abc 9.3.1");
+        for bad in ["", "0.2.0 1 abc", "0.2.0 x abc 9.3.1", "0.2.0 1 abc 9.3.1 extra"] {
+            assert_eq!(parse_marker(bad), None, "{bad:?}");
         }
     }
 }
