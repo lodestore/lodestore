@@ -351,6 +351,11 @@ async fn retention_gates_run_now_limit_covers_host_and_rerun() {
             assert_eq!(status, 200, "[{what}] run {n}: {body}");
             last = body["jobs"][0]["id"].as_str().unwrap().to_string();
         }
+        let distinct: i64 = sqlx::query_scalar("SELECT COUNT(DISTINCT queued_at) FROM jobs")
+            .fetch_one(&ts.state().db.pool)
+            .await
+            .unwrap();
+        assert_eq!(distinct, 6, "[{what}] every run has its own queue time");
         let (status, body) = token.post(&format!("/api/v1/hosts/{host}/run")).await;
         assert_eq!(
             (status, &body["code"]),

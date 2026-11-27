@@ -538,6 +538,16 @@ async fn enqueue_one(
 ) -> Result<RunJob, ApiError> {
     for _ in 0..3 {
         let id = uuid::Uuid::now_v7().to_string();
+        // The run-now limit counts distinct queue times (the jobs of one split run
+        // share one), so two runs in the same millisecond must not share one.
+        let last: Option<i64> = sqlx::query_scalar(
+            "SELECT MAX(queued_at) FROM jobs WHERE host_id = $1 AND policy_id = $2",
+        )
+        .bind(host_id)
+        .bind(policy_id)
+        .fetch_one(&state.db.pool)
+        .await?;
+        let queued_at = last.map_or(now_ms(), |last| now_ms().max(last + 1));
         let inserted = sqlx::query(
             "INSERT INTO jobs (id, host_id, policy_id, policy_name, source, state, spec, queued_at, origin) \
              VALUES ($1, $2, $3, $4, 'manual', 'queued', $5, $6, $7) ON CONFLICT DO NOTHING",
@@ -547,7 +557,7 @@ async fn enqueue_one(
         .bind(policy_id)
         .bind(policy_name)
         .bind(spec.to_vec())
-        .bind(now_ms())
+        .bind(queued_at)
         .bind(origin)
         .execute(&state.db.pool)
         .await?
