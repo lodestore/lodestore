@@ -615,3 +615,54 @@ async fn guest_not_local_redispatch() {
         ts.stop().await;
     }
 }
+
+fn facts_in(cluster: &str, vmid: u32, tags: &[&str]) -> SourceFacts {
+    let mut facts = ct_facts(0, true, &[vmid]);
+    let proxmox = facts.proxmox.as_mut().unwrap();
+    proxmox.cluster = cluster.to_string();
+    proxmox.guests[0].tags = tags.iter().map(|t| t.to_string()).collect();
+    facts
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn guest_not_local_redispatch_same_scope_selected() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let a = enroll(&ts, &api, &repo, "pve1").await;
+        let other_cluster = enroll(&ts, &api, &repo, "pve-other").await;
+        let untagged = enroll(&ts, &api, &repo, "pve2").await;
+        let hosts = [&a, &other_cluster, &untagged];
+        let policy = seed_policy(&ts, &repo, "cts", &hosts, "[]\n    tags: [web]").await;
+        enqueue(
+            ts.state(),
+            "cts",
+            "cts",
+            &[(a.id.clone(), "pve1".to_string())],
+            &job_spec(&policy),
+        )
+        .await
+        .unwrap();
+        seed_facts(&ts, &a, &facts_in("pve-prod", 200, &["web"])).await;
+        seed_facts(&ts, &other_cluster, &facts_in("pve-other", 200, &["web"])).await;
+        seed_facts(&ts, &untagged, &facts_in("pve-prod", 200, &[])).await;
+
+        let mut agent_a = Fake::connect_with(&ts, &a, &[CT_CAPABILITY]).await;
+        let (job_a, instance) = instance_job(&mut agent_a).await;
+        assert_eq!(instance.key, key_of(200));
+        start(&agent_a, &job_a).await;
+        let mut moved = finished(&job_a, JobOutcome::Failed, "");
+        moved.error_code = "guest_not_local".to_string();
+        agent_a.send(AgentBody::JobFinished(moved)).await;
+        assert_eq!(agent_a.recv(is_ack).await, job_a);
+
+        let pool = &ts.state().db.pool;
+        let other = per_host(pool, &other_cluster.id).await;
+        assert_eq!(other, 0, "[{}] other cluster", backend.name());
+        let unselected = per_host(pool, &untagged.id).await;
+        assert_eq!(unselected, 0, "[{}] not selected", backend.name());
+        drop(agent_a);
+        ts.stop().await;
+    }
+}

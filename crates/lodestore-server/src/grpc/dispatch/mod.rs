@@ -725,7 +725,8 @@ async fn expand_guest_job(
 
 /// The agent answered `guest_not_local`: the container lives on another node.
 /// Every other host of the policy whose fresh list shows a container with this
-/// VMID gets a job of its own for it, once per run: a host that already has a
+/// VMID in the same cluster, still selected by the policy, gets a job of its own
+/// for it, once per run: a host that already has a
 /// job for the instance from this run or a later one is skipped, so two agents
 /// that disown the container cannot pass it back and forth.
 async fn redispatch_guest(state: &AppState, job_id: &str) -> anyhow::Result<()> {
@@ -755,6 +756,13 @@ async fn redispatch_guest(state: &AppState, job_id: &str) -> anyhow::Result<()> 
     let spec: Vec<u8> = row.try_get("spec")?;
     let queued_at: i64 = row.try_get("queued_at")?;
     let origin: String = row.try_get("origin")?;
+    let Some(source) = JobSpec::decode(spec.as_slice())
+        .ok()
+        .and_then(|spec| source_of(&spec).ok().flatten())
+    else {
+        return Ok(());
+    };
+    let scope = source_ref.rsplit_once('/').map(|(scope, _)| scope);
     let now = now_ms();
     for host_id in crate::policies::hosts_of_policy(state, policy_id).await? {
         if host_id == from_host {
@@ -769,9 +777,11 @@ async fn redispatch_guest(state: &AppState, job_id: &str) -> anyhow::Result<()> 
             .as_ref()
             .filter(|_| is_fresh(stored.collected_at, now))
             .and_then(|node| {
-                node.guests
-                    .iter()
-                    .find(|g| g.kind == sources::GuestType::Ct && g.vmid == vmid)
+                node.guests.iter().find(|g| {
+                    g.vmid == vmid
+                        && g.key.rsplit_once('/').map(|(scope, _)| scope) == scope
+                        && sources::select::selects_guest(&source, g)
+                })
             })
         else {
             continue;
