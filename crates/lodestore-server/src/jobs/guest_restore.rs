@@ -27,7 +27,7 @@ use super::api::RestoreCreated;
 use super::restore::{
     ExpectedTarget, GuestRestoreRecord, RestoreRecord, conflict_name, insert_restore_job,
 };
-use crate::auth::tokens::{RestoreGuestWrite, Scope, Scoped, SnapshotsRead};
+use crate::auth::tokens::{RestoreGuestWrite, Scope, Scoped};
 use crate::browse::tree::{read_error, reader};
 use crate::error::{ApiError, ErrorBody};
 use crate::grpc::registry::CAP_GUEST_RESTORE_CT;
@@ -673,11 +673,12 @@ pub fn kept_count(filtered: &Filtered) -> u64 {
     get,
     tag = "Restore",
     summary = "Preview a container snapshot and the config keys a restore drops",
-    security(("session" = []), ("bearer" = ["snapshots:read"])),
+    security(("session" = []), ("bearer" = ["restore:guest"]), ("bearer" = ["restore:guest-in-place"])),
     path = "/api/v1/restore/snapshots/{id}/container",
     params(("id" = String, Path, description = "Snapshot id"), PreviewQuery),
     responses(
         (status = 200, description = "The container and its configuration through the filter of the agent", body = ContainerFacts),
+        (status = 403, description = "The token holds neither `restore:guest` nor `restore:guest-in-place`", body = ErrorBody),
         (status = 404, description = "Unknown snapshot, or gone from storage", body = ErrorBody),
         (status = 422, description = "`restore_snapshot_not_ct`: the snapshot is not of a container; `guest_config_unreadable`: the container snapshot cannot be read", body = ErrorBody),
         (status = 502, description = "The repository storage is unavailable", body = ErrorBody),
@@ -685,7 +686,7 @@ pub fn kept_count(filtered: &Filtered) -> u64 {
 )]
 pub async fn container_preview(
     State(state): State<AppState>,
-    _auth: Scoped<SnapshotsRead>,
+    _auth: Scoped<RestoreGuestWrite>,
     Path(id): Path<String>,
     Query(query): Query<PreviewQuery>,
 ) -> Result<Json<ContainerFacts>, ApiError> {
@@ -846,11 +847,12 @@ fn target_volumes(
     get,
     tag = "Restore",
     summary = "List where a container snapshot can be restored",
-    security(("session" = []), ("bearer" = ["snapshots:read"])),
+    security(("session" = []), ("bearer" = ["restore:guest"]), ("bearer" = ["restore:guest-in-place"])),
     path = "/api/v1/restore/guest-targets",
     params(TargetsQuery),
     responses(
         (status = 200, description = "Nodes, storages and containers of the snapshot's cluster", body = GuestTargets),
+        (status = 403, description = "The token holds neither `restore:guest` nor `restore:guest-in-place`", body = ErrorBody),
         (status = 404, description = "Unknown snapshot, or gone from storage", body = ErrorBody),
         (status = 422, description = "`restore_snapshot_not_ct`: the snapshot is not of a container; `guest_config_unreadable`: the container snapshot cannot be read", body = ErrorBody),
         (status = 502, description = "The repository storage is unavailable", body = ErrorBody),
@@ -858,7 +860,7 @@ fn target_volumes(
 )]
 pub async fn guest_targets(
     State(state): State<AppState>,
-    _auth: Scoped<SnapshotsRead>,
+    _auth: Scoped<RestoreGuestWrite>,
     Query(query): Query<TargetsQuery>,
 ) -> Result<Json<GuestTargets>, ApiError> {
     let row = load_ct_row(&state, &query.snapshot_id).await?;
@@ -868,10 +870,16 @@ pub async fn guest_targets(
     let snapshot_mps: BTreeSet<&str> = filtered.volumes.iter().map(|v| v.mp.as_str()).collect();
     let cluster = row.cluster().to_string();
     let hosts = load_hosts(&state).await?;
-    let members: Vec<(&AgentHost, &ProxmoxNode)> = hosts
-        .iter()
-        .filter_map(|h| h.proxmox().map(|p| (h, p)))
-        .filter(|(_, p)| p.name == cluster)
+    let proxmox = || hosts.iter().filter_map(|h| h.proxmox().map(|p| (h, p)));
+    // The source node tells a cluster from a lone node of the same name; without it, the name decides.
+    let anchor = proxmox()
+        .find(|(h, p)| row.host_id.as_ref() == Some(&h.id) && p.name == cluster)
+        .map(|(_, p)| p);
+    let members: Vec<(&AgentHost, &ProxmoxNode)> = proxmox()
+        .filter(|(_, p)| match anchor {
+            Some(anchor) => same_scope(p, anchor),
+            None => p.name == cluster,
+        })
         .collect();
 
     let mut nodes: Vec<TargetNode> = members

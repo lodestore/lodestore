@@ -337,7 +337,7 @@ pub async fn enqueue_restore_checked(
         let manifest = source.snapshot(&snapshot_id).await.map_err(read_error)?;
         let meta = ct::check_manifest(&manifest)
             .map_err(|error| ApiError::Validation(error.to_string()))?;
-        owner_shift(meta.idmap.as_ref())
+        owner_shift(meta.idmap.as_ref())?
     } else {
         String::new()
     };
@@ -376,12 +376,22 @@ pub async fn enqueue_restore_checked(
 }
 
 /// The id map the agent shifts the owners of a container's files by. A map
-/// that gives any id of the container to root of the node is not sent (the
-/// agent refuses it); the files then keep the ids of the container's view.
-fn owner_shift(map: Option<&IdMap>) -> String {
-    map.filter(|map| map.ranges().iter().all(|range| range.host != 0))
-        .and_then(|map| map.canonical().ok())
-        .unwrap_or_default()
+/// that gives any id of the container to root of the node is refused: the
+/// agent would not apply it, and the files would silently keep the ids of the
+/// container's view.
+fn owner_shift(map: Option<&IdMap>) -> Result<String, ApiError> {
+    let Some(map) = map else {
+        return Ok(String::new());
+    };
+    if map.ranges().iter().any(|range| range.host == 0) {
+        return Err(ApiError::Unprocessable(
+            "ct_idmap_unsupported",
+            "The id map of this container gives an id to root of the node, so its owners \
+             cannot be restored. Restore it without owners."
+                .into(),
+        ));
+    }
+    Ok(map.canonical().unwrap_or_default())
 }
 
 pub(crate) async fn insert_restore_job(
@@ -474,12 +484,15 @@ mod tests {
             count: 65536,
         };
         assert_eq!(
-            owner_shift(Some(&IdMap::default_unprivileged())),
+            owner_shift(Some(&IdMap::default_unprivileged())).unwrap(),
             "u:0:100000:65536,g:0:100000:65536"
         );
         let to_root =
             IdMap::new(vec![range(IdKind::User, 100000), range(IdKind::Group, 0)]).unwrap();
-        assert_eq!(owner_shift(Some(&to_root)), "");
-        assert_eq!(owner_shift(None), "");
+        assert!(matches!(
+            owner_shift(Some(&to_root)),
+            Err(ApiError::Unprocessable("ct_idmap_unsupported", _))
+        ));
+        assert_eq!(owner_shift(None).unwrap(), "");
     }
 }

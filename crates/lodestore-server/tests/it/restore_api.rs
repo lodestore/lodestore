@@ -445,7 +445,10 @@ async fn post_as(ts: &TestServer, client: &reqwest::Client, path: &str, body: &V
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn restore_api_ct_files_restore() {
-    use crate::guest_restore::{CONFIG, enroll as enroll_host, set_capabilities, write_ct};
+    use crate::guest_restore::{
+        CONFIG, enroll as enroll_host, set_capabilities, write_ct, write_ct_mapped,
+    };
+    use lodestore_format::ct::{IdKind, IdMap, IdRange};
     for backend in backends() {
         let name = backend.name();
         let ts = TestServer::start(&backend).await;
@@ -485,6 +488,20 @@ async fn restore_api_ct_files_restore() {
             spec.ct_idmap, "u:0:100000:65536,g:0:100000:65536",
             "[{name}]"
         );
+
+        let range = |kind, host| IdRange {
+            kind,
+            ct: 0,
+            host,
+            count: 65536,
+        };
+        let to_root = IdMap::new(vec![range(IdKind::User, 100000), range(IdKind::Group, 0)]);
+        let rooted = write_ct_mapped(&ts, &repo, &host, (201, CONFIG, None), to_root.unwrap());
+        let mut owners = restore(true);
+        owners["snapshot_id"] = json!(rooted.await);
+        let got = post_as(&ts, &owners_token, "/api/v1/restores", &owners).await;
+        assert_eq!(got["status"], 422, "[{name}] {got}");
+        assert_eq!(got["code"], "ct_idmap_unsupported", "[{name}]");
 
         let mut in_place = restore(false);
         in_place["in_place"] = json!(true);
