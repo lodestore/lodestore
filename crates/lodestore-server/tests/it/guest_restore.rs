@@ -127,6 +127,17 @@ pub(crate) async fn write_ct(
     config: &str,
     firewall: Option<&str>,
 ) -> String {
+    let idmap = IdMap::default_unprivileged();
+    write_ct_mapped(ts, repo_id, host, (vmid, config, firewall), idmap).await
+}
+
+pub(crate) async fn write_ct_mapped(
+    ts: &TestServer,
+    repo_id: &str,
+    host: &Host,
+    (vmid, config, firewall): (u32, &str, Option<&str>),
+    idmap: IdMap,
+) -> String {
     let store = LocalFsStore::new(ts.local_repo_root("main"));
     let repo = Repository::open(&store, PASSWORD).await.unwrap();
     let keys = repo.read_keys().write_keys(repo.config_hash());
@@ -140,7 +151,7 @@ pub(crate) async fn write_ct(
         meta: CtMeta {
             mode: CtMode::Snapshot,
             unprivileged: true,
-            idmap: Some(IdMap::default_unprivileged()),
+            idmap: Some(idmap),
         },
         source_meta: Meta::from([
             ("vmid".to_owned(), vmid.to_string()),
