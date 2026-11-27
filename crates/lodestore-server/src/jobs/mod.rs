@@ -452,6 +452,7 @@ pub fn job_spec(policy: &BackupPolicy) -> JobSpec {
         gc_locks_required: false,
         distrusted_shards: Vec::new(),
         source: normalized(&spec.source).map(selector_of),
+        ..Default::default()
     }
 }
 

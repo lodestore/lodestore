@@ -738,6 +738,7 @@ impl<'a, F: PackFetcher> Attempt<'a, F> {
                 skipped: stats.skipped,
                 files: stats.created + stats.overwritten,
                 bytes: stats.bytes,
+                ..Default::default()
             }),
             errors_total: self.errors,
             warnings_total: self.warnings,

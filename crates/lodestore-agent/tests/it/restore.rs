@@ -178,6 +178,7 @@ impl Fx {
             conflict: conflict as i32,
             restore_owners: owners,
             target: None,
+            ..Default::default()
         }
     }
 
@@ -540,7 +541,7 @@ async fn restore_runner_restores_plan_from_local_repo() {
 
     let f = finished_of(&msgs, &id).unwrap();
     assert_eq!(f.outcome, JobOutcome::Succeeded as i32, "{msgs:?}");
-    let stats = f.restore.unwrap();
+    let stats = f.restore.clone().unwrap();
     assert_eq!(stats.files, 6);
     assert_eq!(stats.created, 6);
     assert_eq!(stats.overwritten + stats.skipped, 0);
@@ -1169,7 +1170,15 @@ async fn restore_runner_skip_and_overwrite_counts() {
         false,
     )
     .await;
-    assert_eq!(finished_of(&msgs, &id).unwrap().restore.unwrap().created, 2);
+    assert_eq!(
+        finished_of(&msgs, &id)
+            .unwrap()
+            .restore
+            .clone()
+            .unwrap()
+            .created,
+        2
+    );
 
     let changed = fx.restored(&dest, "a/x");
     fs::write(&changed, b"edited by hand").unwrap();
@@ -1183,7 +1192,7 @@ async fn restore_runner_skip_and_overwrite_counts() {
         false,
     )
     .await;
-    let stats = finished_of(&msgs, &id).unwrap().restore.unwrap();
+    let stats = finished_of(&msgs, &id).unwrap().restore.clone().unwrap();
     assert_eq!((stats.created, stats.overwritten, stats.skipped), (0, 0, 2));
     assert_eq!(fs::read(&changed).unwrap(), b"edited by hand");
 
@@ -1198,7 +1207,7 @@ async fn restore_runner_skip_and_overwrite_counts() {
     .await;
     let f = finished_of(&msgs, &id).unwrap();
     assert_eq!(f.outcome, JobOutcome::Succeeded as i32, "{msgs:?}");
-    let stats = f.restore.unwrap();
+    let stats = f.restore.clone().unwrap();
     assert_eq!((stats.created, stats.overwritten, stats.skipped), (1, 1, 1));
     assert_eq!(stats.files, 2);
     same_file(&fx, &dest, "a/x");
@@ -1243,7 +1252,7 @@ async fn restore_runner_in_place_keeps_ancestors() {
     .await;
     let f = finished_of(&msgs, &id).unwrap();
     assert_eq!(f.outcome, JobOutcome::Succeeded as i32, "{msgs:?}");
-    assert_eq!(f.restore.unwrap().created, 1);
+    assert_eq!(f.restore.clone().unwrap().created, 1);
     same_file(&fx, &target, "a/x");
     assert_eq!(
         fs::metadata(&a_dir).unwrap().permissions().mode() & 0o7777,
@@ -1879,6 +1888,7 @@ async fn restore_refuses_a_target_it_cannot_run() {
             node: "pve1".into(),
             vmid: 9001,
             in_place: false,
+            ..Default::default()
         }),
         Target::Database(DatabaseTarget {
             database: "app".into(),
