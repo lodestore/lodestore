@@ -237,6 +237,12 @@ node_setup_ct() {
   pct create "$victim" "$template" --hostname victim --unprivileged 1 --rootfs local-lvm:1 --memory 256
   echo 'lxc.apparmor.profile: unconfined' >>"/etc/pve/lxc/$ct.conf"
   pct start "$ct"
+  pveversion -v | grep -E '^(pve-manager|pve-container|libpve-storage-perl|lvm2|lxc-pve)' >&2
+  if ! lvcreate -n e2e-probe -pr -s "pve/vm-$ct-disk-0" >&2; then
+    lvs -a >&2
+    echo "the lab cannot snapshot pve/vm-$ct-disk-0, see above" >&2
+  fi
+  lvremove -fy pve/e2e-probe >/dev/null 2>&1 || true
   (cd /tmp && apt-get download -q acl libcap2-bin >/dev/null)
   for deb in /tmp/acl_*.deb /tmp/libcap2-bin_*.deb; do
     pct push "$ct" "$deb" "/root/$(basename "$deb")"
