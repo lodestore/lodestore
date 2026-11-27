@@ -235,7 +235,11 @@ sub archive_get_firewall_config {
 sub restore_container_init {
     my ($self, $volname, $info) = @_;
     my $answer = call('pve_restore_open', restore_id => restore_id($volname));
-    return { 'archive-directory' => $answer->{directory} };
+    # pct runs with taint checks and hands the directory to tar.
+    my $directory = untaint($answer->{directory}, $SOCKET_PATH);
+    die "the agent returned an unusable restore directory\n"
+        if !defined($directory) || $directory =~ m{(?:^|/)\.\.?(?:/|\z)};
+    return { 'archive-directory' => $directory };
 }
 
 sub restore_container_cleanup {

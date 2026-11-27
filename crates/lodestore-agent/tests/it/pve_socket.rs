@@ -644,6 +644,7 @@ async fn fake_pct(run: &Running, volid: &str, token: Option<&Token>) -> PctRun {
     let proxmox = proxmox_dir();
     let mut command = Command::new("perl");
     command
+        .arg("-t")
         .arg("-I")
         .arg(proxmox.join("t/stubs"))
         .arg("-I")

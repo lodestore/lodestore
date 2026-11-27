@@ -230,7 +230,7 @@ impl Lab {
         let body = match fail {
             Some(text) => format!("echo '{text}' >&2\nexit 1\n"),
             None => format!(
-                "{wait}LODESTORE_FAKE_PCT='{scenario}' exec perl -I '{stubs}' -I '{lib}' '{fake}' \"$@\"\n",
+                "{wait}LODESTORE_FAKE_PCT='{scenario}' exec perl -t -I '{stubs}' -I '{lib}' '{fake}' \"$@\"\n",
                 scenario = self.path("pct.json").display(),
                 stubs = proxmox.join("t/stubs").display(),
                 lib = proxmox.display(),

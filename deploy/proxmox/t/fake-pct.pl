@@ -11,12 +11,14 @@
 # out_config (where the configuration PVE would write goes), out_argv (the
 # arguments as received), copy_to (where the archive directory is copied) and
 # out_fw (where a firewall configuration would go; nothing is written when the
-# provider returns none).
+# provider returns none). Run it with `perl -t` so the archive directory is
+# checked for taint as `pct` does.
 
 use strict;
 use warnings;
 
 use JSON::PP;
+use Scalar::Util ();
 
 use PVE::BackupProvider::Plugin::Lodestore;
 
@@ -42,6 +44,7 @@ close($fh);
 
 sub write_file {
     my ($path, $bytes) = @_;
+    ($path) = $path =~ m{^(.*)\z}s;
     open(my $out, '>:raw', $path) or die "cannot write $path: $!\n";
     print {$out} $bytes;
     close($out) or die "cannot write $path: $!\n";
@@ -61,8 +64,13 @@ my $ok = eval {
     my $firewall = $provider->archive_get_firewall_config($volname);
     my $init = $provider->restore_container_init($volname, {});
     my $directory = $init->{'archive-directory'};
+    # PVE runs pct with taint checks and hands the directory to tar.
+    die "Insecure dependency: the archive directory is tainted\n"
+        if defined($directory) && ${^TAINT} && Scalar::Util::tainted($directory);
     if ($scenario->{copy_to} && defined($directory)) {
-        system('cp', '-a', "$directory/.", $scenario->{copy_to}) == 0
+        my ($copy_to) = $scenario->{copy_to} =~ m{^(.*)\z}s;
+        local $ENV{PATH} = '/usr/bin:/bin';
+        system('cp', '-a', "$directory/.", $copy_to) == 0
             or die "cannot copy $directory\n";
     }
     my $second = $provider->archive_get_guest_config($volname);
