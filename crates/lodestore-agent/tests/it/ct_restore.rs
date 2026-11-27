@@ -2,7 +2,7 @@
 
 use crate::common::{TestAgent, local_agent, short_socket_dir};
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -39,6 +39,8 @@ use lodestore_proto::agent::v1::{
     GuestTarget, JobFinished, JobOutcome, OtherGuestConfirmation, PlanEnter, PlanEntry, PlanItem,
     PlanLeave, RestorePlanBatch, RestoreSpec, RestoreTotals,
 };
+use proptest::prelude::*;
+use proptest::test_runner::TestRunner;
 use prost::Message;
 use rustix::fs::{FileType, Mode, OFlags};
 use serde_json::json;
@@ -50,7 +52,7 @@ pub(crate) const UID_Y: &str = "bbbbbbbbbbbbbbbbbbbb";
 pub(crate) const UID_Z: &str = "cccccccccccccccccccc";
 const UID_V: &str = "dddddddddddddddddddd";
 const UID_W: &str = "eeeeeeeeeeeeeeeeeeee";
-const UUID: &str = "0192f0c4-7d3a-7000-8000-000000000001";
+pub(crate) const UUID: &str = "0192f0c4-7d3a-7000-8000-000000000001";
 const UUID_NEW: &str = "0192f0c4-7d3a-7000-8000-000000000002";
 const WAIT: Duration = Duration::from_secs(120);
 const PAUSE: Duration = Duration::from_millis(10);
@@ -209,11 +211,26 @@ impl Lab {
 
     /// `pct` runs `fake-pct.pl`, or prints `fail` and exits 1.
     pub fn pct_script(&self, fail: Option<&str>) {
+        self.pct_script_with(fail, false);
+    }
+
+    /// With `gate`, `pct` waits for `pct-go` after it created `pct-started`,
+    /// so a test can look at the staging folder as `pct` finds it.
+    pub fn pct_script_with(&self, fail: Option<&str>, gate: bool) {
         let proxmox = proxmox_dir();
+        let wait = if gate {
+            format!(
+                "touch '{started}'\nwhile [ ! -e '{proceed}' ]; do sleep 0.05; done\n",
+                started = self.path("pct-started").display(),
+                proceed = self.path("pct-go").display(),
+            )
+        } else {
+            String::new()
+        };
         let body = match fail {
             Some(text) => format!("echo '{text}' >&2\nexit 1\n"),
             None => format!(
-                "LODESTORE_FAKE_PCT='{scenario}' exec perl -I '{stubs}' -I '{lib}' '{fake}' \"$@\"\n",
+                "{wait}LODESTORE_FAKE_PCT='{scenario}' exec perl -I '{stubs}' -I '{lib}' '{fake}' \"$@\"\n",
                 scenario = self.path("pct.json").display(),
                 stubs = proxmox.join("t/stubs").display(),
                 lib = proxmox.display(),
@@ -406,6 +423,31 @@ impl Lab {
         .await
     }
 
+    /// Runs the restore and calls `inspect` while a gated `pct` waits.
+    pub async fn run_gated(
+        &self,
+        snap: &Snap,
+        spec: RestoreSpec,
+        inspect: impl FnOnce() + Send + 'static,
+    ) -> Ran {
+        let (started, proceed) = (self.path("pct-started"), self.path("pct-go"));
+        for f in [&started, &proceed] {
+            let _ = fs::remove_file(f);
+        }
+        let gate = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + WAIT;
+            while !started.exists() {
+                assert!(std::time::Instant::now() < deadline, "pct did not start");
+                std::thread::sleep(PAUSE);
+            }
+            inspect();
+            fs::write(proceed, "").unwrap();
+        });
+        let ran = self.run(snap, spec).await;
+        gate.join().unwrap();
+        ran
+    }
+
     pub async fn run_with(&self, snap: &Snap, spec: RestoreSpec, reserve: SpaceReserve) -> Ran {
         let vmid = match &spec.target {
             Some(Target::Guest(g)) => g.vmid,
@@ -531,7 +573,7 @@ pub(crate) fn new_ct(vmid: u32) -> GuestTarget {
     }
 }
 
-fn expected(uid: &str, uuid: &str) -> ExpectedGuest {
+pub(crate) fn expected(uid: &str, uuid: &str) -> ExpectedGuest {
     ExpectedGuest {
         vmid: 200,
         name: "ct200".into(),
@@ -545,7 +587,7 @@ fn expected(uid: &str, uuid: &str) -> ExpectedGuest {
     }
 }
 
-fn replace(uid: &str, confirm: Option<(&str, &str)>) -> GuestTarget {
+pub(crate) fn replace(uid: &str, confirm: Option<(&str, &str)>) -> GuestTarget {
     GuestTarget {
         node: NODE.into(),
         vmid: 200,
@@ -1053,4 +1095,245 @@ async fn ct_restore_pct_fails_cleans_staging() {
     child.wait().unwrap();
     clean_stale_staging(&base);
     assert!(!held.exists());
+}
+
+#[derive(Debug, Clone)]
+enum Planted {
+    File(Vec<u8>, bool),
+    Dir,
+    Symlink(usize),
+    Fifo,
+    Device(bool),
+}
+
+#[derive(Debug, Clone)]
+struct Entry {
+    parent: usize,
+    kind: Planted,
+    uid: u32,
+    gid: u32,
+    mode: u32,
+    xattr: Option<u8>,
+    acl: Option<u32>,
+}
+
+const PARENTS: [&str; 3] = ["", "d0", "d0/d1"];
+
+fn planted_entry() -> impl Strategy<Value = Entry> {
+    let kind = prop_oneof![
+        4 => (prop::collection::vec(any::<u8>(), 0..2048), any::<bool>())
+            .prop_map(|(data, setuid)| Planted::File(data, setuid)),
+        2 => Just(Planted::Dir),
+        1 => (0usize..8).prop_map(Planted::Symlink),
+        1 => Just(Planted::Fifo),
+        1 => any::<bool>().prop_map(Planted::Device),
+    ];
+    (
+        0..PARENTS.len(),
+        kind,
+        0u32..70_000,
+        0u32..70_000,
+        prop::sample::select(&[0o600u32, 0o640, 0o644, 0o700, 0o750, 0o755][..]),
+        proptest::option::of(any::<u8>()),
+        proptest::option::of(1u32..70_000),
+    )
+        .prop_map(|(parent, kind, uid, gid, mode, xattr, acl)| Entry {
+            parent,
+            kind,
+            uid,
+            gid,
+            mode,
+            xattr,
+            acl,
+        })
+}
+
+/// Builds the planted tree under `root`; returns how many device nodes it has.
+fn plant(root: &Path, entries: &[Entry]) -> u64 {
+    use std::os::unix::fs::symlink;
+    for parent in PARENTS.iter().skip(1) {
+        fs::create_dir_all(root.join(parent)).unwrap();
+    }
+    let mut devices = 0;
+    for (i, e) in entries.iter().enumerate() {
+        let path = root.join(PARENTS[e.parent]).join(format!("e{i}"));
+        let node = |ty, dev| {
+            rustix::fs::mknodat(rustix::fs::CWD, &path, ty, Mode::from_raw_mode(e.mode), dev)
+                .unwrap();
+        };
+        match &e.kind {
+            Planted::File(data, _) => fs::write(&path, data).unwrap(),
+            Planted::Dir => fs::create_dir(&path).unwrap(),
+            Planted::Symlink(t) => symlink(format!("e{t}"), &path).unwrap(),
+            Planted::Fifo => node(FileType::Fifo, 0),
+            Planted::Device(block) => {
+                devices += 1;
+                if *block {
+                    node(FileType::BlockDevice, rustix::fs::makedev(8, 0));
+                } else {
+                    node(FileType::CharacterDevice, rustix::fs::makedev(1, 3));
+                }
+            }
+        }
+        rustix::fs::chownat(
+            rustix::fs::CWD,
+            &path,
+            Some(rustix::process::Uid::from_raw(e.uid)),
+            Some(rustix::process::Gid::from_raw(e.gid)),
+            rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+        )
+        .unwrap();
+        if matches!(e.kind, Planted::Symlink(_)) {
+            continue;
+        }
+        let setuid = matches!(e.kind, Planted::File(_, true));
+        let mode = e.mode | if setuid { 0o4000 } else { 0 };
+        fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+        if !matches!(e.kind, Planted::File(..) | Planted::Dir) {
+            continue;
+        }
+        if let Some(x) = e.xattr {
+            rustix::fs::setxattr(
+                &path,
+                format!("user.k{x}").as_str(),
+                format!("v{x}").as_bytes(),
+                rustix::fs::XattrFlags::empty(),
+            )
+            .unwrap();
+        }
+        if let Some(uid) = e.acl {
+            let out = std::process::Command::new("setfacl")
+                .arg("-m")
+                .arg(format!("u:{uid}:r-x"))
+                .arg(&path)
+                .output()
+                .expect("setfacl is needed for this test");
+            assert!(out.status.success(), "{out:?}");
+        }
+    }
+    devices
+}
+
+#[derive(Debug, PartialEq)]
+struct Desc {
+    kind: u32,
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    xattrs: BTreeMap<Vec<u8>, Vec<u8>>,
+    content: Vec<u8>,
+}
+
+/// Every entry below `root` with type, mode, owners, xattrs (ACLs among
+/// them) and content; device nodes are left out.
+fn describe(root: &Path) -> BTreeMap<String, Desc> {
+    use std::os::unix::fs::MetadataExt;
+    let mut out = BTreeMap::new();
+    let mut todo = vec![PathBuf::new()];
+    while let Some(rel) = todo.pop() {
+        let path = root.join(&rel);
+        let meta = fs::symlink_metadata(&path).unwrap();
+        let ft = meta.file_type();
+        if ft.is_block_device() || ft.is_char_device() {
+            continue;
+        }
+        let mut xattrs = BTreeMap::new();
+        if !ft.is_symlink() {
+            let mut names = vec![0u8; 4096];
+            let n = rustix::fs::listxattr(&path, &mut names).unwrap();
+            for name in names[..n].split(|b| *b == 0).filter(|n| !n.is_empty()) {
+                let mut value = vec![0u8; 4096];
+                let c = std::ffi::CString::new(name).unwrap();
+                let len = rustix::fs::getxattr(&path, c.as_c_str(), &mut value).unwrap();
+                xattrs.insert(name.to_vec(), value[..len].to_vec());
+            }
+        }
+        let content = if ft.is_file() {
+            fs::read(&path).unwrap()
+        } else if ft.is_symlink() {
+            fs::read_link(&path)
+                .unwrap()
+                .into_os_string()
+                .into_encoded_bytes()
+        } else {
+            Vec::new()
+        };
+        if ft.is_dir() {
+            for entry in fs::read_dir(&path).unwrap() {
+                todo.push(rel.join(entry.unwrap().file_name()));
+            }
+        }
+        let mode = if ft.is_symlink() {
+            0
+        } else {
+            meta.mode() & 0o7777
+        };
+        out.insert(
+            rel.display().to_string(),
+            Desc {
+                kind: meta.mode() & 0o170000,
+                mode,
+                uid: meta.uid(),
+                gid: meta.gid(),
+                xattrs,
+                content,
+            },
+        );
+    }
+    out
+}
+
+/// The staging folder `pct` gets is the snapshot's `/fs` as the container
+/// sees it: types, modes with setuid, owners, xattrs, ACLs and content; no
+/// device nodes, and each one counted.
+#[test]
+#[ignore = "needs root"]
+fn pve_root_staging_matches_snapshot() {
+    assert!(rustix::process::geteuid().is_root(), "run as root");
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let lab = rt.block_on(Lab::new());
+    lab.pct_script_with(None, true);
+    let mut runner = TestRunner::new(ProptestConfig {
+        cases: 16,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    });
+    let tree = prop::collection::vec(planted_entry(), 0..12);
+    runner
+        .run(&tree, |entries| {
+            let _ = fs::remove_file(lab.pve.join(format!("nodes/{NODE}/lxc/105.conf")));
+            let source = Arc::new(std::sync::Mutex::new(None));
+            let devices = Arc::new(AtomicUsize::new(0));
+            let (src, dev) = (Arc::clone(&source), Arc::clone(&devices));
+            let config = snapshot_config(None, "");
+            let planted = move |root: &Path| {
+                dev.store(plant(root, &entries) as usize, Ordering::Relaxed);
+                *src.lock().unwrap() = Some(describe(root));
+            };
+            let snap = rt.block_on(lab.snapshot(&config, None, planted, &[]));
+            let expected = source.lock().unwrap().take().unwrap();
+            let base = lab.staging_default();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let inspect = move || {
+                let mut dirs = fs::read_dir(&base).unwrap().map(|e| e.unwrap().path());
+                let staging = dirs.next().unwrap();
+                assert!(dirs.next().is_none());
+                tx.send(describe(&staging.join("fs"))).unwrap();
+            };
+            let spec = lab.spec(&snap, new_ct(105));
+            let ran = rt.block_on(lab.run_gated(&snap, spec, inspect));
+            prop_assert!(ran.done.error_code.is_empty(), "{:?}", ran.msgs);
+            let staged = rx.recv().unwrap();
+            prop_assert_eq!(&staged, &expected);
+            prop_assert_eq!(
+                ran.done.restore.as_ref().unwrap().special_skipped,
+                devices.load(Ordering::Relaxed) as u64
+            );
+            prop_assert!(lab.staging_clean(&lab.staging_default()));
+            Ok(())
+        })
+        .unwrap();
 }

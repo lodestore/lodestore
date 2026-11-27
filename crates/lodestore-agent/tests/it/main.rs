@@ -2,6 +2,7 @@
 mod adv_support;
 mod common;
 
+mod adv_guest_config;
 mod ct_backup;
 mod ct_restore;
 mod deadline;
