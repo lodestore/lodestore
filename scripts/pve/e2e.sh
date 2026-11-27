@@ -397,14 +397,16 @@ backup_stopped_and_native() {
   on_node node_plant_victim "$ct" "$victim"
   snap_stopped=$(run_backup)
   echo "snapshot of the stopped container: $snap_stopped"
-  on_node node_native_list "$ct" | LC_ALL=C sort >"$logs/native.list"
+  # tar lists a mount point twice: as a folder of the root file system and as
+  # the root of its own volume.
+  on_node node_native_list "$ct" | LC_ALL=C sort -u >"$logs/native.list"
   node sed -i '/^mp1: /d' "/etc/pve/lxc/$ct.conf"
   victim_sum=$(on_node node_victim_sum "$victim")
   echo "victim volume sha256 before the restore: $victim_sum"
 }
 
 compare_native() {
-  tree_list "$snap_stopped" /fs "" | LC_ALL=C sort >"$logs/snapshot.list"
+  tree_list "$snap_stopped" /fs "" | LC_ALL=C sort -u >"$logs/snapshot.list"
   echo "native archive: $(wc -l <"$logs/native.list") paths, snapshot: $(wc -l <"$logs/snapshot.list") paths"
   diff -u "$logs/native.list" "$logs/snapshot.list" ||
     fail "the snapshot tree differs from the native vzdump archive (lines: - native, + snapshot)"
