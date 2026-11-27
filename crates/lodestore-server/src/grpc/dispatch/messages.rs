@@ -565,6 +565,7 @@ async fn apply_finished(
                 "skipped": r.skipped,
                 "files": r.files,
                 "bytes": r.bytes,
+                "guest": r.guest.as_ref().map(crate::jobs::guest_restore::guest_result),
             })
             .to_string()
         })

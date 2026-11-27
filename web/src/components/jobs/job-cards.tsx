@@ -409,6 +409,8 @@ export function restoreFailureText(
 			return e.restore_target_not_empty(host, path);
 		case "restore_disk_full":
 			return e.restore_disk_full(host, path);
+		case "restore_no_space":
+			return e.restore_no_space(host, path);
 		case "restore_outside_roots":
 			return e.restore_outside_roots(host, path);
 		case "restore_in_place_disabled":

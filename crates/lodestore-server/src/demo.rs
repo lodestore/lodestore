@@ -49,6 +49,8 @@ pub const ALLOWED: &[(&str, &str)] = &[
     ("GET", "/api/v1/snapshots/{id}/search"),
     ("GET", "/api/v1/restore/hosts"),
     ("GET", "/api/v1/restore/snapshots"),
+    ("GET", "/api/v1/restore/snapshots/{id}/container"),
+    ("GET", "/api/v1/restore/guest-targets"),
     ("GET", "/api/v1/find/{id}"),
     ("GET", "/api/v1/find/{id}/groups/{index}"),
     ("GET", "/api/v1/downloads/{id}/archive"),

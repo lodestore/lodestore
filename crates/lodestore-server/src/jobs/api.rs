@@ -876,7 +876,7 @@ pub struct RestoreBody {
     pub destination: String,
     pub in_place: bool,
     pub conflict: ConflictPolicyDto,
-    /// Restores file owners, setuid/setgid bits and file capabilities. An API token needs the `restore:in-place` scope for it.
+    /// Restores file owners, setuid/setgid bits and file capabilities. An API token needs the `restore:in-place` scope for it. The owners of files of an unprivileged container are shifted by its id map, as the node sees them.
     pub restore_owners: bool,
     /// Must be true to restore a snapshot that nothing signed; such a snapshot cannot be restored in place.
     #[serde(default)]
@@ -900,7 +900,7 @@ pub struct RestoreCreated {
         (status = 400, description = "`restore_destination_root`: a restore into a new folder names `/`; `restore_in_place_not_empty`: a restore in place with `stop_if_not_empty`; `restore_unverified_in_place`: nothing signed the snapshot, so it cannot be restored in place; `restore_unverified_not_confirmed`: nothing signed the snapshot and `accept_unverified` is not set; `restore_outside_roots`: the new folder is outside the folders the agent restores into; `restore_in_place_disabled`: the agent does not allow restores in place; `restore_agent_outdated`: a token cannot restore to an agent that does not check restore folders", body = ErrorBody),
         (status = 403, description = "The token lacks `restore:host` for a new folder, or `restore:in-place` for a restore in place, with `restore_owners`, or for a whole disk image (`/`) with `overwrite_changed`, which could replace an existing disk image file; or `step_up_required`: a session restores in place, with `restore_owners`, replaces a disk image file, or restores to an agent that does not check restore folders, and the password was not entered in the last 15 minutes", body = ErrorBody),
         (status = 404, description = "Unknown snapshot or host, or a selected path is missing", body = ErrorBody),
-        (status = 422, description = "The selection, destination or host is not valid; the snapshot is neither a files backup nor a disk image restored whole (select `/`); a disk image cannot be restored in place; or the disk image has too many holes to restore through the server", body = ErrorBody),
+        (status = 422, description = "The selection, destination or host is not valid; the snapshot is neither a files backup, a container snapshot nor a disk image restored whole (select `/`); a disk image or a container snapshot cannot be restored in place; or the disk image has too many holes to restore through the server", body = ErrorBody),
         (status = 502, description = "The repository storage is unavailable", body = ErrorBody),
     )
 )]
@@ -954,6 +954,9 @@ pub async fn create_restore(
 pub fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(create_restore))
+        .routes(routes!(super::guest_restore::create_guest_restore))
+        .routes(routes!(super::guest_restore::container_preview))
+        .routes(routes!(super::guest_restore::guest_targets))
         .routes(routes!(list_jobs))
         .routes(routes!(get_job))
         .routes(routes!(list_job_events))
