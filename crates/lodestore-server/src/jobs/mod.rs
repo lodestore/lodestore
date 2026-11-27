@@ -552,7 +552,7 @@ async fn enqueue_one(
             (id, true)
         } else {
             let existing = sqlx::query(sqlx::AssertSqlSafe(format!(
-                "SELECT id FROM jobs WHERE host_id = $1 AND policy_id = $2 \
+                "SELECT id FROM jobs WHERE host_id = $1 AND policy_id = $2 AND source_ref = '' \
                  AND state IN ({ACTIVE_STATES})"
             )))
             .bind(host_id)
@@ -593,7 +593,7 @@ pub async fn check_run_rate(
     let now = now_ms();
     for (host_id, hostname) in hosts {
         let row = sqlx::query(
-            "SELECT COUNT(*) AS n, MIN(queued_at) AS oldest FROM jobs \
+            "SELECT COUNT(DISTINCT queued_at) AS n, MIN(queued_at) AS oldest FROM jobs \
              WHERE policy_id = $1 AND host_id = $2 AND kind = 'backup' \
              AND source = 'manual' AND origin = 'manual' AND queued_at > $3",
         )
