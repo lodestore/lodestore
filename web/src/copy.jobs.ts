@@ -182,6 +182,10 @@ export const jobs = {
 		offlineWhileRestoring: (host: string) =>
 			`${host} is offline. The agent keeps restoring and reports the result when it reconnects.`,
 		restoreOf: "Restore of snapshot",
+		containerRestore: (src: string, dst: string) =>
+			`Restore of ${src} as ${dst}`,
+		containerReplace: (src: string, dst: string) =>
+			`Restore of ${src} over ${dst}`,
 		downloadOf: "Download of snapshot",
 		lastUpdate: (time: string) => `Last update ${time}`,
 		scanningNote:
@@ -279,6 +283,24 @@ export const jobs = {
 			"Incomplete snapshot. Some files could not be read. See the warnings in the log.",
 		browseFiles: "Browse files",
 		sourceHost: "Source host",
+		node: "Node",
+		container: "Container",
+		containerValue: (label: string, storage: string) => `${label}, ${storage}`,
+		sourceOnNode: (label: string, node: string) => `${label} on ${node}`,
+		droppedTitle: (n: number) => `Config keys not restored · ${n}`,
+		droppedHint: "Add them back in Proxmox if you trust them.",
+		droppedCut: (shown: number) => `Showing the first ${shown}.`,
+		docsLabel: "About restored containers",
+		docsUrl: "https://lodestore.dev/docs/guides/proxmox-containers/",
+		networkKept: "Network interfaces kept",
+		containerEffects: {
+			stopped: (vmid: number) => `CT ${vmid} is stopped, start on boot is off`,
+			replaced: (vmid: number) =>
+				`All volumes of CT ${vmid} were replaced with the snapshot`,
+			newMacs: (nets: string) => `New MAC addresses on ${nets}`,
+			unprivileged: (base: number | null | undefined) =>
+				base == null ? "Unprivileged" : `Unprivileged, 0 → ${base}`,
+		},
 		destination: "Destination",
 		copyDestination: "destination",
 		ifExists: "Existing files",
@@ -400,6 +422,29 @@ export const jobs = {
 			"Data failed the integrity check. A chunk read from storage does not match its hash, so that file was not written. Try another snapshot and check the repository.",
 		restore_access_denied: (host: string) =>
 			`The host could not read from storage. The temporary access link expired or was refused. Check that ${host} can reach the bucket, then restore again.`,
+		guestInPlaceDisabled: (host: string) =>
+			`Replacing containers is turned off on ${host}. Run lodestore-agent pve install --allow-guest-in-place on the node, then restore again.`,
+		guestRunning: (vmid: number) =>
+			`CT ${vmid} is running. Stop it in Proxmox, then try again.`,
+		guestHaManaged: (vmid: number) =>
+			`CT ${vmid} is managed by HA. Remove it from HA in Proxmox, then try again.`,
+		guestTargetChanged: (vmid: number) =>
+			`CT ${vmid} changed after you confirmed the replace. Nothing was restored. Check the container and confirm again.`,
+		restoreExpired:
+			"The replace was confirmed more than 15 minutes ago. Confirm it again.",
+		restoreVmidTaken: (vmid: number) =>
+			`VMID ${vmid} is taken. Nothing was restored. Restore again with another VMID.`,
+		restoreSnapshotNotCt:
+			"This snapshot is not of a container, so nothing was restored. Choose a container snapshot.",
+		guestPluginMissing: (node: string) =>
+			`The Lodestore plugin is missing or was changed on ${node}. Run lodestore-agent pve install there.`,
+		guestNotLocal: (host: string) =>
+			`The container is not on ${host}, so nothing was backed up. Check where it runs in Proxmox, then run again.`,
+		sourceUnknown: (host: string) =>
+			`The backup did not start. The agent on ${host} has not listed its containers since the job was queued. Check that the agent is running, then run again.`,
+		ctModeMismatch:
+			"The container was backed up in a mode Lodestore did not expect, so no snapshot was written. Check the log, then run again.",
+		coalesced: "Every selected container already has a job in progress.",
 		restoreInterrupted:
 			"The agent stopped while this restore ran. Files already written stay on the host. Start the restore again to finish.",
 		restoreNotStarted: (host: string) =>

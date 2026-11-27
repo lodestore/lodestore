@@ -7,7 +7,7 @@ import {
 	CancelJobDialog,
 	useRerunAction,
 } from "@/components/jobs/cancel-job-dialog";
-import { JobCards } from "@/components/jobs/job-cards";
+import { JobCards, useContainerLabels } from "@/components/jobs/job-cards";
 import { JobLog, LOG_ANCHOR, type LogFilter } from "@/components/jobs/job-log";
 import {
 	JobProgress,
@@ -125,6 +125,14 @@ function JobNotices({ job }: { job: JobDetail }) {
 	);
 }
 
+function ContainerSubline({ job }: { job: JobDetail }) {
+	const { source, target } = useContainerLabels(job);
+	const text = job.restore?.guest?.replace
+		? copy.jobs.detail.containerReplace
+		: copy.jobs.detail.containerRestore;
+	return text(source ?? copy.restore.header.container(null), target);
+}
+
 function JobSubline({ job }: { job: JobDetail }) {
 	if (job.kind === "agent_update") {
 		return copy.jobs.agentUpdate.kind(
@@ -133,6 +141,9 @@ function JobSubline({ job }: { job: JobDetail }) {
 		);
 	}
 	const info = job.restore ?? job.download;
+	if (job.kind === "restore" && job.restore?.guest) {
+		return <ContainerSubline job={job} />;
+	}
 	if (job.kind === "restore" || job.kind === "download") {
 		if (!info) return null;
 		const host = job.restore?.source_host_key ?? job.host_id;

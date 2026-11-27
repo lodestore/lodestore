@@ -15,6 +15,7 @@ import type {
 	JobSummary,
 } from "@/api/gen/model";
 import { apiError, renderApp, useSignedIn } from "@/test/app";
+import { containerFacts } from "@/test/container";
 import { server } from "@/test/server";
 
 Element.prototype.hasPointerCapture ??= () => false;
@@ -1213,6 +1214,249 @@ describe("Restore job page", () => {
 		await openJob();
 		const log = await screen.findByRole("log");
 		expect(await within(log).findByText("Owner not applied")).toBeVisible();
+	});
+});
+
+function makeContainerRestore(over: Partial<JobDetail> = {}): JobDetail {
+	const base = makeRestore();
+	return makeRestore({
+		hostname: "pve-01",
+		restore: {
+			...base.restore,
+			snapshot_id: SNAP,
+			source_host_key: "host-2",
+			source_hostname: "pve-01",
+			destination: "",
+			guest: {
+				node: "pve-01",
+				replace: false,
+				storage: "local-lvm",
+				vmid: 105,
+			},
+		} as NonNullable<JobDetail["restore"]>,
+		...over,
+	});
+}
+
+const guestReport = (
+	over: NonNullable<NonNullable<JobDetail["restore_result"]>["guest"]> = {},
+) => ({
+	created: 12,
+	overwritten: 0,
+	skipped: 0,
+	files: 12,
+	bytes: 1024,
+	guest: {
+		vmid: 105,
+		name: "dns",
+		node: "pve-01",
+		storage: "local-lvm",
+		replaced: false,
+		unprivileged: true,
+		root_host_uid: 100000,
+		new_mac_nets: ["net0"],
+		network: [],
+		dropped: [],
+		dropped_total: 0,
+		...over,
+	},
+});
+
+describe("Container restore job page", () => {
+	const mockSource = () =>
+		server.use(
+			http.get("/api/v1/restore/snapshots/:id/container", () =>
+				HttpResponse.json(containerFacts()),
+			),
+		);
+
+	it("confirms what happened, the kept interfaces and the dropped keys", async () => {
+		mockSource();
+		mockJob(
+			makeContainerRestore({
+				restore_result: guestReport({
+					network: [{ key: "net0", value: "bridge=vmbr0,name=eth0" }],
+					dropped: [
+						{ key: "lxc.apparmor.profile", value: "unconfined", reason: "lxc" },
+						{ key: "pct.fw", value: "", reason: "firewall" },
+					],
+					dropped_total: 2,
+				}),
+			}),
+		);
+		await openJob();
+		expect(
+			await screen.findByText("Restore of CT 200 · dns as CT 105 · dns"),
+		).toBeVisible();
+		const job = (await screen.findByRole("heading", { name: "Job" })).closest(
+			"[data-slot=card]",
+		) as HTMLElement;
+		expect(within(job).getByText("pve-01")).toBeVisible();
+		expect(
+			await within(job).findByText("CT 200 · dns on pve-01"),
+		).toBeVisible();
+		expect(within(job).getByText("CT 105 · dns, local-lvm")).toBeVisible();
+		const result = screen
+			.getByRole("heading", { name: "Result" })
+			.closest("[data-slot=card]") as HTMLElement;
+		expect(
+			within(result).getByText("CT 105 is stopped, start on boot is off"),
+		).toBeVisible();
+		expect(within(result).getByText("New MAC addresses on net0")).toBeVisible();
+		expect(within(result).getByText("Unprivileged, 0 → 100000")).toBeVisible();
+		expect(within(result).getByText("Network interfaces kept")).toBeVisible();
+		expect(within(result).getByText(/bridge=vmbr0,name=eth0/)).toBeVisible();
+		const dropped = screen
+			.getByRole("heading", { name: "Config keys not restored · 2" })
+			.closest("[data-slot=card]") as HTMLElement;
+		expect(within(dropped).getByText(/lxc.apparmor.profile/)).toBeVisible();
+		expect(within(dropped).getByText(/pct.fw/)).toBeVisible();
+		expect(
+			within(dropped).getByText(/Firewall rules aren't restored/),
+		).toBeVisible();
+		expect(
+			within(dropped).getByText(/Add them back in Proxmox if you trust them/),
+		).toBeVisible();
+		expect(
+			within(dropped).getByRole("link", { name: "About restored containers" }),
+		).toHaveAttribute(
+			"href",
+			"https://lodestore.dev/docs/guides/proxmox-containers/",
+		);
+	});
+
+	it("has no dropped-keys card when the agent dropped nothing", async () => {
+		mockSource();
+		mockJob(makeContainerRestore({ restore_result: guestReport() }));
+		await openJob();
+		await screen.findByText("CT 105 is stopped, start on boot is off");
+		expect(screen.queryByText(/Config keys not restored/)).toBeNull();
+	});
+
+	it("says a replaced container was replaced", async () => {
+		mockSource();
+		const base = makeContainerRestore();
+		mockJob(
+			makeContainerRestore({
+				restore: {
+					...base.restore,
+					guest: {
+						node: "pve-01",
+						replace: true,
+						storage: "local-lvm",
+						vmid: 105,
+					},
+				} as NonNullable<JobDetail["restore"]>,
+				restore_result: guestReport({ replaced: true, new_mac_nets: [] }),
+			}),
+		);
+		await openJob();
+		expect(
+			await screen.findByText(
+				"All volumes of CT 105 were replaced with the snapshot",
+			),
+		).toBeVisible();
+		expect(screen.queryByText(/New MAC addresses/)).toBeNull();
+		expect(
+			screen.getByText("Restore of CT 200 · dns over CT 105 · dns"),
+		).toBeVisible();
+	});
+
+	it.each([
+		[
+			"guest_running",
+			"CT 105 · dns is running. Stop it in Proxmox, then try again.",
+			"CT 105 · dns is running. Stop it in Proxmox, then try again.",
+		],
+		[
+			"guest_ha_managed",
+			"CT 105 · dns is managed by HA. Remove it from HA in Proxmox, then try again.",
+			"CT 105 · dns is managed by HA. Remove it from HA in Proxmox, then try again.",
+		],
+		[
+			"guest_target_changed",
+			"CT 105 is not the container that was confirmed (x).",
+			"CT 105 changed after you confirmed the replace. Nothing was restored. Check the container and confirm again.",
+		],
+		[
+			"restore_expired",
+			"x",
+			"The replace was confirmed more than 15 minutes ago. Confirm it again.",
+		],
+		[
+			"guest_plugin_missing",
+			"x",
+			"The Lodestore plugin is missing or was changed on pve-01. Run lodestore-agent pve install there.",
+		],
+		[
+			"guest_in_place_disabled",
+			"x",
+			"Replacing containers is turned off on pve-01. Run lodestore-agent pve install --allow-guest-in-place on the node, then restore again.",
+		],
+		[
+			"restore_vmid_taken",
+			"x",
+			"VMID 105 is taken. Nothing was restored. Restore again with another VMID.",
+		],
+		[
+			"restore_snapshot_not_ct",
+			"x",
+			"This snapshot is not of a container, so nothing was restored. Choose a container snapshot.",
+		],
+		[
+			"restore_no_space",
+			"not enough free space on the staging volume",
+			"The restore failed. Not enough free space on the staging volume. Check the log, then restore again.",
+		],
+	])("explains %s in the existing error view", async (code, message, text) => {
+		mockSource();
+		mockJob(
+			makeContainerRestore({
+				state: "failed",
+				error_code: code,
+				error_message: message,
+			}),
+		);
+		await openJob();
+		const alert = await screen.findByRole("alert");
+		expect(alert).toHaveTextContent(text);
+	});
+});
+
+describe("Container backup job errors", () => {
+	it.each([
+		[
+			"guest_plugin_missing",
+			/The Lodestore plugin is missing or was changed on web-1\./,
+		],
+		[
+			"guest_not_local",
+			/The container is not on web-1, so nothing was backed up\./,
+		],
+		["source_unknown", /The agent on web-1 has not listed its containers/],
+		["ct_mode_mismatch", /backed up in a mode Lodestore did not expect/],
+	])("explains %s", async (code, text) => {
+		mockJob(
+			makeDetail({ state: "failed", error_code: code, error_message: "x" }),
+		);
+		await openJob();
+		expect(await screen.findByRole("alert")).toHaveTextContent(text);
+	});
+
+	it("says every selected container already has a job when the run coalesced", async () => {
+		mockJob(
+			makeDetail({
+				state: "cancelled",
+				error_code: "coalesced",
+				error_message: "x",
+			}),
+		);
+		await openJob();
+		expect(
+			await screen.findByText(
+				"Every selected container already has a job in progress.",
+			),
+		).toBeVisible();
 	});
 });
 
