@@ -16,6 +16,7 @@ mod backup_behavior;
 mod bounded_reads;
 mod check;
 mod codec_props;
+mod ct;
 mod fidelity;
 mod gc_interleave;
 mod gc_locks;

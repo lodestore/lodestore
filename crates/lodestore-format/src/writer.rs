@@ -59,7 +59,9 @@ pub const INDEX_FLUSH_PACKS: usize = 8;
 // needs a content-list indirection and so a higher min_reader_version.
 const MAX_CONTENT_IDS: usize = (MAX_TREE_ULEN - (2 << 20)) / 34;
 
+mod ct;
 mod image;
+pub use ct::{CtBackup, PendingContainer};
 pub use image::{ImageOptions, ImageOutcome};
 
 pub type IssueFn<'a> = Box<dyn Fn(&IssueEvent<'_>) + 'a>;
@@ -973,6 +975,8 @@ struct Session<'a, 'p, S: BlobStore> {
     /// to be written, then through the directory [`Session::write_tree`]
     /// wrote, counted as the sum of the decoded tree blob lengths.
     held_bytes: u64,
+    /// Set for the walk of a container.
+    ct: Option<ct::CtWalk>,
 }
 
 impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
@@ -1007,6 +1011,7 @@ impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
             cur_read: 0,
             held: 0,
             held_bytes: 0,
+            ct: None,
         }
     }
 
@@ -1315,7 +1320,8 @@ impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
                 if self.excluded(&full, &st) {
                     continue;
                 }
-                if let Some(node) = self.backup_entry(dirfd, &entry.name, &st, &full).await? {
+                if let Some(mut node) = self.backup_entry(dirfd, &entry.name, &st, &full).await? {
+                    self.ct_node(&mut node, &full);
                     nodes.push(node);
                 }
                 below = below.max(std::mem::take(&mut self.held));
@@ -1328,6 +1334,14 @@ impl<'a, 'p, S: BlobStore> Session<'a, 'p, S> {
     }
 
     fn excluded(&self, path: &[u8], st: &Stat) -> bool {
+        let path = if self.ct.is_some() {
+            if ct::CtWalk::skipped(path, st) {
+                return true;
+            }
+            ct::CtWalk::inner(path)
+        } else {
+            path
+        };
         self.walk
             .exclude
             .as_ref()

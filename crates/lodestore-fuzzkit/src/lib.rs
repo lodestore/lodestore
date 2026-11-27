@@ -22,7 +22,9 @@ use lodestore_format::crypto::{
     open_provenance_body, open_writer_marker_body, seal_gc_manifest_body, seal_index_shard,
     seal_provenance_body, seal_snapshot_body, seal_snapshot_key, seal_writer_marker_body,
 };
+use lodestore_format::ct::{self, CtMeta, IdMap};
 use lodestore_format::error::Result;
+use lodestore_format::fs::idmap::{Direction, translate_acl, translate_caps};
 use lodestore_format::fs::restore::check_extents;
 use lodestore_format::image::{
     BitmapBinding, BitmapNames, FullReason, IMAGE_CHUNK_SIZE, ImageExtent, ImageMeta, ImageSource,
@@ -289,6 +291,55 @@ pub fn source_decode(data: &[u8]) {
             Some(key),
             "a parsed key must parse again to itself"
         );
+    }
+}
+
+/// A hostile container manifest, top tree, `/config` listing, id map,
+/// `pct.conf` or ACL/capability xattr is refused or checks out; a parsed
+/// map is canonical, a parsed meta encodes back to itself, and a translated
+/// xattr translates again.
+pub fn ct_layout(data: &[u8]) {
+    if let Ok(snapshot) = pb::Snapshot::decode(data) {
+        let _ = ct::check_manifest(&snapshot);
+    }
+    if let Ok(claimed) = pb::Source::decode(data)
+        && let Ok((_, meta)) = source::decode(Some(&claimed))
+        && let Ok(parsed) = CtMeta::from_meta(&meta)
+    {
+        let again = parsed.to_meta().expect("a parsed container meta encodes");
+        assert_eq!(
+            CtMeta::from_meta(&again).ok(),
+            Some(parsed),
+            "a container meta must decode to what was encoded"
+        );
+    }
+    if let Ok(tree) = pb::Tree::decode(data) {
+        let _ = ct::check_top(&tree.nodes);
+        if let Ok((conf, fw)) = ct::check_config_dir(&tree.nodes) {
+            assert!(conf.size <= ct::MAX_CT_CONFIG_BYTES as u64);
+            assert!(fw.is_none_or(|n| n.size <= ct::MAX_CT_CONFIG_BYTES as u64));
+        }
+    }
+    if let Ok(text) = std::str::from_utf8(data) {
+        if let Ok(map) = IdMap::parse_canonical(text) {
+            assert_eq!(
+                map.canonical().ok().as_deref(),
+                Some(text),
+                "a parsed id map must be canonical"
+            );
+        }
+        let _ = ct::config_lines(text).count();
+        let _ = IdMap::from_config(text);
+    }
+    let map = IdMap::default_unprivileged();
+    for dir in [Direction::HostToCt, Direction::CtToHost] {
+        if let Ok(out) = translate_acl(data, dir, &map, &mut 0) {
+            assert_eq!(out.len(), data.len(), "an ACL keeps its entries");
+            assert!(translate_acl(&out, dir, &map, &mut 0).is_ok());
+        }
+        if let Ok(Some(out)) = translate_caps(data, dir, &map, &mut 0) {
+            assert!(translate_caps(&out, dir, &map, &mut 0).is_ok());
+        }
     }
 }
 
@@ -653,6 +704,7 @@ pub const TARGETS: &[(&str, Target)] = &[
     ("provenance_open", provenance_open),
     ("source_decode", source_decode),
     ("image_layout", image_layout),
+    ("ct_layout", ct_layout),
     ("image_state", image_state),
     ("nbd_client", nbd_client),
     ("nbd_server", nbd_server),

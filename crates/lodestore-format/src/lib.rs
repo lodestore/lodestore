@@ -6,6 +6,7 @@ pub mod check;
 pub mod chunker;
 pub mod config;
 pub mod crypto;
+pub mod ct;
 pub mod error;
 pub mod fs;
 pub mod gc;

@@ -15,7 +15,9 @@ use rustix::fs::{
 use rustix::io::Errno;
 
 use super::conv;
+use super::idmap::{Direction, shift_node};
 use super::restore::Unapplied;
+use crate::ct::IdMap;
 use crate::pb;
 
 fn grow(
@@ -178,16 +180,35 @@ fn needs_owners(name: &[u8]) -> bool {
 /// but without `keep_privileges` the owner is applied and the privileges are
 /// still dropped. Without `owners`, ACLs, `security.*` and `trusted.*` xattrs
 /// are not applied either: they grant access or labels chosen at backup time
-/// to whoever runs the restore.
+/// to whoever runs the restore. With `shift` and `owners` the owner, ACLs and
+/// capabilities are first translated from the container's view to the node's.
 pub fn apply_metadata(
     target: &Target<'_>,
     node: &pb::Node,
     path: &[u8],
     owners: bool,
     keep_privileges: bool,
+    shift: Option<&IdMap>,
     out: &mut Vec<Unapplied>,
 ) {
     let privileges = owners && keep_privileges;
+    let shifted;
+    let node = match shift {
+        Some(map) if owners => {
+            let mut copy = node.clone();
+            let mut unmapped = 0;
+            for (name, e) in shift_node(&mut copy, Direction::CtToHost, map, &mut unmapped) {
+                out.push(Unapplied {
+                    path: path.to_vec(),
+                    what: format!("xattr {}", String::from_utf8_lossy(&name)),
+                    error: e.to_string(),
+                });
+            }
+            shifted = copy;
+            &shifted
+        }
+        _ => node,
+    };
     let mut fail = |what: String, e: Errno| {
         out.push(Unapplied {
             path: path.to_vec(),
