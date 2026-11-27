@@ -2491,6 +2491,7 @@ fn vm_facts(age_ms: u64, truncated: bool, vmids: &[u32]) -> SourceFacts {
                     ..Default::default()
                 })
                 .collect(),
+            ..Default::default()
         }),
         ..Default::default()
     }
@@ -2673,6 +2674,7 @@ fn node_facts(age_ms: u64, truncated: bool, guests: Vec<ProxmoxGuest>) -> Source
             cluster: "pve-prod".to_string(),
             node: "pve1".to_string(),
             guests,
+            ..Default::default()
         }),
         ..Default::default()
     }

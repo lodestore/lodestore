@@ -166,6 +166,7 @@ mod tests {
                 scope: ScopeKind::Cluster,
                 name: "pve".into(),
                 guests,
+                ..Default::default()
             }),
             servers: Vec::new(),
         }

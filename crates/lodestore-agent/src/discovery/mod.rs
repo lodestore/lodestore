@@ -37,6 +37,11 @@ pub const MAX_PVE_FILE_BYTES: u64 = 4 << 20;
 pub const MAX_GUEST_CONF_BYTES: u64 = 64 << 10;
 pub const MAX_SCAN_BYTES: u64 = 32 << 20;
 pub const MAX_STATE_BYTES: u64 = 1 << 20;
+pub const MAX_STORAGES: usize = 64;
+pub const MAX_STORAGE_CONTENT: usize = 8;
+pub const STORAGE_CONTENT_TYPES: [&str; 7] = [
+    "images", "rootdir", "vztmpl", "iso", "backup", "snippets", "import",
+];
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -436,6 +441,7 @@ mod tests {
                 cluster: String::new(),
                 node: "pve1".into(),
                 guests,
+                ..ProxmoxFacts::default()
             }),
             ..SourceFacts::default()
         }

@@ -5,12 +5,13 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{self, BufRead, BufReader};
 use std::path::Path;
 
-use lodestore_proto::agent::v1::{GuestKind, ProxmoxFacts, ProxmoxGuest};
+use lodestore_proto::agent::v1::{GuestKind, ProxmoxFacts, ProxmoxGuest, ProxmoxStorage};
 use serde::Deserialize;
 
 use super::{
     MAX_GUEST_CONF_BYTES, MAX_GUEST_TAGS, MAX_GUESTS, MAX_NAME_BYTES, MAX_PVE_FILE_BYTES,
-    MAX_SCAN_BYTES, MAX_STATE_BYTES, ScanFailed,
+    MAX_SCAN_BYTES, MAX_STATE_BYTES, MAX_STORAGE_CONTENT, MAX_STORAGES, STORAGE_CONTENT_TYPES,
+    ScanFailed,
 };
 use super::{clip, open_nofollow, read_bounded};
 use crate::identity::write_private_file;
@@ -154,6 +155,101 @@ pub(crate) fn parse_guest_conf(text: &str) -> GuestConf {
         }
     }
     conf
+}
+
+fn storage_id_valid(id: &str) -> bool {
+    let mut bytes = id.bytes();
+    id.len() <= MAX_NAME_BYTES
+        && bytes.next().is_some_and(|b| b.is_ascii_alphabetic())
+        && bytes.all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+fn storage_type_valid(kind: &str) -> bool {
+    (1..=32).contains(&kind.len())
+        && kind
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+fn is_true(value: &str) -> bool {
+    matches!(value, "1" | "yes" | "true" | "on")
+}
+
+/// The storages `node` can use from `storage.cfg` (`{type}: {id}` sections of
+/// indented `{key} {value}` lines), and whether a section had to be left out.
+/// A `nodes` list without `node` and a `disable` flag leave a storage out
+/// silently: they are the user's choice, not a loss.
+fn parse_storages(text: &str, node: &str) -> (Vec<ProxmoxStorage>, bool) {
+    struct Section {
+        kind: String,
+        id: String,
+        content: Vec<String>,
+        shared: bool,
+        skip: bool,
+    }
+    let mut truncated = false;
+    let mut storages = Vec::new();
+    let mut open: Option<Section> = None;
+    let mut close = |section: Option<Section>, storages: &mut Vec<ProxmoxStorage>| {
+        let Some(s) = section else { return };
+        if s.skip {
+            return;
+        }
+        if !storage_id_valid(&s.id)
+            || !storage_type_valid(&s.kind)
+            || storages.len() >= MAX_STORAGES
+        {
+            truncated = true;
+        } else {
+            storages.push(ProxmoxStorage {
+                id: s.id,
+                r#type: s.kind,
+                content: s.content,
+                shared: s.shared,
+            });
+        }
+    };
+    for line in text.lines() {
+        if line.trim().is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with([' ', '\t']) {
+            let Some(section) = open.as_mut() else {
+                continue;
+            };
+            let line = line.trim();
+            let (key, value) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+            let value = value.trim();
+            match key {
+                "content" => {
+                    let mut known = Vec::new();
+                    for item in value.split(',').map(str::trim) {
+                        if STORAGE_CONTENT_TYPES.contains(&item) && !known.iter().any(|k| k == item)
+                        {
+                            known.push(item.to_string());
+                        }
+                    }
+                    known.truncate(MAX_STORAGE_CONTENT);
+                    section.content = known;
+                }
+                "nodes" => section.skip |= !value.split(',').any(|n| n.trim() == node),
+                "disable" => section.skip |= is_true(value),
+                "shared" => section.shared = is_true(value),
+                _ => {}
+            }
+        } else {
+            close(open.take(), &mut storages);
+            open = line.split_once(':').map(|(kind, id)| Section {
+                kind: kind.trim().to_string(),
+                id: id.trim().to_string(),
+                content: Vec::new(),
+                shared: false,
+                skip: false,
+            });
+        }
+    }
+    close(open.take(), &mut storages);
+    (storages, truncated)
 }
 
 /// `vmid -> pool` from the `pool:<id>:<comment>:<vmids>:<storages>:` lines of
@@ -325,7 +421,7 @@ fn scan_with(root: &Path, ids_path: &Path, budget: u64) -> Result<Option<Found>,
             let proxmox = ProxmoxFacts {
                 cluster,
                 node,
-                guests: Vec::new(),
+                ..ProxmoxFacts::default()
             };
             return Ok(Some(Found {
                 proxmox,
@@ -351,6 +447,20 @@ fn scan_with(root: &Path, ids_path: &Path, budget: u64) -> Result<Option<Found>,
         Err(_) => {
             truncated = true;
             HashMap::new()
+        }
+    };
+
+    let storages = match read_bounded(&root.join("storage.cfg"), MAX_PVE_FILE_BYTES) {
+        Ok(bytes) => {
+            spent += bytes.len() as u64;
+            let (storages, cut) = parse_storages(&String::from_utf8_lossy(&bytes), &node);
+            truncated |= cut;
+            storages
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(_) => {
+            truncated = true;
+            Vec::new()
         }
     };
 
@@ -467,6 +577,7 @@ fn scan_with(root: &Path, ids_path: &Path, budget: u64) -> Result<Option<Found>,
             cluster,
             node,
             guests,
+            storages,
         },
         truncated,
     }))
@@ -889,6 +1000,83 @@ mod tests {
         assert!(guest(&found, 200).is_some());
         assert_eq!(std::fs::metadata(pve.corrupt()).unwrap().len(), 64 << 20);
         assert_eq!(pve.ids().len(), 1);
+    }
+
+    fn storages(pve: &Pve) -> Vec<(String, String, Vec<String>, bool)> {
+        let found = pve.found().proxmox;
+        let list = found.storages.iter();
+        list.map(|s| (s.id.clone(), s.r#type.clone(), s.content.clone(), s.shared))
+            .collect()
+    }
+
+    #[test]
+    fn storage_cfg_reads_content_nodes_and_disable() {
+        let pve = Pve::new();
+        pve.members("pve1", None);
+        pve.vmlist(&[]);
+        pve.write(
+            "storage.cfg",
+            "dir: local\n\tpath /var/lib/vz\n\tcontent iso,backup,vztmpl\n\n\
+             lvmthin: local-lvm\n\tthinpool data\n\tvgname pve\n\tcontent rootdir,images,bogus,rootdir\n\n\
+             nfs: elsewhere\n\tcontent images\n\tshared 1\n\tnodes pve2,pve3\n\n\
+             dir: off\n\tdisable 1\n\tcontent rootdir\n\n\
+             lodestoreprobe: probe\n\tprune-backups keep-all=1\n\n\
+             nfs: both\n\tnodes pve2, pve1\n\tcontent rootdir\n\tshared 1\n",
+        );
+        let strings = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            storages(&pve),
+            [
+                (
+                    "local".into(),
+                    "dir".into(),
+                    strings(&["iso", "backup", "vztmpl"]),
+                    false
+                ),
+                (
+                    "local-lvm".into(),
+                    "lvmthin".into(),
+                    strings(&["rootdir", "images"]),
+                    false
+                ),
+                ("probe".into(), "lodestoreprobe".into(), Vec::new(), false),
+                ("both".into(), "nfs".into(), strings(&["rootdir"]), true),
+            ]
+        );
+        assert!(!pve.found().truncated);
+    }
+
+    #[test]
+    fn storage_cfg_skips_invalid_ids_and_caps_the_list() {
+        let pve = Pve::new();
+        pve.members("pve1", None);
+        pve.vmlist(&[]);
+        let long = "a".repeat(MAX_NAME_BYTES + 1);
+        pve.write(
+            "storage.cfg",
+            &format!("dir: 9lives\n\tcontent rootdir\n\ndir: {long}\n\ndir: bad/id\n\ndir: fine\n"),
+        );
+        let found = pve.found();
+        assert!(found.truncated);
+        let ids: Vec<&str> = found
+            .proxmox
+            .storages
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
+        assert_eq!(ids, ["fine"]);
+
+        let many: String = (0..MAX_STORAGES + 5)
+            .map(|i| format!("dir: s{i}\n"))
+            .collect();
+        pve.write("storage.cfg", &many);
+        let found = pve.found();
+        assert!(found.truncated);
+        assert_eq!(found.proxmox.storages.len(), MAX_STORAGES);
+
+        std::fs::remove_file(pve.root.join("storage.cfg")).unwrap();
+        let found = pve.found();
+        assert!(!found.truncated && found.proxmox.storages.is_empty());
     }
 
     #[test]

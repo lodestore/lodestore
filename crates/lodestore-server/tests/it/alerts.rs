@@ -332,6 +332,7 @@ impl Env {
                         ..Default::default()
                     })
                     .collect(),
+                ..Default::default()
             }),
             ..Default::default()
         };

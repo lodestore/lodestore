@@ -832,6 +832,7 @@ fn pve(guests: Vec<ProxmoxGuest>, age_ms: u64, truncated: bool) -> SourceFacts {
             cluster: "pve-prod".to_string(),
             node: "pve".to_string(),
             guests,
+            ..Default::default()
         }),
         ..Default::default()
     }

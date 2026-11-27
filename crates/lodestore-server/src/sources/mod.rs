@@ -35,6 +35,10 @@ pub const MAX_SCOPE_NAME_BYTES: usize = 63;
 /// The largest list stored: the 256 KiB the agent cuts its list to, plus its
 /// age, which the agent adds after the cut.
 pub const MAX_FACTS_BYTES: usize = (256 << 10) + 16;
+/// Storages kept per node.
+pub const MAX_STORAGES: usize = 64;
+/// Content types kept per storage.
+pub const MAX_STORAGE_CONTENT: usize = 8;
 /// The source types besides files, in the order lists show them.
 pub const SOURCE_TYPES: [&str; 4] = ["proxmox-vm", "proxmox-ct", "postgres", "mysql"];
 /// How long a collection counts as current.
@@ -42,12 +46,16 @@ pub const FRESH_FOR: Duration = Duration::from_secs(15 * 60);
 
 const MIN_VMID: u32 = 100;
 const MAX_VMID: u32 = 999_999_999;
+const CONTENT_TYPES: [&str; 7] = [
+    "images", "rootdir", "vztmpl", "iso", "backup", "snippets", "import",
+];
 const NIL_UUID: &str = "00000000-0000-0000-0000-000000000000";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScopeKind {
     Cluster,
+    #[default]
     Node,
 }
 
@@ -76,10 +84,20 @@ pub struct Guest {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Storage {
+    pub id: String,
+    pub kind: String,
+    pub content: Vec<String>,
+    pub shared: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProxmoxNode {
     pub scope: ScopeKind,
     pub name: String,
     pub guests: Vec<Guest>,
+    #[serde(default)]
+    pub storages: Vec<Storage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -233,7 +251,54 @@ fn proxmox_node(
         scope,
         name: name.to_string(),
         guests,
+        storages: proxmox_storages(&facts.storages, truncated),
     })
+}
+
+fn proxmox_storages(
+    storages: &[lodestore_proto::agent::v1::ProxmoxStorage],
+    truncated: &mut bool,
+) -> Vec<Storage> {
+    let mut kept: Vec<Storage> = Vec::new();
+    for storage in storages {
+        if kept.len() >= MAX_STORAGES {
+            *truncated = true;
+            break;
+        }
+        let id = &storage.id;
+        let valid = id.len() <= MAX_NAME_BYTES
+            && id.bytes().next().is_some_and(|b| b.is_ascii_alphabetic())
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+            && (1..=32).contains(&storage.r#type.len())
+            && storage
+                .r#type
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'));
+        if !valid || kept.iter().any(|k| k.id == *id) {
+            *truncated = true;
+            continue;
+        }
+        let mut content: Vec<String> = Vec::new();
+        for item in &storage.content {
+            if !CONTENT_TYPES.contains(&item.as_str()) || content.contains(item) {
+                *truncated = true;
+            } else if content.len() >= MAX_STORAGE_CONTENT {
+                *truncated = true;
+                break;
+            } else {
+                content.push(item.clone());
+            }
+        }
+        kept.push(Storage {
+            id: id.clone(),
+            kind: storage.r#type.clone(),
+            content,
+            shared: storage.shared,
+        });
+    }
+    kept
 }
 
 fn proxmox_guest(
@@ -536,6 +601,7 @@ mod tests {
                 cluster: "c1".into(),
                 node: "pve1".into(),
                 guests,
+                ..Default::default()
             }),
             ..Default::default()
         }

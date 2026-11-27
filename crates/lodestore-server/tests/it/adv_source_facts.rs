@@ -59,6 +59,7 @@ fn facts(guests: Vec<ProxmoxGuest>) -> SourceFacts {
             cluster: "pve-prod".to_string(),
             node: "pve".to_string(),
             guests,
+            ..Default::default()
         }),
         ..Default::default()
     }

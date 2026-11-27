@@ -177,6 +177,15 @@ message ProxmoxFacts {
   string cluster = 1;
   string node = 2;
   repeated ProxmoxGuest guests = 3;
+  // Storages this node can use, as the cluster storage.cfg lists them.
+  repeated ProxmoxStorage storages = 4;
+}
+
+message ProxmoxStorage {
+  string id = 1;
+  string type = 2;
+  repeated string content = 3;
+  bool shared = 4;
 }
 
 enum GuestKind {
