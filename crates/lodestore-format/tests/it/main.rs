@@ -26,6 +26,7 @@ mod gc_purge_s3;
 mod gc_repack;
 mod gc_trust;
 mod golden;
+mod guest_config;
 mod image;
 mod image_binding;
 mod index_props;

@@ -10,6 +10,7 @@ pub mod ct;
 pub mod error;
 pub mod fs;
 pub mod gc;
+pub mod guest_config;
 pub mod image;
 pub mod index;
 pub mod keys;
