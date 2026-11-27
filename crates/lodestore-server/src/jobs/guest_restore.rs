@@ -15,13 +15,18 @@ use lodestore_format::guest_config::{
 use lodestore_format::index::parse_hex32;
 use lodestore_format::source::{self, Meta};
 use lodestore_proto::agent::v1::restore_spec::Target;
-use lodestore_proto::agent::v1::{ConflictPolicy, GuestRestoreResult, GuestTarget, RestoreSpec};
+use lodestore_proto::agent::v1::{
+    ConfigLine, ConflictPolicy, ExpectedGuest, GuestRestoreResult, GuestTarget,
+    OtherGuestConfirmation, RestoreSpec,
+};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use utoipa::{IntoParams, ToSchema};
 
 use super::api::RestoreCreated;
-use super::restore::{GuestRestoreRecord, RestoreRecord, conflict_name, insert_restore_job};
+use super::restore::{
+    ExpectedTarget, GuestRestoreRecord, RestoreRecord, conflict_name, insert_restore_job,
+};
 use crate::auth::tokens::{RestoreGuestWrite, Scope, Scoped, SnapshotsRead};
 use crate::browse::tree::{read_error, reader};
 use crate::error::{ApiError, ErrorBody};
@@ -56,6 +61,7 @@ const MAX_VMID: u32 = 999_999_999;
 const CT_ITEMS: [&[u8]; 2] = [b"/fs", b"/config"];
 
 const NEW_PURPOSE: &str = "restore a container to a new VMID";
+const REPLACE_PURPOSE: &str = "replace an existing container";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct DroppedKey {
@@ -298,6 +304,98 @@ pub(crate) async fn load_hosts(state: &AppState) -> Result<Vec<AgentHost>, ApiEr
         .collect()
 }
 
+impl ExpectedTarget {
+    fn to_proto(&self) -> ExpectedGuest {
+        ExpectedGuest {
+            vmid: self.vmid,
+            name: self.name.clone(),
+            pve_uid: self.pve_uid.clone(),
+            pve_rtime: self.pve_rtime,
+            instance_uuid: self.instance_uuid.clone(),
+            volumes: self
+                .volumes
+                .iter()
+                .map(|v| ConfigLine {
+                    key: v.key.clone(),
+                    value: v.value.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// The container a replace writes over, as fresh facts of its node show it
+/// at the moment the user confirms: the agent refuses when it differs right
+/// before the restore.
+fn replace_target(
+    host: &AgentHost,
+    facts: &ProxmoxNode,
+    vmid: u32,
+) -> Result<ExpectedTarget, ApiError> {
+    let fresh = host
+        .stored
+        .as_ref()
+        .is_some_and(|s| sources::is_fresh(s.collected_at, crate::db::now_ms()));
+    if !fresh {
+        return Err(ApiError::ConflictCode(
+            "guest_facts_stale",
+            format!(
+                "{} has not listed its containers in the last 15 minutes. Check that the agent \
+                 is connected and try again.",
+                host.hostname
+            ),
+        ));
+    }
+    if !facts.guest_in_place_allowed {
+        return Err(ApiError::BadRequest(
+            "guest_in_place_disabled",
+            format!(
+                "{} does not allow replacing a guest. Run lodestore-agent pve install \
+                 --allow-guest-in-place on the node, or set restore.allow_guest_in_place: true \
+                 in its agent.yaml.",
+                host.hostname
+            ),
+        ));
+    }
+    let guest = facts
+        .guests
+        .iter()
+        .find(|g| g.kind == sources::GuestType::Ct && g.vmid == vmid)
+        .ok_or_else(|| ApiError::NotFound(format!("CT {vmid} is not on {}.", host.hostname)))?;
+    if guest.volumes_truncated {
+        return Err(ApiError::Unprocessable(
+            "guest_target_unverifiable",
+            format!(
+                "{} did not list every volume of CT {vmid}, so the replace cannot be checked.",
+                host.hostname
+            ),
+        ));
+    }
+    if guest.ha_managed {
+        return Err(ApiError::Unprocessable(
+            "guest_ha_managed",
+            format!(
+                "CT {vmid} is an HA resource, and HA would start it right after the restore. \
+                 Remove it from HA first."
+            ),
+        ));
+    }
+    if guest.running {
+        return Err(ApiError::ConflictCode(
+            "guest_running",
+            format!("CT {vmid} is running. Stop it in Proxmox, then try again."),
+        ));
+    }
+    Ok(ExpectedTarget {
+        vmid,
+        name: guest.name.clone().unwrap_or_default(),
+        pve_uid: guest.pve_uid.clone(),
+        pve_rtime: guest.pve_rtime,
+        instance_uuid: guest.key.rsplit('/').next().unwrap_or_default().to_string(),
+        volumes: guest.volumes.clone(),
+    })
+}
+
 /// Whether two reports name the same scope: one cluster, or one node outside a cluster.
 fn same_scope(a: &ProxmoxNode, b: &ProxmoxNode) -> bool {
     a.scope == b.scope && a.name == b.name
@@ -344,21 +442,35 @@ pub async fn create_guest_restore(
     auth: Scoped<RestoreGuestWrite>,
     Json(body): Json<GuestRestoreBody>,
 ) -> Result<(StatusCode, Json<RestoreCreated>), ApiError> {
-    let vmid = match (body.vmid, body.replace_vmid) {
-        (Some(vmid), None) => vmid,
+    let (vmid, replace) = match (body.vmid, body.replace_vmid) {
+        (Some(vmid), None) => (vmid, false),
+        (None, Some(vmid)) => (vmid, true),
         _ => {
             return Err(ApiError::Validation(
-                "Give vmid for a new container.".into(),
+                "Give vmid for a new container or replace_vmid to replace one.".into(),
             ));
         }
     };
-    auth.require_also(Scope::RestoreGuest, NEW_PURPOSE)?;
+    if replace {
+        auth.require_step_up()?;
+        auth.require_also(Scope::RestoreGuestInPlace, REPLACE_PURPOSE)?;
+    } else {
+        auth.require_also(Scope::RestoreGuest, NEW_PURPOSE)?;
+    }
     if !(MIN_VMID..=MAX_VMID).contains(&vmid) {
         return Err(ApiError::Validation(format!(
             "A VMID is between {MIN_VMID} and {MAX_VMID}."
         )));
     }
     let row = load_ct_row(&state, &body.snapshot_id).await?;
+    if !row.verified && replace {
+        return Err(ApiError::BadRequest(
+            "restore_unverified_in_place",
+            "Nothing signed this snapshot, so it may not come from the guest it names. \
+             Restore it as a new container."
+                .into(),
+        ));
+    }
     if !row.verified && !body.accept_unverified {
         return Err(ApiError::BadRequest(
             "restore_unverified_not_confirmed",
@@ -411,41 +523,69 @@ pub async fn create_guest_restore(
             ),
         ));
     }
-    let taken = hosts
-        .iter()
-        .filter_map(AgentHost::proxmox)
-        .filter(|p| same_scope(p, facts))
-        .flat_map(|p| &p.guests)
-        .any(|g| g.vmid == vmid);
-    if taken {
-        return Err(ApiError::ConflictCode(
-            "restore_vmid_taken",
-            format!("VMID {vmid} is taken in {}.", facts.name),
-        ));
-    }
-    open_ct(&state, &row).await?;
+    let (expected, confirm) = if replace {
+        let expected = replace_target(target, facts, vmid)?;
+        let opened = open_ct(&state, &row).await?;
+        let snapshot_uid = opened.uid()?;
+        let target_uid = Some(expected.pve_uid.as_str()).filter(|uid| !uid.is_empty());
+        let confirm = if same_guest(snapshot_uid.as_deref(), target_uid) {
+            None
+        } else if body.confirm_other_guest {
+            Some((snapshot_uid.unwrap_or_default(), expected.pve_uid.clone()))
+        } else {
+            return Err(ApiError::BadRequest(
+                "restore_other_guest_not_confirmed",
+                format!(
+                    "The snapshot may be of another guest than CT {vmid}, or one of them has \
+                     no uid. Confirm replacing CT {vmid} with it."
+                ),
+            ));
+        };
+        (Some(expected), confirm)
+    } else {
+        let taken = hosts
+            .iter()
+            .filter_map(AgentHost::proxmox)
+            .filter(|p| same_scope(p, facts))
+            .flat_map(|p| &p.guests)
+            .any(|g| g.vmid == vmid);
+        if taken {
+            return Err(ApiError::ConflictCode(
+                "restore_vmid_taken",
+                format!("VMID {vmid} is taken in {}.", facts.name),
+            ));
+        }
+        open_ct(&state, &row).await?;
+        (None, None)
+    };
 
     let node = target.node();
-    let guest = GuestRestoreRecord {
-        node: node.clone(),
-        vmid,
-        storage: body.storage.clone(),
-        replace: false,
-        expected: None,
-        confirm_other_guest: None,
-    };
     let spec = RestoreSpec {
         snapshot_id: row.id.clone(),
         conflict: ConflictPolicy::Unspecified as i32,
         target: Some(Target::Guest(GuestTarget {
-            node,
+            node: node.clone(),
             vmid,
-            in_place: false,
-            storage: body.storage,
-            ..Default::default()
+            in_place: replace,
+            storage: body.storage.clone(),
+            expected: expected.as_ref().map(ExpectedTarget::to_proto),
+            confirm_other_guest: confirm.as_ref().map(|(snapshot, target)| {
+                OtherGuestConfirmation {
+                    snapshot_pve_uid: snapshot.clone(),
+                    target_pve_uid: target.clone(),
+                }
+            }),
         })),
         guest_snapshot: true,
         ..Default::default()
+    };
+    let guest = GuestRestoreRecord {
+        node,
+        vmid,
+        storage: body.storage,
+        replace,
+        expected,
+        confirm_other_guest: confirm,
     };
     let record = RestoreRecord {
         snapshot_id: row.id,
@@ -457,7 +597,7 @@ pub async fn create_guest_restore(
             .map(|item| data_encoding::BASE64URL_NOPAD.encode(item))
             .collect(),
         destination: String::new(),
-        in_place: false,
+        in_place: replace,
         conflict: conflict_name(ConflictPolicy::Unspecified).to_string(),
         restore_owners: false,
         started_by: auth.actor(),

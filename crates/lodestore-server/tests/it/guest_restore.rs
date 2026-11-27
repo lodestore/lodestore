@@ -38,7 +38,7 @@ const AGENT_CAPS: [&str; 4] = [
     "guest_restore_ct_v1",
     "source:proxmox-ct",
 ];
-const CONFIG: &str = "arch: amd64\nhostname: dns\nrootfs: local-lvm:vm-200-disk-0,size=8G\n\
+pub(crate) const CONFIG: &str = "arch: amd64\nhostname: dns\nrootfs: local-lvm:vm-200-disk-0,size=8G\n\
                       net0: name=eth0,bridge=vmbr0,hwaddr=AA:BB:CC:00:00:01\nunprivileged: 1\n";
 
 pub(crate) async fn enroll(ts: &TestServer, api: &Api, repo: &str, hostname: &str) -> Host {
@@ -752,6 +752,405 @@ async fn guest_targets_destroyed_volumes() {
             "[{name}]"
         );
         assert_eq!(got["replace"][0]["volumes_truncated"], false, "[{name}]");
+        ts.stop().await;
+    }
+}
+
+const TARGET_UID: &str = "yyyyyyyyyyyyyyyyyyyy";
+
+/// CT 200 on pve1, stopped, on a node that allows replacing it.
+fn target(uid: &str) -> ProxmoxGuest {
+    ProxmoxGuest {
+        name: "dns".into(),
+        pve_uid: uid.into(),
+        pve_rtime: 1_700_000_000,
+        volumes: vec![
+            volume("rootfs", "local-lvm:vm-200-disk-0,size=8G"),
+            volume("mp0", "local-lvm:vm-200-disk-1,mp=/data,backup=0,size=2G"),
+        ],
+        ..ct(200)
+    }
+}
+
+fn replace_facts(guest: ProxmoxGuest) -> ProxmoxFacts {
+    let mut facts = node_facts(CLUSTER, "pve1", vec![guest]);
+    facts.guest_in_place_allowed = true;
+    facts
+}
+
+/// A test server with pve1, CT 200 as `guest`, and a snapshot of CT 200 with `config`.
+async fn replace_setup(
+    backend: &common::Backend,
+    guest: ProxmoxGuest,
+    config: &str,
+) -> (TestServer, Api, Host, String) {
+    let ts = TestServer::start(backend).await;
+    let api = ts.api().await;
+    let repo = ts.create_local_repository("main").await;
+    let host = enroll(&ts, &api, &repo, "pve1").await;
+    set_capabilities(&ts, &host, CAPS).await;
+    seed_facts(&ts, &host, replace_facts(guest), 0).await;
+    let snapshot = write_ct(&ts, &repo, &host, 200, config, None).await;
+    (ts, api, host, snapshot)
+}
+
+fn same_config() -> String {
+    format!("{CONFIG}meta: uid={SAME_UID}\n")
+}
+
+fn replace_body(snapshot: &str, host: &Host) -> Value {
+    json!({
+        "snapshot_id": snapshot,
+        "target_host_id": host.id,
+        "storage": "local-lvm",
+        "replace_vmid": 200,
+    })
+}
+
+async fn queued_spec(ts: &TestServer, job_id: &str) -> RestoreSpec {
+    let raw: Vec<u8> = sqlx::query("SELECT spec FROM jobs WHERE id = $1")
+        .bind(job_id)
+        .fetch_one(&ts.state().db.pool)
+        .await
+        .unwrap()
+        .get("spec");
+    prost::Message::decode(raw.as_slice()).unwrap()
+}
+
+fn guest_target(spec: &RestoreSpec) -> GuestTarget {
+    match &spec.target {
+        Some(Target::Guest(target)) => target.clone(),
+        other => panic!("not a guest target: {other:?}"),
+    }
+}
+
+async fn post_as(ts: &TestServer, client: &reqwest::Client, body: &Value) -> (u16, Value) {
+    let response = client
+        .post(format!("{}/api/v1/restores/guest", ts.rest_url()))
+        .json(body)
+        .send()
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    (status, response.json().await.unwrap_or(Value::Null))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn guest_restore_replace_scopes() {
+    for backend in backends() {
+        let name = backend.name();
+        let (ts, api, host, snapshot) =
+            replace_setup(&backend, target(SAME_UID), &same_config()).await;
+        let body = replace_body(&snapshot, &host);
+
+        let guest = common::bearer_client(&ts.issue_token(&["restore:guest"]).await);
+        let (status, got) = post_as(&ts, &guest, &body).await;
+        assert_eq!(status, 403, "[{name}] {got}");
+        assert_eq!(
+            got["message"],
+            "The token needs the restore:guest-in-place scope to replace an existing container.",
+            "[{name}]"
+        );
+        let in_place = common::bearer_client(&ts.issue_token(&["restore:guest-in-place"]).await);
+        let (status, got) = post_as(&ts, &in_place, &new_body(&snapshot, &host)).await;
+        assert_eq!(
+            status, 403,
+            "[{name}] new CT with restore:guest-in-place: {got}"
+        );
+        let files =
+            common::bearer_client(&ts.issue_token(&["restore:host", "restore:in-place"]).await);
+        let (status, _) = post_as(&ts, &files, &body).await;
+        assert_eq!(status, 403, "[{name}] file scopes");
+        assert_eq!(job_count(&ts).await, 0, "[{name}]");
+
+        let (status, got) = post_as(&ts, &in_place, &body).await;
+        assert_eq!(status, 201, "[{name}] {got}");
+        let spec = queued_spec(&ts, got["job_id"].as_str().unwrap()).await;
+        assert!(guest_target(&spec).in_place, "[{name}]");
+        assert_eq!(guest_target(&spec).vmid, 200, "[{name}]");
+
+        let no_csrf = reqwest::Client::new()
+            .post(format!("{}/api/v1/restores/guest", ts.rest_url()))
+            .header("cookie", api.cookie())
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(no_csrf.status(), 403, "[{name}] without CSRF");
+
+        sqlx::query("UPDATE sessions SET authenticated_at = $1")
+            .bind(now_ms() - 16 * 60_000)
+            .execute(&ts.state().db.pool)
+            .await
+            .unwrap();
+        let before = job_count(&ts).await;
+        let (status, got) = post(&api, &body).await;
+        assert_eq!(status, 403, "[{name}] {got}");
+        assert_eq!(got["code"], "step_up_required", "[{name}]");
+        assert_eq!(job_count(&ts).await, before, "[{name}]");
+        let (status, got) = post(&api, &new_body(&snapshot, &host)).await;
+        assert_ne!(got["code"], "step_up_required", "[{name}] new CT: {status}");
+
+        let step = api
+            .post(
+                "/api/v1/auth/step-up",
+                &json!({ "password": common::ADMIN_PASSWORD }),
+            )
+            .await;
+        assert_eq!(step.status(), 204, "[{name}]");
+        let (status, got) = post(&api, &body).await;
+        assert_eq!(status, 201, "[{name}] {got}");
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn guest_restore_replace_unverified() {
+    for backend in backends() {
+        let name = backend.name();
+        let (ts, api, host, snapshot) =
+            replace_setup(&backend, target(SAME_UID), &same_config()).await;
+        sqlx::query("UPDATE snapshots SET verified_at = NULL WHERE id = $1")
+            .bind(&snapshot)
+            .execute(&ts.state().db.pool)
+            .await
+            .unwrap();
+        let mut body = replace_body(&snapshot, &host);
+        body["accept_unverified"] = json!(true);
+        let (status, got) = post(&api, &body).await;
+        assert_eq!(status, 400, "[{name}] {got}");
+        assert_eq!(got["code"], "restore_unverified_in_place", "[{name}]");
+
+        let (status, got) = post(&api, &new_body(&snapshot, &host)).await;
+        assert_eq!(status, 400, "[{name}] {got}");
+        assert_eq!(got["code"], "restore_unverified_not_confirmed", "[{name}]");
+        let mut accepted = new_body(&snapshot, &host);
+        accepted["accept_unverified"] = json!(true);
+        let (status, got) = post(&api, &accepted).await;
+        assert_eq!(status, 201, "[{name}] {got}");
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn guest_restore_replace_expected() {
+    for backend in backends() {
+        let name = backend.name();
+        let (ts, api, host, snapshot) =
+            replace_setup(&backend, target(SAME_UID), &same_config()).await;
+        let (status, got) = post(&api, &replace_body(&snapshot, &host)).await;
+        assert_eq!(status, 201, "[{name}] {got}");
+        let job_id = got["job_id"].as_str().unwrap().to_string();
+        let expected = guest_target(&queued_spec(&ts, &job_id).await)
+            .expected
+            .expect("expected target");
+        assert_eq!(expected.vmid, 200, "[{name}]");
+        assert_eq!(expected.name, "dns", "[{name}]");
+        assert_eq!(expected.pve_uid, SAME_UID, "[{name}]");
+        assert_eq!(expected.pve_rtime, 1_700_000_000, "[{name}]");
+        assert_eq!(expected.instance_uuid, uuid_of(200), "[{name}]");
+        assert_eq!(expected.volumes, target(SAME_UID).volumes, "[{name}]");
+        let record: Value = serde_json::from_str(
+            &sqlx::query("SELECT restore_json FROM jobs WHERE id = $1")
+                .bind(&job_id)
+                .fetch_one(&ts.state().db.pool)
+                .await
+                .unwrap()
+                .get::<String, _>("restore_json"),
+        )
+        .unwrap();
+        assert_eq!(record["guest"]["expected"]["pve_uid"], SAME_UID, "[{name}]");
+        assert_eq!(record["guest"]["replace"], true, "[{name}]");
+
+        seed_facts(&ts, &host, replace_facts(target(SAME_UID)), 16 * 60_000).await;
+        let (status, got) = post(&api, &replace_body(&snapshot, &host)).await;
+        assert_eq!(status, 409, "[{name}] {got}");
+        assert_eq!(got["code"], "guest_facts_stale", "[{name}]");
+
+        let cut = ProxmoxGuest {
+            volumes_truncated: true,
+            ..target(SAME_UID)
+        };
+        seed_facts(&ts, &host, replace_facts(cut), 0).await;
+        let (status, got) = post(&api, &replace_body(&snapshot, &host)).await;
+        assert_eq!(status, 422, "[{name}] {got}");
+        assert_eq!(got["code"], "guest_target_unverifiable", "[{name}]");
+
+        let mut closed = replace_facts(target(SAME_UID));
+        closed.guest_in_place_allowed = false;
+        seed_facts(&ts, &host, closed, 0).await;
+        let (status, got) = post(&api, &replace_body(&snapshot, &host)).await;
+        assert_eq!(status, 400, "[{name}] {got}");
+        assert_eq!(got["code"], "guest_in_place_disabled", "[{name}]");
+        assert_eq!(job_count(&ts).await, 1, "[{name}]");
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn guest_restore_other_guest() {
+    for backend in backends() {
+        let name = backend.name();
+        let (ts, api, host, other) =
+            replace_setup(&backend, target(TARGET_UID), &same_config()).await;
+        let (status, got) = post(&api, &replace_body(&other, &host)).await;
+        assert_eq!(status, 400, "[{name}] {got}");
+        assert_eq!(got["code"], "restore_other_guest_not_confirmed", "[{name}]");
+        let mut confirmed = replace_body(&other, &host);
+        confirmed["confirm_other_guest"] = json!(true);
+        let (status, got) = post(&api, &confirmed).await;
+        assert_eq!(status, 201, "[{name}] {got}");
+        let pair = guest_target(&queued_spec(&ts, got["job_id"].as_str().unwrap()).await)
+            .confirm_other_guest
+            .unwrap();
+        assert_eq!(
+            (pair.snapshot_pve_uid.as_str(), pair.target_pve_uid.as_str()),
+            (SAME_UID, TARGET_UID),
+            "[{name}]"
+        );
+
+        let repo: String = sqlx::query("SELECT repository_id FROM snapshots WHERE id = $1")
+            .bind(&other)
+            .fetch_one(&ts.state().db.pool)
+            .await
+            .unwrap()
+            .get("repository_id");
+        let no_uid = write_ct(&ts, &repo, &host, 200, CONFIG, None).await;
+        let (status, got) = post(&api, &replace_body(&no_uid, &host)).await;
+        assert_eq!(status, 400, "[{name}] {got}");
+        assert_eq!(got["code"], "restore_other_guest_not_confirmed", "[{name}]");
+        let mut confirmed = replace_body(&no_uid, &host);
+        confirmed["confirm_other_guest"] = json!(true);
+        let (status, got) = post(&api, &confirmed).await;
+        assert_eq!(status, 201, "[{name}] {got}");
+        let pair = guest_target(&queued_spec(&ts, got["job_id"].as_str().unwrap()).await)
+            .confirm_other_guest
+            .unwrap();
+        assert_eq!(
+            (pair.snapshot_pve_uid.as_str(), pair.target_pve_uid.as_str()),
+            ("", TARGET_UID),
+            "[{name}]"
+        );
+
+        seed_facts(&ts, &host, replace_facts(target(SAME_UID)), 0).await;
+        let mut confirmed = replace_body(&other, &host);
+        confirmed["confirm_other_guest"] = json!(true);
+        let (status, got) = post(&api, &confirmed).await;
+        assert_eq!(status, 201, "[{name}] {got}");
+        let spec = queued_spec(&ts, got["job_id"].as_str().unwrap()).await;
+        assert!(
+            guest_target(&spec).confirm_other_guest.is_none(),
+            "[{name}] the same guest needs no confirmation"
+        );
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn guest_restore_replace_ha_and_running() {
+    for backend in backends() {
+        let name = backend.name();
+        let ha = ProxmoxGuest {
+            ha_managed: true,
+            ..target(SAME_UID)
+        };
+        let (ts, api, host, snapshot) = replace_setup(&backend, ha, &same_config()).await;
+        let (status, got) = post(&api, &replace_body(&snapshot, &host)).await;
+        assert_eq!(status, 422, "[{name}] {got}");
+        assert_eq!(got["code"], "guest_ha_managed", "[{name}]");
+
+        let running = ProxmoxGuest {
+            running: true,
+            ..target(SAME_UID)
+        };
+        seed_facts(&ts, &host, replace_facts(running), 0).await;
+        let (status, got) = post(&api, &replace_body(&snapshot, &host)).await;
+        assert_eq!(status, 409, "[{name}] {got}");
+        assert_eq!(got["code"], "guest_running", "[{name}]");
+        assert_eq!(job_count(&ts).await, 0, "[{name}]");
+        ts.stop().await;
+    }
+}
+
+async fn age_job(ts: &TestServer, job_id: &str, by_ms: i64) {
+    sqlx::query("UPDATE jobs SET queued_at = queued_at - $1 WHERE id = $2")
+        .bind(by_ms)
+        .bind(job_id)
+        .execute(&ts.state().db.pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn guest_restore_replace_expires() {
+    for backend in backends() {
+        let name = backend.name();
+        let (ts, api, host, snapshot) =
+            replace_setup(&backend, target(SAME_UID), &same_config()).await;
+        let (status, got) = post(&api, &replace_body(&snapshot, &host)).await;
+        assert_eq!(status, 201, "[{name}] {got}");
+        let replace = got["job_id"].as_str().unwrap().to_string();
+        age_job(&ts, &replace, 15 * 60_000 + 1000).await;
+
+        let mut agent = Fake::connect_with(&ts, &host, &AGENT_CAPS).await;
+        let assigned = agent.drain(std::time::Duration::from_secs(3)).await;
+        assert!(
+            assigned.into_iter().all(|m| assigned_restore(m).is_none()),
+            "[{name}] the expired replace was handed out"
+        );
+        let job: Value = api
+            .get(&format!("/api/v1/jobs/{replace}"))
+            .await
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(job["state"], "failed", "[{name}] {job}");
+        assert_eq!(job["error_code"], "restore_expired", "[{name}]");
+        assert_eq!(
+            job["error_message"],
+            "The replace was confirmed more than 15 minutes ago. Confirm it again.",
+            "[{name}]"
+        );
+
+        let (status, got) = post(&api, &new_body(&snapshot, &host)).await;
+        assert_eq!(status, 201, "[{name}] {got}");
+        let new = got["job_id"].as_str().unwrap().to_string();
+        age_job(&ts, &new, 15 * 60_000 + 1000).await;
+        let (assigned, _) = agent.recv(assigned_restore).await;
+        assert_eq!(assigned, new, "[{name}] a new container does not expire");
+        drop(agent);
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn guest_restore_vmid_taken() {
+    for backend in backends() {
+        let name = backend.name();
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let host = enroll(&ts, &api, &repo, "pve1").await;
+        let peer = enroll(&ts, &api, &repo, "pve2").await;
+        set_capabilities(&ts, &host, CAPS).await;
+        seed_facts(&ts, &host, node_facts(CLUSTER, "pve1", vec![]), 0).await;
+        seed_facts(&ts, &peer, node_facts(CLUSTER, "pve2", vec![ct(200)]), 0).await;
+        let snapshot = write_ct(&ts, &repo, &host, 200, CONFIG, None).await;
+        let mut body = new_body(&snapshot, &host);
+        body["vmid"] = json!(200);
+        let (status, got) = post(&api, &body).await;
+        assert_eq!(status, 409, "[{name}] {got}");
+        assert_eq!(got["code"], "restore_vmid_taken", "[{name}]");
+        let mut storage = new_body(&snapshot, &host);
+        storage["storage"] = json!("local");
+        let (status, got) = post(&api, &storage).await;
+        assert_eq!(status, 422, "[{name}] {got}");
+        assert_eq!(got["code"], "restore_storage_invalid", "[{name}]");
+        let mut both = new_body(&snapshot, &host);
+        both["replace_vmid"] = json!(200);
+        let (status, _) = post(&api, &both).await;
+        assert_eq!(status, 422, "[{name}] vmid and replace_vmid");
+        assert_eq!(job_count(&ts).await, 0, "[{name}]");
         ts.stop().await;
     }
 }

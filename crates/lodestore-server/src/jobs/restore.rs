@@ -1,4 +1,5 @@
 use lodestore_format::crypto::BlobId;
+use lodestore_format::ct::{self, IdMap};
 use lodestore_format::image::{ImageMeta, load_image};
 use lodestore_format::index::parse_hex32;
 use lodestore_format::reader::Reader;
@@ -264,10 +265,17 @@ pub async fn enqueue_restore_checked(
         .await?
         .ok_or_else(|| ApiError::NotFound("The snapshot was not found.".into()))?;
     let source_type: String = snapshot.try_get("source_type")?;
+    let container = source_type == "proxmox-ct";
     let mut image = None;
     if source_type == "image" && req.in_place {
         return Err(invalid(
             "A disk image cannot be restored in place; restore it into a folder.",
+        ));
+    }
+    if container && req.in_place {
+        return Err(invalid(
+            "A container snapshot cannot be restored in place; restore it as a container or \
+             into a folder.",
         ));
     }
     if replaces_a_disk_image(&source_type, &req) {
@@ -275,7 +283,7 @@ pub async fn enqueue_restore_checked(
     }
     if source_type == "image" && req.items == [b"/".to_vec()] {
         image = Some(signed_image(state, &req.snapshot_id).await?);
-    } else if source_type != "files" && source_type != "image" {
+    } else if source_type != "files" && source_type != "image" && !container {
         return Err(ApiError::Validation(format!(
             "This snapshot is a {source_type} backup and cannot be restored as files."
         )));
@@ -325,6 +333,14 @@ pub async fn enqueue_restore_checked(
         None => require_items_exist(&mut source, &snapshot_id, &req.items).await?,
     }
     let image = image.map(|(_, name)| name);
+    let ct_idmap = if container && req.restore_owners {
+        let manifest = source.snapshot(&snapshot_id).await.map_err(read_error)?;
+        let meta = ct::check_manifest(&manifest)
+            .map_err(|error| ApiError::Validation(error.to_string()))?;
+        owner_shift(meta.idmap.as_ref())
+    } else {
+        String::new()
+    };
 
     let record = RestoreRecord {
         snapshot_id: req.snapshot_id.clone(),
@@ -353,9 +369,19 @@ pub async fn enqueue_restore_checked(
         conflict: req.conflict as i32,
         restore_owners: req.restore_owners,
         target: None,
-        ..Default::default()
+        ct_idmap,
+        guest_snapshot: container,
     };
     insert_restore_job(state, &req.target_host_id, &spec, &record).await
+}
+
+/// The id map the agent shifts the owners of a container's files by. A map
+/// that gives any id of the container to root of the node is not sent (the
+/// agent refuses it); the files then keep the ids of the container's view.
+fn owner_shift(map: Option<&IdMap>) -> String {
+    map.filter(|map| map.ranges().iter().all(|range| range.host != 0))
+        .and_then(|map| map.canonical().ok())
+        .unwrap_or_default()
 }
 
 pub(crate) async fn insert_restore_job(
@@ -431,4 +457,29 @@ async fn check_image(
              restore it with lode restore.",
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use lodestore_format::ct::{IdKind, IdRange};
+
+    use super::*;
+
+    #[test]
+    fn owner_shift_never_maps_to_root_of_the_node() {
+        let range = |kind, host| IdRange {
+            kind,
+            ct: 0,
+            host,
+            count: 65536,
+        };
+        assert_eq!(
+            owner_shift(Some(&IdMap::default_unprivileged())),
+            "u:0:100000:65536,g:0:100000:65536"
+        );
+        let to_root =
+            IdMap::new(vec![range(IdKind::User, 100000), range(IdKind::Group, 0)]).unwrap();
+        assert_eq!(owner_shift(Some(&to_root)), "");
+        assert_eq!(owner_shift(None), "");
+    }
 }

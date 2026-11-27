@@ -18,6 +18,7 @@ use tokio_util::sync::CancellationToken;
 use crate::catalog::RepositoryUnavailable;
 use crate::db::now_ms;
 use crate::grpc::registry::{CAP_GC, CAP_GUEST_RESTORE_CT, CAP_LIMITS, CAP_RESTORE};
+use crate::jobs::guest_restore::REPLACE_TTL_MS;
 use crate::jobs::restore::RestoreRecord;
 use crate::jobs::source_of;
 use crate::maintenance::attest::load_distrusted;
@@ -224,6 +225,22 @@ pub async fn assign_queued(state: &AppState, only_agent: Option<&str>) -> anyhow
                     &job_id,
                     "restore_agent_outdated",
                     "Update the agent on this host to restore containers to it.",
+                )
+                .await?;
+                continue;
+            }
+            let queued_at: i64 = row.try_get("queued_at")?;
+            if record
+                .as_ref()
+                .and_then(|r| r.guest.as_ref())
+                .is_some_and(|g| g.replace)
+                && now_ms().saturating_sub(queued_at) > REPLACE_TTL_MS
+            {
+                fail_job(
+                    state,
+                    &job_id,
+                    "restore_expired",
+                    "The replace was confirmed more than 15 minutes ago. Confirm it again.",
                 )
                 .await?;
                 continue;

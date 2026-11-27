@@ -9,6 +9,7 @@ use lodestore_format::store::LocalFsStore;
 use lodestore_format::writer::{BackupOptions, Writer};
 use lodestore_server::catalog::ingest_snapshot;
 use serde_json::{Value, json};
+use sqlx::Row;
 
 const PASSWORD: &[u8] = b"test-password";
 
@@ -415,6 +416,111 @@ async fn restore_api_unverified_needs_confirmation() {
         payload["accept_unverified"] = json!(false);
         let response = api.post("/api/v1/restores", &payload).await;
         assert_eq!(response.status(), 201);
+        ts.stop().await;
+    }
+}
+
+async fn spec_of(ts: &TestServer, job_id: &str) -> lodestore_proto::agent::v1::RestoreSpec {
+    let raw: Vec<u8> = sqlx::query("SELECT spec FROM jobs WHERE id = $1")
+        .bind(job_id)
+        .fetch_one(&ts.state().db.pool)
+        .await
+        .unwrap()
+        .get("spec");
+    prost::Message::decode(raw.as_slice()).unwrap()
+}
+
+async fn post_as(ts: &TestServer, client: &reqwest::Client, path: &str, body: &Value) -> Value {
+    let response = client
+        .post(format!("{}{path}", ts.rest_url()))
+        .json(body)
+        .send()
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    let mut got: Value = response.json().await.unwrap_or(Value::Null);
+    got["status"] = json!(status);
+    got
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restore_api_ct_files_restore() {
+    use crate::guest_restore::{CONFIG, enroll as enroll_host, set_capabilities, write_ct};
+    for backend in backends() {
+        let name = backend.name();
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let host = enroll_host(&ts, &api, &repo, "pve1").await;
+        set_capabilities(&ts, &host, r#"["restore_v1","restore_roots_v1"]"#).await;
+        let snapshot = write_ct(&ts, &repo, &host, 200, CONFIG, None).await;
+        let restore = |owners: bool| {
+            json!({
+                "snapshot_id": snapshot,
+                "items": [b64(b"/fs/etc/hostname")],
+                "target_host_id": host.id,
+                "destination": "/srv/out",
+                "in_place": false,
+                "conflict": "skip_existing",
+                "restore_owners": owners,
+            })
+        };
+
+        let host_token = common::bearer_client(&ts.issue_token(&["restore:host"]).await);
+        let got = post_as(&ts, &host_token, "/api/v1/restores", &restore(false)).await;
+        assert_eq!(got["status"], 201, "[{name}] {got}");
+        let spec = spec_of(&ts, got["job_id"].as_str().unwrap()).await;
+        assert!(spec.guest_snapshot, "[{name}]");
+        assert_eq!(spec.ct_idmap, "", "[{name}] no shift without owners");
+
+        let got = post_as(&ts, &host_token, "/api/v1/restores", &restore(true)).await;
+        assert_eq!(got["status"], 403, "[{name}] owners need restore:in-place");
+        let owners_token =
+            common::bearer_client(&ts.issue_token(&["restore:host", "restore:in-place"]).await);
+        let got = post_as(&ts, &owners_token, "/api/v1/restores", &restore(true)).await;
+        assert_eq!(got["status"], 201, "[{name}] {got}");
+        let spec = spec_of(&ts, got["job_id"].as_str().unwrap()).await;
+        assert!(spec.guest_snapshot, "[{name}]");
+        assert_eq!(
+            spec.ct_idmap, "u:0:100000:65536,g:0:100000:65536",
+            "[{name}]"
+        );
+
+        let mut in_place = restore(false);
+        in_place["in_place"] = json!(true);
+        in_place["destination"] = json!("/");
+        let response = api.post("/api/v1/restores", &in_place).await;
+        assert_eq!(response.status(), 422, "[{name}]");
+        let error: Value = response.json().await.unwrap();
+        assert_eq!(
+            error["message"],
+            "A container snapshot cannot be restored in place; restore it as a container or \
+             into a folder.",
+            "[{name}]"
+        );
+
+        let files = seed(&ts, &repo).await;
+        let response = api.post("/api/v1/restores", &body(&files, &host.id)).await;
+        assert_eq!(response.status(), 201, "[{name}]");
+        let created: Value = response.json().await.unwrap();
+        let spec = spec_of(&ts, created["job_id"].as_str().unwrap()).await;
+        assert!(!spec.guest_snapshot, "[{name}] a files snapshot");
+
+        let response = api
+            .post(
+                "/api/v1/downloads",
+                &json!({
+                    "snapshot_id": snapshot,
+                    "items": [b64(b"/fs/etc")],
+                    "format": "zip",
+                }),
+            )
+            .await;
+        assert_eq!(
+            response.status(),
+            201,
+            "[{name}] download of a container snapshot"
+        );
         ts.stop().await;
     }
 }

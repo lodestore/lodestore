@@ -6220,7 +6220,7 @@
             }
           },
           "422": {
-            "description": "The selection, destination or host is not valid; the snapshot is neither a files backup nor a disk image restored whole (select `/`); a disk image cannot be restored in place; or the disk image has too many holes to restore through the server",
+            "description": "The selection, destination or host is not valid; the snapshot is neither a files backup, a container snapshot nor a disk image restored whole (select `/`); a disk image or a container snapshot cannot be restored in place; or the disk image has too many holes to restore through the server",
             "content": {
               "application/json": {
                 "schema": {
@@ -14100,7 +14100,7 @@
           },
           "restore_owners": {
             "type": "boolean",
-            "description": "Restores file owners, setuid/setgid bits and file capabilities. An API token needs the `restore:in-place` scope for it."
+            "description": "Restores file owners, setuid/setgid bits and file capabilities. An API token needs the `restore:in-place` scope for it. The owners of files of an unprivileged container are shifted by its id map, as the node sees them."
           },
           "snapshot_id": {
             "type": "string"
