@@ -392,6 +392,39 @@ async fn pve_socket_idle_first_line() {
     assert_eq!(reply["code"], "bad_request", "{reply}");
 }
 
+/// Connects `count` times as `nobody`. Only the calling thread changes its
+/// uid: the raw syscall, unlike `setuid(3)`, does not reach the other threads.
+fn connect_as_nobody(path: &Path, count: usize) -> Vec<Client> {
+    let path = path.to_path_buf();
+    std::thread::spawn(move || {
+        let nobody: libc::uid_t = 65534;
+        // SAFETY: a plain syscall on this thread's own credentials.
+        let rc = unsafe { libc::syscall(libc::SYS_setresuid, nobody, nobody, nobody) };
+        assert_eq!(rc, 0, "{}", std::io::Error::last_os_error());
+        (0..count).map(|_| Client::connect(&path)).collect()
+    })
+    .join()
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs root"]
+async fn pve_root_socket_idle_non_root_cannot_starve_root() {
+    use std::os::unix::fs::PermissionsExt;
+    let run = start_with(PveSessions::new(0)).await;
+    for path in [run.socket.parent().unwrap(), &run.socket] {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o777)).unwrap();
+    }
+    let (token, _session) = run.pve.register_backup(200);
+    run.pve.set_spawned_pid(&token, std::process::id());
+    let _idle = connect_as_nobody(&run.socket, MAX_HANDLERS);
+    let mut over = connect_as_nobody(&run.socket, 1);
+    assert_eq!(code(&over[0].recv()), "busy");
+
+    let mut client = Client::connect(&run.socket);
+    assert_eq!(client.ask(&job_check(&token))["ok"], true);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn pve_socket_session_limit() {
     let run = start().await;

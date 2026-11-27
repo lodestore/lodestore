@@ -211,6 +211,10 @@ impl PveSessions {
         self
     }
 
+    pub(crate) fn required_uid(&self) -> u32 {
+        self.required_uid
+    }
+
     pub(crate) fn first_line_timeout(&self) -> Duration {
         self.first_line
     }
