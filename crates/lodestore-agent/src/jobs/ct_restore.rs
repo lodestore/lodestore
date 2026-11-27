@@ -431,7 +431,14 @@ fn staged_config(dir: &Path) -> Result<(Vec<u8>, Option<Vec<u8>>), Refused> {
     let config_dir = openat(&root, "config", flags | OFlags::DIRECTORY, Mode::empty())
         .map_err(|e| not_ct(format!("/config is not a folder: {e}")))?;
     let read = |name: &str| -> io::Result<Vec<u8>> {
-        let fd = openat(&config_dir, name, flags, Mode::empty())?;
+        // Non-blocking, so a FIFO cannot hold the open; it is refused below.
+        let fd = openat(&config_dir, name, flags | OFlags::NONBLOCK, Mode::empty())?;
+        if FileType::from_raw_mode(rustix::fs::fstat(&fd)?.st_mode) != FileType::RegularFile {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{name} is not a regular file"),
+            ));
+        }
         let mut bytes = Vec::new();
         std::fs::File::from(fd)
             .take(MAX_CT_CONFIG_BYTES as u64 + 1)
@@ -768,8 +775,14 @@ mod tests {
 
     #[test]
     fn staging_names() {
-        assert!(is_staging_name(&format!("lodestore-restore-{}", "ab".repeat(16))));
-        assert!(!is_staging_name(&format!("lodestore-restore-{}", "AB".repeat(16))));
+        assert!(is_staging_name(&format!(
+            "lodestore-restore-{}",
+            "ab".repeat(16)
+        )));
+        assert!(!is_staging_name(&format!(
+            "lodestore-restore-{}",
+            "AB".repeat(16)
+        )));
         assert!(!is_staging_name(&"ab".repeat(16)));
         assert!(!is_staging_name("lodestore-restore-"));
         assert!(!is_staging_name("lost+found"));

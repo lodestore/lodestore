@@ -1233,6 +1233,24 @@ async fn ct_restore_planted_lock_keeps_staging_held() {
     succeeded(&ran);
 }
 
+/// A FIFO as `pct.conf` is refused instead of blocking the agent.
+#[tokio::test(flavor = "multi_thread")]
+async fn ct_restore_config_fifo_refused() {
+    let lab = Lab::new().await;
+    let mut snap = lab
+        .snapshot(&snapshot_config(None, ""), None, |_| {}, &[])
+        .await;
+    edit_entry(&mut snap, b"pct.conf", |node, chunks| {
+        node.r#type = NodeType::Fifo as i32;
+        node.size = 0;
+        chunks.clear();
+    });
+    let ran = lab.run(&snap, lab.spec(&snap, new_ct(105))).await;
+    failed_with(&ran, "restore_config_invalid");
+    assert!(ran.argv.is_none());
+    assert!(lab.staging_clean(&lab.staging_default()));
+}
+
 #[derive(Debug, Clone)]
 enum Planted {
     File(Vec<u8>, bool),
