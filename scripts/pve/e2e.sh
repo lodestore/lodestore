@@ -50,7 +50,9 @@ victim=102
 restored=201
 recovered=301
 storage=local-lvm
-files=(/srv/e2e/owned.txt /srv/e2e/acl.txt /srv/e2e/capbin /srv/e2e/suid /data /data/f)
+# Not /data itself: pct restore mounts the new volumes before tar runs, and tar
+# keeps the owner, mode and ACLs of a folder that exists (--skip-old-files).
+files=(/srv/e2e/owned.txt /srv/e2e/acl.txt /srv/e2e/capbin /srv/e2e/suid /srv/e2e/dacl /data/f)
 mkdir -p "$logs"
 
 cleanup() {
@@ -266,7 +268,8 @@ node_setup_ct() {
     echo excluded >/srv/e2e/scratch.tmp
     echo data >/data/f
     chown 1000:1000 /data/f
-    setfacl -d -m u:1000:rwx /data
+    mkdir /srv/e2e/dacl
+    setfacl -d -m u:1000:rwx /srv/e2e/dacl
   '
 }
 
