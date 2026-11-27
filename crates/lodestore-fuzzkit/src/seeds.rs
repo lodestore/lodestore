@@ -460,6 +460,31 @@ pub fn try_seeds(fixtures: &Path) -> Result<Seeds, String> {
         out.push(("source_decode", key.into_bytes()));
     }
 
+    let ct = vectors(fixtures, "ct-vectors.json")?;
+    for field in [
+        "tree",
+        "config_tree",
+        "claimed",
+        "snapshot",
+        "acl_in",
+        "acl_out",
+        "caps_in",
+        "caps_out",
+    ] {
+        for bytes in hex_fields(&ct, field)? {
+            out.push(("ct_layout", bytes));
+        }
+    }
+    for field in ["default", "through", "from_config"] {
+        for text in string_fields(&ct, field)? {
+            out.push(("ct_layout", text.into_bytes()));
+        }
+    }
+    out.push((
+        "ct_layout",
+        b"unprivileged: 1\nlxc.idmap: u 0 100000 65536\n".to_vec(),
+    ));
+
     let binding = vectors(fixtures, "image-binding-vectors.json")?;
     for claimed in hex_fields(&binding, "claimed")? {
         out.push(("image_layout", claimed));

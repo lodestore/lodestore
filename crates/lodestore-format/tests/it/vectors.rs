@@ -1162,3 +1162,174 @@ fn image_binding_vectors_generate_v1() {
     let text = serde_json::to_string_pretty(&image_binding_vectors()).unwrap();
     std::io::Write::write_all(&mut out, format!("{text}\n").as_bytes()).unwrap();
 }
+
+fn ct_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/v1/ct-vectors.json")
+}
+
+fn ct_vectors() -> Value {
+    use lodestore_format::ct::{self, CtMeta, CtMode, IdKind, IdMap, IdRange};
+    use lodestore_format::fs::idmap::{Direction, OVERFLOW_ID, translate_acl, translate_caps};
+    use lodestore_format::tree::encode_tree;
+
+    const CT: &str = "c0ffee00-1234-4abc-8def-0123456789ab";
+    let range = |kind, ct, host, count| IdRange {
+        kind,
+        ct,
+        host,
+        count,
+    };
+    // One container id passed through to the node, the rest shifted.
+    let through = IdMap::new(vec![
+        range(IdKind::User, 0, 100_000, 1000),
+        range(IdKind::User, 1000, 1000, 1),
+        range(IdKind::User, 1001, 101_001, 64_535),
+        range(IdKind::Group, 0, 100_000, 1000),
+        range(IdKind::Group, 1000, 1000, 1),
+        range(IdKind::Group, 1001, 101_001, 64_535),
+    ])
+    .unwrap();
+    let default = IdMap::default_unprivileged();
+
+    let mut metas = Vec::new();
+    for mode in CtMode::ALL {
+        for (unprivileged, idmap) in [(false, None), (true, Some(default.clone()))] {
+            let meta = CtMeta {
+                mode,
+                unprivileged,
+                idmap,
+            }
+            .to_meta()
+            .unwrap();
+            metas.push(
+                json!({ "mode": mode.as_str(), "unprivileged": unprivileged, "values": meta }),
+            );
+        }
+    }
+
+    let acl = |entries: &[(u16, u16, u32)]| {
+        let mut out = 2u32.to_le_bytes().to_vec();
+        for &(tag, perm, id) in entries {
+            out.extend_from_slice(&tag.to_le_bytes());
+            out.extend_from_slice(&perm.to_le_bytes());
+            out.extend_from_slice(&id.to_le_bytes());
+        }
+        out
+    };
+    let acl_in = acl(&[
+        (0x01, 6, u32::MAX),
+        (0x02, 6, 101_000),
+        (0x02, 4, 300_000),
+        (0x04, 4, u32::MAX),
+        (0x08, 4, 101_001),
+        (0x10, 6, u32::MAX),
+        (0x20, 4, u32::MAX),
+    ]);
+    let mut unmapped = 0;
+    let acl_out = translate_acl(&acl_in, Direction::HostToCt, &default, &mut unmapped).unwrap();
+    let mut caps_in = 0x0300_0001u32.to_le_bytes().to_vec();
+    caps_in.extend_from_slice(&(1u32 << 13).to_le_bytes());
+    caps_in.extend_from_slice(&[0; 12]);
+    caps_in.extend_from_slice(&100_000u32.to_le_bytes());
+    let caps_out = translate_caps(&caps_in, Direction::HostToCt, &default, &mut 0)
+        .unwrap()
+        .unwrap();
+    let caps_back = translate_caps(&caps_out, Direction::CtToHost, &default, &mut 0)
+        .unwrap()
+        .unwrap();
+
+    let mut source_meta = CtMeta {
+        mode: CtMode::Snapshot,
+        unprivileged: true,
+        idmap: Some(default.clone()),
+    }
+    .to_meta()
+    .unwrap();
+    source_meta.insert("name".to_owned(), "dns".to_owned());
+    source_meta.insert("vmid".to_owned(), "200".to_owned());
+    let key = SourceKey::proxmox_ct("pve1", CT).unwrap();
+    let claimed = source::encode(&key, &source_meta).unwrap().unwrap();
+    let snapshot = pb::Snapshot {
+        paths: vec![ct::FS_PATH.to_vec()],
+        source: Some(claimed.clone()),
+        ..Default::default()
+    };
+    let dir = |name: &[u8], fill: u8| pb::Node {
+        name: name.to_vec(),
+        r#type: pb::NodeType::Dir as i32,
+        mode: 0o700,
+        subtrees: vec![vec![fill; 32]],
+        ..Default::default()
+    };
+    let file = |name: &[u8], size: u64, fill: u8| pb::Node {
+        name: name.to_vec(),
+        r#type: pb::NodeType::File as i32,
+        mode: 0o600,
+        size,
+        content: vec![vec![fill; 32]],
+        ..Default::default()
+    };
+    let top = encode_tree(vec![dir(ct::CONFIG_DIR, 1), dir(ct::FS_DIR, 2)]);
+    let config = encode_tree(vec![
+        file(ct::CONFIG_FILE, 28, 3),
+        file(ct::FIREWALL_FILE, 20, 4),
+    ]);
+
+    json!({
+        "layout": {
+            "version": ct::CT_LAYOUT_VERSION,
+            "keys": [ct::META_CT_LAYOUT, ct::META_CT_MODE, ct::META_CT_UNPRIVILEGED, ct::META_CT_IDMAP],
+            "fs_dir": String::from_utf8_lossy(ct::FS_DIR),
+            "config_dir": String::from_utf8_lossy(ct::CONFIG_DIR),
+            "config_file": String::from_utf8_lossy(ct::CONFIG_FILE),
+            "firewall_file": String::from_utf8_lossy(ct::FIREWALL_FILE),
+            "paths": [String::from_utf8_lossy(ct::FS_PATH)],
+            "max_config_bytes": ct::MAX_CT_CONFIG_BYTES,
+            "max_idmap_len": ct::MAX_CT_IDMAP_LEN,
+            "overflow_id": OVERFLOW_ID,
+            "tree": hex(&top),
+            "config_tree": hex(&config),
+        },
+        "meta": metas,
+        "idmap": {
+            "default": default.canonical().unwrap(),
+            "through": through.canonical().unwrap(),
+            "from_config": IdMap::from_config("unprivileged: 1\n").unwrap().unwrap().canonical().unwrap(),
+        },
+        "translate": {
+            "acl_in": hex(&acl_in),
+            "acl_out": hex(&acl_out),
+            "acl_unmapped": unmapped,
+            "caps_in": hex(&caps_in),
+            "caps_out": hex(&caps_out),
+            "caps_back": hex(&caps_back),
+        },
+        "source": {
+            "key": key.as_str(),
+            "claimed": hex(&claimed.encode_to_vec()),
+            "snapshot": hex(&snapshot.encode_to_vec()),
+        },
+    })
+}
+
+#[test]
+fn ct_vectors_match() {
+    let committed: Value = serde_json::from_str(&fs::read_to_string(ct_path()).unwrap()).unwrap();
+    assert_eq!(ct_vectors(), committed);
+}
+
+#[test]
+#[ignore = "generates frozen fixtures; run once via LODE_GENERATE_FIXTURES=1 cargo nextest run -p lodestore-format --run-ignored only ct_vectors_generate_v1"]
+fn ct_vectors_generate_v1() {
+    if std::env::var_os("LODE_GENERATE_FIXTURES").is_none() {
+        eprintln!("skipped: set LODE_GENERATE_FIXTURES=1 to generate fixtures");
+        return;
+    }
+    let mut out = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(ct_path())
+        .unwrap_or_else(|e| panic!("{}: {e}; the v1 vectors are frozen", ct_path().display()));
+    let text = serde_json::to_string_pretty(&ct_vectors()).unwrap();
+    std::io::Write::write_all(&mut out, format!("{text}\n").as_bytes()).unwrap();
+}

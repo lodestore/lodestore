@@ -55,7 +55,7 @@ The mode is read from the line `backup mode: {mode}` that vzdump prints and is c
 
 Ownership is stored in the container's view. Root in the initial namespace sees host ids (100000 + n) in `st_uid`/`st_gid`, in POSIX ACL xattrs and in the root id of version 3 file capabilities; the agent translates all three with the container's id map, the same translation the kernel gives a reader inside the container. An id outside the map becomes the overflow id 65534 and is counted in the job report. Owner names are left empty: the names on the node belong to the node, not the container.
 
-`exclude-path` from `vzdump.conf` and the standard excludes (`/tmp/?*`, `/var/tmp/?*`, `/var/run/?*.pid`) arrive in `$exclude_patterns` and are applied as vzdump applies them (D-19): a pattern that starts with `/` is anchored at the root of the container, `?*` matches the entries of a directory and everything under them, not the directory. Like vzdump the walk also skips `lost+found` at the root of each volume and sockets, so the set of paths equals that of a native vzdump archive of the same container (see "Verified behaviour"); the differential test of the end-to-end suite compares the two. The snapshot is committed only in `backup_cleanup(success=1)`; when anything fails after `backup_container` returned, vzdump calls it with `success=0` and the error (observed with a failing `--protected 1`).
+`exclude-path` from `vzdump.conf` and the standard excludes (`/tmp/?*`, `/var/tmp/?*`, `/var/run/?*.pid`) arrive in `$exclude_patterns` and are applied as vzdump applies them (D-19): a pattern that starts with `/` is anchored at the root of the container, `?*` matches the entries of a directory and everything under them, not the directory. Like vzdump the walk also skips sockets and every entry named `lost+found` (the `tar` of vzdump excludes the name unanchored, so at the root of each volume and at any depth below), so the set of paths equals that of a native vzdump archive of the same container (see "Verified behaviour"); the differential test of the end-to-end suite compares the two. The snapshot is committed only in `backup_cleanup(success=1)`; when anything fails after `backup_container` returned, vzdump calls it with `success=0` and the error (observed with a failing `--protected 1`).
 
 ### CT layout and metadata
 
@@ -70,7 +70,7 @@ This is a one-way decision (D-02). A container snapshot has the tree:
 - `ct_layout`: `1`.
 - `ct_mode`: `snapshot`, `suspend` or `stop`, the mode vzdump applied. A stopped container is always backed up in `stop` mode, whatever mode was asked for.
 - `ct_unprivileged`: `0` or `1`.
-- `ct_idmap`: the canonical id map, `u:{ct}:{host}:{count}` and `g:{ct}:{host}:{count}` entries separated by commas, `u` entries before `g` entries, each group in ascending order of `ct`, at most 256 bytes. A container whose map is longer is not backed up; the job fails with `ct_idmap_unsupported`.
+- `ct_idmap`: the canonical id map, present for an unprivileged container and for a privileged one with `lxc.idmap` lines. It is built as Proxmox VE builds it: the `lxc.idmap` lines when there are any, otherwise `u:0:100000:65536,g:0:100000:65536` for an unprivileged container. The form is `u:{ct}:{host}:{count}` and `g:{ct}:{host}:{count}` entries separated by commas, `u` entries before `g` entries, each group in ascending order of `ct`, at most 256 bytes. A container whose map is longer is not backed up; the job fails with `ct_idmap_unsupported`.
 
 `ct-vectors.json` freezes the layout and the keys; a change needs a new ADR.
 
@@ -212,6 +212,7 @@ A container end-to-end run (lab, agent, backup, restore, the recovery from the b
 ## Consequences
 
 - The format gains a container layout and four metadata keys; `ct-vectors.json` is a new file and the existing vectors do not change. `format_version` stays 1.
+- A container snapshot is an ordinary tree: a `lode` from before this ADR lists and restores it by id like any snapshot, with `/fs` and `/config` as its top directories and the owners in the container's view.
 - [ADR 0007](/docs/adr/0007-source-model/) said that a container has no UUID of its own. From pve-manager 9.2.33 it has `meta uid`; the instance key is still the UUID the agent generates, and the uid decides when a new instance begins.
 - A Proxmox VE node older than 9.2.33 is not supported for container backups; `pve install` refuses it, and so does a cluster with such a node.
 - Backups to the Lodestore storage cannot be started from Proxmox VE (GUI, scheduler, API). Restore from the Proxmox VE GUI is not offered in this phase: the plugin lists no volumes.
