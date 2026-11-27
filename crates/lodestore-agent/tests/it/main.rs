@@ -2,6 +2,7 @@
 mod adv_support;
 mod common;
 
+mod ct_backup;
 mod deadline;
 mod distrusted;
 mod hooks;

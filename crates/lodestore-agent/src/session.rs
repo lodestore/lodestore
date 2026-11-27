@@ -20,6 +20,7 @@ use crate::connect::channel;
 use crate::discovery::{self, Discovery};
 use crate::identity::{AgentConfig, Identity, Paths, load_pair, replace_pair, write_json_file};
 use crate::jobs::JobHub;
+use crate::jobs::ct_backup::{PveCommands, PveJobs};
 use crate::pve::ROOT_UID;
 use crate::pve::socket::PveSessions;
 use crate::shared_channel::SharedChannel;
@@ -36,13 +37,14 @@ const STABLE_STREAM: Duration = Duration::from_secs(60);
 const RENEW_RETRY: Duration = Duration::from_secs(60);
 const MAX_SKEW_SECS: i64 = 300;
 const JOBS_DRAIN: Duration = Duration::from_secs(30);
-pub const CAPABILITIES: [&str; 9] = [
+pub const CAPABILITIES: [&str; 10] = [
     "restore_v1",
     "limits_v1",
     "gc_v1",
     "restore_roots_v1",
     "shard_limit_v1",
     "source:files",
+    "source:proxmox-ct",
     "host_key_v1",
     "location_v1",
     "sas_refresh_v1",
@@ -144,10 +146,18 @@ pub async fn run_with(
     hub.set_net(args.net.clone());
     let socket_stop = args.shutdown.child_token();
     let pve = Arc::new(PveSessions::new(ROOT_UID));
+    let socket_path = AgentSettings::load(&args.paths).socket_path();
+    hub.set_pve(PveJobs {
+        sessions: Arc::clone(&pve),
+        commands: PveCommands::default(),
+        pve_root: discovery.pve_root.clone(),
+        perl_root: discovery.perl_root.clone(),
+        socket: socket_path.clone(),
+    });
     tokio::spawn(socket::serve_with(
         Arc::clone(&hub),
         pve,
-        AgentSettings::load(&args.paths).socket_path(),
+        socket_path,
         socket_stop.clone(),
     ));
     let discovery = Discovery::spawn(discovery, args.paths.clone(), args.shutdown.clone());

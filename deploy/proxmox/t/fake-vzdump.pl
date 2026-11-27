@@ -7,7 +7,8 @@
 #   fake-vzdump.pl {vmid} --storage S --mode M --remove 0 [--protected 0]
 #
 # The scenario is a JSON file named by $ENV{LODESTORE_FAKE_VZDUMP} with the keys
-# dir, config, excludes, mode, sources, guest_uid and fail_after_data.
+# dir, config, excludes, mode, sources, guest_uid, fail_after_data, pause (seconds
+# to wait after the open) and term_file (created when SIGTERM arrives).
 
 use strict;
 use warnings;
@@ -16,6 +17,8 @@ use JSON::PP;
 use POSIX ();
 
 use PVE::BackupProvider::Plugin::Lodestore;
+
+$| = 1;
 
 my @args = @ARGV;
 my $vmid = shift @args;
@@ -31,6 +34,16 @@ my $scenario_file = $ENV{LODESTORE_FAKE_VZDUMP} // die "LODESTORE_FAKE_VZDUMP is
 open(my $fh, '<', $scenario_file) or die "cannot read $scenario_file: $!\n";
 my $scenario = JSON::PP->new->utf8->decode(do { local $/; <$fh> });
 close($fh);
+
+if (defined(my $term_file = $scenario->{term_file})) {
+    ($term_file) = $term_file =~ m{^(/.*)\z}s;
+    $SIG{TERM} = sub {
+        if (open(my $marker, '>', $term_file)) {
+            close($marker);
+        }
+        POSIX::_exit(143);
+    };
+}
 
 my $start_time = 1732600000;
 my $mode = $scenario->{mode} // $opt{mode} // 'snapshot';
@@ -51,6 +64,7 @@ my $ok = eval {
     print "INFO: backup mode: $mode\n";
     $provider->backup_get_mechanism($vmid, 'lxc');
     $provider->backup_container_prepare($vmid, $info);
+    sleep($scenario->{pause}) if $scenario->{pause};
 
     # vzdump runs backup_container in a forked child, and the provider must not fork there.
     my $pid = fork() // die "fork failed: $!\n";

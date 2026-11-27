@@ -19,7 +19,9 @@ use lodestore_format::store::opendal::SasSource;
 use lodestore_format::store::s3::StaticCredentials;
 use lodestore_format::store::{RepoLocation, Store};
 use lodestore_format::tree_cache::{CacheWriter, open_parent};
-use lodestore_format::writer::{BackupOptions, BackupProgress, Deadline, IssueEvent, Writer};
+use lodestore_format::writer::{
+    BackupOptions, BackupOutcome, BackupProgress, Deadline, IssueEvent, Writer,
+};
 use lodestore_proto::agent::v1::{
     DatabaseKind, GuestKind, Hook, JobEventLevel, JobFinished, JobOutcome, JobPhaseKind, JobSpec,
     JobStats, SourceFacts, SourceSelector,
@@ -29,11 +31,12 @@ use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
+use super::ct_backup;
 use super::distrusted;
 use super::own_shards;
 use super::priority;
 use super::throttle::Throttled;
-use super::{JobCtx, failed};
+use super::{JobCtx, ProgressCell, failed};
 use crate::Paths;
 use crate::config::AgentSettings;
 use crate::hooks::{HookError, HookPhase, HookRun, HookSpec, run_hook};
@@ -70,7 +73,7 @@ pub async fn open_writer(
     open_writer_with(paths, keys, None, uploaded).await
 }
 
-fn read_write_keys(paths: &Paths) -> Result<WriteKeys, String> {
+pub(super) fn read_write_keys(paths: &Paths) -> Result<WriteKeys, String> {
     let text = Zeroizing::new(
         std::fs::read_to_string(paths.writer_keys())
             .map_err(|e| format!("{}: {e}", paths.writer_keys().display()))?,
@@ -96,7 +99,7 @@ fn sas_source(paths: &Paths, first: Zeroizing<String>) -> SasSource {
     })
 }
 
-async fn open_writer_with(
+pub(super) async fn open_writer_with(
     paths: &Paths,
     keys: WriteKeys,
     rate: Option<u64>,
@@ -333,7 +336,7 @@ fn backup_status(outcome: i32) -> &'static str {
     }
 }
 
-fn interrupted(ctx: &JobCtx) -> JobFinished {
+pub(super) fn interrupted(ctx: &JobCtx) -> JobFinished {
     let (outcome, code, text) = if ctx.cancelled() {
         (
             JobOutcome::Cancelled,
@@ -509,7 +512,10 @@ async fn execute(ctx: &JobCtx, spec: &JobSpec) -> JobFinished {
         Some(finished) => finished,
         None => {
             ctx.phase(JobPhaseKind::Backup, "");
-            backup(ctx, spec, deadline).await
+            match spec.source.as_ref().map(|s| s.r#type.as_str()) {
+                Some("proxmox-ct") => ct_backup::run(ctx, spec, deadline).await,
+                _ => backup(ctx, spec, deadline).await,
+            }
         }
     };
     watcher.abort();
@@ -621,23 +627,8 @@ async fn backup(ctx: &JobCtx, spec: &JobSpec, deadline: Deadline) -> JobFinished
         }
     };
     let cell = ctx.progress_cell();
-    let progress = move |p: &BackupProgress| {
-        cell.files_done.store(p.files_done, Ordering::Relaxed);
-        cell.bytes_processed
-            .store(p.bytes_processed, Ordering::Relaxed);
-        cell.bytes_added.store(p.bytes_added, Ordering::Relaxed);
-        cell.files_total.store(p.files_total, Ordering::Relaxed);
-        cell.bytes_total.store(p.bytes_total, Ordering::Relaxed);
-        cell.scan_done.store(p.scan_done, Ordering::Relaxed);
-    };
-    let on_issue = |issue: &IssueEvent<'_>| {
-        let level = if issue.warning {
-            JobEventLevel::Warning
-        } else {
-            JobEventLevel::Error
-        };
-        ctx.event(level, issue_kind(issue.kind), issue.path, "", issue.message);
-    };
+    let progress = move |p: &BackupProgress| record_progress(&cell, p);
+    let on_issue = |issue: &IssueEvent<'_>| report_issue(ctx, issue);
     let paths: Vec<PathBuf> = spec.paths.iter().map(PathBuf::from).collect();
     let result = writer
         .backup(
@@ -664,14 +655,6 @@ async fn backup(ctx: &JobCtx, spec: &JobSpec, deadline: Deadline) -> JobFinished
     own_shards::record_written(ctx.paths(), &writer);
     match result {
         Ok(outcome) => {
-            let id = hex32(&outcome.snapshot_id);
-            ctx.event(
-                JobEventLevel::Info,
-                "snapshot_written",
-                b"",
-                "",
-                &format!("snapshot {id} written"),
-            );
             let cache = cache.borrow_mut().take();
             if let Some(Err(e)) = cache.map(|w| {
                 w.commit(
@@ -683,32 +666,70 @@ async fn backup(ctx: &JobCtx, spec: &JobSpec, deadline: Deadline) -> JobFinished
             }) {
                 cache_failed(&e);
             }
-            let stats = outcome.stats;
-            JobFinished {
-                outcome: if outcome.errors_total + outcome.warnings_total > 0 {
-                    JobOutcome::Warnings
-                } else {
-                    JobOutcome::Succeeded
-                } as i32,
-                snapshot_id: id,
-                stats: Some(JobStats {
-                    files_new: stats.files_new,
-                    files_changed: stats.files_changed,
-                    files_unchanged: stats.files_unchanged,
-                    dirs: stats.dirs,
-                    bytes_total: stats.bytes_total,
-                    bytes_read: stats.bytes_read,
-                    bytes_added: stats.bytes_added,
-                }),
-                incomplete: outcome.incomplete,
-                errors_total: outcome.errors_total,
-                warnings_total: outcome.warnings_total,
-                ..Default::default()
-            }
+            written(ctx, &outcome)
         }
-        Err(Error::Interrupted) => interrupted(ctx),
-        Err(Error::DeadlineExceeded { limit_secs }) => time_limit(limit_secs),
-        Err(e) => failed("backup_failed", &e.to_string()),
+        Err(e) => backup_error(ctx, e),
+    }
+}
+
+pub(super) fn record_progress(cell: &ProgressCell, p: &BackupProgress) {
+    cell.files_done.store(p.files_done, Ordering::Relaxed);
+    cell.bytes_processed
+        .store(p.bytes_processed, Ordering::Relaxed);
+    cell.bytes_added.store(p.bytes_added, Ordering::Relaxed);
+    cell.files_total.store(p.files_total, Ordering::Relaxed);
+    cell.bytes_total.store(p.bytes_total, Ordering::Relaxed);
+    cell.scan_done.store(p.scan_done, Ordering::Relaxed);
+}
+
+pub(super) fn report_issue(ctx: &JobCtx, issue: &IssueEvent<'_>) {
+    let level = if issue.warning {
+        JobEventLevel::Warning
+    } else {
+        JobEventLevel::Error
+    };
+    ctx.event(level, issue_kind(issue.kind), issue.path, "", issue.message);
+}
+
+pub(super) fn backup_error(ctx: &JobCtx, e: Error) -> JobFinished {
+    match e {
+        Error::Interrupted => interrupted(ctx),
+        Error::DeadlineExceeded { limit_secs } => time_limit(limit_secs),
+        e => failed("backup_failed", &e.to_string()),
+    }
+}
+
+/// Reports the written snapshot and builds the job's result.
+pub(super) fn written(ctx: &JobCtx, outcome: &BackupOutcome) -> JobFinished {
+    let id = hex32(&outcome.snapshot_id);
+    ctx.event(
+        JobEventLevel::Info,
+        "snapshot_written",
+        b"",
+        "",
+        &format!("snapshot {id} written"),
+    );
+    let stats = outcome.stats;
+    JobFinished {
+        outcome: if outcome.errors_total + outcome.warnings_total > 0 {
+            JobOutcome::Warnings
+        } else {
+            JobOutcome::Succeeded
+        } as i32,
+        snapshot_id: id,
+        stats: Some(JobStats {
+            files_new: stats.files_new,
+            files_changed: stats.files_changed,
+            files_unchanged: stats.files_unchanged,
+            dirs: stats.dirs,
+            bytes_total: stats.bytes_total,
+            bytes_read: stats.bytes_read,
+            bytes_added: stats.bytes_added,
+        }),
+        incomplete: outcome.incomplete,
+        errors_total: outcome.errors_total,
+        warnings_total: outcome.warnings_total,
+        ..Default::default()
     }
 }
 
