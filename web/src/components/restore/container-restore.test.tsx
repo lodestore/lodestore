@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { describe, expect, it } from "vitest";
 import { formatBytes } from "@/lib/format";
+import { encodeB64 } from "@/lib/names";
 import { apiError, renderApp, useSignedIn } from "@/test/app";
 import {
 	CT_HOST,
@@ -59,6 +60,20 @@ describe("Container restore dialog", { timeout: 30_000 }, () => {
 		expect(screen.getByText("rootfs 8 GiB · mp0 32 GiB")).toBeVisible();
 		expect(screen.getByText("Unprivileged, 0 → 100000")).toBeVisible();
 		expect(screen.getByText("21.4 GiB")).toBeVisible();
+	});
+
+	it("the browser labels the folder that is a mount point with its volume", async () => {
+		mockContainer({ entries: { path: "/mnt", names: ["data", "other"] } });
+		useSignedIn();
+		renderApp(`${PAGE}&path=${encodeB64(new TextEncoder().encode("/mnt"))}`);
+		const row = (
+			await screen.findByRole("button", { name: "Open folder data" })
+		).parentElement;
+		expect(row).toHaveTextContent("mp0");
+		const other = screen.getByRole("button", {
+			name: "Open folder other",
+		}).parentElement;
+		expect(other).not.toHaveTextContent("mp0");
 	});
 
 	it("no restore button on a file snapshot", async () => {

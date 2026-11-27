@@ -754,6 +754,60 @@ describe("Restore dialog", { timeout: 30_000 }, () => {
 	});
 });
 
+describe("Restore dialog for a container snapshot", { timeout: 30_000 }, () => {
+	const SHIFTED =
+		"CT 200 is unprivileged, so owners are shifted on the node: uid 0 becomes 100000. Copy the files into the container with cp -a and they belong to the right users.";
+
+	async function openCt(unprivileged: boolean) {
+		mockServer(fleet, { ...snapshot, source_type: "proxmox-ct" });
+		server.use(
+			http.get("/api/v1/restore/snapshots/:id/container", () =>
+				HttpResponse.json({
+					bridges_checked: false,
+					dropped: [],
+					kept_count: 3,
+					mode: "snapshot",
+					name: "dns",
+					network: [],
+					root_host_uid: unprivileged ? 100000 : 0,
+					unprivileged,
+					vmid: 200,
+					volumes: [],
+				}),
+			),
+		);
+		const opened = await openRestore();
+		await opened.user.click(
+			within(opened.dialog).getByRole("button", { name: /^Options/ }),
+		);
+		return opened;
+	}
+
+	it("explains the owner shift of an unprivileged container while owners are restored", async () => {
+		const { dialog } = await openCt(true);
+		expect(await within(dialog).findByText(SHIFTED)).toBeVisible();
+	});
+
+	it("says nothing once the owners are not restored", async () => {
+		const { dialog, user } = await openCt(true);
+		await within(dialog).findByText(SHIFTED);
+		await user.click(
+			within(dialog).getByRole("switch", { name: "Restore original owners" }),
+		);
+		expect(within(dialog).queryByText(SHIFTED)).toBeNull();
+	});
+
+	it("says nothing for a privileged container or for files", async () => {
+		const { dialog } = await openCt(false);
+		await waitFor(() =>
+			expect(
+				within(dialog).getByRole("switch", { name: "Restore original owners" }),
+			).toBeChecked(),
+		);
+		expect(within(dialog).queryByText(/is unprivileged/)).toBeNull();
+	});
+});
+
 describe("Download dialog", { timeout: 30_000 }, () => {
 	async function openDownload(shown = snapshot) {
 		mockServer(fleet, shown);

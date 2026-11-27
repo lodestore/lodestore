@@ -9,6 +9,7 @@ import type {
 	RestoreSnapshot,
 	TargetNode,
 } from "@/api/gen/model";
+import { encodeB64 } from "@/lib/names";
 import { apiError } from "@/test/app";
 import { server } from "@/test/server";
 
@@ -198,6 +199,7 @@ export function mockContainer(
 		targetsStatus?: number;
 		post?: (body: GuestRestoreBody) => Response | undefined;
 		stepUp?: boolean;
+		entries?: { path: string; names: string[] };
 	} = {},
 ): ContainerMock {
 	const mock: ContainerMock = {
@@ -219,10 +221,22 @@ export function mockContainer(
 		http.get("/api/v1/snapshots/:id", () => HttpResponse.json(shown)),
 		http.get("/api/v1/snapshots/:id/entries", () =>
 			HttpResponse.json({
-				path: "",
-				path_b64: "",
-				entries: [],
-				total: 0,
+				path: options.entries?.path ?? "",
+				path_b64: encodeB64(
+					new TextEncoder().encode(options.entries?.path ?? ""),
+				),
+				entries: (options.entries?.names ?? []).map((name) => ({
+					name,
+					name_b64: encodeB64(new TextEncoder().encode(name)),
+					kind: "dir",
+					size: 0,
+					mtime_ms: 0,
+					mode: 0o40755,
+					uid: 0,
+					gid: 0,
+					link_target: null,
+				})),
+				total: options.entries?.names.length ?? 0,
 				offset: 0,
 			}),
 		),
