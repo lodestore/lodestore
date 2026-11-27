@@ -237,6 +237,7 @@ node_setup_ct() {
   pct create "$victim" "$template" --hostname victim --unprivileged 1 --rootfs local-lvm:1 --memory 256
   echo 'lxc.apparmor.profile: unconfined' >>"/etc/pve/lxc/$ct.conf"
   pct start "$ct"
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -q acl libcap2-bin >/dev/null
   for b in setfacl getfacl setcap getcap; do
     pct push "$ct" "$(command -v "$b")" "/usr/local/bin/$b" --perms 0755
   done
