@@ -59,7 +59,11 @@ async fn start_with(pve: PveSessions) -> Running {
         shutdown.clone(),
     ));
     for _ in 0..200 {
-        if UnixStream::connect(&socket).is_ok() {
+        if let Ok(probe) = UnixStream::connect(&socket) {
+            // The probe holds a handler slot until the server sees it close; tests that
+            // fill every slot must not race it.
+            drop(probe);
+            tokio::time::sleep(Duration::from_millis(200)).await;
             break;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
