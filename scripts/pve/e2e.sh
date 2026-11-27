@@ -228,7 +228,7 @@ install_agent() {
 
 node_setup_ct() {
   set -euo pipefail
-  local ct=$1 victim=$2 template b
+  local ct=$1 victim=$2 template deb
   template=$(pveam list local | awk '/debian-13-standard_.*_amd64\./ {print $1}' | sort -V | tail -n 1)
   ip link show vmbr0 >/dev/null 2>&1 || { ip link add vmbr0 type bridge; ip link set vmbr0 up; }
   printf 'exclude-path: /var/cache/?* *.tmp\n' >>/etc/vzdump.conf
@@ -237,10 +237,11 @@ node_setup_ct() {
   pct create "$victim" "$template" --hostname victim --unprivileged 1 --rootfs local-lvm:1 --memory 256
   echo 'lxc.apparmor.profile: unconfined' >>"/etc/pve/lxc/$ct.conf"
   pct start "$ct"
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -q acl libcap2-bin >/dev/null
-  for b in setfacl getfacl setcap getcap; do
-    pct push "$ct" "$(command -v "$b")" "/usr/local/bin/$b" --perms 0755
+  (cd /tmp && apt-get download -q acl libcap2-bin >/dev/null)
+  for deb in /tmp/acl_*.deb /tmp/libcap2-bin_*.deb; do
+    pct push "$ct" "$deb" "/root/$(basename "$deb")"
   done
+  pct exec "$ct" -- sh -ec 'dpkg -i /root/*.deb >/dev/null && command -v setfacl setcap'
   pct exec "$ct" -- sh -ec '
     groupadd -g 1001 bob
     useradd -u 1000 alice
