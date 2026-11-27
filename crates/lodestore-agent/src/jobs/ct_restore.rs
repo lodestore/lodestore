@@ -23,7 +23,7 @@ use lodestore_proto::agent::v1::{
     ConfigLine, DroppedConfigKey, ExpectedGuest, GuestRestoreResult, GuestTarget, JobFinished,
     JobOutcome, RestoreSpec,
 };
-use rustix::fs::{FlockOperation, Mode, OFlags, flock, openat};
+use rustix::fs::{AtFlags, FileType, FlockOperation, Mode, OFlags, flock, openat, statat};
 use tokio::process::Command;
 
 use super::JobCtx;
@@ -104,6 +104,21 @@ async fn restore<P: PlanSource, F: PackFetcher>(
         .any(|o| *o as i32 == finished.outcome);
     if !ok {
         return Err(Box::new(finished));
+    }
+    // Warnings (owners as a regular user, skipped devices) leave a usable
+    // copy; an entry that was not restored does not.
+    if finished.errors_total > 0 {
+        let mut refused = refuse(
+            "restore_incomplete",
+            &format!(
+                "{} entries of the snapshot could not be restored into the staging folder. CT {} was not restored.",
+                finished.errors_total, guest.vmid
+            ),
+        );
+        refused.errors_total = finished.errors_total;
+        refused.warnings_total = finished.warnings_total;
+        refused.restore = finished.restore.take();
+        return Err(refused);
     }
     let report = hand_over(ctx, pve, guest, &checked, &staging).await?;
     finished.restore.get_or_insert_with(Default::default).guest = Some(report);
@@ -388,8 +403,16 @@ fn staged_config(dir: &Path) -> Result<(Vec<u8>, Option<Vec<u8>>), Refused> {
             &format!("cannot open the staging folder: {e}"),
         )
     })?;
-    openat(&root, "fs", flags | OFlags::DIRECTORY, Mode::empty())
+    let fs = openat(&root, "fs", flags | OFlags::DIRECTORY, Mode::empty())
         .map_err(|e| not_ct(format!("/fs is not a folder: {e}")))?;
+    let has_etc = statat(&fs, "etc", AtFlags::SYMLINK_NOFOLLOW)
+        .is_ok_and(|st| FileType::from_raw_mode(st.st_mode) == FileType::Directory);
+    if !has_etc {
+        return Err(refuse(
+            "restore_incomplete",
+            "The container root of the snapshot has no /etc, so it was empty or not mounted when it was backed up. Nothing was restored.",
+        ));
+    }
     let config_dir = openat(&root, "config", flags | OFlags::DIRECTORY, Mode::empty())
         .map_err(|e| not_ct(format!("/config is not a folder: {e}")))?;
     let read = |name: &str| -> io::Result<Vec<u8>> {

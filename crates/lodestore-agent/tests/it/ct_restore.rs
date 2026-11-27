@@ -1097,6 +1097,67 @@ async fn ct_restore_pct_fails_cleans_staging() {
     assert!(!held.exists());
 }
 
+/// Changes the plan entry named `name`.
+fn edit_entry(snap: &mut Snap, name: &[u8], edit: impl Fn(&mut Node, &mut Vec<ChunkLoc>)) {
+    let mut found = false;
+    for item in &mut snap.batches[0].items {
+        if let Some(Kind::Entry(e)) = &mut item.kind {
+            let mut node = Node::decode(e.node.as_slice()).unwrap();
+            if node.name == name {
+                edit(&mut node, &mut e.chunks);
+                e.node = node.encode_to_vec();
+                found = true;
+            }
+        }
+    }
+    assert!(found, "no entry {}", String::from_utf8_lossy(name));
+}
+
+/// An entry that failed to restore leaves the staging copy incomplete:
+/// neither a new container nor a replace is started from it.
+#[tokio::test(flavor = "multi_thread")]
+async fn ct_restore_incomplete_staging_refused() {
+    let lab = Lab::new().await;
+    lab.allow_replace();
+    let bad_name = Node {
+        name: b"a/b".to_vec(),
+        r#type: NodeType::File as i32,
+        mode: 0o644,
+        ..Default::default()
+    };
+    let corrupt = |snap: &mut Snap| {
+        edit_entry(snap, b"hostname", |_, chunks| chunks[0].id[0] ^= 1);
+    };
+    for replace_it in [false, true] {
+        let (uid, guest) = if replace_it {
+            lab.target(Some(UID_X), UUID, "");
+            (Some(UID_X), replace(UID_X, None))
+        } else {
+            (None, new_ct(105))
+        };
+        let config = snapshot_config(uid, "");
+        let mut corrupted = lab.snapshot(&config, None, |_| {}, &[]).await;
+        corrupt(&mut corrupted);
+        let rejected = lab
+            .snapshot(&config, None, |_| {}, &[("etc", bad_name.clone())])
+            .await;
+        let no_etc = lab
+            .snapshot(
+                &config,
+                None,
+                |root| fs::remove_dir_all(root.join("etc")).unwrap(),
+                &[],
+            )
+            .await;
+        for snap in [&corrupted, &rejected, &no_etc] {
+            let ran = lab.run(snap, lab.spec(snap, guest.clone())).await;
+            failed_with(&ran, "restore_incomplete");
+            assert!(ran.argv.is_none(), "{:?}", ran.done);
+            assert!(lab.staging_clean(&lab.staging_default()));
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 enum Planted {
     File(Vec<u8>, bool),
