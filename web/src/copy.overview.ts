@@ -137,6 +137,7 @@ export const overview = {
 		unknownHost: "unknown host",
 		unknownPolicy: "unknown",
 		unknownSource: "A source",
+		unknownGuest: "A guest",
 		unknownRepository: "unknown repository",
 		more: (n: number) => `and ${n} more. Use the API to list all alerts.`,
 		since: "Since ",
@@ -167,6 +168,8 @@ export const overview = {
 				`Agent certificate refused for ${host}`,
 			sourceInstanceGone: (host: string, label: string, policy: string) =>
 				`${label} of ${host} is no longer backed up by ${policy}`,
+			guestUnprotected: (host: string, label: string) =>
+				`${label} on ${host} is not backed up by any policy`,
 			expiresIn: (name: string, days: number) =>
 				`${name} expires in ${plural(days, "day")}`,
 			expired: (name: string) => `${name} has expired`,
@@ -197,6 +200,12 @@ export const overview = {
 				`${problemCount(n)} found. Open the report in Integrity checks.`,
 			agentUpdateFailed: (error?: string | null) =>
 				`${error ? sentenceEnd(error) : "The update was rolled back"}.`,
+			guestUnprotected: (relative?: string, policy?: string | null) =>
+				`${
+					relative
+						? `Last snapshot ${relative}${policy ? ` by ${policy}` : ""}.`
+						: "It was backed up before."
+				} Add it to a policy or silence the alert.`,
 		},
 		silence: {
 			trigger: "Silence alerts",

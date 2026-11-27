@@ -97,6 +97,13 @@ function titleOf(alert: AlertDto, now: number) {
 				link: hostLink,
 			};
 		}
+		case "guest_unprotected": {
+			const label = alert.facts.source_label ?? text.unknownGuest;
+			return {
+				build: (slot: string) => titles.guestUnprotected(slot, label),
+				link: hostLink,
+			};
+		}
 		case "check_failed": {
 			const level = alert.check_level ?? "";
 			const name =
@@ -168,6 +175,11 @@ function detailOf(alert: AlertDto) {
 			return details.agentUpdateFailed(facts.error);
 		case "check_failed":
 			return details.checkFailed(facts.findings ?? 0);
+		case "guest_unprotected":
+			return details.guestUnprotected(
+				relative(facts.last_success_at),
+				alert.policy,
+			);
 		default:
 			return alert.detail;
 	}
