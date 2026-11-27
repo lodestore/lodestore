@@ -501,6 +501,7 @@ fn pve_plugin_refuses_deletion() {
             print "parse: $@";
         }
         print 'api: ', $p->api(), "\n";
+        print 'path: ', ($p->path({}, 'backup/restore/' . ('ab' x 16)))[0], "\n";
     "#;
     let run = |apiver: &str| {
         let output = std::process::Command::new("perl")
@@ -536,6 +537,11 @@ fn pve_plugin_refuses_deletion() {
     assert!(out.contains(&restore), "{out}");
     assert_eq!(out.matches("parse: unable to parse").count(), 3, "{out}");
     assert!(out.contains("api: 17"));
+    let path = format!(
+        "path: /var/lib/lodestore/pve-staging/lodestore-restore-{}/data\n",
+        "ab".repeat(16)
+    );
+    assert!(out.contains(&path), "{out}");
     assert!(run("12").contains("api: 12"));
     assert!(run("18").contains("api: 17"));
 }
@@ -590,6 +596,13 @@ fn pve_plugin_finds_the_agent_socket_as_the_provider_does() {
             "a stale socket file is no agent: {out}"
         );
     }
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&live, std::fs::Permissions::from_mode(0o000)).unwrap();
+    assert_eq!(
+        run(&yaml(&live), None),
+        up,
+        "a caller outside the socket's group still sees a listening agent"
+    );
 }
 
 const RESTORE_ID: &str = "0123456789abcdef0123456789abcdef";

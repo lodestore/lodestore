@@ -70,15 +70,17 @@ sub path {
     my ($class, $scfg, $volname, $storeid, $snapname) = @_;
     my ($type, $name, $vmid) = $class->parse_volname($volname);
     $name =~ s!^restore/!!;
-    return (STAGING . "/$name", $vmid, $type);
+    return (STAGING . "/lodestore-restore-$name/data", $vmid, $type);
 }
 
-# A socket file left behind by an agent that stopped does not count.
+# A socket file left behind by an agent that stopped does not count. A caller
+# outside the socket's group (pveproxy runs as www-data) is refused with EACCES
+# by a listening agent, which still counts as running.
 sub agent_running {
     my $sock = IO::Socket::UNIX->new(
         Peer => PVE::BackupProvider::Plugin::Lodestore::socket_path(),
         Timeout => 2,
-    ) or return 0;
+    ) or return ($!{EACCES} || $!{EPERM}) ? 1 : 0;
     close($sock);
     return 1;
 }
