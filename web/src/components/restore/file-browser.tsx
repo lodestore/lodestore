@@ -1,6 +1,10 @@
 import { getRouteApi } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useGetSnapshot, useListRestoreHosts } from "@/api/gen/endpoints";
+import {
+	useContainerPreview,
+	useGetSnapshot,
+	useListRestoreHosts,
+} from "@/api/gen/endpoints";
 import { DownloadDialog } from "@/components/restore/download-dialog";
 import {
 	EntriesTable,
@@ -68,6 +72,18 @@ export function FileBrowser({
 	const settled = listing.isSuccess && !listing.isPlaceholderData;
 
 	const detail = useGetSnapshot(snapshot);
+	const container = useContainerPreview(snapshot, undefined, {
+		query: { enabled: detail.data?.source_type === "proxmox-ct" },
+	}).data;
+	const volumes = useMemo(
+		() =>
+			new Map(
+				container?.volumes
+					.filter((volume) => volume.mp !== "/")
+					.map((volume) => [volume.mp, volume.key]),
+			),
+		[container],
+	);
 	const canRestore = (useListRestoreHosts().data ?? []).some(isRestoreTarget);
 	const [dialog, setDialog] = useState<"restore" | "download">();
 	const restoreButton = useRef<HTMLButtonElement>(null);
@@ -202,6 +218,7 @@ export function FileBrowser({
 						folder={folder}
 						selection={selection}
 						complete={rows !== undefined && rows.length === total}
+						volumes={volumes}
 						onOpen={open}
 					/>
 					{rows?.length === 0 && (

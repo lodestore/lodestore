@@ -13,6 +13,7 @@ import {
 	getCreateRestoreMutationKey,
 	getListJobsQueryKey,
 	summarizeSelection,
+	useContainerPreview,
 	useCreateRestore,
 	useListRestoreHosts,
 } from "@/api/gen/endpoints";
@@ -142,6 +143,11 @@ function RestoreForm({
 		? CONFLICTS.filter((option) => option !== "stop_if_not_empty")
 		: CONFLICTS;
 	const [owners, setOwners] = useState(true);
+	const container = useContainerPreview(snapshot.id, undefined, {
+		query: { enabled: snapshot.source_type === "proxmox-ct" },
+	}).data;
+	const shiftedTo =
+		owners && container?.unprivileged ? container.root_host_uid : null;
 
 	const counts = useQuery({
 		queryKey: ["selection-summary", snapshot.id, items],
@@ -455,13 +461,20 @@ function RestoreForm({
 									</SelectContent>
 								</Select>
 							</div>
-							<div className="flex items-center gap-2">
-								<Switch
-									id={`${id}-owners`}
-									checked={owners}
-									onCheckedChange={setOwners}
-								/>
-								<Label htmlFor={`${id}-owners`}>{text.owners}</Label>
+							<div className="flex flex-col gap-2">
+								<div className="flex items-center gap-2">
+									<Switch
+										id={`${id}-owners`}
+										checked={owners}
+										onCheckedChange={setOwners}
+									/>
+									<Label htmlFor={`${id}-owners`}>{text.owners}</Label>
+								</div>
+								{shiftedTo != null && (
+									<p className="text-sm text-muted-foreground">
+										{text.ownersShifted(container?.vmid, shiftedTo)}
+									</p>
+								)}
 							</div>
 						</CollapsibleContent>
 					</Collapsible>
