@@ -30,18 +30,22 @@ const SPACE_CHECK_EVERY: u64 = 64 << 20;
 /// Entries besides files, folders and symlinks that a restore leaves out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkipSpecial {
-    /// Character and block devices.
+    /// Character and block devices, but not the 0:0 character device an
+    /// overlayfs whiteout is: without it a deleted file of a lower layer
+    /// comes back.
     Devices,
     /// Devices, FIFOs and every other node type.
     All,
 }
 
 impl SkipSpecial {
-    fn skips(self, ty: pb::NodeType) -> bool {
+    fn skips(self, ty: pb::NodeType, rdev: u64) -> bool {
         match self {
-            SkipSpecial::Devices => {
-                matches!(ty, pb::NodeType::Chardev | pb::NodeType::Blockdev)
-            }
+            SkipSpecial::Devices => match ty {
+                pb::NodeType::Blockdev => true,
+                pb::NodeType::Chardev => rdev != 0,
+                _ => false,
+            },
             SkipSpecial::All => ty != pb::NodeType::Symlink,
         }
     }
@@ -1042,7 +1046,7 @@ impl Restorer {
             return Ok(());
         }
         let ty = pb::NodeType::try_from(node.r#type).unwrap_or_default();
-        if self.skip_special.is_some_and(|s| s.skips(ty)) {
+        if self.skip_special.is_some_and(|s| s.skips(ty, node.rdev)) {
             self.stats.special_skipped += 1;
             self.unapplied.push(Unapplied {
                 path: self.path_of(&node.name),
@@ -1362,6 +1366,7 @@ mod tests {
             name: name.as_bytes().to_vec(),
             r#type: ty as i32,
             mode: 0o666,
+            rdev: 0x0103,
             ..Default::default()
         };
         let specials = [
@@ -1397,6 +1402,29 @@ mod tests {
             std::fs::remove_file(tmp.path().join("link")).unwrap();
             let _ = std::fs::remove_file(tmp.path().join("fifo"));
         }
+    }
+
+    #[test]
+    fn skip_devices_keeps_overlay_whiteouts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let whiteout = pb::Node {
+            name: b"deleted".to_vec(),
+            r#type: pb::NodeType::Chardev as i32,
+            mode: 0o600,
+            rdev: 0,
+            ..Default::default()
+        };
+        let mut restorer = Restorer::open(tmp.path(), settings())
+            .unwrap()
+            .skip_special_files(SkipSpecial::Devices);
+        restorer.create_other(&whiteout).unwrap();
+        assert_eq!(restorer.stats().special_skipped, 0);
+        assert!(
+            !restorer
+                .take_unapplied()
+                .iter()
+                .any(|u| u.what == "special file")
+        );
     }
 
     #[test]
