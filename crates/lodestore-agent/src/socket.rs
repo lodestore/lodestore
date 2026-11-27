@@ -26,7 +26,7 @@ pub const MAX_HEADER: usize = 4096;
 const SOCKET_GROUP: &str = "lodestore";
 pub const FIRST_LINE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_POLICY: usize = 128;
-const MAX_HANDLERS: usize = 16;
+pub const MAX_HANDLERS: usize = 16;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
