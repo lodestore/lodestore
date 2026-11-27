@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use lodestore_format::Error;
 use lodestore_format::crypto::{BLOB_TYPE_DATA, BlobId, RepoId};
+use lodestore_format::ct::IdMap;
 use lodestore_format::fs::restore::{Overwrite, RestoreSettings, Restorer, is_empty_below};
 use lodestore_format::keys::cdc_seed;
 use lodestore_format::pb::{Node, NodeType};
@@ -206,6 +207,8 @@ struct Prepared {
     overwrite: Overwrite,
     restore_owners: bool,
     stop_if_not_empty: bool,
+    /// The container's id map; owners are shifted by it to the node's ids.
+    id_shift: Option<IdMap>,
 }
 
 impl Prepared {
@@ -227,6 +230,16 @@ impl Prepared {
         let k_id = <[u8; 32]>::try_from(spec.k_id.as_slice())
             .map(Zeroizing::new)
             .map_err(|_| invalid("chunk key"))?;
+        let id_shift = if spec.ct_idmap.is_empty() {
+            None
+        } else {
+            Some(IdMap::parse_canonical(&spec.ct_idmap).map_err(|_| {
+                abort(
+                    "restore_failed",
+                    "the container idmap of the snapshot is invalid",
+                )
+            })?)
+        };
         let policy = ConflictPolicy::try_from(spec.conflict).unwrap_or_default();
         let mut confined = None;
         let target = if spec.in_place {
@@ -292,6 +305,7 @@ impl Prepared {
             },
             restore_owners: spec.restore_owners,
             stop_if_not_empty: policy == ConflictPolicy::StopIfNotEmpty,
+            id_shift,
         })
     }
 
@@ -366,6 +380,10 @@ impl<'a, F: PackFetcher> Attempt<'a, F> {
             Some((root, rest)) => Restorer::open_in(root, rest, prepared.settings()),
             None => Restorer::open(&prepared.target, prepared.settings()),
         };
+        let opened = opened.map(|r| match &prepared.id_shift {
+            Some(map) if prepared.restore_owners => r.with_id_shift(map.clone()),
+            _ => r,
+        });
         let restorer = opened.map_err(|e| match e {
             Error::Io(e) => io_abort(&e, &format!("cannot open {target}")),
             other => abort("restore_failed", other.to_string()),

@@ -874,6 +874,105 @@ async fn restore_runner_root_new_folder_gives_foreign_owner_without_privileges()
     assert!(has_cap(&restored), "in place keeps {CAP}");
 }
 
+#[cfg(target_os = "linux")]
+const CT_IDMAP: &str = "u:0:100000:65536,g:0:100000:65536";
+
+#[cfg(target_os = "linux")]
+/// Files of a container snapshot: `a/x` owned by the container's root, `a/y`
+/// by its uid 33 and `b/z` setuid with a capability.
+fn ct_plan(planned: &Planned) -> MemPlan {
+    MemPlan::new(planned).map_nodes(|n| {
+        let (id, privileged) = match n.name.as_slice() {
+            b"y" => (33, false),
+            b"z" => (0, true),
+            _ => (0, false),
+        };
+        n.uid = id;
+        n.gid = id;
+        if privileged {
+            n.mode = 0o4755;
+            n.xattrs.push(lodestore_format::pb::Xattr {
+                name: b"security.capability".to_vec(),
+                value: [&[0, 0, 0, 2][..], &[0; 16]].concat(),
+            });
+        }
+    })
+}
+
+#[cfg(target_os = "linux")]
+async fn ct_files_restore(fx: &Fx, dest: &Path, ct_idmap: &str) -> Vec<AgentMessage> {
+    let hub = fx.hub();
+    let ids = ids(fx).await;
+    let planned = fx.plan(&["a/x", "a/y", "b/z"], 4, None).await;
+    let id = fx.job_id();
+    let spec = RestoreSpec {
+        ct_idmap: ct_idmap.into(),
+        ..fx.spec(
+            dest,
+            ConflictPolicy::OverwriteChanged,
+            false,
+            true,
+            ids.k_id,
+            ids.repo_id,
+        )
+    };
+    let opts = RestoreOptions {
+        roots: vec![fx.root.clone()],
+        ..options()
+    };
+    let msgs = run(
+        &hub,
+        &id,
+        spec,
+        ct_plan(&planned),
+        StoreFetcher::new(fx),
+        opts,
+    )
+    .await;
+    let f = finished_of(&msgs, &id).unwrap();
+    assert_eq!(f.outcome, JobOutcome::Succeeded as i32, "{msgs:?}");
+    msgs
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[ignore = "requires root; run scripts/test-linux.sh --root -p lodestore-agent pve_root_"]
+async fn pve_root_file_shift_owners() {
+    use rustix::fs::getxattr;
+
+    assert!(is_root(), "run through scripts/test-linux.sh --root");
+    let fx = Fx::new().await;
+    let dest = fx.root.join("fresh");
+    ct_files_restore(&fx, &dest, CT_IDMAP).await;
+    let owner = |rel: &str| {
+        let meta = fs::metadata(fx.restored(&dest, rel)).unwrap();
+        (meta.uid(), meta.gid())
+    };
+    assert_eq!(owner("a/x"), (100_000, 100_000));
+    assert_eq!(owner("a/y"), (100_033, 100_033));
+    assert_eq!(owner("b/z"), (100_000, 100_000));
+    assert_eq!(owner("a"), (100_000, 100_000), "folders are shifted too");
+    let z = fx.restored(&dest, "b/z");
+    assert_eq!(
+        fs::metadata(&z).unwrap().permissions().mode() & 0o7777,
+        0o755
+    );
+    assert!(getxattr(&z, "security.capability", &mut [0u8; 64]).is_err());
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[ignore = "requires root; run scripts/test-linux.sh --root -p lodestore-agent pve_root_"]
+async fn pve_root_file_shift_privileged_ct() {
+    assert!(is_root(), "run through scripts/test-linux.sh --root");
+    let fx = Fx::new().await;
+    let dest = fx.root.join("fresh");
+    ct_files_restore(&fx, &dest, "").await;
+    let uid = |rel: &str| fs::metadata(fx.restored(&dest, rel)).unwrap().uid();
+    assert_eq!(uid("a/x"), 0);
+    assert_eq!(uid("a/y"), 33);
+}
+
 #[tokio::test]
 async fn restore_runner_symlinked_target_is_not_read() {
     let fx = Fx::new().await;
