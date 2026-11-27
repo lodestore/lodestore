@@ -461,6 +461,10 @@ export function restoreFailureText(
 				return e.restoreVmidTaken(vmid);
 			case "restore_snapshot_not_ct":
 				return e.restoreSnapshotNotCt;
+			case "restore_incomplete":
+				return e.restoreIncomplete;
+			case "guest_target_has_snapshots":
+				return e.guestTargetHasSnapshots(vmid);
 			case "restore_no_space":
 				return e.restoreFailed(own).replace(/\s{2,}/g, " ");
 		}

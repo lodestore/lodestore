@@ -436,6 +436,10 @@ export const jobs = {
 			`VMID ${vmid} is taken. Nothing was restored. Restore again with another VMID.`,
 		restoreSnapshotNotCt:
 			"This snapshot is not of a container, so nothing was restored. Choose a container snapshot.",
+		restoreIncomplete:
+			"Some files of the snapshot could not be read, so the container was not restored and nothing was replaced. Check the log and the repository, or restore another snapshot.",
+		guestTargetHasSnapshots: (vmid: number) =>
+			`CT ${vmid} has Proxmox snapshots, which a replace would delete. Nothing was restored. Remove the snapshots in Proxmox or restore to a new VMID.`,
 		guestPluginMissing: (node: string) =>
 			`The Lodestore plugin is missing or was changed on ${node}. Run lodestore-agent pve install there.`,
 		guestNotLocal: (host: string) =>

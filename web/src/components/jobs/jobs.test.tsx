@@ -1406,6 +1406,16 @@ describe("Container restore job page", () => {
 			"This snapshot is not of a container, so nothing was restored. Choose a container snapshot.",
 		],
 		[
+			"restore_incomplete",
+			"x",
+			"Some files of the snapshot could not be read, so the container was not restored and nothing was replaced. Check the log and the repository, or restore another snapshot.",
+		],
+		[
+			"guest_target_has_snapshots",
+			"x",
+			"CT 105 has Proxmox snapshots, which a replace would delete. Nothing was restored. Remove the snapshots in Proxmox or restore to a new VMID.",
+		],
+		[
 			"restore_no_space",
 			"not enough free space on the staging volume",
 			"The restore failed. Not enough free space on the staging volume. Check the log, then restore again.",
