@@ -285,6 +285,16 @@ async fn ct_backup_writes_ct_snapshot() {
     assert_eq!(meta["ct_mode"], "snapshot");
 }
 
+/// vzdump unmounts and deletes its snapshot before it exits; a descriptor the
+/// agent still holds into the container would leave the snapshot and its lock.
+#[tokio::test(flavor = "multi_thread")]
+async fn ct_backup_releases_the_container_after_the_data() {
+    let lab = Lab::new().await;
+    lab.scenario(json!({ "check_released": true }));
+    let done = lab.run().await;
+    assert_eq!(done.outcome, JobOutcome::Succeeded as i32, "{done:?}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn ct_backup_argv_is_fixed() {
     let lab = Lab::new().await;

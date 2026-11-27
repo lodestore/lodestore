@@ -8,11 +8,14 @@
 #
 # The scenario is a JSON file named by $ENV{LODESTORE_FAKE_VZDUMP} with the keys
 # dir, config, excludes, mode, sources, guest_uid, fail_after_data, pause (seconds
-# to wait after the open) and term_file (created when SIGTERM arrives).
+# to wait after the open), term_file (created when SIGTERM arrives) and
+# check_released (fail when the parent still holds a descriptor into dir after the
+# data, which would keep vzdump from unmounting and deleting its snapshot).
 
 use strict;
 use warnings;
 
+use Cwd ();
 use JSON::PP;
 use POSIX ();
 
@@ -81,6 +84,19 @@ my $ok = eval {
 
     my $error;
     $error = "backup_container failed" if $child_failed;
+    if (!$error && $scenario->{check_released}) {
+        my $dir = Cwd::realpath($scenario->{dir});
+        my $fds = '/proc/' . getppid() . '/fd';
+        opendir(my $dh, $fds) or die "cannot list $fds: $!\n";
+        for my $fd (readdir($dh)) {
+            my $target = readlink("$fds/$fd") // next;
+            if ($target eq $dir || index($target, "$dir/") == 0) {
+                $error = "the agent still holds $target after the data";
+                last;
+            }
+        }
+        closedir($dh);
+    }
     $error = "failure injected after the data" if !$child_failed && $scenario->{fail_after_data};
     my $stats = $provider->backup_cleanup($vmid, 'lxc', $error ? 0 : 1, { error => $error });
     $size = $stats->{stats}->{'archive-size'};

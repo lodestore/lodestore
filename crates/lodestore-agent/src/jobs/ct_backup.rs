@@ -441,8 +441,10 @@ impl Run<'_> {
                     excludes,
                     reply,
                 })) => {
-                    let result = match &opened {
-                        Some((root, info)) => self.data(root, info, config, excludes).await,
+                    // Taken so the descriptor closes after the walk: vzdump unmounts and
+                    // deletes its snapshot before it exits, and an open one keeps it busy.
+                    let result = match opened.take() {
+                        Some((root, info)) => self.data(&root, &info, config, excludes).await,
                         None => Err(refuse("vzdump_failed", "the data came before the open")),
                     };
                     match result {
