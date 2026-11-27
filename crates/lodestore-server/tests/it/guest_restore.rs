@@ -548,7 +548,7 @@ async fn files_snapshot(ts: &TestServer, repo_id: &str) -> String {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn guest_preview_requires_read() {
+async fn guest_preview_requires_restore_guest() {
     for backend in backends() {
         let name = backend.name();
         let ts = TestServer::start(&backend).await;
@@ -560,24 +560,24 @@ async fn guest_preview_requires_read() {
         let preview = format!("/api/v1/restore/snapshots/{snapshot}/container");
         let targets = format!("/api/v1/restore/guest-targets?snapshot_id={snapshot}");
 
-        let guest_only = common::bearer_client(&ts.issue_token(&["restore:guest"]).await);
-        for path in [&preview, &targets] {
-            let status = guest_only
-                .get(format!("{}{path}", ts.rest_url()))
-                .send()
-                .await
-                .unwrap()
-                .status();
-            assert_eq!(status, 403, "[{name}] {path}");
-        }
         let read_only = common::bearer_client(&ts.issue_token(&["snapshots:read"]).await);
-        let status = read_only
-            .get(format!("{}{preview}", ts.rest_url()))
-            .send()
-            .await
-            .unwrap()
-            .status();
-        assert_eq!(status, 200, "[{name}]");
+        let hosts_read = common::bearer_client(&ts.issue_token(&["hosts:read"]).await);
+        let guest = common::bearer_client(&ts.issue_token(&["restore:guest"]).await);
+        let replace = common::bearer_client(&ts.issue_token(&["restore:guest-in-place"]).await);
+        let anonymous = reqwest::Client::new();
+        for path in [&preview, &targets] {
+            for (client, want) in [
+                (&read_only, 403),
+                (&hosts_read, 403),
+                (&anonymous, 401),
+                (&guest, 200),
+                (&replace, 200),
+            ] {
+                let url = format!("{}{path}", ts.rest_url());
+                let status = client.get(url).send().await.unwrap().status();
+                assert_eq!(status, want, "[{name}] {path}");
+            }
+        }
 
         for path in [
             format!("/api/v1/restore/snapshots/{files}/container"),
@@ -613,7 +613,9 @@ async fn guest_targets_from_facts() {
         let one = enroll(&ts, &api, &repo, "pve-01").await;
         let two = enroll(&ts, &api, &repo, "pve-02").await;
         let other = enroll(&ts, &api, &repo, "pve-03").await;
+        let lone = enroll(&ts, &api, &repo, "lone").await;
         set_capabilities(&ts, &one, CAPS).await;
+        seed_facts(&ts, &lone, node_facts("", CLUSTER, vec![ct(500)]), 0).await;
 
         let mut facts = node_facts(
             CLUSTER,
@@ -692,6 +694,10 @@ async fn guest_targets_from_facts() {
             "[{name}]"
         );
         assert!(got["storages"].get(&other.id).is_none(), "[{name}]");
+        assert!(
+            got["storages"].get(&lone.id).is_none(),
+            "[{name}] a lone node"
+        );
         let replace = got["replace"].as_array().unwrap();
         assert_eq!(replace.len(), 2, "[{name}] {replace:?}");
         assert_eq!(replace[0]["vmid"], 200, "[{name}]");

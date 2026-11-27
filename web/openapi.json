@@ -5903,6 +5903,16 @@
               }
             }
           },
+          "403": {
+            "description": "The token holds neither `restore:guest` nor `restore:guest-in-place`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "404": {
             "description": "Unknown snapshot, or gone from storage",
             "content": {
@@ -5940,7 +5950,12 @@
           },
           {
             "bearer": [
-              "snapshots:read"
+              "restore:guest"
+            ]
+          },
+          {
+            "bearer": [
+              "restore:guest-in-place"
             ]
           }
         ]
@@ -6118,6 +6133,16 @@
               }
             }
           },
+          "403": {
+            "description": "The token holds neither `restore:guest` nor `restore:guest-in-place`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "404": {
             "description": "Unknown snapshot, or gone from storage",
             "content": {
@@ -6155,7 +6180,12 @@
           },
           {
             "bearer": [
-              "snapshots:read"
+              "restore:guest"
+            ]
+          },
+          {
+            "bearer": [
+              "restore:guest-in-place"
             ]
           }
         ]
