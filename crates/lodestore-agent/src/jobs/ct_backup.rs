@@ -178,16 +178,16 @@ pub(super) async fn run(ctx: &JobCtx, spec: &JobSpec, deadline: Deadline) -> Job
             "this agent is not set up for Proxmox VE containers",
         );
     };
-    let target = match target(ctx, pve, spec) {
-        Ok(target) => target,
-        Err(refused) => return *refused,
+    let mut finished = match target(ctx, pve, spec) {
+        Ok(target) => backup(ctx, pve, spec, target, deadline).await,
+        Err(refused) => *refused,
     };
-    let vmid = target.vmid;
-    let mut finished = backup(ctx, pve, spec, target, deadline).await;
-    if !finished.error_code.is_empty() {
+    if !finished.error_code.is_empty()
+        && let Some(instance) = &spec.instance
+    {
         finished
             .error_detail
-            .insert("vmid".into(), vmid.to_string());
+            .insert("vmid".into(), instance.vmid.to_string());
     }
     finished
 }

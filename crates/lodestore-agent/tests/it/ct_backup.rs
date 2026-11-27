@@ -9,12 +9,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lodestore_agent::jobs::JobHub;
-use lodestore_agent::jobs::ct_backup::{PveCommands, PveJobs};
+use lodestore_agent::jobs::ct_backup::{PveCommands, PveJobs, translate_excludes};
 use lodestore_agent::pve::install::embedded_plugin_hash;
 use lodestore_agent::pve::socket::PveSessions;
 use lodestore_agent::session::CAPABILITIES;
 use lodestore_agent::socket;
 use lodestore_format::ct::{CtMode, CtSnapshot};
+use lodestore_format::fs::filter::PathMatcher;
 use lodestore_format::pb;
 use lodestore_format::reader::Reader;
 use lodestore_format::repo::Repository;
@@ -23,7 +24,8 @@ use lodestore_format::store::LocalFsStore;
 use lodestore_proto::agent::v1::agent_message::Body as AgentBody;
 use lodestore_proto::agent::v1::server_message::Body as ServerBody;
 use lodestore_proto::agent::v1::{
-    AgentMessage, JobAssign, JobFinished, JobOutcome, JobSpec, SourceInstance, SourceSelector,
+    AgentMessage, JobAssign, JobCancel, JobFinished, JobOutcome, JobSpec, SourceInstance,
+    SourceSelector,
 };
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
@@ -311,4 +313,272 @@ async fn ct_backup_capability() {
     let done = lab.run().await;
     assert_ne!(done.error_code, "source_agent_outdated", "{done:?}");
     assert_eq!(lab.snapshot_count().await, 1);
+}
+
+/// Fails with `code`, writes no snapshot, and says whether vzdump ran.
+async fn refused(lab: &Lab, code: &str) -> (JobFinished, bool) {
+    let done = lab.run().await;
+    assert_eq!(done.outcome, JobOutcome::Failed as i32, "{done:?}");
+    assert_eq!(done.error_code, code, "{done:?}");
+    assert_eq!(lab.snapshot_count().await, 0);
+    (done, lab.argv().is_some())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ct_backup_not_local() {
+    let lab = Lab::new().await;
+    std::fs::create_dir_all(lab.pve.join("nodes/other/lxc")).unwrap();
+    std::fs::rename(
+        lab.pve.join(format!("nodes/{NODE}/lxc/200.conf")),
+        lab.pve.join("nodes/other/lxc/200.conf"),
+    )
+    .unwrap();
+    let (done, ran) = refused(&lab, "guest_not_local").await;
+    assert!(!ran);
+    assert_eq!(done.error_detail["vmid"], "200");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ct_backup_uuid_mismatch() {
+    let lab = Lab::new().await;
+    lab.record("0192f0c4-7d3a-7000-8000-000000000002", UID);
+    let (_, ran) = refused(&lab, "guest_identity_changed").await;
+    assert!(!ran);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ct_backup_guest_uid_changed() {
+    for guest_uid in [json!("zyxwvutsrqponmlkjihg"), Value::Null] {
+        let lab = Lab::new().await;
+        lab.scenario(json!({ "guest_uid": guest_uid }));
+        let (_, ran) = refused(&lab, "guest_identity_changed").await;
+        assert!(ran, "the uid is checked when the provider opens the backup");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ct_backup_uid_appears_after_reuse() {
+    let lab = Lab::new().await;
+    lab.record(UUID, "");
+    let (_, ran) = refused(&lab, "guest_identity_changed").await;
+    assert!(ran);
+
+    let lab = Lab::new().await;
+    lab.record(UUID, "");
+    lab.scenario(json!({ "guest_uid": null }));
+    let done = lab.run().await;
+    assert_eq!(done.outcome, JobOutcome::Succeeded as i32, "{done:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ct_backup_plugin_unhealthy() {
+    let lab = Lab::new().await;
+    let provider = lab.perl.join("PVE/BackupProvider/Plugin/Lodestore.pm");
+    let mut text = std::fs::read_to_string(&provider).unwrap();
+    text.push_str("# changed\n");
+    std::fs::write(&provider, text).unwrap();
+    let (done, ran) = refused(&lab, "guest_plugin_missing").await;
+    assert!(!ran);
+    assert!(
+        done.error_message
+            .contains(&format!("run lodestore-agent pve install on {NODE}")),
+        "{}",
+        done.error_message
+    );
+}
+
+/// The paths of `tree` that survive `patterns`, as `tar` of vzdump keeps them
+/// and as the walk keeps them with [`translate_excludes`].
+fn kept_by_tar(
+    tree: &Path,
+    patterns: &[&str],
+    archive: &Path,
+) -> std::collections::BTreeSet<String> {
+    let mut create = std::process::Command::new("tar");
+    create.arg("-cf").arg(archive).arg("-C").arg(tree);
+    create.arg("--no-anchored");
+    create.args(
+        patterns
+            .iter()
+            .filter(|p| !p.starts_with('/'))
+            .map(|p| format!("--exclude={p}")),
+    );
+    create.arg("--anchored");
+    create.args(
+        patterns
+            .iter()
+            .filter(|p| p.starts_with('/'))
+            .map(|p| format!("--exclude=.{p}")),
+    );
+    assert!(create.args(["--", "./"]).status().unwrap().success());
+    let list = std::process::Command::new("tar")
+        .arg("-tf")
+        .arg(archive)
+        .output()
+        .unwrap();
+    assert!(list.status.success());
+    String::from_utf8(list.stdout)
+        .unwrap()
+        .lines()
+        .map(|l| l.trim_start_matches("./").trim_end_matches('/').to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
+fn kept_by_walk(
+    dir: &Path,
+    rel: &str,
+    matcher: &PathMatcher,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name().into_string().unwrap();
+        let path = format!("{rel}/{name}");
+        let is_dir = entry.file_type().unwrap().is_dir();
+        if matcher.is_match(path.as_bytes(), is_dir) {
+            continue;
+        }
+        out.insert(path[1..].to_string());
+        if is_dir {
+            kept_by_walk(&entry.path(), &path, matcher, out);
+        }
+    }
+}
+
+#[test]
+fn ct_backup_excludes_match_tar() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tree = tmp.path().join("tree");
+    for file in [
+        "tmp/a",
+        "tmp/sub/b",
+        "var/tmp/c",
+        "var/run/x.pid",
+        "var/run/keep",
+        "home/u/b.cache",
+        "home/u/.cache/d",
+        "srv/tmp/e",
+        "data/logs/old.log",
+    ] {
+        write(&tree.join(file), "x");
+    }
+    let patterns = [
+        "/tmp/?*",
+        "/var/tmp/?*",
+        "/var/run/?*.pid",
+        "*.cache",
+        "/data/logs/*.log",
+        "tmp",
+        "*/sub/*",
+        "/srv/",
+    ];
+    let sets: Vec<Vec<&str>> = patterns
+        .iter()
+        .map(|p| vec![*p])
+        .chain([patterns.to_vec(), Vec::new()])
+        .collect();
+    for set in sets {
+        let owned: Vec<String> = set.iter().map(|p| p.to_string()).collect();
+        let (matcher, _) = translate_excludes(&owned);
+        let mut walked = std::collections::BTreeSet::new();
+        kept_by_walk(&tree, "", &matcher, &mut walked);
+        let tar = kept_by_tar(&tree, &set, &tmp.path().join("a.tar"));
+        assert_eq!(walked, tar, "patterns {set:?}");
+    }
+    let (_, warnings) = translate_excludes(&["/srv/".to_string()]);
+    assert_eq!(warnings.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ct_backup_mode_from_output() {
+    let lab = Lab::new().await;
+    let copy = lab.tmp.path().join("tmp/vzdumptmp4242_200");
+    write(&copy.join("etc/hostname"), "ct200\n");
+    lab.scenario(json!({ "dir": copy, "mode": "suspend", "sources": ["."] }));
+    let done = lab.run().await;
+    assert_eq!(done.outcome, JobOutcome::Succeeded as i32, "{done:?}");
+    let (_, ct, _) = lab.container().await;
+    assert_eq!(ct.meta.mode, CtMode::Suspend);
+
+    let lab = Lab::new().await;
+    let copy = lab.tmp.path().join("tmp/vzdumptmp4242_200");
+    write(&copy.join("etc/hostname"), "ct200\n");
+    lab.scenario(json!({ "dir": copy, "mode": "snapshot", "sources": ["."] }));
+    refused(&lab, "ct_mode_mismatch").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ct_backup_excludes() {
+    let lab = Lab::new().await;
+    for file in ["tmp/a", "var/run/x.pid", "var/run/keep", "home/u/b.cache"] {
+        write(&lab.ct.join(file), "x");
+    }
+    lab.scenario(json!({ "excludes": ["/tmp/?*", "/var/tmp/?*", "/var/run/?*.pid", "*.cache"] }));
+    let done = lab.run().await;
+    assert_eq!(done.outcome, JobOutcome::Succeeded as i32, "{done:?}");
+    let (_, _, nodes) = lab.container().await;
+    for gone in ["/fs/tmp/a", "/fs/var/run/x.pid", "/fs/home/u/b.cache"] {
+        assert!(!nodes.contains_key(gone), "{gone}");
+    }
+    for kept in ["/fs/tmp", "/fs/var/run/keep", "/fs/home/u"] {
+        assert!(nodes.contains_key(kept), "{kept}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ct_backup_mount_points() {
+    let lab = Lab::new().await;
+    write(&lab.ct.join("data/f"), "mounted");
+    lab.scenario(json!({ "sources": ["./", "./data"] }));
+    let done = lab.run().await;
+    assert_eq!(done.outcome, JobOutcome::Succeeded as i32, "{done:?}");
+    let (_, _, nodes) = lab.container().await;
+    assert!(nodes.contains_key("/fs/data/f"));
+
+    let lab = Lab::new().await;
+    std::os::unix::fs::symlink(lab.tmp.path(), lab.ct.join("outside")).unwrap();
+    lab.scenario(json!({ "sources": ["./", "./outside"] }));
+    refused(&lab, "source_invalid").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ct_backup_empty_rootfs() {
+    let lab = Lab::new().await;
+    std::fs::remove_dir_all(lab.ct.join("etc")).unwrap();
+    refused(&lab, "ct_empty_rootfs").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ct_backup_fail_after_data() {
+    let lab = Lab::new().await;
+    lab.scenario(json!({ "fail_after_data": true }));
+    let (done, _) = refused(&lab, "vzdump_failed").await;
+    assert!(
+        done.error_message.contains("failure injected"),
+        "{}",
+        done.error_message
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ct_backup_cancel() {
+    let lab = Lab::new().await;
+    let term = lab.tmp.path().join("terminated");
+    lab.scenario(json!({ "pause": 60, "term_file": term }));
+    lab.assign();
+    let started = tokio::time::Instant::now();
+    while lab.argv().is_none() {
+        assert!(started.elapsed() < WAIT, "vzdump did not start");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    lab.hub
+        .handle(ServerBody::JobCancel(JobCancel { job_id: JOB.into() }));
+    let msgs = lab.wait().await;
+    let done = finished(&msgs).unwrap();
+    assert_eq!(done.outcome, JobOutcome::Cancelled as i32, "{done:?}");
+    assert!(started.elapsed() < Duration::from_secs(30));
+    assert!(term.exists(), "vzdump got no SIGTERM");
+    assert_eq!(lab.snapshot_count().await, 0);
 }
