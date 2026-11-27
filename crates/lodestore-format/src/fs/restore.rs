@@ -17,6 +17,7 @@ use super::meta::{Target, apply_metadata};
 use super::walk::ExtentReader;
 use crate::chunker::{Chunker, blob_id};
 use crate::crypto::Key32;
+use crate::ct::IdMap;
 use crate::error::{Error, Result};
 use crate::image::IMAGE_CHUNK_SIZE;
 use crate::pb;
@@ -161,6 +162,8 @@ pub struct Restorer {
     unapplied: Vec<Unapplied>,
     /// First restored member of each hardlink group, as a path below the target.
     links: HashMap<u64, Vec<u8>>,
+    /// Owners are translated from a container's view by this map.
+    id_shift: Option<IdMap>,
 }
 
 /// A file being written under a temporary name; it takes its final name in
@@ -307,7 +310,17 @@ impl Restorer {
             names: Vec::new(),
             unapplied: Vec::new(),
             links: HashMap::new(),
+            id_shift: None,
         })
+    }
+
+    /// Translates owners, ACLs and capabilities from the container's view
+    /// in `map` to the node's before they are applied. Without
+    /// `restore_owners` it changes nothing; capabilities still need
+    /// `keep_privileges`.
+    pub fn with_id_shift(mut self, map: IdMap) -> Self {
+        self.id_shift = Some(map);
+        self
     }
 
     /// Whether the opened target can be written, asked of the open folder
@@ -520,6 +533,7 @@ impl Restorer {
                 &path,
                 self.settings.restore_owners,
                 self.settings.keep_privileges,
+                self.id_shift.as_ref(),
                 &mut self.unapplied,
             );
         }
@@ -655,6 +669,7 @@ impl Restorer {
                                 &path,
                                 self.settings.restore_owners,
                                 self.settings.keep_privileges,
+                                self.id_shift.as_ref(),
                                 &mut self.unapplied,
                             );
                             self.remember_link(node);
@@ -785,6 +800,7 @@ impl Restorer {
             &path,
             self.settings.restore_owners,
             self.settings.keep_privileges,
+            self.id_shift.as_ref(),
             &mut self.unapplied,
         );
         drop(file);
@@ -986,6 +1002,7 @@ impl Restorer {
             &path,
             self.settings.restore_owners,
             self.settings.keep_privileges,
+            self.id_shift.as_ref(),
             &mut unapplied,
         );
         self.unapplied = unapplied;

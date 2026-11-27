@@ -11,10 +11,11 @@ use super::{
 use crate::chunker::Chunker;
 use crate::crypto::{BLOB_TYPE_DATA, BlobId};
 use crate::ct::{
-    CONFIG_DIR, CONFIG_FILE, CtMeta, FIREWALL_FILE, FS_DIR, FS_PATH, MAX_CT_CONFIG_BYTES,
+    CONFIG_DIR, CONFIG_FILE, CtMeta, FIREWALL_FILE, FS_DIR, FS_PATH, IdMap, MAX_CT_CONFIG_BYTES,
 };
 use crate::error::{Error, Result};
 use crate::fs::filter::PathMatcher;
+use crate::fs::idmap::{Direction, OVERFLOW_ID, shift_node};
 use crate::fs::walk::Walker;
 use crate::fs::{conv, meta};
 use crate::pb;
@@ -37,7 +38,10 @@ pub struct CtBackup {
 }
 
 /// How the walk of a container differs from a file backup.
-pub(super) struct CtWalk;
+pub(super) struct CtWalk {
+    pub(super) idmap: Option<IdMap>,
+    pub(super) unmapped: u64,
+}
 
 impl CtWalk {
     /// Like the `tar` of vzdump, the walk leaves out every `lost+found` and
@@ -145,7 +149,10 @@ impl<S: BlobStore> Writer<S> {
         let mut run = Session::new(self, progress);
         run.apply(&mut options);
         run.walk.exclude.clone_from(&ct.exclude);
-        run.ct = Some(CtWalk);
+        run.ct = Some(CtWalk {
+            idmap: ct.meta.idmap.clone(),
+            unmapped: 0,
+        });
         run.root_dev = conv(st.st_dev);
         let root_tree = match run.container_tree(dir, &st, &ct, started).await {
             Ok(root) => root,
@@ -157,7 +164,17 @@ impl<S: BlobStore> Writer<S> {
         };
         run.wind_down().await?;
 
-        let unmapped = 0;
+        let unmapped = run.ct.as_ref().map_or(0, |c| c.unmapped);
+        if unmapped > 0 {
+            run.issue(
+                true,
+                pb::IssueKind::Unspecified,
+                FS_PATH,
+                format!(
+                    "{unmapped} owner ids are outside the container's id map and were stored as {OVERFLOW_ID}"
+                ),
+            );
+        }
         let stats = run.stats;
         let snapshot = pb::Snapshot {
             time: Some(started),
@@ -224,12 +241,30 @@ impl<S: BlobStore> Session<'_, '_, S> {
     }
 
     /// The node of an entry below `/fs` as the container sees it.
-    pub(super) fn ct_node(&mut self, node: &mut pb::Node, _path: &[u8]) {
-        if self.ct.is_none() {
+    /// The node of an entry below `/fs` as the container sees it: owners,
+    /// ACLs and capabilities translated by the id map and no owner names. An
+    /// ACL or capability xattr that does not parse is left out with a warning.
+    pub(super) fn ct_node(&mut self, node: &mut pb::Node, path: &[u8]) {
+        let Some(ct) = self.ct.as_mut() else {
             return;
-        }
+        };
         node.user.clear();
         node.group.clear();
+        let Some(map) = &ct.idmap else {
+            return;
+        };
+        let dropped = shift_node(node, Direction::HostToCt, map, &mut ct.unmapped);
+        for (name, e) in dropped {
+            self.issue(
+                true,
+                pb::IssueKind::Unreadable,
+                path,
+                format!(
+                    "extended attribute {} not captured: {e}",
+                    String::from_utf8_lossy(&name)
+                ),
+            );
+        }
     }
 
     async fn config_file(
