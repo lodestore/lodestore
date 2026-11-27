@@ -30,7 +30,7 @@ const LOW_KDF: KdfCost = KdfCost {
 const CONFIG: &str = "arch: amd64\nhostname: dns\n";
 const GUEST: &str = "0b0e6b8e-6d4f-4c1a-9a43-3f6c4b8e2a10";
 
-async fn init_repo(dir: &Path) -> LocalFsStore {
+pub(crate) async fn init_repo(dir: &Path) -> LocalFsStore {
     let store = LocalFsStore::new(dir.to_path_buf());
     let mut entropy = Entropy::os();
     let options = InitOptions {
@@ -45,22 +45,22 @@ async fn init_repo(dir: &Path) -> LocalFsStore {
     store
 }
 
-async fn writer(store: &LocalFsStore) -> Writer<&LocalFsStore> {
+pub(crate) async fn writer(store: &LocalFsStore) -> Writer<&LocalFsStore> {
     let repo = Repository::open(store, b"pw").await.unwrap();
     let keys = repo.read_keys().write_keys(repo.config_hash());
     Writer::new(store, keys, repo.config()).await.unwrap()
 }
 
-async fn reader(store: &LocalFsStore) -> Reader<&LocalFsStore> {
+pub(crate) async fn reader(store: &LocalFsStore) -> Reader<&LocalFsStore> {
     let repo = Repository::open(store, b"pw").await.unwrap();
     Reader::open(store, repo.read_keys().duplicate(), repo.config()).unwrap()
 }
 
-fn key() -> SourceKey {
+pub(crate) fn key() -> SourceKey {
     SourceKey::proxmox_ct("cluster", GUEST).unwrap()
 }
 
-fn open_dir(path: &Path) -> OwnedFd {
+pub(crate) fn open_dir(path: &Path) -> OwnedFd {
     openat(
         rustix::fs::CWD,
         path,

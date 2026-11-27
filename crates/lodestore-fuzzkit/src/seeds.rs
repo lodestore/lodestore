@@ -484,6 +484,21 @@ pub fn try_seeds(fixtures: &Path) -> Result<Seeds, String> {
         "ct_layout",
         b"unprivileged: 1\nlxc.idmap: u 0 100000 65536\n".to_vec(),
     ));
+    let planted: &[u8] =
+        b"# web\narch: amd64\nlxc.hook.pre-start: /x\nmp0: mp=/host,volume=/,size=1G\n\
+        mp1: local-lvm:vm-1-disk-1,mp=/data,backup=1,size=32G\nhookscript: local:snippets/x.sh\n\
+        dev0: /dev/sda\nunprivileged: 0\nfeatures: nesting=1,keyctl=1\n\
+        rootfs: volume=local-lvm:vm-1-disk-0,size=8G\n\
+        net0: name=eth0,bridge=vmbr0,hwaddr=AA:BB:CC:00:00:01,firewall=1,link_down=1\n\
+        meta: ctime=1,rtime=2,uid=abcdefghijklmnopqrst\n[snap]\nlxc.hook.mount: /x\n";
+    for mode in 0u8..4 {
+        let mut seed = vec![mode];
+        seed.extend_from_slice(planted);
+        if mode & 1 == 1 {
+            seed.extend_from_slice(b"\0net0: name=eth0,hwaddr=BC:24:11:00:00:99,firewall=1\n");
+        }
+        out.push(("guest_config", seed));
+    }
 
     let binding = vectors(fixtures, "image-binding-vectors.json")?;
     for claimed in hex_fields(&binding, "claimed")? {
