@@ -104,12 +104,17 @@ struct PairRow<'a> {
 }
 
 impl<'a> PairRow<'a> {
+    /// The `source` label is left out for files, so their series keep the identity they had before instances had series.
     fn labels(&self) -> Labels<'a> {
-        vec![
+        let mut labels = vec![
             ("host_id", self.host.host_id.as_str()),
             ("host", self.host.hostname.as_str()),
             ("policy", self.pair.policy.as_str()),
-        ]
+        ];
+        if !self.pair.source_ref.is_empty() {
+            labels.push(("source", self.pair.source_ref.as_str()));
+        }
+        labels
     }
 }
 
@@ -265,13 +270,18 @@ fn pair_series(
         .hosts
         .iter()
         .flat_map(|host| {
-            // shortcut: per-pair series cover the files instance; add a source label when other sources back up (phase 22).
-            let files = host.pairs.iter().filter(|p| p.source_ref.is_empty());
-            files.map(move |pair| PairRow {
-                host,
-                pair,
-                detail: details.get(&(pair.policy.clone(), host.host_id.clone())),
-            })
+            host.pairs
+                .iter()
+                .filter(|p| p.expected)
+                .map(move |pair| PairRow {
+                    host,
+                    pair,
+                    detail: details.get(&(
+                        pair.policy.clone(),
+                        host.host_id.clone(),
+                        pair.source_ref.clone(),
+                    )),
+                })
         })
         .collect();
     x.family(
@@ -324,19 +334,19 @@ fn pair_series(
     );
 }
 
-type Pair = (String, String);
+type Pair = (String, String, String);
 
 async fn pair_details(state: &AppState) -> anyhow::Result<HashMap<Pair, PairDetail>> {
     let mut out: HashMap<Pair, PairDetail> = HashMap::new();
     let rows = sqlx::query(
-        "SELECT s.policy_name, s.host_id, s.stats_json FROM snapshots s JOIN ( \
-             SELECT policy_name, host_id, MAX(received_at) AS at FROM snapshots \
+        "SELECT s.policy_name, s.host_id, s.source_ref, s.stats_json FROM snapshots s JOIN ( \
+             SELECT policy_name, host_id, source_ref, MAX(received_at) AS at FROM snapshots \
              WHERE incomplete = 0 AND verified_at IS NOT NULL AND stdin_name IS NULL \
-                 AND source_ref = '' AND policy_name IS NOT NULL AND host_id IS NOT NULL \
-             GROUP BY policy_name, host_id \
-         ) l ON l.policy_name = s.policy_name AND l.host_id = s.host_id AND l.at = s.received_at \
-         WHERE s.incomplete = 0 AND s.verified_at IS NOT NULL AND s.stdin_name IS NULL \
-             AND s.source_ref = ''",
+                 AND policy_name IS NOT NULL AND host_id IS NOT NULL \
+             GROUP BY policy_name, host_id, source_ref \
+         ) l ON l.policy_name = s.policy_name AND l.host_id = s.host_id \
+             AND l.source_ref = s.source_ref AND l.at = s.received_at \
+         WHERE s.incomplete = 0 AND s.verified_at IS NOT NULL AND s.stdin_name IS NULL",
     )
     .fetch_all(&state.db.pool)
     .await
@@ -345,18 +355,23 @@ async fn pair_details(state: &AppState) -> anyhow::Result<HashMap<Pair, PairDeta
         let stats: Value =
             serde_json::from_str(&row.try_get::<String, _>("stats_json")?).unwrap_or(Value::Null);
         let detail = out
-            .entry((row.try_get("policy_name")?, row.try_get("host_id")?))
+            .entry((
+                row.try_get("policy_name")?,
+                row.try_get("host_id")?,
+                row.try_get("source_ref")?,
+            ))
             .or_default();
         detail.bytes_added = stats["bytes_added"].as_u64();
         detail.bytes_total = stats["bytes_total"].as_u64();
     }
     let rows = sqlx::query(
-        "SELECT j.policy_name, j.host_id, j.started_at, j.finished_at FROM jobs j JOIN ( \
-             SELECT policy_name, host_id, MAX(finished_at) AS at FROM jobs \
+        "SELECT j.policy_name, j.host_id, j.source_ref, j.started_at, j.finished_at FROM jobs j JOIN ( \
+             SELECT policy_name, host_id, source_ref, MAX(finished_at) AS at FROM jobs \
              WHERE kind = 'backup' AND state IN ('succeeded', 'warnings') \
                  AND policy_name IS NOT NULL AND started_at IS NOT NULL \
-             GROUP BY policy_name, host_id \
-         ) l ON l.policy_name = j.policy_name AND l.host_id = j.host_id AND l.at = j.finished_at \
+             GROUP BY policy_name, host_id, source_ref \
+         ) l ON l.policy_name = j.policy_name AND l.host_id = j.host_id \
+             AND l.source_ref = j.source_ref AND l.at = j.finished_at \
          WHERE j.kind = 'backup' AND j.state IN ('succeeded', 'warnings') \
              AND j.started_at IS NOT NULL",
     )
@@ -366,9 +381,13 @@ async fn pair_details(state: &AppState) -> anyhow::Result<HashMap<Pair, PairDeta
     for row in &rows {
         let started: i64 = row.try_get("started_at")?;
         let finished: i64 = row.try_get("finished_at")?;
-        out.entry((row.try_get("policy_name")?, row.try_get("host_id")?))
-            .or_default()
-            .duration_secs = Some(secs((finished - started).max(0)));
+        out.entry((
+            row.try_get("policy_name")?,
+            row.try_get("host_id")?,
+            row.try_get("source_ref")?,
+        ))
+        .or_default()
+        .duration_secs = Some(secs((finished - started).max(0)));
     }
     Ok(out)
 }
@@ -788,7 +807,7 @@ async fn check_series(x: &mut Exposition, state: &AppState) -> anyhow::Result<()
     Ok(())
 }
 
-const ALERT_TYPES: [AlertType; 13] = [
+const ALERT_TYPES: [AlertType; 15] = [
     AlertType::BackupFailed,
     AlertType::NoRecentBackup,
     AlertType::AgentOffline,
@@ -802,6 +821,8 @@ const ALERT_TYPES: [AlertType; 13] = [
     AlertType::SourceInstanceGone,
     AlertType::GuaranteeDowngraded,
     AlertType::HostKeyChanged,
+    AlertType::GuestUnprotected,
+    AlertType::PvePluginMissing,
 ];
 
 async fn alert_series(x: &mut Exposition, state: &AppState, now_ms: i64) -> anyhow::Result<()> {

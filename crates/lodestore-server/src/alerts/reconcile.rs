@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::Context;
 use sqlx::{Any, Row, Transaction};
 
-use super::evaluate::Candidate;
+use super::evaluate::{Candidate, PLUGIN_KEY};
 use super::model::REMINDER_EVERY;
 use super::{silences, text};
 use crate::state::AppState;
@@ -26,12 +26,18 @@ struct Burning {
 pub struct Unknown {
     pub server_cert: bool,
     pub policies: HashSet<String>,
+    /// Proxmox clusters and nodes whose plugin state was read this tick.
+    pub plugin_scopes: HashSet<String>,
 }
 
 impl Unknown {
     pub fn covers(&self, key: &str, policy: Option<&str>) -> bool {
         (self.server_cert && key == GRPC_CERT_KEY)
             || policy.is_some_and(|p| self.policies.contains(p))
+            || key
+                .strip_prefix(PLUGIN_KEY)
+                .and_then(|rest| rest.rsplit_once(':'))
+                .is_some_and(|(scope, _)| !self.plugin_scopes.contains(scope))
     }
 }
 
@@ -192,11 +198,14 @@ mod tests {
         let unknown = Unknown {
             server_cert: true,
             policies: HashSet::from(["daily".to_string()]),
+            plugin_scopes: HashSet::from(["c1".to_string()]),
         };
         assert!(unknown.covers(GRPC_CERT_KEY, None));
         assert!(!unknown.covers("certificate_expiring:agent:h1", None));
         assert!(unknown.covers("backup_failed:h1:daily", Some("daily")));
         assert!(!unknown.covers("backup_failed:h1:weekly", Some("weekly")));
+        assert!(!unknown.covers("pve_plugin_missing:c1:pve-03", None));
+        assert!(unknown.covers("pve_plugin_missing:c2:pve-03", None));
         assert!(!Unknown::default().covers(GRPC_CERT_KEY, Some("daily")));
     }
 }
