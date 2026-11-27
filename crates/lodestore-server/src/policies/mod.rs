@@ -937,6 +937,20 @@ pub async fn run_policy(
     Ok(Json(RunResult { jobs }))
 }
 
+pub(crate) async fn hosts_of_policy(
+    state: &AppState,
+    policy_id: &str,
+) -> Result<Vec<String>, ApiError> {
+    let rows = all_policies(state).await?;
+    let Some(row) = rows.iter().find(|r| r.id == policy_id) else {
+        return Ok(Vec::new());
+    };
+    Ok(hosts_of(&load_agents(state).await?, row)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect())
+}
+
 async fn host_agent(state: &AppState, id: &str) -> Result<AgentRow, ApiError> {
     if let Some(agent) = load_agents(state).await?.into_iter().find(|a| a.id == id) {
         return Ok(agent);

@@ -60,6 +60,7 @@ mod gc_chaos;
 mod gc_cycle;
 mod gc_s3;
 mod gc_schedule;
+mod guest_jobs;
 mod image_restore;
 mod install;
 mod install_verify;

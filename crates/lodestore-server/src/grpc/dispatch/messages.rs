@@ -651,6 +651,11 @@ async fn apply_finished(
     }
     state.registry.live.remove(job_id);
     state.registry.clear_issued(job_id);
+    if error_code.as_deref() == Some(super::GUEST_NOT_LOCAL)
+        && let Err(error) = super::redispatch_guest(state, job_id).await
+    {
+        tracing::warn!(%error, job_id, "queueing the container job on its own node failed");
+    }
     if let Some(message) = &refusal
         && let Err(error) = crate::catalog::retention::append_event(
             state,
