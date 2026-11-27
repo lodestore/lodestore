@@ -240,6 +240,22 @@ impl Prepared {
                 )
             })?)
         };
+        // A range that starts at host id 0 maps a container id to the node's root.
+        if id_shift
+            .as_ref()
+            .is_some_and(|m| m.ranges().iter().any(|r| r.host == 0))
+        {
+            return Err(abort(
+                "restore_failed",
+                "the container idmap of the snapshot maps a container id to root on the node",
+            ));
+        }
+        if spec.in_place && (id_shift.is_some() || spec.guest_snapshot) {
+            return Err(abort(
+                "restore_failed",
+                "a container snapshot cannot be restored in place",
+            ));
+        }
         let policy = ConflictPolicy::try_from(spec.conflict).unwrap_or_default();
         let mut confined = None;
         let target = if spec.in_place {

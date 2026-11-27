@@ -874,10 +874,8 @@ async fn restore_runner_root_new_folder_gives_foreign_owner_without_privileges()
     assert!(has_cap(&restored), "in place keeps {CAP}");
 }
 
-#[cfg(target_os = "linux")]
 const CT_IDMAP: &str = "u:0:100000:65536,g:0:100000:65536";
 
-#[cfg(target_os = "linux")]
 /// Files of a container snapshot: `a/x` owned by the container's root, `a/y`
 /// by its uid 33 and `b/z` setuid with a capability.
 fn ct_plan(planned: &Planned) -> MemPlan {
@@ -899,14 +897,20 @@ fn ct_plan(planned: &Planned) -> MemPlan {
     })
 }
 
-#[cfg(target_os = "linux")]
-async fn ct_files_restore(fx: &Fx, dest: &Path, ct_idmap: &str) -> Vec<AgentMessage> {
+/// Runs a files restore of a container snapshot into `dest` and returns
+/// the job's end.
+async fn ct_restore_job(
+    fx: &Fx,
+    dest: &Path,
+    tweak: impl FnOnce(&mut RestoreSpec),
+    opts: RestoreOptions,
+) -> JobFinished {
     let hub = fx.hub();
     let ids = ids(fx).await;
     let planned = fx.plan(&["a/x", "a/y", "b/z"], 4, None).await;
     let id = fx.job_id();
-    let spec = RestoreSpec {
-        ct_idmap: ct_idmap.into(),
+    let mut spec = RestoreSpec {
+        ct_idmap: CT_IDMAP.into(),
         ..fx.spec(
             dest,
             ConflictPolicy::OverwriteChanged,
@@ -916,10 +920,7 @@ async fn ct_files_restore(fx: &Fx, dest: &Path, ct_idmap: &str) -> Vec<AgentMess
             ids.repo_id,
         )
     };
-    let opts = RestoreOptions {
-        roots: vec![fx.root.clone()],
-        ..options()
-    };
+    tweak(&mut spec);
     let msgs = run(
         &hub,
         &id,
@@ -929,9 +930,86 @@ async fn ct_files_restore(fx: &Fx, dest: &Path, ct_idmap: &str) -> Vec<AgentMess
         opts,
     )
     .await;
-    let f = finished_of(&msgs, &id).unwrap();
-    assert_eq!(f.outcome, JobOutcome::Succeeded as i32, "{msgs:?}");
-    msgs
+    finished_of(&msgs, &id).unwrap().clone()
+}
+
+fn in_root(fx: &Fx) -> RestoreOptions {
+    RestoreOptions {
+        roots: vec![fx.root.clone()],
+        ..options()
+    }
+}
+
+async fn assert_refused(fx: &Fx, tweak: impl FnOnce(&mut RestoreSpec), text: &str) {
+    let dest = fx.root.join("refused");
+    let f = ct_restore_job(fx, &dest, tweak, in_root(fx)).await;
+    assert_eq!(f.outcome, JobOutcome::Failed as i32, "{f:?}");
+    assert_eq!(f.error_code, "restore_failed", "{f:?}");
+    assert_eq!(f.error_message, text, "{f:?}");
+    assert!(!dest.exists(), "nothing is written");
+}
+
+#[tokio::test]
+async fn restore_ct_idmap_invalid_refused() {
+    let fx = Fx::new().await;
+    let text = "the container idmap of the snapshot is invalid";
+    assert_refused(&fx, |s| s.ct_idmap = "u:0:100000".into(), text).await;
+    let long = vec!["u:0:100000:1"; 30].join(",");
+    assert!(long.len() > 256);
+    assert_refused(&fx, |s| s.ct_idmap = long, text).await;
+}
+
+#[tokio::test]
+async fn restore_ct_idmap_maps_root_refused() {
+    let fx = Fx::new().await;
+    let text = "the container idmap of the snapshot maps a container id to root on the node";
+    for map in [
+        "u:0:0:65536,g:0:100000:65536",
+        "u:0:100000:65536,g:1000:0:1",
+    ] {
+        assert_refused(&fx, |s| s.ct_idmap = map.into(), text).await;
+    }
+}
+
+#[tokio::test]
+async fn restore_ct_idmap_in_place_refused() {
+    let fx = Fx::new().await;
+    let target = fx.root.join("in-place");
+    let opts = RestoreOptions {
+        root: target.clone(),
+        allow_in_place: true,
+        ..options()
+    };
+    let f = ct_restore_job(&fx, Path::new("/"), |s| s.in_place = true, opts).await;
+    assert_eq!(f.outcome, JobOutcome::Failed as i32, "{f:?}");
+    assert_eq!(f.error_code, "restore_failed", "{f:?}");
+    assert_eq!(
+        f.error_message,
+        "a container snapshot cannot be restored in place"
+    );
+    assert!(!target.exists(), "nothing is written");
+}
+
+#[tokio::test]
+async fn restore_ct_idmap_without_owners() {
+    let fx = Fx::new().await;
+    let dest = fx.root.join("fresh");
+    let f = ct_restore_job(&fx, &dest, |s| s.restore_owners = false, in_root(&fx)).await;
+    assert_eq!(f.outcome, JobOutcome::Succeeded as i32, "{f:?}");
+    assert_eq!(f.errors_total + f.warnings_total, 0, "{f:?}");
+    let me = rustix::process::geteuid().as_raw();
+    for rel in ["a/x", "a/y", "b/z"] {
+        let meta = fs::metadata(fx.restored(&dest, rel)).unwrap();
+        assert_eq!(meta.uid(), me, "{rel}: no owner is applied");
+    }
+    assert_eq!(
+        fs::metadata(fx.restored(&dest, "b/z"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7000,
+        0
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -943,7 +1021,8 @@ async fn pve_root_file_shift_owners() {
     assert!(is_root(), "run through scripts/test-linux.sh --root");
     let fx = Fx::new().await;
     let dest = fx.root.join("fresh");
-    ct_files_restore(&fx, &dest, CT_IDMAP).await;
+    let f = ct_restore_job(&fx, &dest, |_| {}, in_root(&fx)).await;
+    assert_eq!(f.outcome, JobOutcome::Succeeded as i32, "{f:?}");
     let owner = |rel: &str| {
         let meta = fs::metadata(fx.restored(&dest, rel)).unwrap();
         (meta.uid(), meta.gid())
@@ -967,7 +1046,8 @@ async fn pve_root_file_shift_privileged_ct() {
     assert!(is_root(), "run through scripts/test-linux.sh --root");
     let fx = Fx::new().await;
     let dest = fx.root.join("fresh");
-    ct_files_restore(&fx, &dest, "").await;
+    let f = ct_restore_job(&fx, &dest, |s| s.ct_idmap.clear(), in_root(&fx)).await;
+    assert_eq!(f.outcome, JobOutcome::Succeeded as i32, "{f:?}");
     let uid = |rel: &str| fs::metadata(fx.restored(&dest, rel)).unwrap().uid();
     assert_eq!(uid("a/x"), 0);
     assert_eq!(uid("a/y"), 33);
