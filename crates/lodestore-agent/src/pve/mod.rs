@@ -1,6 +1,8 @@
 //! Proxmox VE support: the socket operations the Perl backup provider uses to
-//! hand a container backup or restore to the agent.
+//! hand a container backup or restore to the agent, and the installer of the
+//! provider and the storage plugin.
 
+pub mod install;
 pub mod socket;
 
 pub const STORAGE_ID: &str = "lodestore";

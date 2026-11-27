@@ -100,7 +100,7 @@ impl Switcher for RecordingSwitcher {
     }
 }
 
-const SERVICE: &str = "lodestore-agent.service";
+pub(crate) const SERVICE: &str = "lodestore-agent.service";
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Real systemd calls. Every program runs with an argv vector, never a shell.

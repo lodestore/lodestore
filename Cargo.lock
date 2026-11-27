@@ -2524,6 +2524,7 @@ dependencies = [
  "anyhow",
  "aws-lc-rs",
  "blake2",
+ "blake3",
  "bytes",
  "clap",
  "data-encoding",
