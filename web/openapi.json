@@ -7496,11 +7496,32 @@
               "null"
             ]
           },
+          "plugin_outdated": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "The plugin is installed but not the current one, as opposed to missing."
+          },
           "previous_ip": {
             "type": [
               "string",
               "null"
             ]
+          },
+          "pve_cluster": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The cluster of that node; absent for a node outside a cluster."
+          },
+          "pve_node": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The Proxmox node whose plugin is missing or outdated."
           },
           "serial": {
             "type": [
@@ -7616,7 +7637,9 @@
           "agent_certificate_rejected",
           "source_instance_gone",
           "guarantee_downgraded",
-          "host_key_changed"
+          "host_key_changed",
+          "guest_unprotected",
+          "pve_plugin_missing"
         ]
       },
       "Alerts": {

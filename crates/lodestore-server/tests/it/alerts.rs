@@ -1779,3 +1779,190 @@ async fn alerts_guest_left_out_of_an_incomplete_list_still_alerts() {
         env.stop().await;
     }
 }
+
+impl Env {
+    async fn ct_policy(&self, name: &str, host: &str, vmids: &str) {
+        let yaml = format!(
+            "apiVersion: lodestore.io/v1alpha2\nkind: BackupPolicy\nmetadata:\n  name: {name}\n\
+             spec:\n  repository: main\n  selector:\n    hosts: [{host}]\n  \
+             source:\n    type: proxmox-ct\n    vmids: [{vmids}]\n{DAILY}"
+        );
+        let policy = lodestore_policy::parse_yaml(&yaml).unwrap();
+        sqlx::query(
+            "INSERT INTO policies (id, name, repository_id, yaml, spec_json, revision, \
+             created_at, updated_at) VALUES ($1, $1, $2, $3, $4, 1, $5, $5)",
+        )
+        .bind(name)
+        .bind(&self.repo)
+        .bind(&yaml)
+        .bind(serde_json::to_string(&policy).unwrap())
+        .bind(now_ms() - 30 * DAY)
+        .execute(self.pool())
+        .await
+        .unwrap();
+    }
+
+    async fn ct_facts(&self, host: &str, cts: &[u32], truncated: bool, at: i64) {
+        let facts = SourceFacts {
+            truncated,
+            proxmox: Some(ProxmoxFacts {
+                cluster: "pve-prod".to_string(),
+                node: "pve1".to_string(),
+                guests: cts
+                    .iter()
+                    .map(|vmid| ProxmoxGuest {
+                        kind: GuestKind::Ct as i32,
+                        vmid: *vmid,
+                        name: "dns".to_string(),
+                        uuid: format!("{vmid:08}-1111-4111-8111-111111111111"),
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        sources::record(self.ts.state(), host, &facts, &mut None, at)
+            .await
+            .unwrap();
+    }
+
+    async fn ct_snapshot(&self, id: &str, host: &str, policy: &str, vmid: u32, at: i64) -> String {
+        let key = self.guest_key(host, vmid).await;
+        self.snapshot(id, host, policy, at).await;
+        sqlx::query(
+            "UPDATE snapshots SET source_type = 'proxmox-ct', source_ref = $1, \
+             source_label = $2 WHERE id = $3",
+        )
+        .bind(&key)
+        .bind(format!("CT {vmid} · dns"))
+        .bind(id)
+        .execute(self.pool())
+        .await
+        .unwrap();
+        key
+    }
+
+    async fn unprotected_rows(&self) -> Vec<(String, String)> {
+        sqlx::query("SELECT host_id, source_ref FROM guests_unprotected ORDER BY source_ref")
+            .fetch_all(self.pool())
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| {
+                (
+                    r.try_get("host_id").unwrap(),
+                    r.try_get("source_ref").unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    async fn of_type(&self, state: &str, kind: &str) -> Vec<Value> {
+        self.alerts(state)
+            .await
+            .into_iter()
+            .filter(|a| a["type"] == kind)
+            .collect()
+    }
+}
+
+/// CT 200 was backed up by a policy that selects another container now.
+async fn unprotected_ct(env: &Env, t0: i64) -> String {
+    env.host("h1", "web-1").await;
+    env.ct_policy("cts", "h1", "201").await;
+    env.ct_facts("h1", &[200], false, t0).await;
+    env.ct_snapshot("s1", "h1", "cts", 200, t0 - DAY).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn guest_unprotected_opens_after_hour() {
+    for backend in backends() {
+        let name = backend.name();
+        let env = Env::start(&backend).await;
+        let t0 = now_ms();
+        let key = unprotected_ct(&env, t0).await;
+
+        env.tick(t0).await;
+        assert_eq!(
+            env.unprotected_rows().await,
+            [("h1".to_string(), key.clone())],
+            "[{name}]"
+        );
+        env.ct_facts("h1", &[200], false, t0 + 59 * MINUTE).await;
+        env.tick(t0 + 59 * MINUTE).await;
+        assert!(env.of_type("active", "guest_unprotected").await.is_empty());
+
+        env.ct_facts("h1", &[200], false, t0 + HOUR).await;
+        env.tick(t0 + HOUR).await;
+        let open = env.of_type("active", "guest_unprotected").await;
+        assert_eq!(open.len(), 1, "[{name}]");
+        assert_eq!(open[0]["severity"], "warning");
+        assert_eq!(
+            open[0]["title"],
+            "CT 200 · dns on web-1 is not backed up by any policy"
+        );
+        assert_eq!(open[0]["facts"]["source_label"], "CT 200 · dns");
+        assert_eq!(open[0]["policy"], "cts");
+        assert_eq!(
+            env.firing_keys("guest_unprotected").await,
+            [format!("guest_unprotected:h1:{key}")]
+        );
+        assert!(
+            open[0]["detail"]
+                .as_str()
+                .unwrap()
+                .ends_with("by cts. Add it to a policy or silence the alert."),
+            "[{name}] {}",
+            open[0]["detail"]
+        );
+        env.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn guest_unprotected_new_guest_no_alert() {
+    for backend in backends() {
+        let name = backend.name();
+        let env = Env::start(&backend).await;
+        let t0 = now_ms();
+        env.host("h1", "web-1").await;
+
+        for at in [t0, t0 + HOUR, t0 + 3 * HOUR] {
+            env.ct_facts("h1", &[300], false, at).await;
+            env.tick(at).await;
+            assert!(env.unprotected_rows().await.is_empty(), "[{name}]");
+            assert_eq!(env.alert_count("guest_unprotected").await, 0, "[{name}]");
+        }
+        env.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn guest_unprotected_closes_on_selection() {
+    for backend in backends() {
+        let name = backend.name();
+        let env = Env::start(&backend).await;
+        let t0 = now_ms();
+        unprotected_ct(&env, t0).await;
+        env.tick(t0).await;
+        env.ct_facts("h1", &[200], false, t0 + HOUR).await;
+        env.tick(t0 + HOUR).await;
+        assert_eq!(env.of_type("active", "guest_unprotected").await.len(), 1);
+
+        env.ct_policy("both", "h1", "200").await;
+        env.ct_facts("h1", &[200], false, t0 + 2 * HOUR).await;
+        env.tick(t0 + 2 * HOUR).await;
+        assert!(
+            env.of_type("active", "guest_unprotected").await.is_empty(),
+            "[{name}]"
+        );
+        assert_eq!(
+            env.of_type("resolved", "guest_unprotected").await.len(),
+            1,
+            "[{name}]"
+        );
+        assert!(env.unprotected_rows().await.is_empty(), "[{name}]");
+        env.stop().await;
+    }
+}

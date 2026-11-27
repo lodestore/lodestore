@@ -24,10 +24,17 @@ pub async fn tick(state: &AppState, now_ms: i64) -> anyhow::Result<reconcile::Re
             "recording gone source instances failed"
         );
     }
+    if let Err(error) = inputs::record_unprotected(state, &mut inputs, now_ms).await {
+        tracing::warn!(
+            error = format!("{error:#}"),
+            "recording unprotected guests failed"
+        );
+    }
     let candidates = evaluate::evaluate(&inputs, now_ms, state.started_at_ms, &thresholds);
     let unknown = reconcile::Unknown {
         server_cert: inputs.server_cert.is_none(),
         policies: inputs.unreadable_policies.iter().cloned().collect(),
+        plugin_scopes: inputs.plugin_scopes.clone(),
     };
     reconcile::reconcile(state, candidates, &unknown, now_ms).await
 }

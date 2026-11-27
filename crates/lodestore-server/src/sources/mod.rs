@@ -134,6 +134,9 @@ pub struct Storage {
 pub struct ProxmoxNode {
     pub scope: ScopeKind,
     pub name: String,
+    /// The node the reporting host is; empty when the agent did not say or the name is not valid.
+    #[serde(default)]
+    pub node: String,
     pub guests: Vec<Guest>,
     #[serde(default)]
     pub storages: Vec<Storage>,
@@ -303,6 +306,10 @@ fn proxmox_node(
     Some(ProxmoxNode {
         scope,
         name: name.to_string(),
+        node: Some(facts.node.as_str())
+            .filter(|node| node_name_valid(node))
+            .unwrap_or_default()
+            .to_string(),
         guests,
         storages: proxmox_storages(&facts.storages, truncated),
         nodes: cluster_nodes(&facts.nodes, truncated),

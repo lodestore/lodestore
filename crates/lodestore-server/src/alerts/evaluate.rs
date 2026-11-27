@@ -7,6 +7,7 @@ const DAY_MS: i64 = 86_400_000;
 pub const SECURITY_ALERT_WINDOW_MS: i64 = DAY_MS;
 pub const GONE_AFTER_MS: i64 = 3_600_000;
 pub const GONE_WINDOW_MS: i64 = DAY_MS;
+pub const PLUGIN_KEY: &str = "pve_plugin_missing:";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Candidate {
@@ -168,6 +169,48 @@ pub fn evaluate(
                 external: Some(external),
                 ..AlertFacts::default()
             },
+        });
+    }
+    for u in &inputs.unprotected {
+        let Some(h) = inputs.hosts.iter().find(|h| h.host_id == u.host_id) else {
+            continue;
+        };
+        if u.since_ms
+            .is_some_and(|since| since + GONE_AFTER_MS <= now_ms)
+        {
+            out.push(Candidate {
+                policy: u.policy.clone(),
+                facts: AlertFacts {
+                    last_success_at: u.last_snapshot_ms,
+                    source_label: u.label.clone(),
+                    ..AlertFacts::default()
+                },
+                ..Candidate::for_host(
+                    h,
+                    AlertType::GuestUnprotected,
+                    format!("guest_unprotected:{}:{}", h.host_id, u.source_ref),
+                    Severity::Warning,
+                )
+            });
+        }
+    }
+    for finding in &inputs.plugins {
+        let Some(h) = inputs.hosts.iter().find(|h| h.host_id == finding.host_id) else {
+            continue;
+        };
+        out.push(Candidate {
+            facts: AlertFacts {
+                pve_node: Some(finding.node.clone()),
+                pve_cluster: finding.in_cluster.then(|| finding.scope.clone()),
+                plugin_outdated: finding.outdated.then_some(true),
+                ..AlertFacts::default()
+            },
+            ..Candidate::for_host(
+                h,
+                AlertType::PvePluginMissing,
+                format!("{PLUGIN_KEY}{}:{}", finding.scope, finding.node),
+                Severity::Warning,
+            )
         });
     }
     for failure in &inputs.update_failures {

@@ -156,6 +156,8 @@ pub enum AlertType {
     SourceInstanceGone,
     GuaranteeDowngraded,
     HostKeyChanged,
+    GuestUnprotected,
+    PvePluginMissing,
 }
 
 impl AlertType {
@@ -174,6 +176,8 @@ impl AlertType {
             AlertType::SourceInstanceGone => "source_instance_gone",
             AlertType::GuaranteeDowngraded => "guarantee_downgraded",
             AlertType::HostKeyChanged => "host_key_changed",
+            AlertType::GuestUnprotected => "guest_unprotected",
+            AlertType::PvePluginMissing => "pve_plugin_missing",
         }
     }
 
@@ -192,6 +196,8 @@ impl AlertType {
             "source_instance_gone" => AlertType::SourceInstanceGone,
             "guarantee_downgraded" => AlertType::GuaranteeDowngraded,
             "host_key_changed" => AlertType::HostKeyChanged,
+            "guest_unprotected" => AlertType::GuestUnprotected,
+            "pve_plugin_missing" => AlertType::PvePluginMissing,
             _ => return None,
         })
     }
@@ -310,6 +316,15 @@ pub struct AlertFacts {
     pub pinned_fingerprint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offered_fingerprint: Option<String>,
+    /// The Proxmox node whose plugin is missing or outdated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pve_node: Option<String>,
+    /// The cluster of that node; absent for a node outside a cluster.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pve_cluster: Option<String>,
+    /// The plugin is installed but not the current one, as opposed to missing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_outdated: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
