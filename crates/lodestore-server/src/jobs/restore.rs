@@ -391,7 +391,8 @@ fn owner_shift(map: Option<&IdMap>) -> Result<String, ApiError> {
                 .into(),
         ));
     }
-    Ok(map.canonical().unwrap_or_default())
+    map.canonical()
+        .map_err(|e| ApiError::Unprocessable("ct_idmap_unsupported", e.to_string()))
 }
 
 pub(crate) async fn insert_restore_job(
