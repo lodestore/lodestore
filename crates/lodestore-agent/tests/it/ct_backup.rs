@@ -582,3 +582,145 @@ async fn ct_backup_cancel() {
     assert!(term.exists(), "vzdump got no SIGTERM");
     assert_eq!(lab.snapshot_count().await, 0);
 }
+
+fn caps_v3(rootid: u32) -> Vec<u8> {
+    let mut out = 0x0300_0001u32.to_le_bytes().to_vec();
+    out.extend_from_slice(&(1u32 << 13).to_le_bytes());
+    out.extend_from_slice(&[0; 12]);
+    out.extend_from_slice(&rootid.to_le_bytes());
+    out
+}
+
+/// `(tag, perm, id)` of each entry of a POSIX ACL xattr.
+fn acl_entries(blob: &[u8]) -> Vec<(u16, u16, u32)> {
+    blob.get(4..)
+        .unwrap_or_default()
+        .chunks(8)
+        .map(|e| {
+            (
+                u16::from_le_bytes([e[0], e[1]]),
+                u16::from_le_bytes([e[2], e[3]]),
+                u32::from_le_bytes([e[4], e[5], e[6], e[7]]),
+            )
+        })
+        .collect()
+}
+
+fn xattr<'a>(node: &'a pb::Node, name: &str) -> Option<&'a [u8]> {
+    node.xattrs
+        .iter()
+        .find(|x| x.name == name.as_bytes())
+        .map(|x| x.value.as_slice())
+}
+
+/// The container of an unprivileged CT as root on the node sees it: host
+/// ids 100000 + n, an ACL entry for 101000, a version 3 capability with
+/// root id 100000 and one file whose owner is outside the default map.
+fn host_view(ct: &Path) {
+    use std::os::unix::fs::{chown, lchown};
+
+    write(&ct.join("etc/shadow"), "root:*:1::::::\n");
+    write(&ct.join("var/www/index.html"), "hi");
+    write(&ct.join("home/u/doc"), "doc");
+    write(&ct.join("usr/bin/ping"), "elf");
+    write(&ct.join("stray"), "outside the map");
+    let mut dirs = vec![ct.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        lchown(&dir, Some(100_000), Some(100_000)).unwrap();
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let entry = entry.unwrap();
+            lchown(entry.path(), Some(100_000), Some(100_000)).unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                dirs.push(entry.path());
+            }
+        }
+    }
+    chown(ct.join("etc/shadow"), Some(100_000), Some(100_042)).unwrap();
+    std::fs::set_permissions(
+        ct.join("etc/shadow"),
+        std::fs::Permissions::from_mode(0o640),
+    )
+    .unwrap();
+    chown(ct.join("var/www/index.html"), Some(100_033), Some(100_033)).unwrap();
+    chown(ct.join("home/u/doc"), Some(101_000), Some(101_000)).unwrap();
+    chown(ct.join("stray"), Some(200_000), Some(200_000)).unwrap();
+    let status = std::process::Command::new("setfacl")
+        .args(["-m", "u:101000:rw"])
+        .arg(ct.join("home/u/doc"))
+        .status()
+        .expect("setfacl is needed for this test");
+    assert!(status.success());
+    rustix::fs::setxattr(
+        ct.join("usr/bin/ping"),
+        "security.capability",
+        &caps_v3(100_000),
+        rustix::fs::XattrFlags::empty(),
+    )
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs root"]
+async fn pve_root_ct_backup_unprivileged_default_map() {
+    let lab = Lab::new().await;
+    host_view(&lab.ct);
+    lab.scenario(json!({ "config": "arch: amd64\nhostname: ct200\nunprivileged: 1\n" }));
+    let done = lab.run().await;
+    assert_eq!(done.outcome, JobOutcome::Warnings as i32, "{done:?}");
+    assert!(done.warnings_total >= 1);
+
+    let (_, ct, nodes) = lab.container().await;
+    assert!(ct.meta.unprivileged);
+    assert_eq!(
+        ct.meta.idmap.unwrap().canonical().unwrap(),
+        "u:0:100000:65536,g:0:100000:65536"
+    );
+    let ids = |path: &str| (nodes[path].uid, nodes[path].gid);
+    assert_eq!(ids("/fs/etc/hostname"), (0, 0));
+    assert_eq!(ids("/fs/etc/shadow"), (0, 42));
+    assert_eq!(nodes["/fs/etc/shadow"].mode & 0o7777, 0o640);
+    assert_eq!(ids("/fs/var/www/index.html"), (33, 33));
+    assert_eq!(ids("/fs/home/u/doc"), (1000, 1000));
+    assert_eq!(ids("/fs/stray"), (65534, 65534));
+    let acl = acl_entries(xattr(&nodes["/fs/home/u/doc"], "system.posix_acl_access").unwrap());
+    assert!(acl.contains(&(0x02, 6, 1000)), "{acl:?}");
+    assert_eq!(
+        xattr(&nodes["/fs/usr/bin/ping"], "security.capability").map(<[u8]>::len),
+        Some(20),
+        "a version 2 capability in the container's view"
+    );
+    assert!(
+        nodes
+            .values()
+            .all(|n| n.user.is_empty() && n.group.is_empty())
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs root"]
+async fn pve_root_ct_backup_privileged_ids() {
+    let lab = Lab::new().await;
+    host_view(&lab.ct);
+    let done = lab.run().await;
+    assert_eq!(done.outcome, JobOutcome::Succeeded as i32, "{done:?}");
+
+    let (snapshot, ct, nodes) = lab.container().await;
+    assert!(!ct.meta.unprivileged);
+    assert!(ct.meta.idmap.is_none());
+    let (_, meta) = decode(snapshot.source.as_ref()).unwrap();
+    assert!(!meta.contains_key("ct_idmap"));
+    assert_eq!(
+        (nodes["/fs/etc/shadow"].uid, nodes["/fs/etc/shadow"].gid),
+        (100_000, 100_042)
+    );
+    assert_eq!(nodes["/fs/stray"].uid, 200_000);
+    assert_eq!(
+        xattr(&nodes["/fs/usr/bin/ping"], "security.capability"),
+        Some(caps_v3(100_000).as_slice())
+    );
+    assert!(
+        nodes
+            .values()
+            .all(|n| n.user.is_empty() && n.group.is_empty())
+    );
+}
