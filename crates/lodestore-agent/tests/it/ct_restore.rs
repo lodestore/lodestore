@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use lodestore_agent::jobs::JobHub;
 use lodestore_agent::jobs::ct_backup::{PveCommands, PveJobs};
+use lodestore_agent::jobs::ct_restore::clean_stale_staging;
 use lodestore_agent::jobs::fetch::{FetchError, PackAccess, PackFetcher};
 use lodestore_agent::jobs::restore::{PlanError, PlanSource, RestoreOptions, run_restore_with};
 use lodestore_agent::pve::install::embedded_plugin_hash;
@@ -34,9 +35,9 @@ use lodestore_proto::agent::v1::agent_message::Body as AgentBody;
 use lodestore_proto::agent::v1::plan_item::Kind;
 use lodestore_proto::agent::v1::restore_spec::Target;
 use lodestore_proto::agent::v1::{
-    AgentMessage, ChunkLoc, DatabaseTarget, GuestRestoreResult, GuestTarget, JobFinished,
-    JobOutcome, PlanEnter, PlanEntry, PlanItem, PlanLeave, RestorePlanBatch, RestoreSpec,
-    RestoreTotals,
+    AgentMessage, ChunkLoc, ConfigLine, DatabaseTarget, ExpectedGuest, GuestRestoreResult,
+    GuestTarget, JobFinished, JobOutcome, OtherGuestConfirmation, PlanEnter, PlanEntry, PlanItem,
+    PlanLeave, RestorePlanBatch, RestoreSpec, RestoreTotals,
 };
 use prost::Message;
 use rustix::fs::{FileType, Mode, OFlags};
@@ -44,9 +45,17 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) const NODE: &str = "pve1";
+pub(crate) const UID_X: &str = "abcdefghijklmnopqrst";
+pub(crate) const UID_Y: &str = "bbbbbbbbbbbbbbbbbbbb";
+pub(crate) const UID_Z: &str = "cccccccccccccccccccc";
+const UID_V: &str = "dddddddddddddddddddd";
+const UID_W: &str = "eeeeeeeeeeeeeeeeeeee";
 const UUID: &str = "0192f0c4-7d3a-7000-8000-000000000001";
+const UUID_NEW: &str = "0192f0c4-7d3a-7000-8000-000000000002";
 const WAIT: Duration = Duration::from_secs(120);
 const PAUSE: Duration = Duration::from_millis(10);
+pub(crate) const TARGET_MAC: &str = "BC:24:11:00:00:02";
+const ROOTFS: &str = "local-lvm:vm-200-disk-0,size=8G";
 
 pub(crate) fn proxmox_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/proxmox")
@@ -222,8 +231,30 @@ impl Lab {
         fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
     }
 
+    pub fn allow_replace(&self) {
+        self.agent_yaml("restore:\n  allow_guest_in_place: true\n");
+    }
+
     pub fn staging_default(&self) -> PathBuf {
         self.agent.paths.state_dir.join("pve-staging")
+    }
+
+    /// CT 200 on this node with `uid` and the saved instance `uuid`.
+    pub fn target(&self, uid: Option<&str>, uuid: &str, extra: &str) {
+        let meta = uid.map_or(String::new(), |u| {
+            format!("meta: ctime=1700000000,uid={u},rtime=5\n")
+        });
+        write(
+            &self.pve.join(format!("nodes/{NODE}/lxc/200.conf")),
+            &format!(
+                "arch: amd64\nhostname: ct200\n{meta}net0: name=eth0,bridge=vmbr0,hwaddr={TARGET_MAC},firewall=1,type=veth\nrootfs: {ROOTFS}\nunprivileged: 1\n{extra}"
+            ),
+        );
+        write(
+            &self.agent.paths.source_ids(),
+            &json!({"ct/200": {"uuid": uuid, "pve_uid": uid.unwrap_or_default()}}).to_string(),
+        );
+        self.vmlist(&[200]);
     }
 
     /// A CT snapshot with `config` and `firewall`, its `/fs` built by
@@ -500,6 +531,34 @@ pub(crate) fn new_ct(vmid: u32) -> GuestTarget {
     }
 }
 
+fn expected(uid: &str, uuid: &str) -> ExpectedGuest {
+    ExpectedGuest {
+        vmid: 200,
+        name: "ct200".into(),
+        pve_uid: uid.into(),
+        pve_rtime: 5,
+        instance_uuid: uuid.into(),
+        volumes: vec![ConfigLine {
+            key: "rootfs".into(),
+            value: ROOTFS.into(),
+        }],
+    }
+}
+
+fn replace(uid: &str, confirm: Option<(&str, &str)>) -> GuestTarget {
+    GuestTarget {
+        node: NODE.into(),
+        vmid: 200,
+        in_place: true,
+        storage: "local-lvm".into(),
+        expected: Some(expected(uid, UUID)),
+        confirm_other_guest: confirm.map(|(s, t)| OtherGuestConfirmation {
+            snapshot_pve_uid: s.into(),
+            target_pve_uid: t.into(),
+        }),
+    }
+}
+
 fn snapshot_config(uid: Option<&str>, extra: &str) -> String {
     let meta = uid.map_or(String::new(), |u| {
         format!("meta: ctime=1600000000,uid={u},rtime=3\n")
@@ -724,4 +783,274 @@ async fn ct_restore_staging_dir_setting() {
     );
     assert!(lab.staging_clean(&custom));
     assert!(!lab.staging_default().exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ct_restore_replace_needs_local_key() {
+    let lab = Lab::new().await;
+    lab.target(Some(UID_X), UUID, "");
+    let snap = lab
+        .snapshot(&snapshot_config(Some(UID_X), ""), None, |_| {}, &[])
+        .await;
+    let ran = lab.run(&snap, lab.spec(&snap, replace(UID_X, None))).await;
+    failed_with(&ran, "guest_in_place_disabled");
+    assert!(ran.argv.is_none());
+    assert!(!lab.staging_default().exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ct_restore_replace_running_refused() {
+    let lab = Lab::new().await;
+    lab.allow_replace();
+    lab.target(Some(UID_X), UUID, "");
+    fs::create_dir_all(lab.sys.join("fs/cgroup/lxc/200")).unwrap();
+    let snap = lab
+        .snapshot(&snapshot_config(Some(UID_X), ""), None, |_| {}, &[])
+        .await;
+    let ran = lab.run(&snap, lab.spec(&snap, replace(UID_X, None))).await;
+    failed_with(&ran, "guest_running");
+    assert_eq!(
+        ran.done.error_message,
+        "CT 200 · ct200 is running. Stop it in Proxmox, then try again."
+    );
+    assert!(ran.argv.is_none());
+    assert!(!lab.staging_default().exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ct_restore_replace_ha_refused() {
+    let lab = Lab::new().await;
+    lab.allow_replace();
+    lab.target(Some(UID_X), UUID, "");
+    write(
+        &lab.pve.join("ha/resources.cfg"),
+        "ct: 200\n\tstate started\n",
+    );
+    let snap = lab
+        .snapshot(&snapshot_config(Some(UID_X), ""), None, |_| {}, &[])
+        .await;
+    let ran = lab.run(&snap, lab.spec(&snap, replace(UID_X, None))).await;
+    failed_with(&ran, "guest_ha_managed");
+    assert_eq!(
+        ran.done.error_message,
+        "CT 200 · ct200 is managed by HA. Remove it from HA in Proxmox, then try again."
+    );
+    assert!(ran.argv.is_none());
+    assert!(!lab.staging_default().exists());
+}
+
+fn replace_argv(extra: &[&str]) -> Vec<String> {
+    let mut argv = new_argv(200, extra);
+    argv[3] = "--force".into();
+    argv
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ct_restore_replace_argv_and_macs() {
+    let lab = Lab::new().await;
+    lab.allow_replace();
+    lab.target(Some(UID_X), UUID, "");
+    let snap = lab
+        .snapshot(&snapshot_config(Some(UID_X), ""), None, |_| {}, &[])
+        .await;
+    let ran = lab.run(&snap, lab.spec(&snap, replace(UID_X, None))).await;
+    succeeded(&ran);
+    let argv = argv_shape(&ran);
+    assert_eq!(argv, replace_argv(&[]));
+    assert!(
+        !argv
+            .iter()
+            .any(|a| a == "--unique" || a == "--allow-identity-mismatch")
+    );
+    let config = ran.config.as_deref().unwrap();
+    let net0 = config.lines().find(|l| l.starts_with("net0:")).unwrap();
+    assert!(net0.contains(&format!("hwaddr={TARGET_MAC}")), "{net0}");
+    assert!(net0.contains("firewall=1"), "{net0}");
+    let guest = ran.guest();
+    assert!(guest.replaced);
+    assert!(guest.new_mac_nets.is_empty(), "{guest:?}");
+    assert!(lab.staging_clean(&lab.staging_default()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ct_restore_replace_target_recreated() {
+    let lab = Lab::new().await;
+    lab.allow_replace();
+    lab.target(Some(UID_Z), UUID_NEW, "");
+    let snap = lab
+        .snapshot(&snapshot_config(Some(UID_X), ""), None, |_| {}, &[])
+        .await;
+    let ran = lab.run(&snap, lab.spec(&snap, replace(UID_X, None))).await;
+    failed_with(&ran, "guest_target_changed");
+    assert!(ran.argv.is_none());
+    assert!(lab.staging_clean(&lab.staging_default()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ct_restore_replace_no_backup_uid_target_changed() {
+    let lab = Lab::new().await;
+    lab.allow_replace();
+    let snap = lab
+        .snapshot(&snapshot_config(None, ""), None, |_| {}, &[])
+        .await;
+    lab.target(Some(UID_Z), UUID_NEW, "");
+    let spec = lab.spec(&snap, replace(UID_X, Some(("", UID_X))));
+    let ran = lab.run(&snap, spec.clone()).await;
+    failed_with(&ran, "guest_target_changed");
+    assert!(ran.argv.is_none());
+
+    lab.target(Some(UID_X), UUID, "");
+    let ran = lab.run(&snap, spec).await;
+    succeeded(&ran);
+    assert_eq!(argv_shape(&ran), replace_argv(&[]));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ct_restore_replace_volumes_changed() {
+    let lab = Lab::new().await;
+    lab.allow_replace();
+    lab.target(
+        Some(UID_X),
+        UUID,
+        "mp1: local-lvm:vm-200-disk-1,mp=/data,backup=0,size=1G\n",
+    );
+    let snap = lab
+        .snapshot(&snapshot_config(Some(UID_X), ""), None, |_| {}, &[])
+        .await;
+    let ran = lab.run(&snap, lab.spec(&snap, replace(UID_X, None))).await;
+    failed_with(&ran, "guest_target_changed");
+    assert!(ran.done.error_message.contains("volumes"), "{:?}", ran.done);
+    assert!(ran.argv.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ct_restore_identity_mismatch() {
+    let lab = Lab::new().await;
+    lab.allow_replace();
+    let snap = lab
+        .snapshot(&snapshot_config(Some(UID_X), ""), None, |_| {}, &[])
+        .await;
+    for (confirm, ok) in [
+        (None, false),
+        (Some((UID_X, UID_W)), false),
+        (Some((UID_V, UID_Y)), false),
+        (Some((UID_X, UID_Y)), true),
+    ] {
+        lab.target(Some(UID_Y), UUID, "");
+        let ran = lab
+            .run(&snap, lab.spec(&snap, replace(UID_Y, confirm)))
+            .await;
+        if ok {
+            succeeded(&ran);
+            assert_eq!(
+                argv_shape(&ran),
+                replace_argv(&["--allow-identity-mismatch", "1"])
+            );
+        } else {
+            failed_with(&ran, "guest_identity_mismatch");
+            assert!(ran.argv.is_none(), "{confirm:?}");
+        }
+        assert!(lab.staging_clean(&lab.staging_default()));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ct_restore_target_missing() {
+    let lab = Lab::new().await;
+    lab.allow_replace();
+    let snap = lab
+        .snapshot(&snapshot_config(Some(UID_X), ""), None, |_| {}, &[])
+        .await;
+    let ran = lab.run(&snap, lab.spec(&snap, replace(UID_X, None))).await;
+    failed_with(&ran, "guest_not_found");
+    assert!(ran.argv.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ct_restore_vmid_taken_and_storage() {
+    let lab = Lab::new().await;
+    lab.target(Some(UID_X), UUID, "");
+    let snap = lab
+        .snapshot(&snapshot_config(None, ""), None, |_| {}, &[])
+        .await;
+    let ran = lab.run(&snap, lab.spec(&snap, new_ct(200))).await;
+    failed_with(&ran, "restore_vmid_taken");
+    let local = GuestTarget {
+        storage: "local".into(),
+        ..new_ct(105)
+    };
+    let ran = lab.run(&snap, lab.spec(&snap, local)).await;
+    failed_with(&ran, "restore_storage_invalid");
+    let other = GuestTarget {
+        node: "pve2".into(),
+        ..new_ct(105)
+    };
+    let ran = lab.run(&snap, lab.spec(&snap, other)).await;
+    failed_with(&ran, "guest_not_local");
+    assert_eq!(ran.done.error_detail["vmid"], "105");
+    assert!(ran.argv.is_none());
+    assert!(!lab.staging_default().exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ct_restore_no_space() {
+    let lab = Lab::new().await;
+    let snap = lab
+        .snapshot(&snapshot_config(None, ""), None, |_| {}, &[])
+        .await;
+    let reserve = SpaceReserve {
+        min_bytes: u64::MAX / 2,
+        percent: 0,
+    };
+    let ran = lab
+        .run_with(&snap, lab.spec(&snap, new_ct(105)), reserve)
+        .await;
+    failed_with(&ran, "restore_no_space");
+    assert!(ran.argv.is_none());
+    assert!(lab.staging_clean(&lab.staging_default()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ct_restore_pct_fails_cleans_staging() {
+    let lab = Lab::new().await;
+    lab.pct_script(Some("unable to restore CT 105 - boom"));
+    let snap = lab
+        .snapshot(&snapshot_config(None, ""), None, |_| {}, &[])
+        .await;
+    let ran = lab.run(&snap, lab.spec(&snap, new_ct(105))).await;
+    failed_with(&ran, "pct_restore_failed");
+    assert!(ran.done.error_message.contains("boom"), "{:?}", ran.done);
+    assert!(lab.staging_clean(&lab.staging_default()));
+
+    let base = lab.staging_default();
+    let stale = base.join("ab".repeat(16));
+    write(&stale.join("fs/etc/hostname"), "x\n");
+    fs::create_dir_all(base.join("not-a-restore")).unwrap();
+    let held = base.join("cd".repeat(16));
+    fs::create_dir_all(&held).unwrap();
+    let lock = rustix::fs::open(
+        held.join(".lock"),
+        OFlags::CREATE | OFlags::RDWR,
+        Mode::RUSR | Mode::WUSR,
+    )
+    .unwrap();
+    rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive).unwrap();
+    let mut child = std::process::Command::new("sleep")
+        .arg("60")
+        .spawn()
+        .unwrap();
+    drop(lock);
+
+    clean_stale_staging(&base);
+    assert!(!stale.exists());
+    assert!(base.join("not-a-restore").exists());
+    assert!(
+        held.exists(),
+        "a folder whose lock a live process holds stays"
+    );
+
+    child.kill().unwrap();
+    child.wait().unwrap();
+    clean_stale_staging(&base);
+    assert!(!held.exists());
 }
