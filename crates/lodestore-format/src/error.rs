@@ -37,6 +37,8 @@ pub enum Error {
     WalkLimit { what: &'static str, limit: u64 },
     #[error("an incomplete or different object already holds the name {key}")]
     NameBurned { key: String },
+    #[error("not enough free space: {free} bytes free, {reserve} bytes must stay free")]
+    NoSpace { free: u64, reserve: u64 },
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }

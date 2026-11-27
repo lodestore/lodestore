@@ -111,6 +111,7 @@ mod tests {
             pool: pool.map(str::to_string),
             tags: tags.iter().map(|t| t.to_string()).collect(),
             key: format!("key-{vmid}"),
+            ..Default::default()
         }
     }
 
@@ -166,6 +167,7 @@ mod tests {
                 scope: ScopeKind::Cluster,
                 name: "pve".into(),
                 guests,
+                ..Default::default()
             }),
             servers: Vec::new(),
         }

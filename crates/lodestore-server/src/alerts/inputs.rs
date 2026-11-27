@@ -1,9 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::Context;
 use lodestore_policy::BackupPolicy;
 use lodestore_policy::jiff::Timestamp;
-use lodestore_policy::source;
+use lodestore_policy::source::{self, Source};
 use serde_json::Value;
 use sqlx::Row;
 
@@ -13,7 +13,8 @@ use crate::agent_update::reached;
 use crate::maintenance::check::CheckLevel;
 use crate::policies::matching::AgentRow;
 use crate::sources;
-use crate::sources::select::{Selection, select};
+use crate::sources::select::{Selection, select, selects_guest};
+use crate::sources::{AgentSources, Guest, GuestType, ProxmoxNode, ScopeKind, Stored, is_fresh};
 use crate::state::AppState;
 
 #[derive(Debug, Default)]
@@ -29,6 +30,40 @@ pub struct Inputs {
     pub guarantees: Vec<RepositoryGuarantee>,
     /// Whether the daily guarantee recheck runs at all.
     pub daily_recheck: bool,
+    /// Guests that were backed up once and that no policy selects now, by host and instance.
+    pub unprotected: Vec<UnprotectedGuest>,
+    /// Stored unprotected guests that a fresh complete list shows selected again or gone.
+    pub unprotected_gone: Vec<(String, String)>,
+    pub plugins: Vec<PluginFinding>,
+    /// Names of the Proxmox clusters and nodes whose plugin state was read this pass.
+    pub plugin_scopes: HashSet<String>,
+    /// Hosts a Proxmox guest policy applies to; the plugin alert watches only their clusters.
+    pub guest_policy_hosts: HashSet<String>,
+}
+
+/// A guest that was protected and is not any more.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnprotectedGuest {
+    pub host_id: String,
+    pub source_ref: String,
+    pub label: Option<String>,
+    pub last_snapshot_ms: Option<i64>,
+    /// The policy of the last snapshot.
+    pub policy: Option<String>,
+    /// When the alert loop first saw the guest unprotected; set by `record_unprotected`.
+    pub since_ms: Option<i64>,
+}
+
+/// A Proxmox node whose Lodestore plugin is missing or does not match the agent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginFinding {
+    /// The host that carries the alert.
+    pub host_id: String,
+    /// The cluster, or the node itself when it is not in a cluster.
+    pub scope: String,
+    pub in_cluster: bool,
+    pub node: String,
+    pub outdated: bool,
 }
 
 /// What the guarantee alert needs to know about a repository.
@@ -217,7 +252,7 @@ pub fn instance_facts(
 
 pub async fn gather(state: &AppState, now_ms: i64) -> anyhow::Result<Inputs> {
     let sources = sources::load_all(state).await?;
-    gather_with(state, now_ms, |policy, host| {
+    let mut inputs = gather_with(state, now_ms, |policy, host| {
         let source = source::normalized(&policy.spec.source)?;
         let stored = sources.get(host).and_then(|a| a.stored.as_ref());
         match select(source, stored, now_ms) {
@@ -229,7 +264,10 @@ pub async fn gather(state: &AppState, now_ms: i64) -> anyhow::Result<Inputs> {
             Selection::Some { keys, complete } => Some(Discovered { keys, complete }),
         }
     })
-    .await
+    .await?;
+    watch_guests(state, &sources, &mut inputs, now_ms).await?;
+    watch_plugins(&sources, &mut inputs, now_ms);
+    Ok(inputs)
 }
 
 /// `discovered(policy, host)` is what the policy's source selects on the host, `None` while that is unknown.
@@ -315,6 +353,7 @@ pub async fn gather_with(
         unreadable_policies,
         guarantees,
         daily_recheck: state.config.schedule_tick_secs > 0,
+        ..Inputs::default()
     })
 }
 
@@ -752,30 +791,285 @@ pub async fn record_gone(
     Ok(())
 }
 
-// shortcut: the newest snapshot of any source of the host; split it per source when other sources back up (phase 22).
+/// The newest snapshot of the files of each host; a host that backs up no files shows its newest instance snapshot, so the size of a container never stands for the files of the host.
 async fn last_snapshots(state: &AppState) -> anyhow::Result<HashMap<String, SnapshotFacts>> {
     let rows = sqlx::query(
-        "SELECT s.host_id, s.received_at, s.stats_json FROM snapshots s JOIN ( \
-             SELECT host_id, MAX(received_at) AS at FROM snapshots \
+        "SELECT s.host_id, s.source_ref, s.received_at, s.stats_json FROM snapshots s JOIN ( \
+             SELECT host_id, source_ref, MAX(received_at) AS at FROM snapshots \
              WHERE incomplete = 0 AND verified_at IS NOT NULL AND host_id IS NOT NULL \
-             GROUP BY host_id \
-         ) l ON l.host_id = s.host_id AND l.at = s.received_at \
+             GROUP BY host_id, source_ref \
+         ) l ON l.host_id = s.host_id AND l.source_ref = s.source_ref AND l.at = s.received_at \
          WHERE s.incomplete = 0 AND s.verified_at IS NOT NULL",
     )
     .fetch_all(&state.db.pool)
     .await
     .context("reading the last snapshots")?;
-    let mut out = HashMap::new();
+    let mut out: HashMap<String, (bool, SnapshotFacts)> = HashMap::new();
     for row in &rows {
         let stats: Value =
             serde_json::from_str(&row.try_get::<String, _>("stats_json")?).unwrap_or(Value::Null);
-        out.entry(row.try_get("host_id")?).or_insert(SnapshotFacts {
+        let files = row.try_get::<String, _>("source_ref")?.is_empty();
+        let found = SnapshotFacts {
             time_ms: row.try_get("received_at")?,
             bytes_total: stats["bytes_total"].as_u64().unwrap_or(0),
             bytes_added: stats["bytes_added"].as_u64().unwrap_or(0),
-        });
+        };
+        let host: String = row.try_get("host_id")?;
+        let better = out
+            .get(&host)
+            .is_none_or(|(was_files, was)| (files, found.time_ms) > (*was_files, was.time_ms));
+        if better {
+            out.insert(host, (files, found));
+        }
+    }
+    Ok(out
+        .into_iter()
+        .map(|(host, (_, facts))| (host, facts))
+        .collect())
+}
+
+/// The list of a host that is fresh and not cut short; anything else says nothing about absence.
+fn complete_list<'a>(
+    sources: &'a HashMap<String, AgentSources>,
+    host_id: &str,
+    now_ms: i64,
+) -> Option<&'a Stored> {
+    sources
+        .get(host_id)?
+        .stored
+        .as_ref()
+        .filter(|s| is_fresh(s.collected_at, now_ms) && !s.discovery.truncated)
+}
+
+struct Past {
+    at: Option<i64>,
+    policy: Option<String>,
+    label: Option<String>,
+}
+
+/// The instances of a host that have a snapshot or a backup job, with their newest snapshot.
+async fn guest_past(state: &AppState, host_id: &str) -> anyhow::Result<HashMap<String, Past>> {
+    let mut out = HashMap::new();
+    let rows = sqlx::query(
+        "SELECT s.source_ref, s.policy_name, s.source_label, s.received_at FROM snapshots s JOIN ( \
+             SELECT source_ref, MAX(received_at) AS at FROM snapshots \
+             WHERE host_id = $1 AND source_ref <> '' GROUP BY source_ref \
+         ) l ON l.source_ref = s.source_ref AND l.at = s.received_at WHERE s.host_id = $1",
+    )
+    .bind(host_id)
+    .fetch_all(&state.db.pool)
+    .await
+    .context("reading the snapshots of the instances of a host")?;
+    for row in &rows {
+        out.entry(row.try_get::<String, _>("source_ref")?)
+            .or_insert(Past {
+                at: Some(row.try_get("received_at")?),
+                policy: row.try_get("policy_name")?,
+                label: row.try_get("source_label")?,
+            });
+    }
+    let rows = sqlx::query(
+        "SELECT DISTINCT source_ref FROM jobs \
+         WHERE host_id = $1 AND kind = 'backup' AND source_ref <> ''",
+    )
+    .bind(host_id)
+    .fetch_all(&state.db.pool)
+    .await
+    .context("reading the backup jobs of the instances of a host")?;
+    for row in &rows {
+        out.entry(row.try_get::<String, _>("source_ref")?)
+            .or_insert(Past {
+                at: None,
+                policy: None,
+                label: None,
+            });
     }
     Ok(out)
+}
+
+fn guest_label(guest: &Guest) -> String {
+    let prefix = match guest.kind {
+        GuestType::Vm => "VM",
+        GuestType::Ct => "CT",
+    };
+    match guest.name.as_deref().filter(|name| !name.is_empty()) {
+        Some(name) => format!("{prefix} {} · {name}", guest.vmid),
+        None => format!("{prefix} {}", guest.vmid),
+    }
+}
+
+/// A guest alert follows the stored row of the guest. A fresh, complete list adds the rows of guests that were backed up once and that no policy of the host selects, and removes the rows of guests that are selected again or gone; any other list, and a policy that cannot be read, leaves the rows as they are.
+async fn watch_guests(
+    state: &AppState,
+    sources: &HashMap<String, AgentSources>,
+    inputs: &mut Inputs,
+    now_ms: i64,
+) -> anyhow::Result<()> {
+    let rows = sqlx::query("SELECT host_id, source_ref, since FROM guests_unprotected")
+        .fetch_all(&state.db.pool)
+        .await
+        .context("reading the unprotected guests")?;
+    let mut tracked: HashMap<String, HashMap<String, i64>> = HashMap::new();
+    for row in &rows {
+        tracked
+            .entry(row.try_get("host_id")?)
+            .or_default()
+            .insert(row.try_get("source_ref")?, row.try_get("since")?);
+    }
+    let (policies, unreadable) = load_policies(state).await?;
+    for agent in load_agents(state).await? {
+        let host = agent.row.id.as_str();
+        let stored = tracked.remove(host).unwrap_or_default();
+        let guest_policy = !unreadable.is_empty()
+            || policies
+                .iter()
+                .filter(|p| agent.row.applies(&p.repository_id, &p.policy.spec.selector))
+                .filter_map(|p| source::normalized(&p.policy.spec.source))
+                .any(|s| matches!(s, Source::ProxmoxCt(_) | Source::ProxmoxVm(_)));
+        if guest_policy {
+            inputs.guest_policy_hosts.insert(host.to_owned());
+        }
+        let list = complete_list(sources, host, now_ms).filter(|_| unreadable.is_empty());
+        let unselected: Vec<&Guest> = list
+            .and_then(|s| s.discovery.proxmox.as_ref())
+            .map_or(&[][..], |p| p.guests.as_slice())
+            .iter()
+            .filter(|g| {
+                !policies
+                    .iter()
+                    .filter(|p| agent.row.applies(&p.repository_id, &p.policy.spec.selector))
+                    .filter_map(|p| source::normalized(&p.policy.spec.source))
+                    .any(|source| selects_guest(source, g))
+            })
+            .collect();
+        if unselected.is_empty() && stored.is_empty() {
+            continue;
+        }
+        let past = guest_past(state, host).await?;
+        let mut push = |source_ref: &str, label: Option<String>| {
+            let known = past.get(source_ref);
+            inputs.unprotected.push(UnprotectedGuest {
+                host_id: host.to_owned(),
+                source_ref: source_ref.to_owned(),
+                label: label.or_else(|| known.and_then(|k| k.label.clone())),
+                last_snapshot_ms: known.and_then(|k| k.at),
+                policy: known.and_then(|k| k.policy.clone()),
+                since_ms: stored.get(source_ref).copied(),
+            });
+        };
+        if list.is_some() {
+            let now_unprotected: Vec<&Guest> = unselected
+                .into_iter()
+                .filter(|g| past.contains_key(&g.key))
+                .collect();
+            for guest in &now_unprotected {
+                push(&guest.key, Some(guest_label(guest)));
+            }
+            inputs.unprotected_gone.extend(
+                stored
+                    .keys()
+                    .filter(|r| !now_unprotected.iter().any(|g| &g.key == *r))
+                    .map(|r| (host.to_owned(), r.clone())),
+            );
+        } else {
+            for source_ref in stored.keys() {
+                push(source_ref, None);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Plugin state of the Proxmox nodes of clusters that a guest policy covers. The facts of a cluster come from its hosts with a fresh, complete list; the host with the smallest node name carries the alert of a node that has no agent of its own.
+fn watch_plugins(sources: &HashMap<String, AgentSources>, inputs: &mut Inputs, now_ms: i64) {
+    let mut scopes: BTreeMap<&str, Vec<(String, &str, &ProxmoxNode)>> = BTreeMap::new();
+    for host in &inputs.hosts {
+        let Some(node) = complete_list(sources, &host.host_id, now_ms)
+            .and_then(|s| s.discovery.proxmox.as_ref())
+        else {
+            continue;
+        };
+        let own = match (node.node.as_str(), node.scope) {
+            ("", ScopeKind::Node) => node.name.clone(),
+            (own, _) => own.to_owned(),
+        };
+        scopes
+            .entry(node.name.as_str())
+            .or_default()
+            .push((own, host.host_id.as_str(), node));
+    }
+    let mut found = Vec::new();
+    let mut seen = HashSet::new();
+    for (scope, mut hosts) in scopes {
+        seen.insert(scope.to_owned());
+        if !hosts
+            .iter()
+            .any(|(_, host, _)| inputs.guest_policy_hosts.contains(*host))
+        {
+            continue;
+        }
+        hosts.sort_by(|a, b| (a.0.is_empty(), &a.0, a.1).cmp(&(b.0.is_empty(), &b.0, b.1)));
+        let carrier = hosts[0].1;
+        let view = hosts[0].2;
+        let mut outdated: BTreeMap<&str, bool> = BTreeMap::new();
+        for node in view.nodes.iter().filter(|n| n.plugin_marker.is_empty()) {
+            outdated.insert(&node.name, false);
+        }
+        for (own, _, node) in hosts.iter().filter(|(own, ..)| !own.is_empty()) {
+            if !node.plugin_installed {
+                outdated.insert(own, false);
+            }
+        }
+        for (own, _, node) in hosts.iter().filter(|(own, ..)| !own.is_empty()) {
+            if node.plugin_installed && !node.plugin_current {
+                outdated.entry(own).or_insert(true);
+            }
+        }
+        found.extend(outdated.into_iter().map(|(node, outdated)| PluginFinding {
+            host_id: carrier.to_owned(),
+            scope: scope.to_owned(),
+            in_cluster: view.scope == ScopeKind::Cluster,
+            node: node.to_owned(),
+            outdated,
+        }));
+    }
+    inputs.plugins = found;
+    inputs.plugin_scopes = seen;
+}
+
+/// Stores when a guest was first seen unprotected, so a restart does not move the hour, and forgets the guests that left the state.
+pub async fn record_unprotected(
+    state: &AppState,
+    inputs: &mut Inputs,
+    now_ms: i64,
+) -> anyhow::Result<()> {
+    const CONTEXT: &str = "recording an unprotected guest";
+    for (host_id, source_ref) in &inputs.unprotected_gone {
+        sqlx::query("DELETE FROM guests_unprotected WHERE host_id = $1 AND source_ref = $2")
+            .bind(host_id)
+            .bind(source_ref)
+            .execute(&state.db.pool)
+            .await
+            .context(CONTEXT)?;
+    }
+    for guest in inputs
+        .unprotected
+        .iter_mut()
+        .filter(|g| g.since_ms.is_none())
+    {
+        sqlx::query(
+            "INSERT INTO guests_unprotected (host_id, source_ref, since) VALUES ($1, $2, $3) \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(&guest.host_id)
+        .bind(&guest.source_ref)
+        .bind(now_ms)
+        .execute(&state.db.pool)
+        .await
+        .context(CONTEXT)?;
+        guest.since_ms = Some(now_ms);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

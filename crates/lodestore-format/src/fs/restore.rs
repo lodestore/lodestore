@@ -17,12 +17,75 @@ use super::meta::{Target, apply_metadata};
 use super::walk::ExtentReader;
 use crate::chunker::{Chunker, blob_id};
 use crate::crypto::Key32;
+use crate::ct::IdMap;
 use crate::error::{Error, Result};
 use crate::image::IMAGE_CHUNK_SIZE;
 use crate::pb;
 use crate::tree::validate_name;
 
 const TMP_PREFIX: &str = ".lode-restore-";
+/// Free space is measured again at the latest after this much file content.
+const SPACE_CHECK_EVERY: u64 = 64 << 20;
+
+/// Entries besides files, folders and symlinks that a restore leaves out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipSpecial {
+    /// Character and block devices, but not the 0:0 character device an
+    /// overlayfs whiteout is: without it a deleted file of a lower layer
+    /// comes back.
+    Devices,
+    /// Devices, FIFOs and every other node type.
+    All,
+}
+
+impl SkipSpecial {
+    fn skips(self, ty: pb::NodeType, rdev: u64) -> bool {
+        match self {
+            SkipSpecial::Devices => match ty {
+                pb::NodeType::Blockdev => true,
+                pb::NodeType::Chardev => rdev != 0,
+                _ => false,
+            },
+            SkipSpecial::All => ty != pb::NodeType::Symlink,
+        }
+    }
+}
+
+/// Free space a restore leaves on the file system it writes to: the larger
+/// of `min_bytes` and `percent` of the file system's size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpaceReserve {
+    pub min_bytes: u64,
+    pub percent: u8,
+}
+
+impl SpaceReserve {
+    pub const DEFAULT: SpaceReserve = SpaceReserve {
+        min_bytes: 2 << 30,
+        percent: 5,
+    };
+
+    /// `NoSpace` when `need` bytes do not fit on the file system of `dir`
+    /// without going below the reserve.
+    pub fn check(self, dir: impl AsFd, need: u64) -> Result<()> {
+        self.room(dir, need).map(|_| ())
+    }
+
+    /// Bytes that may still be written to the file system of `dir`, at most
+    /// what is left until the next check; `NoSpace` when `need` does not fit.
+    fn room(self, dir: impl AsFd, need: u64) -> Result<u64> {
+        let st = rustix::fs::fstatvfs(dir)?;
+        let size = st.f_blocks.saturating_mul(st.f_frsize);
+        let reserve = self
+            .min_bytes
+            .max((size / 100).saturating_mul(u64::from(self.percent)));
+        let free = st.f_bavail.saturating_mul(st.f_frsize);
+        match free.checked_sub(reserve) {
+            Some(room) if room >= need => Ok(room.min(need.max(SPACE_CHECK_EVERY))),
+            _ => Err(Error::NoSpace { free, reserve }),
+        }
+    }
+}
 
 /// What to do with a file that already exists in the target.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -76,6 +139,9 @@ pub struct RestoreStats {
     pub verified: u64,
     pub would_write: u64,
     pub would_skip: u64,
+    /// Devices, FIFOs and other special entries left out by
+    /// [`Restorer::skip_special_files`].
+    pub special_skipped: u64,
 }
 
 /// Whether the chunks of `source`, cut and hashed like a backup does, are
@@ -161,6 +227,10 @@ pub struct Restorer {
     unapplied: Vec<Unapplied>,
     /// First restored member of each hardlink group, as a path below the target.
     links: HashMap<u64, Vec<u8>>,
+    /// Owners are translated from a container's view by this map.
+    id_shift: Option<IdMap>,
+    skip_special: Option<SkipSpecial>,
+    space: Option<SpaceReserve>,
 }
 
 /// A file being written under a temporary name; it takes its final name in
@@ -177,12 +247,22 @@ pub struct FileSink {
     /// Something was at the final name when the file was begun.
     replaced: bool,
     done: bool,
+    space: Option<SpaceReserve>,
+    /// Bytes that may be written before free space is measured again.
+    room: u64,
 }
 
 impl FileSink {
     /// Appends the next piece of the file's content. A dense file takes it
     /// sequentially; a sparse one spreads it over its data extents.
     pub fn write(&mut self, mut data: &[u8]) -> Result<()> {
+        if let Some(reserve) = self.space {
+            let need = data.len() as u64;
+            if need > self.room {
+                self.room = reserve.room(&self.dir, need)?;
+            }
+            self.room -= need;
+        }
         let file = self.file.as_mut().ok_or(Error::Interrupted)?;
         if self.extents.is_empty() {
             file.write_all(data)?;
@@ -307,7 +387,42 @@ impl Restorer {
             names: Vec::new(),
             unapplied: Vec::new(),
             links: HashMap::new(),
+            id_shift: None,
+            skip_special: None,
+            space: None,
         })
+    }
+
+    /// Leaves out the special entries `skip` names, whatever the owner and
+    /// privilege settings say. Each one is counted in
+    /// [`RestoreStats::special_skipped`] and listed as [`Unapplied`] with
+    /// `what` set to `"special file"`.
+    pub fn skip_special_files(mut self, skip: SkipSpecial) -> Self {
+        self.skip_special = Some(skip);
+        self
+    }
+
+    /// Stops with [`Error::NoSpace`] before a file is begun, and while it is
+    /// written, when the free space of the file system written to would fall
+    /// below `reserve`. The file being written is removed.
+    pub fn with_space_reserve(mut self, reserve: SpaceReserve) -> Self {
+        self.space = Some(reserve);
+        self
+    }
+
+    /// Translates owners, ACLs and capabilities from the container's view
+    /// in `map` to the node's before they are applied. Without
+    /// `restore_owners` it changes nothing; capabilities still need
+    /// `keep_privileges`. A map with a range onto host id 0 is refused: it
+    /// would give container ids, and version 2 capabilities, the node's root.
+    pub fn with_id_shift(mut self, map: IdMap) -> Result<Self> {
+        if map.ranges().iter().any(|r| r.host == 0) {
+            return Err(Error::InvalidInput(
+                "the container id map maps a container id to root on the node".into(),
+            ));
+        }
+        self.id_shift = Some(map);
+        Ok(self)
     }
 
     /// Whether the opened target can be written, asked of the open folder
@@ -520,6 +635,7 @@ impl Restorer {
                 &path,
                 self.settings.restore_owners,
                 self.settings.keep_privileges,
+                self.id_shift.as_ref(),
                 &mut self.unapplied,
             );
         }
@@ -655,6 +771,7 @@ impl Restorer {
                                 &path,
                                 self.settings.restore_owners,
                                 self.settings.keep_privileges,
+                                self.id_shift.as_ref(),
                                 &mut self.unapplied,
                             );
                             self.remember_link(node);
@@ -676,6 +793,10 @@ impl Restorer {
             self.remember_link(node);
             return Ok(None);
         }
+        let room = match self.space {
+            Some(reserve) => reserve.room(self.here(), 0)?,
+            None => 0,
+        };
         let tmp = tmp_name()?;
         let fd = openat(
             self.here(),
@@ -696,6 +817,8 @@ impl Restorer {
             extent_pos: 0,
             replaced,
             done: false,
+            space: self.space,
+            room,
         }))
     }
 
@@ -785,6 +908,7 @@ impl Restorer {
             &path,
             self.settings.restore_owners,
             self.settings.keep_privileges,
+            self.id_shift.as_ref(),
             &mut self.unapplied,
         );
         drop(file);
@@ -928,6 +1052,15 @@ impl Restorer {
             return Ok(());
         }
         let ty = pb::NodeType::try_from(node.r#type).unwrap_or_default();
+        if self.skip_special.is_some_and(|s| s.skips(ty, node.rdev)) {
+            self.stats.special_skipped += 1;
+            self.unapplied.push(Unapplied {
+                path: self.path_of(&node.name),
+                what: "special file".into(),
+                error: format!("a {ty:?} node from this snapshot is not created"),
+            });
+            return Ok(());
+        }
         match self.existing(&node.name)? {
             Some(FileType::Directory) => {
                 self.record_failure(&node.name, "a directory is in the way of this entry".into());
@@ -986,6 +1119,7 @@ impl Restorer {
             &path,
             self.settings.restore_owners,
             self.settings.keep_privileges,
+            self.id_shift.as_ref(),
             &mut unapplied,
         );
         self.unapplied = unapplied;
@@ -1229,6 +1363,140 @@ mod tests {
         let err = restore_with_verify(&tmp, &node, &flipped).err().unwrap();
         assert!(matches!(err, Error::Corrupt { .. }), "{err}");
         assert!(!tmp.path().join("disk.img").exists());
+    }
+
+    #[test]
+    fn skip_special_files_creates_none_of_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let node = |name: &str, ty: pb::NodeType| pb::Node {
+            name: name.as_bytes().to_vec(),
+            r#type: ty as i32,
+            mode: 0o666,
+            rdev: 0x0103,
+            ..Default::default()
+        };
+        let specials = [
+            node("blk", pb::NodeType::Blockdev),
+            node("chr", pb::NodeType::Chardev),
+            node("fifo", pb::NodeType::Fifo),
+            pb::Node {
+                r#type: 7,
+                ..node("sock", pb::NodeType::Unspecified)
+            },
+        ];
+        for (skip, skipped) in [(SkipSpecial::All, 4), (SkipSpecial::Devices, 2)] {
+            let mut restorer = Restorer::open(tmp.path(), settings())
+                .unwrap()
+                .skip_special_files(skip);
+            for n in &specials {
+                restorer.create_other(n).unwrap();
+            }
+            let mut link = node("link", pb::NodeType::Symlink);
+            link.link_target = b"blk".to_vec();
+            restorer.create_other(&link).unwrap();
+            assert_eq!(restorer.stats().special_skipped, skipped, "{skip:?}");
+            let listed = restorer
+                .take_unapplied()
+                .into_iter()
+                .filter(|u| u.what == "special file")
+                .count();
+            assert_eq!(listed as u64, skipped, "{skip:?}");
+            for name in ["blk", "chr"] {
+                assert!(tmp.path().join(name).symlink_metadata().is_err(), "{name}");
+            }
+            assert!(tmp.path().join("link").symlink_metadata().is_ok());
+            std::fs::remove_file(tmp.path().join("link")).unwrap();
+            let _ = std::fs::remove_file(tmp.path().join("fifo"));
+        }
+    }
+
+    #[test]
+    fn id_shift_refuses_a_map_onto_node_root() {
+        use crate::ct::{IdKind, IdRange};
+        let tmp = tempfile::tempdir().unwrap();
+        let range = |kind, host| IdRange {
+            kind,
+            ct: 0,
+            host,
+            count: 65_536,
+        };
+        for kind in [IdKind::User, IdKind::Group] {
+            let other = match kind {
+                IdKind::User => IdKind::Group,
+                IdKind::Group => IdKind::User,
+            };
+            let map = IdMap::new(vec![range(kind, 0), range(other, 100_000)]).unwrap();
+            let restorer = Restorer::open(tmp.path(), settings()).unwrap();
+            assert!(restorer.with_id_shift(map).is_err(), "{kind:?}");
+        }
+        let restorer = Restorer::open(tmp.path(), settings()).unwrap();
+        assert!(
+            restorer
+                .with_id_shift(IdMap::default_unprivileged())
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn skip_devices_keeps_overlay_whiteouts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let whiteout = pb::Node {
+            name: b"deleted".to_vec(),
+            r#type: pb::NodeType::Chardev as i32,
+            mode: 0o600,
+            rdev: 0,
+            ..Default::default()
+        };
+        let mut restorer = Restorer::open(tmp.path(), settings())
+            .unwrap()
+            .skip_special_files(SkipSpecial::Devices);
+        restorer.create_other(&whiteout).unwrap();
+        assert_eq!(restorer.stats().special_skipped, 0);
+        assert!(
+            !restorer
+                .take_unapplied()
+                .iter()
+                .any(|u| u.what == "special file")
+        );
+    }
+
+    #[test]
+    fn space_reserve_stops_before_a_file_and_during_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let node = pb::Node {
+            name: b"f".to_vec(),
+            size: 10,
+            ..Default::default()
+        };
+        let huge = SpaceReserve {
+            min_bytes: u64::MAX / 2,
+            percent: 0,
+        };
+        let mut restorer = Restorer::open(tmp.path(), settings())
+            .unwrap()
+            .with_space_reserve(huge);
+        let err = restorer.begin_file(&node).err().unwrap();
+        assert!(matches!(err, Error::NoSpace { .. }), "{err}");
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0);
+
+        let all = SpaceReserve {
+            min_bytes: 0,
+            percent: 100,
+        };
+        let mut restorer = Restorer::open(tmp.path(), settings())
+            .unwrap()
+            .with_space_reserve(SpaceReserve {
+                min_bytes: 0,
+                percent: 0,
+            });
+        let mut sink = restorer.begin_file(&node).unwrap().unwrap();
+        sink.write(b"12345").unwrap();
+        sink.space = Some(all);
+        sink.room = 0;
+        let err = sink.write(b"67890").err().unwrap();
+        assert!(matches!(err, Error::NoSpace { .. }), "{err}");
+        drop(sink);
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0);
     }
 
     fn mode(path: &Path) -> u32 {

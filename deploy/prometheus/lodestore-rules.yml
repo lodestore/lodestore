@@ -22,6 +22,20 @@ groups:
         annotations:
           summary: "A policy no longer selects a source it backed up"
           description: "A guest or database was deleted, replaced or left the policy selector. Its snapshots stay under the retention rules. The source and host are named in the alert in Lodestore; the alert clears itself after a day."
+      - alert: LodestoreGuestUnprotected
+        expr: lodestore_alerts_active{type="guest_unprotected"} > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "A guest that was backed up is no longer selected by any policy"
+          description: "A virtual machine or container that was backed up once is not selected by any policy of its host now. Add it to a policy or silence the alert. The guest and host are named in the alert in Lodestore."
+      - alert: LodestorePvePluginMissing
+        expr: lodestore_alerts_active{type="pve_plugin_missing"} > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "The Lodestore plugin is missing or outdated on a Proxmox node"
+          description: "A node without the plugin removes the Lodestore storage for the whole cluster the next time it writes storage.cfg. Run lodestore-agent pve install on the node named in the alert in Lodestore."
   - name: lodestore-agents
     rules:
       - alert: LodestoreAgentOffline

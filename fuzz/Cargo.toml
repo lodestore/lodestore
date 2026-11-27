@@ -117,6 +117,20 @@ doc = false
 bench = false
 
 [[bin]]
+name = "ct_layout"
+path = "fuzz_targets/ct_layout.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "guest_config"
+path = "fuzz_targets/guest_config.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "image_state"
 path = "fuzz_targets/image_state.rs"
 test = false

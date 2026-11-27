@@ -1,4 +1,5 @@
 pub mod api;
+pub mod guest_restore;
 pub mod restore;
 
 use std::collections::{BTreeMap, HashSet};
@@ -259,6 +260,8 @@ pub struct RestoreInfo {
     pub other_repository: bool,
     pub items: u64,
     pub started_by: String,
+    /// The guest the restore creates or replaces; absent for a restore of files.
+    pub guest: Option<guest_restore::GuestRestoreInfo>,
 }
 
 #[derive(Serialize, Deserialize, ToSchema, Default)]
@@ -269,6 +272,8 @@ pub struct RestoreResultDto {
     pub skipped: u64,
     pub files: u64,
     pub bytes: u64,
+    /// What the agent reports about the guest it restored.
+    pub guest: Option<guest_restore::GuestResultDto>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -452,6 +457,7 @@ pub fn job_spec(policy: &BackupPolicy) -> JobSpec {
         gc_locks_required: false,
         distrusted_shards: Vec::new(),
         source: normalized(&spec.source).map(selector_of),
+        ..Default::default()
     }
 }
 
@@ -532,6 +538,16 @@ async fn enqueue_one(
 ) -> Result<RunJob, ApiError> {
     for _ in 0..3 {
         let id = uuid::Uuid::now_v7().to_string();
+        // The run-now limit counts distinct queue times (the jobs of one split run
+        // share one), so two runs in the same millisecond must not share one.
+        let last: Option<i64> = sqlx::query_scalar(
+            "SELECT MAX(queued_at) FROM jobs WHERE host_id = $1 AND policy_id = $2",
+        )
+        .bind(host_id)
+        .bind(policy_id)
+        .fetch_one(&state.db.pool)
+        .await?;
+        let queued_at = last.map_or(now_ms(), |last| now_ms().max(last + 1));
         let inserted = sqlx::query(
             "INSERT INTO jobs (id, host_id, policy_id, policy_name, source, state, spec, queued_at, origin) \
              VALUES ($1, $2, $3, $4, 'manual', 'queued', $5, $6, $7) ON CONFLICT DO NOTHING",
@@ -541,7 +557,7 @@ async fn enqueue_one(
         .bind(policy_id)
         .bind(policy_name)
         .bind(spec.to_vec())
-        .bind(now_ms())
+        .bind(queued_at)
         .bind(origin)
         .execute(&state.db.pool)
         .await?
@@ -551,7 +567,7 @@ async fn enqueue_one(
             (id, true)
         } else {
             let existing = sqlx::query(sqlx::AssertSqlSafe(format!(
-                "SELECT id FROM jobs WHERE host_id = $1 AND policy_id = $2 \
+                "SELECT id FROM jobs WHERE host_id = $1 AND policy_id = $2 AND source_ref = '' \
                  AND state IN ({ACTIVE_STATES})"
             )))
             .bind(host_id)
@@ -592,7 +608,7 @@ pub async fn check_run_rate(
     let now = now_ms();
     for (host_id, hostname) in hosts {
         let row = sqlx::query(
-            "SELECT COUNT(*) AS n, MIN(queued_at) AS oldest FROM jobs \
+            "SELECT COUNT(DISTINCT queued_at) AS n, MIN(queued_at) AS oldest FROM jobs \
              WHERE policy_id = $1 AND host_id = $2 AND kind = 'backup' \
              AND source = 'manual' AND origin = 'manual' AND queued_at > $3",
         )
@@ -1136,6 +1152,12 @@ fn restore_info(record: RestoreRecord, target_repository: &str) -> RestoreInfo {
         in_place: record.in_place,
         restore_owners: record.restore_owners,
         started_by: record.started_by,
+        guest: record.guest.map(|g| guest_restore::GuestRestoreInfo {
+            node: g.node,
+            vmid: g.vmid,
+            storage: g.storage,
+            replace: g.replace,
+        }),
     }
 }
 

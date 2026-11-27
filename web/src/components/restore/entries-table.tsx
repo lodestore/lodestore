@@ -35,7 +35,13 @@ import {
 	formatDateTimeSeconds,
 	formatMode,
 } from "@/lib/format";
-import { absolutePath, decodeB64, displayName, pathParts } from "@/lib/names";
+import {
+	absolutePath,
+	decodeB64,
+	decodeText,
+	displayName,
+	pathParts,
+} from "@/lib/names";
 
 export const PAGE_SIZE = 200;
 /** Keeps at most 1,000 rows in the DOM; older pages drop off as new ones load. */
@@ -133,9 +139,11 @@ function Truncated({
 
 function EntryName({
 	row,
+	volume,
 	onOpen,
 }: {
 	row: EntryRow;
+	volume?: string;
 	onOpen: (pathB64: string) => void;
 }) {
 	const { entry } = row;
@@ -158,6 +166,9 @@ function EntryName({
 				<Truncated text={name}>
 					<span className="min-w-0 truncate font-mono text-sm">{name}</span>
 				</Truncated>
+			)}
+			{volume && (
+				<span className="shrink-0 text-sm text-muted-foreground">{volume}</span>
 			)}
 			{entry.kind === "symlink" && entry.link_target != null && (
 				<Truncated text={displayName(entry.link_target)}>
@@ -195,12 +206,14 @@ function SkeletonRows() {
 
 const EntryRowView = memo(function EntryRowView({
 	row,
+	volume,
 	selected,
 	includedWith,
 	onToggle,
 	onOpen,
 }: {
 	row: EntryRow;
+	volume?: string;
 	selected: boolean;
 	includedWith?: string;
 	onToggle: (row: EntryRow, range: boolean) => void;
@@ -229,7 +242,7 @@ const EntryRowView = memo(function EntryRowView({
 				/>
 			</TableCell>
 			<TableCell className="w-full max-w-0 px-4">
-				<EntryName row={row} onOpen={onOpen} />
+				<EntryName row={row} volume={volume} onOpen={onOpen} />
 				{row.parent && (
 					<Truncated text={row.parent.display}>
 						<button
@@ -285,9 +298,12 @@ export function EntriesTable({
 	folder,
 	selection,
 	complete,
+	volumes,
 	onOpen,
 }: {
 	complete?: boolean;
+	/** Mount point of a container volume by the key it has in the config, such as `mp0`. */
+	volumes?: Map<string, string>;
 	rows: EntryRow[] | undefined;
 	folder?: SelectedItem;
 	selection: Selection;
@@ -381,6 +397,11 @@ export function EntriesTable({
 							<EntryRowView
 								key={row.pathB64}
 								row={row}
+								volume={
+									row.entry.kind === "dir"
+										? volumes?.get(decodeText(decodeB64(row.pathB64)))
+										: undefined
+								}
 								selected={
 									cover !== undefined || selection.items.has(row.pathB64)
 								}

@@ -93,18 +93,33 @@ pub fn write_private_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         .parent()
         .ok_or_else(|| std::io::Error::other("path has no parent directory"))?;
     ensure_dir(dir)?;
+    write_atomic(path, bytes, 0o600)
+}
+
+/// Replaces `path` with `bytes` through a temporary file in the same
+/// directory, so a reader sees the old or the new content, never a mix.
+pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("path has no parent directory"))?;
     let name = path
         .file_name()
         .ok_or_else(|| std::io::Error::other("path has no file name"))?
         .to_string_lossy();
     let tmp = dir.join(format!(".{name}.tmp"));
+    // A stale temporary file, or a link someone planted there, is removed
+    // (never followed); a new one is created exclusively.
+    match std::fs::remove_file(&tmp) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
     let mut file = std::fs::OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
+        .create_new(true)
+        .mode(mode)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(&tmp)?;
-    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    file.set_permissions(std::fs::Permissions::from_mode(mode))?;
     file.write_all(bytes)?;
     file.sync_all()?;
     std::fs::rename(&tmp, path)?;
@@ -289,6 +304,39 @@ mod tests {
             (cert.as_str(), key.as_str()),
             (third_cert.as_str(), third_key.as_str())
         );
+    }
+
+    #[test]
+    fn write_private_file_does_not_follow_tmp_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, "keep").unwrap();
+        let target = dir.path().join("state/secret");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&victim, target.with_file_name(".secret.tmp")).unwrap();
+
+        write_private_file(&target, b"new").unwrap();
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+        let meta = std::fs::symlink_metadata(&target).unwrap();
+        assert!(meta.is_file());
+        assert_eq!(meta.permissions().mode() & 0o7777, 0o600);
+        assert!(!target.with_file_name(".secret.tmp").exists());
+    }
+
+    #[test]
+    fn write_private_file_replaces_stale_tmp() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("secret");
+        let tmp = dir.path().join(".secret.tmp");
+        std::fs::write(&tmp, "half written from a crash").unwrap();
+        write_private_file(&target, b"new").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+        assert!(!tmp.exists());
+
+        std::fs::create_dir(&tmp).unwrap();
+        assert!(write_private_file(&target, b"newer").is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
     }
 
     #[test]

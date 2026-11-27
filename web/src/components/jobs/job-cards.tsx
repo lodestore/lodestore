@@ -1,9 +1,19 @@
 import { Link } from "@tanstack/react-router";
-import { Copy, ShieldAlert, TriangleAlert } from "lucide-react";
+import {
+	Copy,
+	Lock,
+	Network,
+	Power,
+	RefreshCw,
+	ShieldAlert,
+	TriangleAlert,
+} from "lucide-react";
 import type { ReactNode } from "react";
 import { toast } from "sonner";
+import { useContainerPreview } from "@/api/gen/endpoints";
 import type { JobDetail } from "@/api/gen/model";
 import { PathText, TextWithPaths } from "@/components/path-text";
+import { DroppedKeys, KeyRows } from "@/components/restore/dropped-keys";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -222,54 +232,82 @@ const tookText = (job: JobDetail) =>
 		? formatDuration(job.finished_at - job.started_at)
 		: null;
 
-function RestoreJobCard({ job }: { job: JobDetail }) {
+/** The "CT 200 · dns" the snapshot came from (null while unknown) and the "CT 105 · dns" it became. */
+export function useContainerLabels(job: JobDetail) {
+	const guest = job.restore?.guest;
+	const facts = useContainerPreview(job.restore?.snapshot_id ?? "", undefined, {
+		query: { enabled: !!guest, retry: false },
+	}).data;
+	const name =
+		job.restore_result?.guest?.name || (guest?.replace ? null : facts?.name);
+	return {
+		source: facts
+			? copy.restore.header.container(facts.vmid, facts.name)
+			: null,
+		target: copy.restore.header.container(guest?.vmid, name),
+	};
+}
+
+function restoreFacts(
+	job: JobDetail,
+	labels: ReturnType<typeof useContainerLabels>,
+): Fact[] {
 	const c = copy.jobs.cards;
 	const restore = job.restore;
+	const guest = restore?.guest;
 	const source = restore?.source_host_key ?? job.host_id;
+	const snapshot = restore && (
+		<SnapshotLink key="snapshot" host={source} id={restore.snapshot_id} />
+	);
+	if (restore && guest) {
+		return [
+			[c.node, <HostLink key="host" id={job.host_id} name={guest.node} />],
+			[c.snapshot, snapshot],
+			[
+				c.source,
+				labels.source && c.sourceOnNode(labels.source, restore.source_hostname),
+			],
+			[c.container, c.containerValue(labels.target, guest.storage)],
+			[c.startedBy, restore.started_by],
+			[c.duration, tookText(job)],
+		];
+	}
+	return [
+		[c.host, <HostLink key="host" id={job.host_id} name={job.hostname} />],
+		[c.snapshot, snapshot],
+		[
+			c.sourceHost,
+			restore && (
+				<HostLink key="source" id={source} name={restore.source_hostname} />
+			),
+		],
+		[
+			c.destination,
+			restore && (
+				<CopyCode
+					key="destination"
+					value={`${job.hostname}:${restore.destination}`}
+					label={c.copyDestination}
+				/>
+			),
+		],
+		[c.ifExists, restore && c.conflict[restore.conflict]],
+		[
+			c.owners,
+			restore && (restore.restore_owners ? c.ownersOriginal : c.ownersAgent),
+		],
+		[c.startedBy, restore?.started_by],
+		[c.queued, dateTime(job.queued_at)],
+		[c.started, dateTime(job.started_at)],
+		[c.finished, dateTime(job.finished_at)],
+		[c.duration, tookText(job)],
+	];
+}
+
+function RestoreJobCard({ job }: { job: JobDetail }) {
+	const labels = useContainerLabels(job);
 	return (
-		<Facts
-			title={c.job}
-			facts={[
-				[c.host, <HostLink key="host" id={job.host_id} name={job.hostname} />],
-				[
-					c.snapshot,
-					restore && (
-						<SnapshotLink
-							key="snapshot"
-							host={source}
-							id={restore.snapshot_id}
-						/>
-					),
-				],
-				[
-					c.sourceHost,
-					restore && (
-						<HostLink key="source" id={source} name={restore.source_hostname} />
-					),
-				],
-				[
-					c.destination,
-					restore && (
-						<CopyCode
-							key="destination"
-							value={`${job.hostname}:${restore.destination}`}
-							label={c.copyDestination}
-						/>
-					),
-				],
-				[c.ifExists, restore && c.conflict[restore.conflict]],
-				[
-					c.owners,
-					restore &&
-						(restore.restore_owners ? c.ownersOriginal : c.ownersAgent),
-				],
-				[c.startedBy, restore?.started_by],
-				[c.queued, dateTime(job.queued_at)],
-				[c.started, dateTime(job.started_at)],
-				[c.finished, dateTime(job.finished_at)],
-				[c.duration, tookText(job)],
-			]}
-		/>
+		<Facts title={copy.jobs.cards.job} facts={restoreFacts(job, labels)} />
 	);
 }
 
@@ -402,6 +440,35 @@ export function restoreFailureText(
 	const host = job.hostname;
 	const path = job.restore?.destination ?? "";
 	const e = copy.jobs.errors;
+	const guest = job.restore?.guest;
+	if (guest) {
+		const vmid = guest.vmid;
+		const own = job.error_message?.trim() ?? "";
+		switch (job.error_code) {
+			case "guest_running":
+				return own || e.guestRunning(vmid);
+			case "guest_ha_managed":
+				return own || e.guestHaManaged(vmid);
+			case "guest_target_changed":
+				return e.guestTargetChanged(vmid);
+			case "restore_expired":
+				return e.restoreExpired;
+			case "guest_plugin_missing":
+				return e.guestPluginMissing(guest.node);
+			case "guest_in_place_disabled":
+				return e.guestInPlaceDisabled(guest.node);
+			case "restore_vmid_taken":
+				return e.restoreVmidTaken(vmid);
+			case "restore_snapshot_not_ct":
+				return e.restoreSnapshotNotCt;
+			case "restore_incomplete":
+				return e.restoreIncomplete;
+			case "guest_target_has_snapshots":
+				return e.guestTargetHasSnapshots(vmid);
+			case "restore_no_space":
+				return e.restoreFailed(own).replace(/\s{2,}/g, " ");
+		}
+	}
 	switch (job.error_code) {
 		case "restore_target_unwritable":
 			return e.restore_target_unwritable(host, path);
@@ -409,6 +476,8 @@ export function restoreFailureText(
 			return e.restore_target_not_empty(host, path);
 		case "restore_disk_full":
 			return e.restore_disk_full(host, path);
+		case "restore_no_space":
+			return e.restore_no_space(host, path);
 		case "restore_outside_roots":
 			return e.restore_outside_roots(host, path);
 		case "restore_in_place_disabled":
@@ -453,6 +522,14 @@ export function backupFailureCopy(
 			break;
 		case "inline_not_allowed":
 			return e.inline_not_allowed(host);
+		case "guest_plugin_missing":
+			return e.guestPluginMissing(host);
+		case "guest_not_local":
+			return e.guestNotLocal(host);
+		case "source_unknown":
+			return e.sourceUnknown(host);
+		case "ct_mode_mismatch":
+			return e.ctModeMismatch;
 		case "gc_agent_outdated":
 			return e.gc_agent_outdated(host);
 		case "source_agent_outdated": {
@@ -522,6 +599,7 @@ function outcomeText(job: JobDetail) {
 					? e.restoreNotStarted(job.hostname)
 					: e.notStarted(job.hostname);
 		case "cancelled":
+			if (job.error_code === "coalesced") return e.coalesced;
 			return kind === "restore"
 				? copy.jobs.otherStatusHint.cancelled
 				: copy.jobs.statusHint.cancelled;
@@ -530,8 +608,96 @@ function outcomeText(job: JobDetail) {
 	}
 }
 
+function ContainerResultCard({ job }: { job: JobDetail }) {
+	const c = copy.jobs.cards;
+	const e = c.containerEffects;
+	const guest = job.restore_result?.guest;
+	const info = job.restore?.guest;
+	const vmid = guest?.vmid ?? info?.vmid ?? 0;
+	const nets = guest?.new_mac_nets ?? [];
+	const effects = [
+		{
+			Icon: Power,
+			label:
+				(guest?.replaced ?? info?.replace) ? e.replaced(vmid) : e.stopped(vmid),
+		},
+		...(nets.length > 0
+			? [{ Icon: RefreshCw, label: e.newMacs(nets.join(", ")) }]
+			: []),
+		...(guest?.unprivileged
+			? [{ Icon: Lock, label: e.unprivileged(guest.root_host_uid) }]
+			: []),
+	];
+	const network = guest?.network ?? [];
+	return (
+		<Card>
+			<CardHeader>
+				<CardTitle>
+					<h2>{c.result}</h2>
+				</CardTitle>
+			</CardHeader>
+			<CardContent className="flex flex-col gap-4">
+				<ul className="flex flex-col divide-y">
+					{effects.map(({ Icon, label }) => (
+						<li key={label} className="flex items-center gap-2 py-2 text-sm">
+							<Icon
+								aria-hidden
+								className="size-4 shrink-0 text-muted-foreground"
+							/>
+							{label}
+						</li>
+					))}
+				</ul>
+				{network.length > 0 && (
+					<div className="flex flex-col gap-1">
+						<h3 className="text-sm font-semibold">{c.networkKept}</h3>
+						<KeyRows rows={network} icon={Network} />
+					</div>
+				)}
+			</CardContent>
+		</Card>
+	);
+}
+
+function ContainerDroppedCard({ job }: { job: JobDetail }) {
+	const c = copy.jobs.cards;
+	const guest = job.restore_result?.guest;
+	const dropped = guest?.dropped ?? [];
+	if (dropped.length === 0) return null;
+	const total = guest?.dropped_total ?? dropped.length;
+	return (
+		<Card className="xl:col-span-2">
+			<CardHeader>
+				<CardTitle>
+					<h2>{c.droppedTitle(total)}</h2>
+				</CardTitle>
+			</CardHeader>
+			<CardContent className="flex flex-col gap-4">
+				<DroppedKeys dropped={dropped} />
+				{total > dropped.length && (
+					<p className="text-sm text-muted-foreground">
+						{c.droppedCut(dropped.length)}
+					</p>
+				)}
+				<p className="text-sm text-muted-foreground">
+					{c.droppedHint}{" "}
+					<a
+						href={c.docsUrl}
+						target="_blank"
+						rel="noreferrer"
+						className="rounded-sm text-primary-strong"
+					>
+						{c.docsLabel}
+					</a>
+				</p>
+			</CardContent>
+		</Card>
+	);
+}
+
 function RestoreResultCard({ job }: { job: JobDetail }) {
 	const c = copy.jobs.cards;
+	if (job.restore?.guest) return <ContainerResultCard job={job} />;
 	const result = job.restore_result;
 	const count = (n?: number) => (result ? formatCount(n ?? 0) : null);
 	return (
@@ -647,6 +813,9 @@ export function JobCards({ job }: { job: JobDetail }) {
 							</p>
 						)}
 				</div>
+			)}
+			{job.kind === "restore" && job.restore?.guest && (
+				<ContainerDroppedCard job={job} />
 			)}
 			{text !== null && (
 				<Alert

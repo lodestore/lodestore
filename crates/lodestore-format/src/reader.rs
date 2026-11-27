@@ -1045,11 +1045,11 @@ impl<S: BlobStore> Reader<S> {
 
     /// Writes the content of one regular file to `out`; holes of a sparse
     /// file are written as zeros.
-    pub async fn dump_file(
+    pub async fn dump_file<W: Write + ?Sized>(
         &mut self,
         snapshot_id: &BlobId,
         path: &[u8],
-        out: &mut dyn Write,
+        out: &mut W,
     ) -> Result<()> {
         let (top, top_bytes) = self.open_tree(snapshot_id).await?;
         let at = self.locate(top, top_bytes, path).await?;
@@ -1316,7 +1316,7 @@ impl<S: BlobStore> Reader<S> {
     }
 }
 
-fn write_zeros(out: &mut dyn Write, mut n: u64) -> Result<()> {
+fn write_zeros<W: Write + ?Sized>(out: &mut W, mut n: u64) -> Result<()> {
     static ZEROS: [u8; 64 << 10] = [0; 64 << 10];
     while n > 0 {
         let chunk = usize::try_from(n).map_or(ZEROS.len(), |n| n.min(ZEROS.len()));

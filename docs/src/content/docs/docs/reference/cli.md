@@ -262,7 +262,7 @@ Exit codes: 0 when the search finished or stopped at a limit, 1 when the search 
 
 `lode server restore <snapshot> --host <host>` asks the agent on that host to restore. The snapshot is the full id from `lode server snapshots list`.
 
-The token needs `restore:host` to restore into a folder, and `restore:in-place` with `--in-place`. The two scopes are independent: `restore:in-place` does not allow a restore into a folder. This command restores files: for a snapshot of a guest or a database the server answers 422 ("This snapshot is a proxmox-vm backup and cannot be restored as files.") and `lode` exits with code 1 with that message. A snapshot of a disk image is the one exception: with no `--path`, or `--path /`, it is restored whole as one sparse file `NAME.img` in the target folder, and any other `--path` restores segments as files. `--in-place` is refused for an image. Because the default `--conflict overwrite-changed` could replace an existing `NAME.img`, such a restore needs `restore:in-place` (and a session needs its password within 15 minutes); with `--conflict skip-existing` or `stop-if-not-empty` `restore:host` is enough. An image with too many holes to describe in a plan of 4 MiB is refused with 422 and a pointer to `lode restore`. The four scopes `restore:guest`, `restore:guest-in-place`, `restore:db` and `restore:db-in-place` are reserved for those restores; no command uses them yet, and neither `restore:host` nor `restore:in-place` includes them. Downloading files or an archive in the web interface or through the API is a third scope, `restore:download`; it does not allow a restore onto a host.
+The token needs `restore:host` to restore into a folder, and `restore:in-place` with `--in-place`. The two scopes are independent: `restore:in-place` does not allow a restore into a folder. This command restores files: for a snapshot of a virtual machine or a database the server answers 422 ("This snapshot is a proxmox-vm backup and cannot be restored as files.") and `lode` exits with code 1 with that message. The files of a container snapshot restore into a folder (not with `--in-place`), with owners shifted by the container's id map. A snapshot of a disk image is the other exception: with no `--path`, or `--path /`, it is restored whole as one sparse file `NAME.img` in the target folder, and any other `--path` restores segments as files. `--in-place` is refused for an image. Because the default `--conflict overwrite-changed` could replace an existing `NAME.img`, such a restore needs `restore:in-place` (and a session needs its password within 15 minutes); with `--conflict skip-existing` or `stop-if-not-empty` `restore:host` is enough. An image with too many holes to describe in a plan of 4 MiB is refused with 422 and a pointer to `lode restore`. The four scopes `restore:guest`, `restore:guest-in-place`, `restore:db` and `restore:db-in-place` are for those restores: the guest scopes are used by the [container restore of the API](/docs/reference/api/#container-restore), no command uses any of them yet, and neither `restore:host` nor `restore:in-place` includes them. Downloading files or an archive in the web interface or through the API is a third scope, `restore:download`; it does not allow a restore onto a host.
 
 By default the command also restores file owners, POSIX ACLs and other `system.*` attributes, `security.*` and `trusted.*` extended attributes, setuid/setgid bits and file capabilities. The agent keeps the setuid/setgid bits and the capabilities only in a restore in place; into a new folder it restores the owners and drops them. A token may ask for any of it only with `restore:in-place`; a token with `restore:host` alone must pass `--no-owners`, or the server refuses with 403 and names the scope. The local `lode restore`, run by whoever holds the bucket, always restores owners, ACLs and labels.
 
@@ -452,3 +452,28 @@ The memory of the checks is in `$XDG_CACHE_HOME/lode/<repository id>/` (`$HOME/.
 `lode backup --writer-keys` cannot check the backup, so in such a repository it exits with an error and writes nothing. It also refuses when the key cannot read `locks/`, so it cannot tell, unless `--no-gc-check` says no server cleans up the repository, and on a machine that remembers the repository was upgraded. Back up through the agent (`lode backup --stdin` over its socket), or use the password or recovery key. In a repository no 0.2 server has opened, `--writer-keys` works as before and nothing checks the backup.
 
 `lode backup --stdin` through the agent is signed by the server for the host of the agent; see [Agent local socket](/docs/reference/local-socket/).
+
+## Proxmox VE node
+
+`lodestore-agent pve install` prepares a Proxmox VE node for container backups. Run it as root on every node of the cluster, after the agent is installed there:
+
+```sh
+lodestore-agent pve install
+```
+
+It installs the Lodestore storage plugin and backup provider into `/usr/share/perl5`, reloads `pvedaemon`, `pveproxy`, `pvestatd` and `pvescheduler`, and writes the node's marker into `/etc/pve/lodestore/plugin/`. Then it waits until every node of the cluster has a marker with the same plugin and pve-manager 9.2.33 or newer, printing one line per node (`ready`, `waiting` or `outdated (...)`), and only then adds the `lodestore` storage (`pvesm add lodestore lodestore --content backup --prune-backups keep-all=1`). The storage is added once for the cluster, by whichever waiting node gets there first; running the command again changes nothing that is already in place.
+
+| Flag | Meaning |
+|------|---------|
+| `--allow-guest-in-place` | Allow restoring a container over an existing one on this node: sets `restore.allow_guest_in_place: true` in this node's `agent.yaml` and restarts the agent. Other nodes keep their own setting, and the server cannot change it. Rewriting `agent.yaml` drops its comments |
+| `--wait-seconds N` | How long to wait for the other nodes, default 600 |
+| `--config-dir DIR` | Where `agent.yaml` is, default `/etc/lodestore` |
+
+How backups and restores of containers work is in [Proxmox VE containers](/docs/guides/proxmox-containers/). Every node needs pve-manager 9.2.33 or newer. Install the plugin on a new node before you join it with `pvecm add`: a node without the plugin drops the `lodestore` section of the shared `storage.cfg` the first time it writes that file. Run the command again on a node after an agent update, when the alert `pve_plugin_missing` is open for it, or when a job failed with `protocol_mismatch`.
+
+| Code | Meaning |
+|------|---------|
+| 0 | The plugin is on every node and the storage exists |
+| 1 | A file, a command or `storage.cfg` failed; the message says which |
+| 2 | Refused: not root, not a Proxmox VE node, or pve-manager older than 9.2.33 |
+| 3 | Not every node got ready within `--wait-seconds`; the message lists the nodes where the command still has to run |

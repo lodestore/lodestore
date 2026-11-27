@@ -13,12 +13,14 @@ use lodestore_agent::{EnrollArgs, NetOptions};
 use lodestore_proto::agent::v1::agent_message::Body as AgentBody;
 use lodestore_proto::agent::v1::server_message::Body as ServerBody;
 use lodestore_proto::agent::v1::{
-    DatabaseKind, DatabaseServer, GuestKind, Heartbeat, JobSpec, ProxmoxFacts, ProxmoxGuest,
-    SourceFacts,
+    ClusterNode, ConfigLine, DatabaseKind, DatabaseServer, GuestKind, Heartbeat, JobSpec,
+    ProxmoxFacts, ProxmoxGuest, ProxmoxStorage, SourceFacts,
 };
 use lodestore_server::db::now_ms;
 use lodestore_server::sources::{
-    self, Discovery, MAX_DATABASES, MAX_GUEST_TAGS, MAX_GUESTS, MAX_NAME_BYTES, MAX_SERVERS,
+    self, Discovery, MAX_BRIDGES, MAX_CLUSTER_NODES, MAX_DATABASES, MAX_GUEST_TAGS,
+    MAX_GUEST_VOLUMES, MAX_GUESTS, MAX_NAME_BYTES, MAX_PLUGIN_MARKER, MAX_SERVERS, MAX_STORAGES,
+    MAX_VOLUME_LINE,
 };
 use sqlx::{AnyPool, Row};
 
@@ -59,6 +61,7 @@ fn facts(guests: Vec<ProxmoxGuest>) -> SourceFacts {
             cluster: "pve-prod".to_string(),
             node: "pve".to_string(),
             guests,
+            ..Default::default()
         }),
         ..Default::default()
     }
@@ -316,6 +319,7 @@ fn bloated_guests() -> Vec<ProxmoxGuest> {
             uuid: format!("{i:08x}-1111-4111-8111-111111111111"),
             pool: "p".repeat(100),
             tags: (0..100).map(|t| format!("t{t:02}")).collect(),
+            ..Default::default()
         })
         .collect()
 }
@@ -416,6 +420,92 @@ async fn adv_source_facts_are_bounded() {
         heartbeat(&other, facts(vec![guest(102, SHARED_UUID)])).await;
         wait_stored(pool, &b.id, |d| d.proxmox.is_some()).await;
         drop(other);
+        ts.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adv_source_facts_pve_claims_are_clipped_and_grant_nothing() {
+    for backend in backends() {
+        let ts = TestServer::start(&backend).await;
+        let api = ts.api().await;
+        let repo = ts.create_local_repository("main").await;
+        let pool = &ts.state().db.pool;
+        let a = enroll(&ts, &api, &repo, "pve-a").await;
+        policy(
+            pool,
+            &repo,
+            "vms-a",
+            &a,
+            "  source:\n    type: proxmox-vm\n    vmids: [101]\n",
+        )
+        .await;
+        ts.issue_token(&["hosts:read"]).await;
+        let before = rights(pool).await;
+
+        let mut ct = guest(200, "22222222-2222-4222-8222-222222222222");
+        ct.kind = GuestKind::Ct as i32;
+        ct.pve_uid = "NOT-A-UID".to_string();
+        ct.volumes = (0..500)
+            .map(|i| ConfigLine {
+                key: format!("mp{}", i % 256),
+                value: "v".repeat(100),
+            })
+            .collect();
+        ct.volumes.push(ConfigLine {
+            key: "rootfs".to_string(),
+            value: "x".repeat(4096),
+        });
+        ct.volumes.push(ConfigLine {
+            key: "../../etc".to_string(),
+            value: "evil".to_string(),
+        });
+        let mut claims = facts(vec![guest(101, SHARED_UUID), ct]);
+        let proxmox = claims.proxmox.as_mut().unwrap();
+        proxmox.nodes = (0..100)
+            .map(|i| ClusterNode {
+                name: format!("n{i}"),
+                online: true,
+                plugin_marker: "m".repeat(600),
+            })
+            .collect();
+        proxmox.bridges = (0..1000).map(|i| format!("br{i}")).collect();
+        proxmox.storages = (0..1000)
+            .map(|i| ProxmoxStorage {
+                id: format!("elsewhere{i}"),
+                r#type: "dir".to_string(),
+                content: vec!["rootdir".to_string()],
+                shared: true,
+            })
+            .collect();
+        proxmox.guest_in_place_allowed = true;
+        proxmox.plugin_installed = true;
+        proxmox.next_vmid = 0;
+
+        let agent = Fake::connect(&ts, &a, vec![]).await;
+        heartbeat(&agent, claims).await;
+        wait_stored(pool, &a.id, |d| d.proxmox.is_some()).await;
+        let kept: Discovery = serde_json::from_str(&stored(pool, &a.id).await.unwrap()).unwrap();
+        let node = kept.proxmox.unwrap();
+        assert!(kept.truncated, "[{}]", backend.name());
+        assert_eq!(node.nodes.len(), MAX_CLUSTER_NODES);
+        assert!(
+            node.nodes
+                .iter()
+                .all(|n| n.plugin_marker.len() == MAX_PLUGIN_MARKER)
+        );
+        assert_eq!(node.bridges.len(), MAX_BRIDGES);
+        assert_eq!(node.storages.len(), MAX_STORAGES);
+        assert_eq!(node.next_vmid, None);
+        let ct = node.guests.iter().find(|g| g.vmid == 200).unwrap();
+        assert_eq!(ct.volumes.len(), MAX_GUEST_VOLUMES);
+        assert!(ct.volumes_truncated);
+        assert!(ct.volumes.iter().all(|v| v.value.len() <= MAX_VOLUME_LINE));
+        assert!(ct.volumes.iter().all(|v| v.key.starts_with("mp")));
+        assert_eq!(ct.pve_uid, "");
+
+        assert_eq!(rights(pool).await, before, "[{}]", backend.name());
+        drop(agent);
         ts.stop().await;
     }
 }

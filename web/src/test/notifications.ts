@@ -23,6 +23,8 @@ export const ALL_TYPES: ChannelDto["alert_types"] = [
 	"source_instance_gone",
 	"guarantee_downgraded",
 	"host_key_changed",
+	"guest_unprotected",
+	"pve_plugin_missing",
 ];
 
 export const channel = (

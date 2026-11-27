@@ -72,6 +72,8 @@ The server stores a policy of every type, whether it comes from the form, the YA
 
 For guests, `vmids: [101]` with `tags: [prod]` selects VM 101 and every guest tagged `prod`; it does not require both. The selector of the policy chooses the hosts as for any policy; what the policy backs up on each host comes from what the agent of that host found there.
 
+A policy of containers runs as one job for each selected container of the node that reported it, one at a time on a node. The selector is resolved against the list that the node sent after the job was queued, so a container created just before the run is included, and a container that already has a job in progress from this policy is skipped. The job waits in the queue for such a list for up to 30 minutes, and then fails with `source_unknown`. A container that moved to another node since the last list fails on the old node with `guest_not_local`, and the policy is run at once for it on the other host of the policy that now lists it, as a new job of that host. A node without the Lodestore plugin fails the job with `guest_plugin_missing`.
+
 `lode policy validate FILE...` checks policy files offline, with the same rules as the server, and prints the path, line and column of each problem. It exits 0 when every file is valid and 3 when one is not; it needs no server and no token.
 
 ## What to back up in the policy form
@@ -80,7 +82,7 @@ The field **What to back up** is at the top of the policy form. It offers **File
 
 For guests the form shows **Guests**: pick them from a searchable list (25 rows at a time), take every guest of a pool, or take every guest with any of up to 20 tags. For PostgreSQL and MySQL it shows **Databases** or **Schemas** with three modes: all (including ones created later), pick, or all except the names you tick. The list is what the agents of the selected hosts reported in their last scan. A guest or database that is ticked in the policy but no longer reported stays in the list marked "Not found on the selected hosts", so it can be unticked. A pick with nothing ticked cannot be saved ("Pick at least one guest."), because an empty pick would otherwise mean everything. A selection that combines `vmids`, `pool` and `tags`, or `databases` and `excludeDatabases`, is kept as it is and shown with a note to edit it in the YAML tab. The YAML tab shows the same `spec.source` that `lode apply` takes.
 
-**Matching hosts** shows, for a policy of guests or databases, how many instances the policy selects on each host, and marks a host whose jobs will fail, with the reason: the agent is too old to back up the type, the host has no Proxmox, PostgreSQL or MySQL, or none of the selected guests or databases are on it. When the agent has no recent list, or its list was cut short or could not be read, the host has no count and no mark of the last two kinds: the server does not guess, and the agent decides when the job comes.
+**Matching hosts** shows, for a policy of guests or databases, how many instances the policy selects on each host, and marks a host whose jobs will fail, with the reason: the agent is too old to back up the type, the host has no Proxmox, PostgreSQL or MySQL, or none of the selected guests or databases are on it. When the agent has no recent list, or its list was cut short or could not be read, the host has no count and no mark of the last two kinds: the server does not guess, and the agent decides when the job comes. Jobs of containers are the exception: they wait for a list, see [Jobs that do not start](#jobs-that-do-not-start).
 
 ## Sources found on a host
 
@@ -109,14 +111,17 @@ The agents of this version find guests and databases but back up files only: gue
 
 ## Jobs that do not start
 
-A job of a guest or database policy fails at once, before any hook runs, in two cases. It shows in **Jobs** as a failed job with a message that says what to do, raises the usual **Backup failed** alert and carries its code in `error_code`:
+A job of a guest or database policy fails at once, before any hook runs, in the cases below. It shows in **Jobs** as a failed job with a message that says what to do, raises the usual **Backup failed** alert and carries its code in `error_code`:
 
 | Code | When | What to do |
 | --- | --- | --- |
-| `source_agent_outdated` | The agent has not declared the capability `source:<type>` for the type of the policy. Agents of this version declare only `source:files`. | Update the agent to a version that backs up the type. |
+| `source_agent_outdated` | The agent has not declared the capability `source:<type>` for the type of the policy. Agents of this version declare `source:files` and `source:proxmox-ct`. | Update the agent to a version that backs up the type. |
 | `source_not_found` | The host has no source of the type, or the policy selects none of the guests or databases found on it. | Check what the policy backs up and where it runs. |
+| `source_unknown` | A job of containers waited 30 minutes and the agent did not list its containers after the job was queued. | Check that the agent is online and up to date. |
+| `guest_not_local` | The container is no longer on this node. The agent says which node it is on. | Nothing: the job is queued on the node that lists the container, if it is a host of the policy. Add that host to the policy otherwise. |
+| `guest_plugin_missing` | The node reports that the Lodestore plugin is missing or was changed. | Run `lodestore-agent pve install` on the node. |
 
-The server refuses a job for the second reason only on a recent, complete list: under 15 minutes old, collected after the job was queued, not cut short, and with no database server that could not be read. If the agent is offline, or its list is old, older than the job (a guest created while the job waited) or incomplete, the job goes to the agent, which checks its own scan and refuses with the same code. What an agent reports never widens what it may do: it only narrows what the form offers and which jobs are handed out.
+The server refuses a job for the second reason only on a recent, complete list: under 15 minutes old, collected after the job was queued, not cut short, and with no database server that could not be read. If the agent is offline, or its list is old, older than the job (a guest created while the job waited) or incomplete, a job of a virtual machine or a database goes to the agent, which checks its own scan and refuses with the same code. A job of containers waits for a list instead. What an agent reports never widens what it may do: it only narrows what the form offers and which jobs are handed out.
 
 ## Durations and rates
 

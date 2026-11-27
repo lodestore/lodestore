@@ -854,3 +854,83 @@ async fn metrics_listen_off_by_default() {
     assert_eq!(response.status(), 200);
     handle.shutdown().await;
 }
+
+impl Stand {
+    async fn ct_policy(&self, name: &str, host: &str, vmids: &str) {
+        let yaml = format!(
+            "apiVersion: lodestore.io/v1alpha2\nkind: BackupPolicy\nmetadata:\n  name: {name}\n\
+             spec:\n  repository: main\n  selector:\n    hosts: [{host}]\n  \
+             source:\n    type: proxmox-ct\n    vmids: [{vmids}]\n{DAILY}"
+        );
+        let policy = lodestore_policy::parse_yaml(&yaml).unwrap();
+        sqlx::query(
+            "INSERT INTO policies (id, name, repository_id, yaml, spec_json, revision, \
+             created_at, updated_at) VALUES ($1, $1, $2, $3, $4, 1, $5, $5)",
+        )
+        .bind(name)
+        .bind(&self.repo)
+        .bind(&yaml)
+        .bind(serde_json::to_string(&policy).unwrap())
+        .bind(now_ms() - 30 * DAY)
+        .execute(self.pool())
+        .await
+        .unwrap();
+    }
+
+    async fn instance_snapshot(&self, id: &str, host: &str, policy: &str, key: &str, at: i64) {
+        self.snapshot(id, host, policy, at).await;
+        sqlx::query(
+            "UPDATE snapshots SET source_type = 'proxmox-ct', source_ref = $1, \
+             stats_json = $2 WHERE id = $3",
+        )
+        .bind(key)
+        .bind(r#"{"bytes_total": 90000, "bytes_added": 300}"#)
+        .bind(id)
+        .execute(self.pool())
+        .await
+        .unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn metrics_backup_series_per_instance() {
+    const KEY: &str = "proxmox-ct/pve1/00000200-1111-4111-8111-111111111111";
+    for backend in backends() {
+        let stand = Stand::start(&backend).await;
+        stand.agent("h1", "web-1").await;
+        stand.policy("daily", "h1").await;
+        stand.ct_policy("cts", "h1", "200").await;
+        let (files_at, ct_at) = (now_ms() - HOUR, now_ms() - 3 * DAY);
+        stand.snapshot("f1", "h1", "daily", files_at).await;
+        stand.instance_snapshot("c1", "h1", "cts", KEY, ct_at).await;
+
+        let text = stand.scrape().await;
+        let files = r#"{host_id="h1",host="web-1",policy="daily"}"#;
+        let ct = format!(r#"{{host_id="h1",host="web-1",policy="cts",source="{KEY}"}}"#);
+        for (labels, at) in [(files.to_string(), files_at), (ct.clone(), ct_at)] {
+            let seen = value(
+                &text,
+                &format!("lodestore_backup_last_success_timestamp_seconds{labels}"),
+            );
+            assert!((seen - at as f64 / 1000.0).abs() < 1.0, "{labels}: {seen}");
+            assert_eq!(
+                value(&text, &format!("lodestore_backup_last_status{labels}")),
+                1.0
+            );
+        }
+        assert_eq!(
+            value(&text, &format!("lodestore_backup_overdue{files}")),
+            0.0
+        );
+        assert_eq!(value(&text, &format!("lodestore_backup_overdue{ct}")), 1.0);
+        assert_eq!(
+            value(&text, &format!("lodestore_backup_last_bytes_total{files}")),
+            5000.0
+        );
+        assert_eq!(
+            value(&text, &format!("lodestore_backup_last_bytes_total{ct}")),
+            90000.0
+        );
+        stand.stop().await;
+    }
+}

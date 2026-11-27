@@ -4,7 +4,7 @@
 //! servers are asked over their local sockets (see `database`).
 
 mod database;
-mod proxmox;
+pub(crate) mod proxmox;
 
 use std::fs::File;
 use std::future::Future;
@@ -22,6 +22,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::Paths;
+use crate::config::AgentSettings;
 pub(crate) use database::ProbeMemo;
 
 pub const DISCOVERY_EVERY: Duration = Duration::from_secs(5 * 60);
@@ -37,10 +38,23 @@ pub const MAX_PVE_FILE_BYTES: u64 = 4 << 20;
 pub const MAX_GUEST_CONF_BYTES: u64 = 64 << 10;
 pub const MAX_SCAN_BYTES: u64 = 32 << 20;
 pub const MAX_STATE_BYTES: u64 = 1 << 20;
+pub const MAX_STORAGES: usize = 64;
+pub const MAX_CLUSTER_NODES: usize = 64;
+pub const MAX_BRIDGES: usize = 256;
+pub const MAX_GUEST_VOLUMES: usize = 64;
+pub const MAX_VOLUME_LINE: usize = 512;
+pub const MAX_PLUGIN_MARKER: usize = 128;
+pub const MAX_STORAGE_CONTENT: usize = 8;
+pub const STORAGE_CONTENT_TYPES: [&str; 7] = [
+    "images", "rootdir", "vztmpl", "iso", "backup", "snippets", "import",
+];
 
 #[derive(Debug, Clone)]
 pub struct Config {
     pub pve_root: PathBuf,
+    pub sys_root: PathBuf,
+    pub perl_root: PathBuf,
+    pub dpkg_status: PathBuf,
     /// Searched in this order; a port found in an earlier directory wins.
     pub pg_socket_dirs: Vec<PathBuf>,
     pub mysql_sockets: Vec<PathBuf>,
@@ -73,6 +87,9 @@ impl Config {
     pub fn proxmox_only(pve_root: PathBuf) -> Config {
         Config {
             pve_root,
+            sys_root: PathBuf::from("/sys"),
+            perl_root: PathBuf::from("/usr/share/perl5"),
+            dpkg_status: PathBuf::from("/var/lib/dpkg/status"),
             pg_socket_dirs: Vec::new(),
             mysql_sockets: Vec::new(),
             pg_user: "postgres".into(),
@@ -136,11 +153,20 @@ pub(crate) async fn collect(
     paths: &Paths,
     memo: &ProbeMemo,
 ) -> Result<SourceFacts, ScanFailed> {
-    let (root, ids) = (config.pve_root.clone(), paths.source_ids());
+    let roots = proxmox::ScanRoots {
+        pve: config.pve_root.clone(),
+        sys: config.sys_root.clone(),
+        perl: config.perl_root.clone(),
+        dpkg_status: config.dpkg_status.clone(),
+    };
+    let (ids, paths) = (paths.source_ids(), paths.clone());
     let proxmox = async {
-        tokio::task::spawn_blocking(move || proxmox::scan(&root, &ids))
-            .await
-            .map_err(|e| ScanFailed(format!("the discovery thread failed: {e}")))?
+        tokio::task::spawn_blocking(move || {
+            let allowed = AgentSettings::load(&paths).restore.allow_guest_in_place;
+            proxmox::scan(&roots, &ids, allowed)
+        })
+        .await
+        .map_err(|e| ScanFailed(format!("the discovery thread failed: {e}")))?
     };
     let (found, (databases, db_truncated)) =
         tokio::join!(proxmox, database::scan_databases(config, memo));
@@ -192,6 +218,18 @@ fn bound(mut facts: SourceFacts) -> SourceFacts {
                     .pop()
                     .map_or(0, |s| prost::encoding::message::encoded_len(4, &s)),
             }
+        } else if let Some(guest) = facts
+            .proxmox
+            .as_mut()
+            .and_then(|p| p.guests.iter_mut().rev().find(|g| !g.volumes.is_empty()))
+        {
+            // Cutting the volumes of a guest keeps the guest in the list; a
+            // guest with `volumes_truncated` cannot be replaced.
+            guest.volumes_truncated = true;
+            std::mem::take(&mut guest.volumes)
+                .iter()
+                .map(|line| prost::encoding::message::encoded_len(12, line))
+                .sum()
         } else {
             match facts.proxmox.as_mut().and_then(|p| p.guests.pop()) {
                 Some(guest) => prost::encoding::message::encoded_len(3, &guest),
@@ -427,6 +465,7 @@ mod tests {
             uuid: "0192f0c4-7d3a-7000-8000-000000000001".into(),
             pool: String::new(),
             tags,
+            ..Default::default()
         }
     }
 
@@ -436,6 +475,7 @@ mod tests {
                 cluster: String::new(),
                 node: "pve1".into(),
                 guests,
+                ..ProxmoxFacts::default()
             }),
             ..SourceFacts::default()
         }

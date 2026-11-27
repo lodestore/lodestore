@@ -3,6 +3,7 @@
 //! resolve a multi-component path.
 
 pub mod filter;
+pub mod idmap;
 pub mod meta;
 pub mod raw;
 pub mod restore;

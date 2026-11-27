@@ -56,6 +56,62 @@ enum Command {
         #[arg(long)]
         exe: PathBuf,
     },
+    /// Proxmox VE node setup.
+    Pve {
+        #[command(subcommand)]
+        command: PveCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum PveCommand {
+    /// Install the Lodestore storage plugin and backup provider on this node
+    /// and add the `lodestore` storage once every node of the cluster has them.
+    Install {
+        #[arg(long, default_value = "/etc/lodestore")]
+        config_dir: PathBuf,
+        /// Allow restoring a container over an existing one on this node.
+        #[arg(long)]
+        allow_guest_in_place: bool,
+        /// How long to wait for the other nodes of the cluster.
+        #[arg(long, default_value_t = 600)]
+        wait_seconds: u64,
+    },
+}
+
+fn pve(command: PveCommand) -> ExitCode {
+    use lodestore_agent::pve::install::{InstallOptions, InstallRoots, System, install};
+    let PveCommand::Install {
+        config_dir,
+        allow_guest_in_place,
+        wait_seconds,
+    } = command;
+    if !rustix::process::geteuid().is_root() {
+        eprintln!("lodestore-agent pve install must run as root");
+        return ExitCode::from(2);
+    }
+    let roots = InstallRoots {
+        agent_yaml: Paths {
+            config_dir,
+            ..Paths::default()
+        }
+        .agent_yaml(),
+        ..InstallRoots::default()
+    };
+    let options = InstallOptions {
+        allow_guest_in_place,
+        wait: Duration::from_secs(wait_seconds),
+    };
+    match install(&roots, &options, &System, &mut std::io::stdout()) {
+        Ok(_) => {
+            println!("the lodestore storage is ready on every node");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::from(e.exit_code())
+        }
+    }
 }
 
 fn read_token() -> Result<String, AgentError> {
@@ -125,6 +181,7 @@ async fn execute(command: Command) -> Result<(), AgentError> {
             }
             Ok(())
         }
+        Command::Pve { .. } => unreachable!("handled before the runtime starts"),
         Command::Run { dirs } => {
             let shutdown = CancellationToken::new();
             tokio::spawn(shutdown_on_signal(shutdown.clone()));
@@ -158,6 +215,9 @@ fn main() -> ExitCode {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
     let cli = Cli::parse();
+    if let Command::Pve { command } = cli.command {
+        return pve(command);
+    }
     let runtime = match runtime() {
         Ok(runtime) => runtime,
         Err(e) => {

@@ -9,7 +9,7 @@ use lodestore_format::locks::{DEFAULT_MAX_RUNTIME, RUNTIME_MARGIN};
 use lodestore_policy::source::Source;
 use lodestore_proto::agent::v1::server_message::Body as ServerBody;
 use lodestore_proto::agent::v1::{
-    JobAssign, JobCancel, JobSpec, Limits, RestoreSpec, ServerMessage,
+    JobAssign, JobCancel, JobSpec, Limits, RestoreSpec, ServerMessage, SourceInstance,
 };
 use prost::Message;
 use sqlx::Row;
@@ -17,13 +17,14 @@ use tokio_util::sync::CancellationToken;
 
 use crate::catalog::RepositoryUnavailable;
 use crate::db::now_ms;
-use crate::grpc::registry::{CAP_GC, CAP_LIMITS, CAP_RESTORE};
+use crate::grpc::registry::{CAP_GC, CAP_GUEST_RESTORE_CT, CAP_LIMITS, CAP_RESTORE};
+use crate::jobs::guest_restore::REPLACE_TTL_MS;
 use crate::jobs::restore::RestoreRecord;
 use crate::jobs::source_of;
 use crate::maintenance::attest::load_distrusted;
 use crate::maintenance::gc::db as gc_db;
 use crate::repos::db::server_access_checked;
-use crate::sources::{self, select::Selection};
+use crate::sources::{self, Guest, is_fresh, select::Selection};
 use crate::state::AppState;
 
 const KIND_RESTORE: &str = "restore";
@@ -34,6 +35,8 @@ const TIME_LIMIT_MESSAGE: &str = "The backup ran longer than its time limit and 
 const TICK: Duration = Duration::from_secs(1);
 const JANITOR_EVERY: Duration = Duration::from_secs(60);
 const PROGRESS_FLUSH: Duration = Duration::from_secs(10);
+pub(crate) const GUEST_NOT_LOCAL: &str = "guest_not_local";
+const GUEST_FACTS_WAIT_MS: i64 = 30 * 60 * 1000;
 const QUEUED_TTL_MS: i64 = 24 * 3600 * 1000;
 const UNACCEPTED_TTL_MS: i64 = 2 * 60 * 1000;
 const RUNNING_OFFLINE_TTL_MS: i64 = 24 * 3600 * 1000;
@@ -168,7 +171,8 @@ pub async fn assign_queued(state: &AppState, only_agent: Option<&str>) -> anyhow
     let rows = match only_agent {
         Some(agent) => {
             sqlx::query(
-                "SELECT id, host_id, spec, kind, restore_json, queued_at FROM jobs \
+                "SELECT id, host_id, spec, kind, restore_json, queued_at, source_ref, \
+                 source_meta_json FROM jobs \
                  WHERE state = 'queued' AND source = 'manual' \
                  AND host_id = $1 ORDER BY queued_at, id",
             )
@@ -178,7 +182,8 @@ pub async fn assign_queued(state: &AppState, only_agent: Option<&str>) -> anyhow
         }
         None => {
             sqlx::query(
-                "SELECT id, host_id, spec, kind, restore_json, queued_at FROM jobs \
+                "SELECT id, host_id, spec, kind, restore_json, queued_at, source_ref, \
+                 source_meta_json FROM jobs \
                  WHERE state = 'queued' AND source = 'manual' ORDER BY queued_at, id",
             )
             .fetch_all(&state.db.pool)
@@ -211,6 +216,35 @@ pub async fn assign_queued(state: &AppState, only_agent: Option<&str>) -> anyhow
             let record = row
                 .try_get::<Option<String>, _>("restore_json")?
                 .and_then(|json| serde_json::from_str::<RestoreRecord>(&json).ok());
+            // A guest restore goes only to an agent that declares `guest_restore_ct_v1`.
+            if record.as_ref().is_some_and(|r| r.guest.is_some())
+                && !state.registry.supports(&host_id, CAP_GUEST_RESTORE_CT)
+            {
+                fail_job(
+                    state,
+                    &job_id,
+                    "restore_agent_outdated",
+                    "Update the agent on this host to restore containers to it.",
+                )
+                .await?;
+                continue;
+            }
+            let queued_at: i64 = row.try_get("queued_at")?;
+            if record
+                .as_ref()
+                .and_then(|r| r.guest.as_ref())
+                .is_some_and(|g| g.replace)
+                && now_ms().saturating_sub(queued_at) > REPLACE_TTL_MS
+            {
+                fail_job(
+                    state,
+                    &job_id,
+                    "restore_expired",
+                    "The replace was confirmed more than 15 minutes ago. Confirm it again.",
+                )
+                .await?;
+                continue;
+            }
             if record
                 .as_ref()
                 .is_some_and(|r| r.started_by.starts_with("token:"))
@@ -243,6 +277,32 @@ pub async fn assign_queued(state: &AppState, only_agent: Option<&str>) -> anyhow
                         spec.max_runtime_s = DEFAULT_MAX_RUNTIME.as_secs();
                     }
                     match source_of(&spec) {
+                        Ok(Some(source)) if matches!(source, Source::ProxmoxCt(_)) => {
+                            let source_ref: String = row.try_get("source_ref")?;
+                            let meta: Option<String> = row.try_get("source_meta_json")?;
+                            let queued_at: i64 = row.try_get("queued_at")?;
+                            match prepare_guest_job(
+                                state,
+                                &job_id,
+                                &host_id,
+                                &source,
+                                (&source_ref, meta.as_deref()),
+                                queued_at,
+                            )
+                            .await?
+                            {
+                                GuestStep::Wait => {
+                                    seen.remove(&host_id);
+                                    continue;
+                                }
+                                GuestStep::Done => continue,
+                                GuestStep::Unreadable => {
+                                    fail_unreadable(state, &job_id, &kind).await?;
+                                    continue;
+                                }
+                                GuestStep::Go(instance) => spec.instance = Some(instance),
+                            }
+                        }
                         Ok(Some(source)) => {
                             if let Some((code, message)) =
                                 source_gate(state, &host_id, &source, row.try_get("queued_at")?)
@@ -463,6 +523,343 @@ fn source_noun(source_type: &str) -> &'static str {
     }
 }
 
+fn capability_refusal(
+    state: &AppState,
+    host_id: &str,
+    source: &Source,
+) -> Option<(&'static str, String)> {
+    (!state
+        .registry
+        .supports(host_id, &sources::capability(source.type_name())))
+    .then(|| {
+        let noun = source_noun(source.type_name());
+        (
+            "source_agent_outdated",
+            format!("The agent on this host does not back up {noun} yet. Update the agent."),
+        )
+    })
+}
+
+enum GuestStep {
+    /// No list collected since the job was queued yet; try again on the next pass.
+    Wait,
+    /// The job was failed or cancelled here.
+    Done,
+    Unreadable,
+    Go(SourceInstance),
+}
+
+/// A container job is one instance. The job of a selector is expanded into one
+/// job per selected container once the node has listed its containers after the
+/// job was queued; the keys come from the stored list, never from the agent.
+async fn prepare_guest_job(
+    state: &AppState,
+    job_id: &str,
+    host_id: &str,
+    source: &Source,
+    (source_ref, meta_json): (&str, Option<&str>),
+    queued_at: i64,
+) -> anyhow::Result<GuestStep> {
+    let source_type = source.type_name();
+    let fail = |code: &'static str, message: String| async move {
+        fail_job_with_detail(state, job_id, code, &message, source_type).await?;
+        Ok::<_, anyhow::Error>(GuestStep::Done)
+    };
+    if let Some((code, message)) = capability_refusal(state, host_id, source) {
+        return fail(code, message).await;
+    }
+    let now = now_ms();
+    let instance = !source_ref.is_empty();
+    let stored = sources::load(state, host_id).await?;
+    let listed = stored.as_ref().filter(|s| {
+        is_fresh(s.collected_at, now)
+            && (instance || s.collected_at.is_some_and(|at| at >= queued_at))
+    });
+    if let Some(node) = listed.and_then(|s| s.discovery.proxmox.as_ref())
+        && !node.plugin_installed
+    {
+        let hostname: String = sqlx::query("SELECT hostname FROM agents WHERE id = $1")
+            .bind(host_id)
+            .fetch_one(&state.db.pool)
+            .await?
+            .try_get("hostname")?;
+        return fail(
+            "guest_plugin_missing",
+            format!(
+                "The Lodestore plugin is missing or was changed on {hostname}. Run lodestore-agent pve install there."
+            ),
+        )
+        .await;
+    }
+    if instance {
+        let vmid = meta_json
+            .and_then(|json| {
+                serde_json::from_str::<std::collections::BTreeMap<String, String>>(json).ok()
+            })
+            .and_then(|meta| meta.get("vmid")?.parse().ok());
+        return Ok(match vmid {
+            Some(vmid) => GuestStep::Go(SourceInstance {
+                key: source_ref.to_string(),
+                vmid,
+            }),
+            None => GuestStep::Unreadable,
+        });
+    }
+    match sources::select::select(source, listed, now) {
+        Selection::NoSource | Selection::Nothing => {
+            fail(
+                "source_not_found",
+                "No containers were found on this host, or the policy selects none of them."
+                    .to_string(),
+            )
+            .await
+        }
+        Selection::Unknown if now.saturating_sub(queued_at) > GUEST_FACTS_WAIT_MS => {
+            fail(
+                "source_unknown",
+                "The agent has not listed its containers since the job was queued.".to_string(),
+            )
+            .await
+        }
+        Selection::Unknown => Ok(GuestStep::Wait),
+        Selection::Some { keys, .. } => {
+            let guests: Vec<&Guest> = listed
+                .and_then(|s| s.discovery.proxmox.as_ref())
+                .into_iter()
+                .flat_map(|p| &p.guests)
+                .filter(|g| keys.contains(&g.key))
+                .collect();
+            Ok(match expand_guest_job(state, job_id, &guests).await? {
+                Some(instance) => GuestStep::Go(instance),
+                None => GuestStep::Done,
+            })
+        }
+    }
+}
+
+pub(crate) fn guest_meta(guest: &Guest) -> String {
+    let mut meta = std::collections::BTreeMap::new();
+    meta.insert("vmid", guest.vmid.to_string());
+    if let Some(name) = &guest.name {
+        meta.insert("name", name.clone());
+    }
+    serde_json::to_string(&meta).unwrap_or_default()
+}
+
+/// The selector job becomes the job of the first selected container without an
+/// active job; the others get queued jobs of their own with the same policy,
+/// spec, origin and queue time. `None`: every selected container is already in
+/// progress, so the job is cancelled, or it is no longer a queued selector job:
+/// another pass expanded it first, or raced it to one of the containers.
+#[doc(hidden)]
+pub async fn expand_guest_job(
+    state: &AppState,
+    job_id: &str,
+    guests: &[&Guest],
+) -> anyhow::Result<Option<SourceInstance>> {
+    match expand_selector(state, job_id, guests).await {
+        Err(sqlx::Error::Database(db)) if db.is_unique_violation() => Ok(None),
+        result => Ok(result?),
+    }
+}
+
+async fn expand_selector(
+    state: &AppState,
+    job_id: &str,
+    guests: &[&Guest],
+) -> sqlx::Result<Option<SourceInstance>> {
+    let mut tx = state.db.pool.begin().await?;
+    let Some(row) = sqlx::query(
+        "SELECT host_id, policy_id, policy_name, spec, queued_at, origin FROM jobs \
+         WHERE id = $1 AND state = 'queued' AND source_ref = ''",
+    )
+    .bind(job_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
+        return Ok(None);
+    };
+    let host_id: String = row.try_get("host_id")?;
+    let policy_id: Option<String> = row.try_get("policy_id")?;
+    let mut free = Vec::new();
+    for guest in guests {
+        let busy = sqlx::query(
+            "SELECT 1 FROM jobs WHERE host_id = $1 AND policy_id = $2 AND source_ref = $3 \
+             AND state IN ('queued', 'assigned', 'running') AND id <> $4",
+        )
+        .bind(&host_id)
+        .bind(&policy_id)
+        .bind(&guest.key)
+        .bind(job_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .is_some();
+        if !busy {
+            free.push(*guest);
+        }
+    }
+    let Some((first, rest)) = free.split_first() else {
+        sqlx::query(
+            "UPDATE jobs SET state = 'cancelled', finished_at = $1, error_code = 'coalesced', \
+             error_message = 'Every selected container already has a job in progress.' \
+             WHERE id = $2 AND state = 'queued' AND source_ref = ''",
+        )
+        .bind(now_ms())
+        .bind(job_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        return Ok(None);
+    };
+    let spec: Vec<u8> = row.try_get("spec")?;
+    let policy_name: Option<String> = row.try_get("policy_name")?;
+    let queued_at: i64 = row.try_get("queued_at")?;
+    let origin: String = row.try_get("origin")?;
+    let claimed = sqlx::query(
+        "UPDATE jobs SET source_ref = $1, source_meta_json = $2 \
+         WHERE id = $3 AND state = 'queued' AND source_ref = ''",
+    )
+    .bind(&first.key)
+    .bind(guest_meta(first))
+    .bind(job_id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if claimed == 0 {
+        return Ok(None);
+    }
+    for guest in rest {
+        insert_guest_job(
+            &mut tx,
+            (&host_id, &policy_id, &policy_name),
+            (&spec, queued_at, &origin),
+            guest,
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(Some(SourceInstance {
+        key: first.key.clone(),
+        vmid: first.vmid,
+    }))
+}
+
+/// The agent answered `guest_not_local`: the container lives on another node.
+/// Every other host of the policy whose fresh list shows a container with this
+/// VMID in the same cluster, still selected by the policy, gets a job of its own
+/// for it, once per run: a host that already has a
+/// job for the instance from this run or a later one is skipped, so two agents
+/// that disown the container cannot pass it back and forth.
+async fn redispatch_guest(state: &AppState, job_id: &str) -> anyhow::Result<()> {
+    let Some(row) = sqlx::query(
+        "SELECT host_id, policy_id, policy_name, spec, queued_at, origin, source_ref, \
+         source_meta_json FROM jobs WHERE id = $1",
+    )
+    .bind(job_id)
+    .fetch_optional(&state.db.pool)
+    .await?
+    else {
+        return Ok(());
+    };
+    let source_ref: String = row.try_get("source_ref")?;
+    let policy_id: Option<String> = row.try_get("policy_id")?;
+    let meta: Option<String> = row.try_get("source_meta_json")?;
+    let vmid: Option<u32> = meta
+        .and_then(|json| {
+            serde_json::from_str::<std::collections::BTreeMap<String, String>>(&json).ok()
+        })
+        .and_then(|meta| meta.get("vmid")?.parse().ok());
+    let (Some(policy_id), Some(vmid), false) = (&policy_id, vmid, source_ref.is_empty()) else {
+        return Ok(());
+    };
+    let from_host: String = row.try_get("host_id")?;
+    let policy_name: Option<String> = row.try_get("policy_name")?;
+    let spec: Vec<u8> = row.try_get("spec")?;
+    let queued_at: i64 = row.try_get("queued_at")?;
+    let origin: String = row.try_get("origin")?;
+    let Some(source) = JobSpec::decode(spec.as_slice())
+        .ok()
+        .and_then(|spec| source_of(&spec).ok().flatten())
+    else {
+        return Ok(());
+    };
+    let scope = source_ref.rsplit_once('/').map(|(scope, _)| scope);
+    let now = now_ms();
+    for host_id in crate::policies::hosts_of_policy(state, policy_id).await? {
+        if host_id == from_host {
+            continue;
+        }
+        let Some(stored) = sources::load(state, &host_id).await? else {
+            continue;
+        };
+        let Some(guest) = stored
+            .discovery
+            .proxmox
+            .as_ref()
+            .filter(|_| is_fresh(stored.collected_at, now))
+            .and_then(|node| {
+                node.guests.iter().find(|g| {
+                    g.vmid == vmid
+                        && g.key.rsplit_once('/').map(|(scope, _)| scope) == scope
+                        && sources::select::selects_guest(&source, g)
+                })
+            })
+        else {
+            continue;
+        };
+        let seen = sqlx::query(
+            "SELECT 1 FROM jobs WHERE host_id = $1 AND policy_id = $2 AND source_ref = $3 \
+             AND queued_at >= $4",
+        )
+        .bind(&host_id)
+        .bind(policy_id)
+        .bind(&guest.key)
+        .bind(queued_at)
+        .fetch_optional(&state.db.pool)
+        .await?
+        .is_some();
+        if seen {
+            continue;
+        }
+        let mut tx = state.db.pool.begin().await?;
+        insert_guest_job(
+            &mut tx,
+            (&host_id, &Some(policy_id.clone()), &policy_name),
+            (&spec, queued_at, &origin),
+            guest,
+        )
+        .await?;
+        tx.commit().await?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn insert_guest_job(
+    tx: &mut sqlx::Transaction<'_, sqlx::Any>,
+    (host_id, policy_id, policy_name): (&str, &Option<String>, &Option<String>),
+    (spec, queued_at, origin): (&[u8], i64, &str),
+    guest: &Guest,
+) -> sqlx::Result<bool> {
+    let inserted = sqlx::query(
+        "INSERT INTO jobs (id, host_id, policy_id, policy_name, source, state, spec, \
+         queued_at, origin, source_ref, source_meta_json) \
+         VALUES ($1, $2, $3, $4, 'manual', 'queued', $5, $6, $7, $8, $9) ON CONFLICT DO NOTHING",
+    )
+    .bind(uuid::Uuid::now_v7().to_string())
+    .bind(host_id)
+    .bind(policy_id)
+    .bind(policy_name)
+    .bind(spec.to_vec())
+    .bind(queued_at)
+    .bind(origin)
+    .bind(&guest.key)
+    .bind(guest_meta(guest))
+    .execute(&mut **tx)
+    .await?
+    .rows_affected();
+    Ok(inserted == 1)
+}
+
 /// Why a job for a source that is not files must not reach the agent: the agent
 /// cannot back the type up, or a fresh, complete list collected after the job
 /// was queued shows nothing to back up. Stale, unknown, partial or older data
@@ -474,16 +871,10 @@ async fn source_gate(
     source: &Source,
     queued_at: i64,
 ) -> anyhow::Result<Option<(&'static str, String)>> {
-    let noun = source_noun(source.type_name());
-    if !state
-        .registry
-        .supports(host_id, &sources::capability(source.type_name()))
-    {
-        return Ok(Some((
-            "source_agent_outdated",
-            format!("The agent on this host does not back up {noun} yet. Update the agent."),
-        )));
+    if let Some(refusal) = capability_refusal(state, host_id, source) {
+        return Ok(Some(refusal));
     }
+    let noun = source_noun(source.type_name());
     let stored = sources::load(state, host_id)
         .await?
         .filter(|s| s.collected_at.is_some_and(|at| at >= queued_at));

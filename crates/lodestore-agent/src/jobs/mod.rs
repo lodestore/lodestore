@@ -25,6 +25,8 @@ use crate::shared_channel::SharedChannel;
 use crate::socket::StdinHeader;
 use crate::{AgentError, NetOptions, Paths};
 
+pub mod ct_backup;
+pub mod ct_restore;
 pub(crate) mod distrusted;
 pub mod fetch;
 pub(crate) mod own_shards;
@@ -122,6 +124,7 @@ pub struct JobHub {
     channel: Arc<SharedChannel>,
     stdin_max_runtime_s: AtomicU64,
     discovery: OnceLock<Discovery>,
+    pve: OnceLock<ct_backup::PveJobs>,
 }
 
 /// What a job executor gets: report phases, events and the final result, and
@@ -149,6 +152,10 @@ impl JobCtx {
     /// What this host's discovery found last; `None` without discovery or before its first success.
     pub fn sources(&self) -> Option<SourceFacts> {
         self.hub.discovery.get().and_then(Discovery::current)
+    }
+
+    pub fn pve(&self) -> Option<&ct_backup::PveJobs> {
+        self.hub.pve.get()
     }
 
     /// Proxy settings the session was started with, for connections a job
@@ -302,6 +309,7 @@ impl JobHub {
             channel: Arc::new(SharedChannel::new(paths)),
             stdin_max_runtime_s: AtomicU64::new(0),
             discovery: OnceLock::new(),
+            pve: OnceLock::new(),
         }))
     }
 
@@ -317,6 +325,11 @@ impl JobHub {
     /// The discovery whose latest result jobs check their source against; set once.
     pub fn set_discovery(&self, discovery: Discovery) {
         let _ = self.discovery.set(discovery);
+    }
+
+    /// What container jobs need on a Proxmox VE node; set once.
+    pub fn set_pve(&self, pve: ct_backup::PveJobs) {
+        let _ = self.pve.set(pve);
     }
 
     /// The server channel jobs and update downloads share; the session loop keeps it current.

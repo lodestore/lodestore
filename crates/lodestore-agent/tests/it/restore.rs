@@ -178,6 +178,7 @@ impl Fx {
             conflict: conflict as i32,
             restore_owners: owners,
             target: None,
+            ..Default::default()
         }
     }
 
@@ -540,7 +541,7 @@ async fn restore_runner_restores_plan_from_local_repo() {
 
     let f = finished_of(&msgs, &id).unwrap();
     assert_eq!(f.outcome, JobOutcome::Succeeded as i32, "{msgs:?}");
-    let stats = f.restore.unwrap();
+    let stats = f.restore.clone().unwrap();
     assert_eq!(stats.files, 6);
     assert_eq!(stats.created, 6);
     assert_eq!(stats.overwritten + stats.skipped, 0);
@@ -873,6 +874,390 @@ async fn restore_runner_root_new_folder_gives_foreign_owner_without_privileges()
     assert!(has_cap(&restored), "in place keeps {CAP}");
 }
 
+const CT_IDMAP: &str = "u:0:100000:65536,g:0:100000:65536";
+
+/// Files of a container snapshot: `a/x` owned by the container's root, `a/y`
+/// by its uid 33 and `b/z` setuid with a capability.
+fn ct_plan(planned: &Planned) -> MemPlan {
+    MemPlan::new(planned).map_nodes(|n| {
+        let (id, privileged) = match n.name.as_slice() {
+            b"y" => (33, false),
+            b"z" => (0, true),
+            _ => (0, false),
+        };
+        n.uid = id;
+        n.gid = id;
+        if privileged {
+            n.mode = 0o4755;
+            n.xattrs.push(lodestore_format::pb::Xattr {
+                name: b"security.capability".to_vec(),
+                value: [&[0, 0, 0, 2][..], &[0; 16]].concat(),
+            });
+        }
+    })
+}
+
+/// Runs a files restore of a container snapshot into `dest` and returns
+/// the job's end.
+async fn ct_restore_job(
+    fx: &Fx,
+    dest: &Path,
+    tweak: impl FnOnce(&mut RestoreSpec),
+    opts: RestoreOptions,
+) -> JobFinished {
+    ct_restore_run(fx, dest, tweak, opts, &[]).await.0
+}
+
+/// Like [`ct_restore_job`], with `extra` entries at the top of the plan.
+async fn ct_restore_run(
+    fx: &Fx,
+    dest: &Path,
+    tweak: impl FnOnce(&mut RestoreSpec),
+    opts: RestoreOptions,
+    extra: &[Node],
+) -> (JobFinished, Vec<AgentMessage>) {
+    let hub = fx.hub();
+    let ids = ids(fx).await;
+    let planned = fx.plan(&["a/x", "a/y", "b/z"], 4, None).await;
+    let id = fx.job_id();
+    let mut spec = RestoreSpec {
+        ct_idmap: CT_IDMAP.into(),
+        ..fx.spec(
+            dest,
+            ConflictPolicy::OverwriteChanged,
+            false,
+            true,
+            ids.k_id,
+            ids.repo_id,
+        )
+    };
+    tweak(&mut spec);
+    let mut plan = ct_plan(&planned);
+    let entries = extra.iter().map(|n| PlanItem {
+        kind: Some(Kind::Entry(PlanEntry {
+            node: n.encode_to_vec(),
+            chunks: Vec::new(),
+            more: false,
+        })),
+    });
+    plan.batches[0].items.splice(0..0, entries);
+    let msgs = run(&hub, &id, spec, plan, StoreFetcher::new(fx), opts).await;
+    (finished_of(&msgs, &id).unwrap().clone(), msgs)
+}
+
+fn in_root(fx: &Fx) -> RestoreOptions {
+    RestoreOptions {
+        roots: vec![fx.root.clone()],
+        ..options()
+    }
+}
+
+async fn assert_refused(fx: &Fx, tweak: impl FnOnce(&mut RestoreSpec), text: &str) {
+    let dest = fx.root.join("refused");
+    let f = ct_restore_job(fx, &dest, tweak, in_root(fx)).await;
+    assert_eq!(f.outcome, JobOutcome::Failed as i32, "{f:?}");
+    assert_eq!(f.error_code, "restore_failed", "{f:?}");
+    assert_eq!(f.error_message, text, "{f:?}");
+    assert!(!dest.exists(), "nothing is written");
+}
+
+#[tokio::test]
+async fn restore_ct_idmap_invalid_refused() {
+    let fx = Fx::new().await;
+    let text = "the container idmap of the snapshot is invalid";
+    assert_refused(&fx, |s| s.ct_idmap = "u:0:100000".into(), text).await;
+    let long = vec!["u:0:100000:1"; 30].join(",");
+    assert!(long.len() > 256);
+    assert_refused(&fx, |s| s.ct_idmap = long, text).await;
+}
+
+#[tokio::test]
+async fn restore_ct_idmap_maps_root_refused() {
+    let fx = Fx::new().await;
+    let text = "the container idmap of the snapshot maps a container id to root on the node";
+    for map in [
+        "u:0:0:65536,g:0:100000:65536",
+        "u:0:100000:65536,g:1000:0:1",
+    ] {
+        assert_refused(&fx, |s| s.ct_idmap = map.into(), text).await;
+    }
+}
+
+#[tokio::test]
+async fn restore_ct_idmap_in_place_refused() {
+    let fx = Fx::new().await;
+    let target = fx.root.join("in-place");
+    let opts = RestoreOptions {
+        root: target.clone(),
+        allow_in_place: true,
+        ..options()
+    };
+    let f = ct_restore_job(&fx, Path::new("/"), |s| s.in_place = true, opts).await;
+    assert_eq!(f.outcome, JobOutcome::Failed as i32, "{f:?}");
+    assert_eq!(f.error_code, "restore_failed", "{f:?}");
+    assert_eq!(
+        f.error_message,
+        "a container snapshot cannot be restored in place"
+    );
+    assert!(!target.exists(), "nothing is written");
+}
+
+#[tokio::test]
+async fn restore_ct_idmap_without_owners() {
+    let fx = Fx::new().await;
+    let dest = fx.root.join("fresh");
+    let f = ct_restore_job(&fx, &dest, |s| s.restore_owners = false, in_root(&fx)).await;
+    assert_eq!(f.outcome, JobOutcome::Succeeded as i32, "{f:?}");
+    assert_eq!(f.errors_total + f.warnings_total, 0, "{f:?}");
+    let me = rustix::process::geteuid().as_raw();
+    for rel in ["a/x", "a/y", "b/z"] {
+        let meta = fs::metadata(fx.restored(&dest, rel)).unwrap();
+        assert_eq!(meta.uid(), me, "{rel}: no owner is applied");
+    }
+    assert_eq!(
+        fs::metadata(fx.restored(&dest, "b/z"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7000,
+        0
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[ignore = "requires root; run scripts/test-linux.sh --root -p lodestore-agent pve_root_"]
+async fn pve_root_file_shift_owners() {
+    use rustix::fs::getxattr;
+
+    assert!(is_root(), "run through scripts/test-linux.sh --root");
+    let fx = Fx::new().await;
+    let dest = fx.root.join("fresh");
+    let f = ct_restore_job(&fx, &dest, |_| {}, in_root(&fx)).await;
+    assert_eq!(f.outcome, JobOutcome::Succeeded as i32, "{f:?}");
+    let owner = |rel: &str| {
+        let meta = fs::metadata(fx.restored(&dest, rel)).unwrap();
+        (meta.uid(), meta.gid())
+    };
+    assert_eq!(owner("a/x"), (100_000, 100_000));
+    assert_eq!(owner("a/y"), (100_033, 100_033));
+    assert_eq!(owner("b/z"), (100_000, 100_000));
+    assert_eq!(owner("a"), (100_000, 100_000), "folders are shifted too");
+    let z = fx.restored(&dest, "b/z");
+    assert_eq!(
+        fs::metadata(&z).unwrap().permissions().mode() & 0o7777,
+        0o755
+    );
+    assert!(getxattr(&z, "security.capability", &mut [0u8; 64]).is_err());
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[ignore = "requires root; run scripts/test-linux.sh --root -p lodestore-agent pve_root_"]
+async fn pve_root_file_shift_privileged_ct() {
+    assert!(is_root(), "run through scripts/test-linux.sh --root");
+    let fx = Fx::new().await;
+    let dest = fx.root.join("fresh");
+    let f = ct_restore_job(&fx, &dest, |s| s.ct_idmap.clear(), in_root(&fx)).await;
+    assert_eq!(f.outcome, JobOutcome::Succeeded as i32, "{f:?}");
+    let uid = |rel: &str| fs::metadata(fx.restored(&dest, rel)).unwrap().uid();
+    assert_eq!(uid("a/x"), 0);
+    assert_eq!(uid("a/y"), 33);
+}
+
+/// A block device, a character device, a FIFO and a node type this build
+/// does not know, the way a socket would reach it.
+#[cfg(target_os = "linux")]
+fn specials() -> Vec<Node> {
+    let node = |name: &str, ty: i32, rdev: u64| Node {
+        name: name.as_bytes().to_vec(),
+        r#type: ty,
+        mode: 0o666,
+        rdev,
+        ..Default::default()
+    };
+    vec![
+        node("sda", NodeType::Blockdev as i32, rustix::fs::makedev(8, 0)),
+        node("null", NodeType::Chardev as i32, rustix::fs::makedev(1, 3)),
+        node("fifo", NodeType::Fifo as i32, 0),
+        node("sock", 7, 0),
+    ]
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[ignore = "requires root; run scripts/test-linux.sh --root -p lodestore-agent pve_root_"]
+async fn pve_root_file_shift_skips_devices() {
+    use std::os::unix::fs::FileTypeExt;
+
+    assert!(is_root(), "run through scripts/test-linux.sh --root");
+    let fx = Fx::new().await;
+    let names = ["sda", "null", "fifo", "sock"];
+    for owners in [true, false] {
+        let dest = fx.root.join(format!("guest-{owners}"));
+        let guest = |s: &mut RestoreSpec| {
+            s.guest_snapshot = true;
+            s.restore_owners = owners;
+        };
+        let (f, msgs) = ct_restore_run(&fx, &dest, guest, in_root(&fx), &specials()).await;
+        assert_eq!(f.outcome, JobOutcome::Warnings as i32, "{f:?}");
+        assert_eq!(f.restore.as_ref().unwrap().special_skipped, 4, "{f:?}");
+        let mut reported: Vec<_> = events(&msgs)
+            .iter()
+            .filter(|e| e.kind == "special_file")
+            .map(|e| e.path.clone())
+            .collect();
+        reported.sort();
+        let mut expected: Vec<_> = names.iter().map(|n| n.to_string()).collect();
+        expected.sort();
+        assert_eq!(reported, expected, "{msgs:?}");
+        for name in names {
+            assert!(fs::symlink_metadata(dest.join(name)).is_err(), "{name}");
+        }
+        assert!(fx.restored(&dest, "a/x").is_file());
+        assert_eq!(
+            fs::metadata(&dest).unwrap().permissions().mode() & 0o7777,
+            0o700
+        );
+    }
+
+    let dest = fx.root.join("host");
+    let (f, msgs) = ct_restore_run(
+        &fx,
+        &dest,
+        |s| s.ct_idmap.clear(),
+        in_root(&fx),
+        &specials(),
+    )
+    .await;
+    assert_ne!(f.outcome, JobOutcome::Failed as i32, "{msgs:?}");
+    assert_eq!(f.restore.as_ref().unwrap().special_skipped, 0);
+    let ty = |name: &str| fs::symlink_metadata(dest.join(name)).unwrap().file_type();
+    assert!(ty("sda").is_block_device());
+    assert!(ty("null").is_char_device());
+    assert!(ty("fifo").is_fifo());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires root; run scripts/test-linux.sh --root -p lodestore-agent pve_root_"]
+fn pve_root_space_reserve_mid_write() {
+    use lodestore_format::fs::restore::{Overwrite, RestoreSettings, Restorer, SpaceReserve};
+    use std::process::Command;
+
+    struct Unmount(PathBuf);
+    impl Drop for Unmount {
+        fn drop(&mut self) {
+            let _ = Command::new("umount").arg(&self.0).status();
+        }
+    }
+
+    assert!(is_root(), "run through scripts/test-linux.sh --root");
+    let tmp = tempfile::tempdir().unwrap();
+    let mnt = tmp.path().join("small");
+    fs::create_dir(&mnt).unwrap();
+    let mounted = Command::new("mount")
+        .args(["-t", "tmpfs", "-o", "size=64m", "tmpfs"])
+        .arg(&mnt)
+        .status()
+        .unwrap();
+    assert!(mounted.success(), "cannot mount a tmpfs");
+    let _unmount = Unmount(mnt.clone());
+
+    let settings = RestoreSettings {
+        overwrite: Overwrite::IfChanged,
+        verify: false,
+        dry_run: false,
+        k_id: Zeroizing::new([0; 32]),
+        seed: 0,
+        restore_owners: false,
+        keep_privileges: false,
+    };
+    let node = Node {
+        name: b"big".to_vec(),
+        r#type: NodeType::File as i32,
+        size: 100 << 20,
+        mode: 0o644,
+        ..Default::default()
+    };
+    let piece = vec![7u8; 1 << 20];
+    let free = || {
+        let st = rustix::fs::statvfs(&mnt).unwrap();
+        st.f_bavail * st.f_frsize
+    };
+    // Writes the file piece by piece until the first error; returns how much
+    // went in, the error and the free space at that moment.
+    let fill = |restorer: &mut Restorer| {
+        let mut sink = restorer.begin_file(&node).unwrap().unwrap();
+        let mut written = 0u64;
+        while written < node.size {
+            if let Err(e) = sink.write(&piece) {
+                return (written, Some(e), free());
+            }
+            written += piece.len() as u64;
+        }
+        (written, None, free())
+    };
+
+    let reserve = SpaceReserve {
+        min_bytes: 8 << 20,
+        percent: 0,
+    };
+    let mut restorer = Restorer::open(&mnt, settings.clone())
+        .unwrap()
+        .with_space_reserve(reserve);
+    let (written, err, left) = fill(&mut restorer);
+    assert!(
+        matches!(err, Some(lodestore_format::Error::NoSpace { .. })),
+        "{err:?}"
+    );
+    assert!(written > 0 && written < 64 << 20, "{written}");
+    assert!(left >= (8 << 20) - (64 << 10), "{left} bytes left");
+    assert_eq!(
+        fs::read_dir(&mnt).unwrap().count(),
+        0,
+        "the part is removed"
+    );
+
+    let mut plain = Restorer::open(&mnt, settings).unwrap();
+    let (_, err, _) = fill(&mut plain);
+    assert!(
+        matches!(&err, Some(lodestore_format::Error::Io(e)) if e.kind() == std::io::ErrorKind::StorageFull),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
+async fn restore_guest_snapshot_no_space() {
+    use lodestore_format::fs::restore::SpaceReserve;
+
+    let fx = Fx::new().await;
+    let fresh = fx.root.join("fresh");
+    let opts = || RestoreOptions {
+        space_reserve: SpaceReserve {
+            min_bytes: u64::MAX / 2,
+            percent: 0,
+        },
+        ..in_root(&fx)
+    };
+    let guest = |s: &mut RestoreSpec| s.guest_snapshot = true;
+    for existed in [false, true] {
+        if existed {
+            fs::create_dir(&fresh).unwrap();
+        }
+        let f = ct_restore_job(&fx, &fresh.join("deeper"), guest, opts()).await;
+        assert_eq!(f.outcome, JobOutcome::Failed as i32, "{f:?}");
+        assert_eq!(f.error_code, "restore_no_space", "{f:?}");
+        assert!(f.error_message.contains("must stay free"), "{f:?}");
+        assert_eq!(
+            fresh.exists(),
+            existed,
+            "only what the restore created is removed"
+        );
+        assert!(!fresh.join("deeper").exists());
+    }
+}
+
 #[tokio::test]
 async fn restore_runner_symlinked_target_is_not_read() {
     let fx = Fx::new().await;
@@ -1169,7 +1554,15 @@ async fn restore_runner_skip_and_overwrite_counts() {
         false,
     )
     .await;
-    assert_eq!(finished_of(&msgs, &id).unwrap().restore.unwrap().created, 2);
+    assert_eq!(
+        finished_of(&msgs, &id)
+            .unwrap()
+            .restore
+            .clone()
+            .unwrap()
+            .created,
+        2
+    );
 
     let changed = fx.restored(&dest, "a/x");
     fs::write(&changed, b"edited by hand").unwrap();
@@ -1183,7 +1576,7 @@ async fn restore_runner_skip_and_overwrite_counts() {
         false,
     )
     .await;
-    let stats = finished_of(&msgs, &id).unwrap().restore.unwrap();
+    let stats = finished_of(&msgs, &id).unwrap().restore.clone().unwrap();
     assert_eq!((stats.created, stats.overwritten, stats.skipped), (0, 0, 2));
     assert_eq!(fs::read(&changed).unwrap(), b"edited by hand");
 
@@ -1198,7 +1591,7 @@ async fn restore_runner_skip_and_overwrite_counts() {
     .await;
     let f = finished_of(&msgs, &id).unwrap();
     assert_eq!(f.outcome, JobOutcome::Succeeded as i32, "{msgs:?}");
-    let stats = f.restore.unwrap();
+    let stats = f.restore.clone().unwrap();
     assert_eq!((stats.created, stats.overwritten, stats.skipped), (1, 1, 1));
     assert_eq!(stats.files, 2);
     same_file(&fx, &dest, "a/x");
@@ -1243,7 +1636,7 @@ async fn restore_runner_in_place_keeps_ancestors() {
     .await;
     let f = finished_of(&msgs, &id).unwrap();
     assert_eq!(f.outcome, JobOutcome::Succeeded as i32, "{msgs:?}");
-    assert_eq!(f.restore.unwrap().created, 1);
+    assert_eq!(f.restore.clone().unwrap().created, 1);
     same_file(&fx, &target, "a/x");
     assert_eq!(
         fs::metadata(&a_dir).unwrap().permissions().mode() & 0o7777,
@@ -1879,6 +2272,7 @@ async fn restore_refuses_a_target_it_cannot_run() {
             node: "pve1".into(),
             vmid: 9001,
             in_place: false,
+            ..Default::default()
         }),
         Target::Database(DatabaseTarget {
             database: "app".into(),
@@ -1923,8 +2317,13 @@ async fn restore_refuses_a_target_it_cannot_run() {
             let f = finished_of(&msgs, &id).unwrap();
             let case = format!("{target:?} destination={by_destination} in_place={in_place}");
             assert_eq!(f.outcome, JobOutcome::Failed as i32, "{case} {msgs:?}");
+            // A guest target goes to the container restore, which this hub is not set up for.
+            let expected = match target {
+                Target::Guest(_) => "not set up for Proxmox VE containers",
+                Target::Database(_) => "unsupported restore target",
+            };
             assert!(
-                f.error_message.contains("unsupported restore target"),
+                f.error_message.contains(expected),
                 "{case} {}",
                 f.error_message
             );

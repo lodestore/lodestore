@@ -32,6 +32,9 @@ pub enum ApiError {
     /// A request refused with its own error code.
     #[error("{1}")]
     BadRequest(&'static str, String),
+    /// An unprocessable request refused with its own error code.
+    #[error("{1}")]
+    Unprocessable(&'static str, String),
     #[error("{0}")]
     Conflict(String),
     /// A conflict refused with its own error code.
@@ -72,6 +75,7 @@ impl ApiError {
             ApiError::NotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
             ApiError::Validation(_) => (StatusCode::UNPROCESSABLE_ENTITY, "validation"),
             ApiError::BadRequest(code, _) => (StatusCode::BAD_REQUEST, code),
+            ApiError::Unprocessable(code, _) => (StatusCode::UNPROCESSABLE_ENTITY, code),
             ApiError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
             ApiError::ConflictCode(code, _) => (StatusCode::CONFLICT, code),
             ApiError::PolicyConflict(_) => (StatusCode::CONFLICT, "policy_conflict"),

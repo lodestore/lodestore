@@ -23,6 +23,8 @@ export const notifications = {
 		source_instance_gone: "Source no longer selected",
 		guarantee_downgraded: "Storage protection weakened",
 		host_key_changed: "SFTP host key changed",
+		guest_unprotected: "Guest not protected",
+		pve_plugin_missing: "Proxmox plugin missing",
 	},
 	kinds: {
 		telegram: "Telegram",

@@ -7,7 +7,7 @@ pub mod restore_plan;
 pub mod seeds;
 pub mod stores;
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::pin::Pin;
 use std::sync::OnceLock;
 use std::task::{Context, Poll};
@@ -22,8 +22,11 @@ use lodestore_format::crypto::{
     open_provenance_body, open_writer_marker_body, seal_gc_manifest_body, seal_index_shard,
     seal_provenance_body, seal_snapshot_body, seal_snapshot_key, seal_writer_marker_body,
 };
+use lodestore_format::ct::{self, CtMeta, IdMap};
 use lodestore_format::error::Result;
+use lodestore_format::fs::idmap::{Direction, translate_acl, translate_caps};
 use lodestore_format::fs::restore::check_extents;
+use lodestore_format::guest_config::{self, FilterInput};
 use lodestore_format::image::{
     BitmapBinding, BitmapNames, FullReason, IMAGE_CHUNK_SIZE, ImageExtent, ImageMeta, ImageSource,
     ImageState, SEGMENT_CHUNKS, merge_head, merge_segments, parse_layout, segment_nodes,
@@ -290,6 +293,130 @@ pub fn source_decode(data: &[u8]) {
             "a parsed key must parse again to itself"
         );
     }
+}
+
+/// A hostile container manifest, top tree, `/config` listing, id map,
+/// `pct.conf` or ACL/capability xattr is refused or checks out; a parsed
+/// map is canonical, a parsed meta encodes back to itself, and a translated
+/// xattr translates again.
+pub fn ct_layout(data: &[u8]) {
+    if let Ok(snapshot) = pb::Snapshot::decode(data) {
+        let _ = ct::check_manifest(&snapshot);
+    }
+    if let Ok(claimed) = pb::Source::decode(data)
+        && let Ok((_, meta)) = source::decode(Some(&claimed))
+        && let Ok(parsed) = CtMeta::from_meta(&meta)
+    {
+        let again = parsed.to_meta().expect("a parsed container meta encodes");
+        assert_eq!(
+            CtMeta::from_meta(&again).ok(),
+            Some(parsed),
+            "a container meta must decode to what was encoded"
+        );
+    }
+    if let Ok(tree) = pb::Tree::decode(data) {
+        let _ = ct::check_top(&tree.nodes);
+        if let Ok((conf, fw)) = ct::check_config_dir(&tree.nodes) {
+            assert!(conf.size <= ct::MAX_CT_CONFIG_BYTES as u64);
+            assert!(fw.is_none_or(|n| n.size <= ct::MAX_CT_CONFIG_BYTES as u64));
+        }
+    }
+    if let Ok(text) = std::str::from_utf8(data) {
+        if let Ok(map) = IdMap::parse_canonical(text) {
+            assert_eq!(
+                map.canonical().ok().as_deref(),
+                Some(text),
+                "a parsed id map must be canonical"
+            );
+        }
+        let _ = ct::config_lines(text).count();
+        let _ = IdMap::from_config(text);
+    }
+    let map = IdMap::default_unprivileged();
+    for dir in [Direction::HostToCt, Direction::CtToHost] {
+        if let Ok(out) = translate_acl(data, dir, &map, &mut 0) {
+            assert_eq!(out.len(), data.len(), "an ACL keeps its entries");
+            assert!(translate_acl(&out, dir, &map, &mut 0).is_ok());
+        }
+        if let Ok(Some(out)) = translate_caps(data, dir, &map, &mut 0) {
+            assert!(translate_caps(&out, dir, &map, &mut 0).is_ok());
+        }
+    }
+}
+
+/// A hostile `pct.conf`, filtered for `pct restore`: the first byte says
+/// whether a target configuration follows the snapshot's after a NUL (bit 0)
+/// and whether the node has the bridge `vmbr0` (bit 1). The result holds
+/// only allowed keys, filters to itself without drops, forces
+/// `unprivileged: 1` and `onboot: 0` once, and every mount point in it is an
+/// allocation on a storage.
+pub fn guest_config(data: &[u8]) {
+    let _ = guest_config::guest_identity(data);
+    let Some((&mode, rest)) = data.split_first() else {
+        return;
+    };
+    let (config, target) = if mode & 1 == 1 {
+        let (config, tail) = rest.split_at(rest.iter().position(|b| *b == 0).unwrap_or(rest.len()));
+        (config, tail.get(1..))
+    } else {
+        (rest, None)
+    };
+    let bridges = BTreeSet::from(["vmbr0".to_owned()]);
+    let input = FilterInput {
+        config,
+        firewall: None,
+        target,
+        bridges: (mode & 2 == 2).then_some(&bridges),
+    };
+    let Ok(out) = guest_config::filter_ct(&input) else {
+        return;
+    };
+    let indexed = |key: &str, prefix: &str, max: u32| {
+        key.strip_prefix(prefix)
+            .and_then(|n| n.parse::<u32>().ok().filter(|i| i.to_string() == n))
+            .is_some_and(|i| i < max)
+    };
+    let mut mounts = 0;
+    for line in out.text.split('\n').filter(|l| !l.is_empty()) {
+        if line.starts_with('#') {
+            continue;
+        }
+        let (key, value) = ct::config_lines(line)
+            .next()
+            .expect("every filtered line is a key");
+        assert!(
+            guest_config::KEEP_KEYS.contains(&key)
+                || ["rootfs", "features", "unprivileged", "onboot"].contains(&key)
+                || indexed(key, "mp", 256)
+                || indexed(key, "net", 32),
+            "{key} is not allowed"
+        );
+        if key == "rootfs" || key.starts_with("mp") {
+            mounts += 1;
+            assert_eq!(value.split(',').filter(|p| !p.contains('=')).count(), 1);
+            let props = guest_config::parse_property(value, Some("volume"))
+                .expect("a filtered mount point parses");
+            let (storage, size) = props["volume"].split_once(':').expect("a volume id");
+            assert!(storage.starts_with(|c: char| c.is_ascii_lowercase()));
+            assert!(!size.is_empty() && size.bytes().all(|b| b.is_ascii_digit()));
+        }
+    }
+    assert_eq!(out.volumes.len(), mounts);
+    for key in ["unprivileged", "onboot"] {
+        assert_eq!(out.text.lines().filter(|l| l.starts_with(key)).count(), 1);
+    }
+    assert_eq!(
+        out.text.lines().filter(|l| *l == "unprivileged: 1").count(),
+        1
+    );
+    assert_eq!(out.text.lines().filter(|l| *l == "onboot: 0").count(), 1);
+    let again = guest_config::filter_ct(&FilterInput {
+        config: out.text.as_bytes(),
+        ..input
+    })
+    .expect("a filtered configuration filters again");
+    assert_eq!(again.text, out.text, "the filter is idempotent");
+    assert!(again.dropped.is_empty(), "{:?}", again.dropped);
 }
 
 /// A hostile segment list is either refused or one the writer would have
@@ -653,6 +780,8 @@ pub const TARGETS: &[(&str, Target)] = &[
     ("provenance_open", provenance_open),
     ("source_decode", source_decode),
     ("image_layout", image_layout),
+    ("ct_layout", ct_layout),
+    ("guest_config", guest_config),
     ("image_state", image_state),
     ("nbd_client", nbd_client),
     ("nbd_server", nbd_server),

@@ -65,6 +65,18 @@ export const restore = {
 			"It may not come from this host. You can restore it into another folder or download it after confirming.",
 		clearMark: "Clear mark…",
 		deleteSnapshot: "Delete snapshot…",
+		mode: { snapshot: "Snapshot", suspend: "Suspend", stop: "Stopped" },
+		modeLabel: "Mode",
+		volumes: "Volumes",
+		userIds: {
+			label: "User IDs",
+			unprivileged: (base: number | null | undefined) =>
+				base == null ? "Unprivileged" : `Unprivileged, 0 → ${base}`,
+			privileged: "Privileged",
+		},
+		container: (vmid: number | null | undefined, name?: string | null) =>
+			vmid == null ? "CT" : name ? `CT ${vmid} · ${name}` : `CT ${vmid}`,
+		volume: (key: string, size: string) => `${key} ${size}`,
 	},
 	snapshot: {
 		openFailed: (message?: string) =>
@@ -172,6 +184,8 @@ export const restore = {
 		},
 		owners: "Restore original owners",
 		ownersShort: { on: "Original owners", off: "Agent user (root)" },
+		ownersShifted: (vmid: number | null | undefined, base: number) =>
+			`${vmid == null ? "This container" : `CT ${vmid}`} is unprivileged, so owners are shifted on the node: uid 0 becomes ${base}. Copy the files into the container with cp -a and they belong to the right users.`,
 		options: "Options",
 		optionsValue: (conflict: string, owners: string) =>
 			`${conflict} · ${owners}`,
@@ -215,6 +229,112 @@ export const restore = {
 		dismiss: "Don't download",
 		failed: "start the download",
 		started: "Download started. The archive streams to your browser.",
+	},
+	container: {
+		open: "Restore container",
+		title: (vmid: number | null | undefined, name?: string | null) =>
+			vmid == null
+				? "Restore container"
+				: `Restore CT ${vmid}${name ? ` · ${name}` : ""}`,
+		from: "From",
+		fromValue: (node: string, id: string, when: string, size: string) =>
+			`${node} · snapshot ${id} · ${when} · ${size}`,
+		restoreAs: "Restore as",
+		asNew: "New container",
+		asReplace: "Replace an existing container",
+		node: "Node",
+		storage: "Storage",
+		vmid: "VMID",
+		replaceTarget: "Container",
+		choose: "Choose",
+		nextFree: (n: number, cluster: string, name?: string | null) =>
+			`${n} is the next free ID in ${cluster}.${name ? ` Name: ${name}.` : ""}`,
+		vmidTaken: (n: number) =>
+			`VMID ${n} is taken. Pick another or leave the suggested one.`,
+		vmidInvalid: "Enter a VMID from 100 to 999999999.",
+		pluginMissing: "Plugin not installed",
+		offline: "Offline",
+		noStorage: "No storage for containers",
+		effectsTitle: "The new container",
+		effects: {
+			stopped: "Stays stopped and won't start on boot",
+			newMacs: "Gets new MAC addresses",
+			unprivileged: "Runs unprivileged",
+		},
+		dropped: (n: number) =>
+			`${n} config ${n === 1 ? "key" : "keys"} won't be restored`,
+		droppedNone: "All config keys are restored.",
+		droppedMore: (n: number) => `Show ${n} more`,
+		droppedHide: "Show fewer",
+		droppedShow: "Show",
+		agentFilters: (node: string) =>
+			`The agent on ${node} applies the same filter and lists what it dropped in the job.`,
+		previewFailed:
+			"Couldn't preview the config. The agent still filters it and lists what it dropped in the job.",
+		reasons: {
+			hookscript: "Runs a script as root on the node",
+			lxc: "Raw LXC settings can give root on the node",
+			bind_mount: "Bind mount of a node folder",
+			device: "Passes a node device into the container",
+			privileged: "Would change the container's privileges",
+			features: "Container features that reach the node",
+			args: "Extra arguments for the container runtime",
+			network:
+				"The interface uses a bridge that this node doesn't have, or a setting Lodestore doesn't restore",
+			firewall: "Firewall rules aren't restored. Add them in Proxmox",
+			unknown: "Lodestore doesn't know this setting",
+			section: "Snapshot sections and pending changes aren't restored",
+		},
+		network: "Network interfaces kept",
+		networkNotChecked: "Bridges are checked on the node when the restore runs",
+		replaceOffHead: (node: string) =>
+			`Replacing is turned off on ${node}. To allow it, run`,
+		replaceOffCommand: "lodestore-agent pve install --allow-guest-in-place",
+		replaceOffTail: "on the node.",
+		replaceUnsigned:
+			"An unsigned snapshot cannot replace an existing container.",
+		unverifiedConfirm: "Restore this unsigned snapshot as a new container",
+		replaceNone: "No container on this cluster can be replaced.",
+		replaceWarningTitle: (vmid: number, name?: string | null) =>
+			`All volumes of CT ${vmid}${name ? ` · ${name}` : ""} are replaced with the snapshot`,
+		replaceWarningBody: (vmid: number, n: number) =>
+			`VMID ${vmid} and its MAC addresses stay. Config comes from the snapshot${n > 0 ? ` without the ${n} ${n === 1 ? "key" : "keys"} listed below` : ""}.`,
+		replaceDestroyed: "Deleted with no copy in this snapshot:",
+		replaceDestroyedRow: (
+			key: string,
+			mp: string | undefined,
+			size: string | undefined,
+		) =>
+			`${key}${mp ? ` ${mp}` : ""}${size ? ` · ${size}` : ""} — excluded from backups, not in this snapshot`,
+		replaceConfirm: (
+			vmid: number,
+			name: string | null | undefined,
+			node: string,
+		) => `Replace CT ${vmid}${name ? ` · ${name}` : ""} on ${node}`,
+		replaceButton: (vmid: number) => `Replace CT ${vmid}`,
+		targetLabel: (
+			vmid: number,
+			name: string | null | undefined,
+			node: string,
+			state: string,
+		) => `CT ${vmid}${name ? ` · ${name}` : ""} on ${node} · ${state}`,
+		stopped: "stopped",
+		running: "running",
+		haManaged: "managed by HA",
+		otherGuest: (vmid: number) =>
+			`This snapshot is of another container than CT ${vmid}. Replacing it puts that container's data into CT ${vmid}.`,
+		otherGuestUnknown:
+			"This snapshot doesn't say which container it came from. Check that it is the right one before you replace.",
+		factsStale:
+			"The node hasn't reported its containers recently. Retry in a minute.",
+		targetUnverifiable: (vmid: number) =>
+			`CT ${vmid} has too many volumes to check. Replace it in Proxmox instead.`,
+		retry: "Retry",
+		confirmNew: (vmid: number | string) => `Restore as CT ${vmid}`,
+		nodesFailed: "Couldn't load the nodes of this cluster.",
+		failed: "start the restore",
+		queued: (node: string) => `Restore queued for ${node}.`,
+		dismiss: "Cancel",
 	},
 	cliSource: (name: string) => `CLI · ${name}`,
 	cliBadge: "CLI",

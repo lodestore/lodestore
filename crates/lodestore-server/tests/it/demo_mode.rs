@@ -31,10 +31,20 @@ const POLICY_CHECKS: &[(&str, &str)] = &[
     ("POST", "/api/v1/policies/{name}/retention-preview"),
 ];
 
-const SCHEMA_ONLY: &[(&str, &str)] = &[(
-    "/api/v1/downloads/{id}/archive",
-    "a binary stream; archive_download_works_in_demo reads it and the schema walk covers its fields",
-)];
+const SCHEMA_ONLY: &[(&str, &str)] = &[
+    (
+        "/api/v1/downloads/{id}/archive",
+        "a binary stream; archive_download_works_in_demo reads it and the schema walk covers its fields",
+    ),
+    (
+        "/api/v1/restore/snapshots/{id}/container",
+        "needs a container snapshot, which the demo seed has not; guest_restore reads it and the schema walk covers its fields",
+    ),
+    (
+        "/api/v1/restore/guest-targets",
+        "needs a container snapshot, which the demo seed has not; guest_restore reads it and the schema walk covers its fields",
+    ),
+];
 
 struct Reply {
     status: u16,

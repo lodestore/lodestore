@@ -20,6 +20,8 @@ pub fn alertname(kind: AlertType) -> &'static str {
         AlertType::SourceInstanceGone => "LodestoreSourceInstanceGone",
         AlertType::GuaranteeDowngraded => "LodestoreGuaranteeDowngraded",
         AlertType::HostKeyChanged => "LodestoreHostKeyChanged",
+        AlertType::GuestUnprotected => "LodestoreGuestUnprotected",
+        AlertType::PvePluginMissing => "LodestorePvePluginMissing",
     }
 }
 
@@ -39,6 +41,24 @@ pub fn title(c: &Candidate, now_ms: i64) -> String {
             c.facts.source_label.as_deref().unwrap_or("A source"),
             c.policy.as_deref().unwrap_or("unknown"),
         ),
+        AlertType::GuestUnprotected => format!(
+            "{} on {host} is not backed up by any policy",
+            c.facts.source_label.as_deref().unwrap_or("A guest"),
+        ),
+        AlertType::PvePluginMissing => {
+            let node = c.facts.pve_node.as_deref().unwrap_or("unknown node");
+            let state = if c.facts.plugin_outdated == Some(true) {
+                "outdated"
+            } else {
+                "missing"
+            };
+            match c.facts.pve_cluster.as_deref() {
+                Some(cluster) => {
+                    format!("The Lodestore plugin is {state} on {node} in {cluster}")
+                }
+                None => format!("The Lodestore plugin is {state} on {node}"),
+            }
+        }
         AlertType::AgentOffline => format!("{host} is offline"),
         AlertType::AgentUpdateFailed => format!("Agent update failed on {host}"),
         AlertType::AgentSessionConflict => format!("Two live agent sessions for {host}"),
@@ -122,6 +142,25 @@ pub fn detail(c: &Candidate) -> String {
             format!(
                 "Policy {} no longer selects this source: it was deleted, replaced or left the selector.{last} Its snapshots stay under the retention rules; delete what you do not need by hand. This alert clears itself after a day.",
                 c.policy.as_deref().unwrap_or("unknown"),
+            )
+        }
+        AlertType::GuestUnprotected => {
+            let last = match (c.facts.last_success_at, c.policy.as_deref()) {
+                (Some(ms), Some(policy)) => format!("Last snapshot {} by {policy}.", utc(ms)),
+                (Some(ms), None) => format!("Last snapshot {}.", utc(ms)),
+                (None, _) => "It was backed up before.".to_string(),
+            };
+            format!("{last} Add it to a policy or silence the alert.")
+        }
+        AlertType::PvePluginMissing => {
+            let node = c.facts.pve_node.as_deref().unwrap_or("the node");
+            let scope = if c.facts.pve_cluster.is_some() {
+                "removes the Lodestore storage for the whole cluster"
+            } else {
+                "removes the Lodestore storage"
+            };
+            format!(
+                "Run lodestore-agent pve install on {node}. A node without the plugin {scope} the next time it writes storage.cfg."
             )
         }
         AlertType::AgentOffline => match c.facts.last_seen_at {

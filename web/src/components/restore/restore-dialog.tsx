@@ -13,6 +13,7 @@ import {
 	getCreateRestoreMutationKey,
 	getListJobsQueryKey,
 	summarizeSelection,
+	useContainerPreview,
 	useCreateRestore,
 	useListRestoreHosts,
 } from "@/api/gen/endpoints";
@@ -142,6 +143,11 @@ function RestoreForm({
 		? CONFLICTS.filter((option) => option !== "stop_if_not_empty")
 		: CONFLICTS;
 	const [owners, setOwners] = useState(true);
+	const container = useContainerPreview(snapshot.id, undefined, {
+		query: { enabled: snapshot.source_type === "proxmox-ct" },
+	}).data;
+	const shiftedTo =
+		owners && container?.unprivileged ? container.root_host_uid : null;
 
 	const counts = useQuery({
 		queryKey: ["selection-summary", snapshot.id, items],
@@ -465,6 +471,11 @@ function RestoreForm({
 							</div>
 						</CollapsibleContent>
 					</Collapsible>
+					{shiftedTo != null && (
+						<p className="text-sm text-muted-foreground">
+							{text.ownersShifted(container?.vmid, shiftedTo)}
+						</p>
+					)}
 				</div>
 
 				{restore.isError && (

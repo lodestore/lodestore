@@ -559,14 +559,17 @@ async fn apply_finished(
         .is_some_and(|kind| kind == "restore");
     let stats = if is_restore {
         f.restore.as_ref().map(|r| {
-            serde_json::json!({
+            let mut stats = serde_json::json!({
                 "created": r.created,
                 "overwritten": r.overwritten,
                 "skipped": r.skipped,
                 "files": r.files,
                 "bytes": r.bytes,
-            })
-            .to_string()
+            });
+            if let Some(guest) = &r.guest {
+                stats["guest"] = serde_json::json!(crate::jobs::guest_restore::guest_result(guest));
+            }
+            stats.to_string()
         })
     } else {
         f.stats.as_ref().map(|s| {
@@ -651,6 +654,11 @@ async fn apply_finished(
     }
     state.registry.live.remove(job_id);
     state.registry.clear_issued(job_id);
+    if error_code.as_deref() == Some(super::GUEST_NOT_LOCAL)
+        && let Err(error) = super::redispatch_guest(state, job_id).await
+    {
+        tracing::warn!(%error, job_id, "queueing the container job on its own node failed");
+    }
     if let Some(message) = &refusal
         && let Err(error) = crate::catalog::retention::append_event(
             state,

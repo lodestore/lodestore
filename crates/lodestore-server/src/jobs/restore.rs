@@ -1,4 +1,5 @@
 use lodestore_format::crypto::BlobId;
+use lodestore_format::ct::{self, IdMap};
 use lodestore_format::image::{ImageMeta, load_image};
 use lodestore_format::index::parse_hex32;
 use lodestore_format::reader::Reader;
@@ -50,6 +51,31 @@ pub struct RestoreRecord {
     /// The disk to restore whole as `NAME.img`; absent for a restore of files.
     #[serde(default)]
     pub image: Option<String>,
+    /// The guest to create or replace; absent for a restore of files.
+    #[serde(default)]
+    pub guest: Option<GuestRestoreRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GuestRestoreRecord {
+    pub node: String,
+    pub vmid: u32,
+    pub storage: String,
+    pub replace: bool,
+    /// The target of a replace as the user confirmed it.
+    pub expected: Option<ExpectedTarget>,
+    /// (uid of the snapshot, uid of the target), empty for none.
+    pub confirm_other_guest: Option<(String, String)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExpectedTarget {
+    pub vmid: u32,
+    pub name: String,
+    pub pve_uid: String,
+    pub pve_rtime: u64,
+    pub instance_uuid: String,
+    pub volumes: Vec<crate::sources::VolumeLine>,
 }
 
 impl RestoreRecord {
@@ -239,10 +265,17 @@ pub async fn enqueue_restore_checked(
         .await?
         .ok_or_else(|| ApiError::NotFound("The snapshot was not found.".into()))?;
     let source_type: String = snapshot.try_get("source_type")?;
+    let container = source_type == "proxmox-ct";
     let mut image = None;
     if source_type == "image" && req.in_place {
         return Err(invalid(
             "A disk image cannot be restored in place; restore it into a folder.",
+        ));
+    }
+    if container && req.in_place {
+        return Err(invalid(
+            "A container snapshot cannot be restored in place; restore it as a container or \
+             into a folder.",
         ));
     }
     if replaces_a_disk_image(&source_type, &req) {
@@ -250,7 +283,7 @@ pub async fn enqueue_restore_checked(
     }
     if source_type == "image" && req.items == [b"/".to_vec()] {
         image = Some(signed_image(state, &req.snapshot_id).await?);
-    } else if source_type != "files" && source_type != "image" {
+    } else if source_type != "files" && source_type != "image" && !container {
         return Err(ApiError::Validation(format!(
             "This snapshot is a {source_type} backup and cannot be restored as files."
         )));
@@ -300,6 +333,14 @@ pub async fn enqueue_restore_checked(
         None => require_items_exist(&mut source, &snapshot_id, &req.items).await?,
     }
     let image = image.map(|(_, name)| name);
+    let ct_idmap = if container && req.restore_owners {
+        let manifest = source.snapshot(&snapshot_id).await.map_err(read_error)?;
+        let meta = ct::check_manifest(&manifest)
+            .map_err(|error| ApiError::Validation(error.to_string()))?;
+        owner_shift(meta.idmap.as_ref())?
+    } else {
+        String::new()
+    };
 
     let record = RestoreRecord {
         snapshot_id: req.snapshot_id.clone(),
@@ -317,6 +358,7 @@ pub async fn enqueue_restore_checked(
         restore_owners: req.restore_owners,
         started_by: started_by.to_string(),
         image,
+        guest: None,
     };
     let spec = RestoreSpec {
         snapshot_id: req.snapshot_id,
@@ -327,17 +369,48 @@ pub async fn enqueue_restore_checked(
         conflict: req.conflict as i32,
         restore_owners: req.restore_owners,
         target: None,
+        ct_idmap,
+        guest_snapshot: container,
     };
+    insert_restore_job(state, &req.target_host_id, &spec, &record).await
+}
+
+/// The id map the agent shifts the owners of a container's files by. A map
+/// that gives any id of the container to root of the node is refused: the
+/// agent would not apply it, and the files would silently keep the ids of the
+/// container's view.
+fn owner_shift(map: Option<&IdMap>) -> Result<String, ApiError> {
+    let Some(map) = map else {
+        return Ok(String::new());
+    };
+    if map.ranges().iter().any(|range| range.host == 0) {
+        return Err(ApiError::Unprocessable(
+            "ct_idmap_unsupported",
+            "The id map of this container gives an id to root of the node, so its owners \
+             cannot be restored. Restore it without owners."
+                .into(),
+        ));
+    }
+    map.canonical()
+        .map_err(|e| ApiError::Unprocessable("ct_idmap_unsupported", e.to_string()))
+}
+
+pub(crate) async fn insert_restore_job(
+    state: &AppState,
+    host_id: &str,
+    spec: &RestoreSpec,
+    record: &RestoreRecord,
+) -> Result<String, ApiError> {
     let id = uuid::Uuid::now_v7().to_string();
     sqlx::query(
         "INSERT INTO jobs (id, host_id, source, state, spec, queued_at, kind, restore_json) \
          VALUES ($1, $2, 'manual', 'queued', $3, $4, 'restore', $5)",
     )
     .bind(&id)
-    .bind(&req.target_host_id)
+    .bind(host_id)
     .bind(spec.encode_to_vec())
     .bind(now_ms())
-    .bind(serde_json::to_string(&record).map_err(anyhow::Error::from)?)
+    .bind(serde_json::to_string(record).map_err(anyhow::Error::from)?)
     .execute(&state.db.pool)
     .await?;
     Ok(id)
@@ -395,4 +468,32 @@ async fn check_image(
              restore it with lode restore.",
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use lodestore_format::ct::{IdKind, IdRange};
+
+    use super::*;
+
+    #[test]
+    fn owner_shift_never_maps_to_root_of_the_node() {
+        let range = |kind, host| IdRange {
+            kind,
+            ct: 0,
+            host,
+            count: 65536,
+        };
+        assert_eq!(
+            owner_shift(Some(&IdMap::default_unprivileged())).unwrap(),
+            "u:0:100000:65536,g:0:100000:65536"
+        );
+        let to_root =
+            IdMap::new(vec![range(IdKind::User, 100000), range(IdKind::Group, 0)]).unwrap();
+        assert!(matches!(
+            owner_shift(Some(&to_root)),
+            Err(ApiError::Unprocessable("ct_idmap_unsupported", _))
+        ));
+        assert_eq!(owner_shift(None).unwrap(), "");
+    }
 }

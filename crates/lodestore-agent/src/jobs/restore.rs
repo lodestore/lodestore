@@ -14,7 +14,10 @@ use std::time::Duration;
 
 use lodestore_format::Error;
 use lodestore_format::crypto::{BLOB_TYPE_DATA, BlobId, RepoId};
-use lodestore_format::fs::restore::{Overwrite, RestoreSettings, Restorer, is_empty_below};
+use lodestore_format::ct::IdMap;
+use lodestore_format::fs::restore::{
+    Overwrite, RestoreSettings, Restorer, SkipSpecial, SpaceReserve, is_empty_below,
+};
 use lodestore_format::keys::cdc_seed;
 use lodestore_format::pb::{Node, NodeType};
 use lodestore_format::reader::open_chunk;
@@ -22,6 +25,7 @@ use lodestore_format::tree::validate_name;
 use lodestore_proto::agent::v1 as proto;
 use lodestore_proto::agent::v1::agent_client::AgentClient;
 use lodestore_proto::agent::v1::plan_item::Kind as ItemKind;
+use lodestore_proto::agent::v1::restore_spec::Target;
 use lodestore_proto::agent::v1::{
     ChunkLoc, ConflictPolicy, JobEventLevel, JobFinished, JobOutcome, JobPhaseKind,
     RestorePlanBatch, RestorePlanRequest, RestoreSpec,
@@ -31,11 +35,13 @@ use tonic::{Code, Streaming};
 use zeroize::{Zeroize, Zeroizing};
 
 use super::fetch::{FetchError, Fetchers, PackAccess, PackFetcher, Span, coalesce};
-use super::{JobCtx, ProgressCell, failed, now_ms};
+use super::{JobCtx, ProgressCell, ct_restore, failed, now_ms};
 use crate::config::AgentSettings;
 use crate::shared_channel::SharedChannel;
 
 const CANCEL_POLL: Duration = Duration::from_millis(50);
+/// Skipped special entries listed one by one in the job log; the rest is a count.
+const MAX_SPECIAL_REPORTED: usize = 16;
 pub(super) const MAX_PLAN_MESSAGE: usize = 8 << 20;
 const PLAN_PAUSES: [Duration; 3] = [
     Duration::from_secs(1),
@@ -138,6 +144,8 @@ pub struct RestoreOptions {
     pub roots: Vec<PathBuf>,
     /// Whether a restore in place is allowed on this host.
     pub allow_in_place: bool,
+    /// Free space a restore of a container snapshot's files leaves.
+    pub space_reserve: SpaceReserve,
 }
 
 impl Default for RestoreOptions {
@@ -147,13 +155,14 @@ impl Default for RestoreOptions {
             plan_pauses: PLAN_PAUSES.to_vec(),
             roots: Vec::new(),
             allow_in_place: false,
+            space_reserve: SpaceReserve::DEFAULT,
         }
     }
 }
 
-struct Abort {
-    code: &'static str,
-    message: String,
+pub(super) struct Abort {
+    pub(super) code: &'static str,
+    pub(super) message: String,
 }
 
 fn abort(code: &'static str, message: impl Into<String>) -> Abort {
@@ -196,7 +205,7 @@ async fn unless_cancelled<T>(flag: &AtomicBool, work: impl Future<Output = T>) -
     }
 }
 
-struct Prepared {
+pub(super) struct Prepared {
     snapshot: String,
     repo_id: RepoId,
     k_id: Zeroizing<[u8; 32]>,
@@ -206,9 +215,70 @@ struct Prepared {
     overwrite: Overwrite,
     restore_owners: bool,
     stop_if_not_empty: bool,
+    keep_privileges: bool,
+    /// The container's id map; owners are shifted by it to the node's ids.
+    id_shift: Option<IdMap>,
+    /// Files of a container snapshot: these special entries left out, free space kept.
+    guest: Option<(SkipSpecial, SpaceReserve)>,
+    /// The files of the plan must fit above the reserve before the first is written.
+    precheck_space: bool,
+    /// The topmost folder of the target that did not exist before the restore.
+    created: Option<PathBuf>,
+}
+
+fn invalid(what: &str) -> Abort {
+    abort(
+        "restore_failed",
+        format!("the restore spec is invalid: {what}"),
+    )
+}
+
+fn repo_keys(spec: &RestoreSpec) -> Result<(RepoId, Zeroizing<[u8; 32]>), Abort> {
+    let repo_id =
+        RepoId::try_from(spec.source_repo_id.as_slice()).map_err(|_| invalid("repository id"))?;
+    let k_id = <[u8; 32]>::try_from(spec.k_id.as_slice())
+        .map(Zeroizing::new)
+        .map_err(|_| invalid("chunk key"))?;
+    Ok((repo_id, k_id))
+}
+
+fn no_space(target: &std::path::Path, free: u64, reserve: u64) -> Abort {
+    abort(
+        "restore_no_space",
+        format!(
+            "not enough free space on {}: {free} bytes free, {reserve} bytes must stay free",
+            target.display()
+        ),
+    )
 }
 
 impl Prepared {
+    /// A guest restore's staging folder `dir`, filled as the container sees
+    /// its files: owners and privileges kept, no device nodes, free space kept.
+    pub(super) fn staging(
+        spec: &RestoreSpec,
+        dir: PathBuf,
+        reserve: SpaceReserve,
+    ) -> Result<Self, Abort> {
+        let (repo_id, k_id) = repo_keys(spec)?;
+        Ok(Prepared {
+            snapshot: spec.snapshot_id.clone(),
+            repo_id,
+            k_id,
+            target: dir,
+            confined: None,
+            in_place: false,
+            overwrite: Overwrite::IfChanged,
+            restore_owners: true,
+            stop_if_not_empty: false,
+            keep_privileges: true,
+            id_shift: None,
+            guest: Some((SkipSpecial::Devices, reserve)),
+            precheck_space: true,
+            created: None,
+        })
+    }
+
     fn new(spec: &RestoreSpec, options: &RestoreOptions) -> Result<Self, Abort> {
         if spec.target.is_some() {
             return Err(abort(
@@ -216,19 +286,36 @@ impl Prepared {
                 "unsupported restore target: this agent restores only files",
             ));
         }
-        let invalid = |what: &str| {
-            abort(
-                "restore_failed",
-                format!("the restore spec is invalid: {what}"),
-            )
+        let (repo_id, k_id) = repo_keys(spec)?;
+        let id_shift = if spec.ct_idmap.is_empty() {
+            None
+        } else {
+            Some(IdMap::parse_canonical(&spec.ct_idmap).map_err(|_| {
+                abort(
+                    "restore_failed",
+                    "the container idmap of the snapshot is invalid",
+                )
+            })?)
         };
-        let repo_id = RepoId::try_from(spec.source_repo_id.as_slice())
-            .map_err(|_| invalid("repository id"))?;
-        let k_id = <[u8; 32]>::try_from(spec.k_id.as_slice())
-            .map(Zeroizing::new)
-            .map_err(|_| invalid("chunk key"))?;
+        // A range that starts at host id 0 maps a container id to the node's root.
+        if id_shift
+            .as_ref()
+            .is_some_and(|m| m.ranges().iter().any(|r| r.host == 0))
+        {
+            return Err(abort(
+                "restore_failed",
+                "the container idmap of the snapshot maps a container id to root on the node",
+            ));
+        }
+        if spec.in_place && (id_shift.is_some() || spec.guest_snapshot) {
+            return Err(abort(
+                "restore_failed",
+                "a container snapshot cannot be restored in place",
+            ));
+        }
         let policy = ConflictPolicy::try_from(spec.conflict).unwrap_or_default();
         let mut confined = None;
+        let mut created = None;
         let target = if spec.in_place {
             if !options.allow_in_place {
                 return Err(abort(
@@ -276,6 +363,7 @@ impl Prepared {
                     ),
                 ));
             };
+            created = first_missing(root, rest);
             confined = Some((root.clone(), rest.to_path_buf()));
             path
         };
@@ -292,6 +380,13 @@ impl Prepared {
             },
             restore_owners: spec.restore_owners,
             stop_if_not_empty: policy == ConflictPolicy::StopIfNotEmpty,
+            keep_privileges: spec.in_place,
+            id_shift,
+            guest: spec
+                .guest_snapshot
+                .then_some((SkipSpecial::All, options.space_reserve)),
+            precheck_space: false,
+            created,
         })
     }
 
@@ -323,13 +418,26 @@ impl Prepared {
             k_id: self.k_id.clone(),
             seed: cdc_seed(&self.k_id),
             restore_owners: self.restore_owners,
-            keep_privileges: self.in_place,
+            keep_privileges: self.keep_privileges,
         }
     }
 }
 
+/// The first folder from `root` down to `root/rest` that does not exist.
+fn first_missing(root: &std::path::Path, rest: &std::path::Path) -> Option<PathBuf> {
+    let mut path = root.to_path_buf();
+    for part in rest.components() {
+        path.push(part);
+        if std::fs::symlink_metadata(&path).is_err_and(|e| e.kind() == ErrorKind::NotFound) {
+            return Some(path);
+        }
+    }
+    None
+}
+
 fn unapplied_kind(what: &str) -> &'static str {
     match what {
+        "special file" => "special_file",
         "owner" => "owner_not_applied",
         "times" => "time_not_applied",
         "hardlink" => "link_not_created",
@@ -352,6 +460,7 @@ struct Attempt<'a, F> {
     skip_depth: usize,
     errors: u64,
     warnings: u64,
+    special_reported: usize,
 }
 
 impl<'a, F: PackFetcher> Attempt<'a, F> {
@@ -366,6 +475,16 @@ impl<'a, F: PackFetcher> Attempt<'a, F> {
             Some((root, rest)) => Restorer::open_in(root, rest, prepared.settings()),
             None => Restorer::open(&prepared.target, prepared.settings()),
         };
+        let opened = opened.and_then(|r| {
+            let r = match &prepared.id_shift {
+                Some(map) if prepared.restore_owners => r.with_id_shift(map.clone())?,
+                _ => r,
+            };
+            Ok(match prepared.guest {
+                Some((skip, reserve)) => r.skip_special_files(skip).with_space_reserve(reserve),
+                None => r,
+            })
+        });
         let restorer = opened.map_err(|e| match e {
             Error::Io(e) => io_abort(&e, &format!("cannot open {target}")),
             other => abort("restore_failed", other.to_string()),
@@ -399,6 +518,7 @@ impl<'a, F: PackFetcher> Attempt<'a, F> {
             skip_depth: 0,
             errors,
             warnings,
+            special_reported: 0,
         })
     }
 
@@ -422,6 +542,7 @@ impl<'a, F: PackFetcher> Attempt<'a, F> {
                 if let Some(totals) = &batch.totals {
                     self.cell.files_total.store(totals.files, Ordering::Relaxed);
                     self.cell.bytes_total.store(totals.bytes, Ordering::Relaxed);
+                    self.precheck_space(totals.bytes)?;
                 }
                 self.cell.scan_done.store(true, Ordering::Relaxed);
                 self.ctx.phase(JobPhaseKind::RestoreFiles, "");
@@ -440,6 +561,24 @@ impl<'a, F: PackFetcher> Attempt<'a, F> {
         self.ctx.phase(JobPhaseKind::RestoreMetadata, "");
         self.flush();
         Ok(())
+    }
+
+    fn precheck_space(&self, bytes: u64) -> Result<(), Abort> {
+        let (Some((_, reserve)), true) = (self.prepared.guest, self.prepared.precheck_space) else {
+            return Ok(());
+        };
+        let target = &self.prepared.target;
+        let dir = std::fs::File::open(target)
+            .map_err(|e| io_abort(&e, &format!("cannot open {}", target.display())))?;
+        match reserve.check(&dir, bytes) {
+            Ok(()) => Ok(()),
+            Err(Error::NoSpace { free, reserve }) => Err(no_space(target, free, reserve)),
+            Err(Error::Io(e)) => Err(io_abort(
+                &e,
+                &format!("cannot measure {}", target.display()),
+            )),
+            Err(other) => Err(abort("restore_failed", other.to_string())),
+        }
     }
 
     fn check_cancel(&self) -> Result<(), Stop> {
@@ -554,6 +693,9 @@ impl<'a, F: PackFetcher> Attempt<'a, F> {
             }
             Error::Io(_) => "restore_entry_failed",
             Error::Interrupted => return Err(Stop::Cancelled),
+            Error::NoSpace { free, reserve } => {
+                return Err(no_space(&self.prepared.target, *free, *reserve).into());
+            }
             Error::Corrupt { .. } | Error::Crypto => "restore_integrity",
             other => return Err(abort("restore_failed", other.to_string()).into()),
         };
@@ -570,6 +712,12 @@ impl<'a, F: PackFetcher> Attempt<'a, F> {
 
     fn flush(&mut self) {
         for u in self.restorer.take_unapplied() {
+            if u.what == "special file" {
+                if self.special_reported == MAX_SPECIAL_REPORTED {
+                    continue;
+                }
+                self.special_reported += 1;
+            }
             self.warnings += 1;
             self.ctx.event(
                 JobEventLevel::Warning,
@@ -738,6 +886,8 @@ impl<'a, F: PackFetcher> Attempt<'a, F> {
                 skipped: stats.skipped,
                 files: stats.created + stats.overwritten,
                 bytes: stats.bytes,
+                special_skipped: stats.special_skipped,
+                ..Default::default()
             }),
             errors_total: self.errors,
             warnings_total: self.warnings,
@@ -767,7 +917,7 @@ fn decode(raw: &[u8]) -> Result<Node, Stop> {
         .map_err(|_| abort("restore_failed", "the plan has an unreadable entry").into())
 }
 
-fn stopped(ctx: &JobCtx, mut finished: JobFinished) -> JobFinished {
+pub(super) fn stopped(ctx: &JobCtx, mut finished: JobFinished) -> JobFinished {
     let (outcome, code, text) = if ctx.cancelled() {
         (
             JobOutcome::Cancelled,
@@ -795,10 +945,24 @@ pub async fn execute_with<P: PlanSource, F: PackFetcher>(
     fetch: &F,
     options: &RestoreOptions,
 ) -> JobFinished {
+    if let Some(Target::Guest(guest)) = &spec.target {
+        return ct_restore::run(ctx, spec, guest, plan, fetch, options).await;
+    }
     let prepared = match Prepared::new(spec, options).and_then(|p| p.check_empty().map(|()| p)) {
         Ok(p) => p,
         Err(a) => return failed(a.code, &a.message),
     };
+    execute_prepared(ctx, &prepared, plan, fetch, options).await
+}
+
+/// Runs the plan into the target `prepared` describes.
+pub(super) async fn execute_prepared<P: PlanSource, F: PackFetcher>(
+    ctx: &JobCtx,
+    prepared: &Prepared,
+    plan: &mut P,
+    fetch: &F,
+    options: &RestoreOptions,
+) -> JobFinished {
     tracing::info!(job_id = ctx.job_id(), snapshot = %prepared.snapshot, "restore started");
     let mut restarts = 0;
     let mut broken: Option<String> = None;
@@ -835,7 +999,7 @@ pub async fn execute_with<P: PlanSource, F: PackFetcher>(
                 Err(PlanError::Fatal(why)) => return failed("restore_failed", &why),
             }
         }
-        let mut attempt = match Attempt::new(ctx, &prepared, fetch, carried) {
+        let mut attempt = match Attempt::new(ctx, prepared, fetch, carried) {
             Ok(a) => a,
             Err(a) => return failed(a.code, &a.message),
         };
@@ -850,6 +1014,19 @@ pub async fn execute_with<P: PlanSource, F: PackFetcher>(
             }
             Err(Stop::Abort(a)) => {
                 let mut finished = attempt.finished(JobOutcome::Failed);
+                drop(attempt);
+                if a.code == "restore_no_space"
+                    && let Some(dir) = &prepared.created
+                    && let Err(e) = std::fs::remove_dir_all(dir)
+                {
+                    ctx.event(
+                        JobEventLevel::Warning,
+                        "restore_cleanup_failed",
+                        dir.as_os_str().as_encoded_bytes(),
+                        "",
+                        &format!("cannot remove the folder this restore created: {e}"),
+                    );
+                }
                 finished.error_code = a.code.into();
                 finished.error_message = a.message;
                 return finished;

@@ -1,7 +1,15 @@
-import { Copy, ShieldAlert, ShieldQuestion } from "lucide-react";
-import { memo, useState } from "react";
+import {
+	Box,
+	Copy,
+	RotateCcw,
+	ShieldAlert,
+	ShieldQuestion,
+} from "lucide-react";
+import { memo, useRef, useState } from "react";
 import { toast } from "sonner";
-import type { RestoreSnapshot } from "@/api/gen/model";
+import { useContainerPreview } from "@/api/gen/endpoints";
+import type { ContainerFacts, RestoreSnapshot } from "@/api/gen/model";
+import { ContainerRestoreDialog } from "@/components/restore/container-restore-dialog";
 import { SnapshotActionsMenu } from "@/components/snapshots/snapshot-actions-menu";
 import {
 	type SnapshotAction,
@@ -23,13 +31,50 @@ import { copyText } from "@/lib/clipboard";
 import { formatBytes, formatCount, formatDateTime } from "@/lib/format";
 import { shortId, snapshotFiles, snapshotSource } from "@/lib/snapshot";
 
-function Fact({ label, value }: { label: string; value: string }) {
+function Fact({
+	label,
+	value,
+	box,
+}: {
+	label: string;
+	value: string;
+	box?: boolean;
+}) {
 	return (
 		<div className="flex flex-col">
 			<dt className="text-sm font-semibold text-muted-foreground">{label}</dt>
-			<dd className="tabular-nums">{value}</dd>
+			<dd className="flex items-center gap-1 tabular-nums">
+				{box && <Box aria-hidden className="size-4 text-muted-foreground" />}
+				{value}
+			</dd>
 		</div>
 	);
+}
+
+const containerText = copy.restore.header;
+
+function containerFacts(facts: ContainerFacts) {
+	const mode = containerText.mode as Record<string, string | undefined>;
+	return [
+		{
+			label: containerText.source,
+			value: containerText.container(facts.vmid, facts.name),
+			box: true,
+		},
+		{ label: containerText.modeLabel, value: mode[facts.mode] ?? facts.mode },
+		{
+			label: containerText.volumes,
+			value: facts.volumes
+				.map((v) => containerText.volume(v.key, formatBytes(v.size_bytes)))
+				.join(" · "),
+		},
+		{
+			label: containerText.userIds.label,
+			value: facts.unprivileged
+				? containerText.userIds.unprivileged(facts.root_host_uid)
+				: containerText.userIds.privileged,
+		},
+	];
 }
 
 export const SnapshotHeader = memo(function SnapshotHeader({
@@ -38,6 +83,12 @@ export const SnapshotHeader = memo(function SnapshotHeader({
 	snapshot?: RestoreSnapshot;
 }) {
 	const [action, setAction] = useState<SnapshotAction>();
+	const [restoring, setRestoring] = useState(false);
+	const restoreButton = useRef<HTMLButtonElement>(null);
+	const isContainer = snapshot?.source_type === "proxmox-ct";
+	const container = useContainerPreview(snapshot?.id ?? "", undefined, {
+		query: { enabled: isContainer },
+	}).data;
 	if (snapshot === undefined) {
 		return (
 			<div
@@ -93,20 +144,38 @@ export const SnapshotHeader = memo(function SnapshotHeader({
 							</p>
 						</div>
 						<dl className="flex flex-wrap gap-6">
-							<Fact
-								label={copy.restore.header.source}
-								value={snapshotSource(snapshot)}
-							/>
+							{isContainer && container ? (
+								containerFacts(container).map((fact) => (
+									<Fact key={fact.label} {...fact} />
+								))
+							) : (
+								<Fact
+									label={copy.restore.header.source}
+									value={snapshotSource(snapshot)}
+								/>
+							)}
 							<Fact
 								label={copy.restore.header.size}
 								value={formatBytes(snapshot.stats.bytes_total)}
 							/>
-							<Fact
-								label={copy.restore.header.files}
-								value={formatCount(snapshotFiles(snapshot))}
-							/>
+							{!isContainer && (
+								<Fact
+									label={copy.restore.header.files}
+									value={formatCount(snapshotFiles(snapshot))}
+								/>
+							)}
 						</dl>
 					</div>
+					{isContainer && (
+						<Button
+							ref={restoreButton}
+							type="button"
+							onClick={() => setRestoring(true)}
+						>
+							<RotateCcw aria-hidden />
+							{copy.restore.container.open}
+						</Button>
+					)}
 					<SnapshotActionsMenu snapshot={snapshot} onAction={setAction} />
 				</div>
 				{snapshot.incomplete && (
@@ -157,6 +226,17 @@ export const SnapshotHeader = memo(function SnapshotHeader({
 						</div>
 					</AlertDescription>
 				</Alert>
+			)}
+			{isContainer && (
+				<ContainerRestoreDialog
+					open={restoring}
+					onOpenChange={setRestoring}
+					snapshot={snapshot}
+					onCloseAutoFocus={(event) => {
+						event.preventDefault();
+						restoreButton.current?.focus();
+					}}
+				/>
 			)}
 			<SnapshotDialogs
 				target={action ? { snapshot, action } : undefined}

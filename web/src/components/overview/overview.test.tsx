@@ -855,6 +855,72 @@ describe("active alerts", () => {
 		).toHaveAttribute("href", "/hosts/host-1");
 	});
 
+	it("shows a guest that no policy backs up, with the last snapshot and a link to the host", async () => {
+		await openHostAlerts([
+			alertFixture("g1", {
+				type: "guest_unprotected",
+				severity: "warning",
+				policy: "proxmox-nightly",
+				detail: "server text",
+				started_at: Date.now() - 2 * DAY,
+				facts: {
+					source_label: "CT 200 · dns",
+					last_success_at: Date.now() - 3 * DAY,
+				},
+			}),
+			alertFixture("g2", {
+				type: "guest_unprotected",
+				severity: "warning",
+				policy: null,
+				detail: "server text",
+				facts: { source_label: "VM 101 · web" },
+			}),
+		]);
+		const list = await screen.findByRole("list", { name: HOST_ALERTS });
+		expect(rows(HOST_ALERTS).map(titleOf)).toEqual(
+			expect.arrayContaining([
+				"CT 200 · dns on web-1 is not backed up by any policy",
+				"VM 101 · web on web-1 is not backed up by any policy",
+			]),
+		);
+		expect(
+			within(list).getByText(
+				"Last snapshot 3 days ago by proxmox-nightly. Add it to a policy or silence the alert.",
+			),
+		).toBeVisible();
+		expect(
+			within(list).getByText(
+				"It was backed up before. Add it to a policy or silence the alert.",
+			),
+		).toBeVisible();
+		expect(list).toHaveTextContent("Since 2 days ago");
+		expect(
+			within(list).getAllByRole("link", { name: "web-1" })[0],
+		).toHaveAttribute("href", "/hosts/host-1");
+	});
+
+	it("shows the server text of a missing Proxmox plugin", async () => {
+		await openHostAlerts([
+			alertFixture("p1", {
+				type: "pve_plugin_missing",
+				severity: "warning",
+				policy: null,
+				title: "The Lodestore plugin is missing on pve-01 in prod",
+				detail:
+					"Without it a backup of the node removes the Lodestore storage for the whole cluster.",
+				facts: { pve_node: "pve-01", pve_cluster: "prod" },
+			}),
+		]);
+		const list = await screen.findByRole("list", { name: HOST_ALERTS });
+		expect(
+			within(list).getByText(
+				"The Lodestore plugin is missing on pve-01 in prod",
+			),
+		).toBeVisible();
+		expect(within(list).getByText(/for the whole cluster/)).toBeVisible();
+		expect(list).toHaveTextContent(/Since .+ ago/);
+	});
+
 	it("silences and resumes a host", async () => {
 		const user = userEvent.setup();
 		let body: unknown;

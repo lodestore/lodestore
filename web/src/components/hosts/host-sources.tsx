@@ -121,7 +121,10 @@ function PolicyLinks({ policies }: { policies: string[] }) {
 	);
 }
 
-function Protection({ protection }: Pick<SourceItem, "protection">) {
+function Protection({
+	protection,
+	alertOpen,
+}: Pick<SourceItem, "protection"> & { alertOpen: boolean }) {
 	if (protection.state === "agent_too_old") {
 		return (
 			<Badge variant="outline" className="gap-1 text-neutral">
@@ -134,7 +137,14 @@ function Protection({ protection }: Pick<SourceItem, "protection">) {
 		return <PolicyLinks policies={protection.policies} />;
 	}
 	return (
-		<StatusBadge status="warning">{text.protection.notProtected}</StatusBadge>
+		<span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+			<StatusBadge status="warning">{text.protection.notProtected}</StatusBadge>
+			{alertOpen && (
+				<span className="text-sm text-muted-foreground">
+					{text.protection.alertOpen}
+				</span>
+			)}
+		</span>
 	);
 }
 
@@ -182,7 +192,7 @@ function ItemRow({ item }: { item: SourceItem }) {
 					: guestDetails(item)}
 			</TableCell>
 			<TableCell className={cn(PAD, "text-sm")}>
-				<Protection protection={item.protection} />
+				<Protection protection={item.protection} alertOpen={item.alert_open} />
 			</TableCell>
 			<TableCell className={cn(PAD, FROM_680, "text-sm")}>
 				<LastSnapshot at={item.last_snapshot_at} />
