@@ -15048,9 +15048,14 @@
           "label",
           "tags",
           "protection",
-          "shared_with"
+          "shared_with",
+          "alert_open"
         ],
         "properties": {
+          "alert_open": {
+            "type": "boolean",
+            "description": "A `guest_unprotected` alert is open for the instance."
+          },
           "group_id": {
             "type": [
               "string",

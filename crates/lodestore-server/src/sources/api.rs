@@ -1,6 +1,6 @@
 //! The Sources tab of a host: what the agent found and whether a policy covers it.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -19,6 +19,7 @@ use super::{
     DbServer, DbType, Discovery, GuestType, SOURCE_TYPES, ScopeKind, declares, load_all,
     parse_capabilities, parse_stored,
 };
+use crate::alerts::model::AlertType;
 use crate::auth::tokens::{HostsRead, PoliciesRead, Scoped};
 use crate::error::{ApiError, ErrorBody};
 use crate::hosts::labels::Label;
@@ -92,6 +93,8 @@ pub struct SourceItem {
     pub last_snapshot_at: Option<i64>,
     /// Names of other hosts whose agents found the same instance, like a cloned guest.
     pub shared_with: Vec<String>,
+    /// A `guest_unprotected` alert is open for the instance.
+    pub alert_open: bool,
 }
 
 /// The policies that back up the files of the host.
@@ -121,6 +124,8 @@ struct Context<'a> {
     policies: &'a [PolicyRow],
     snapshots: &'a HashMap<String, i64>,
     shared: &'a HashMap<String, BTreeSet<String>>,
+    /// Instances with an open `guest_unprotected` alert.
+    unprotected: &'a HashSet<String>,
 }
 
 impl Context<'_> {
@@ -203,6 +208,7 @@ fn guest_items(found: &Discovery, ctx: &Context) -> Vec<SourceItem> {
                 protection: ctx.protection(source_type, |s| selects_guest(s, guest)),
                 last_snapshot_at: ctx.snapshots.get(&guest.key).copied(),
                 shared_with: ctx.shared_with(&guest.key),
+                alert_open: ctx.unprotected.contains(&guest.key),
             }
         })
         .collect()
@@ -245,6 +251,7 @@ fn database_groups(found: &Discovery, ctx: &Context) -> (Vec<SourceGroup>, Vec<S
                 protection: ctx.protection(source_type, |s| selects_db(s, server.kind, db)),
                 last_snapshot_at: ctx.snapshots.get(&db.key).copied(),
                 shared_with: others,
+                alert_open: false,
             });
         }
         groups.push(SourceGroup {
@@ -322,6 +329,22 @@ async fn shared_keys(
     Ok(shared)
 }
 
+async fn open_guest_alerts(state: &AppState, host_id: &str) -> Result<HashSet<String>, ApiError> {
+    let prefix = format!("{}:{host_id}:", AlertType::GuestUnprotected.as_str());
+    let rows =
+        sqlx::query("SELECT key FROM alerts WHERE type = $1 AND host_id = $2 AND state = 'firing'")
+            .bind(AlertType::GuestUnprotected.as_str())
+            .bind(host_id)
+            .fetch_all(&state.db.pool)
+            .await?;
+    rows.iter()
+        .map(|row| {
+            let key: String = row.try_get("key")?;
+            Ok(key.strip_prefix(&prefix).unwrap_or(&key).to_owned())
+        })
+        .collect()
+}
+
 #[utoipa::path(
     get,
     tag = "Hosts",
@@ -372,11 +395,13 @@ pub(crate) async fn host_sources(
         .collect();
     let snapshots = latest_snapshots(&state, &id).await?;
     let shared = shared_keys(&state, &id).await?;
+    let unprotected = open_guest_alerts(&state, &id).await?;
     let ctx = Context {
         capabilities: &capabilities,
         policies: &policies,
         snapshots: &snapshots,
         shared: &shared,
+        unprotected: &unprotected,
     };
     let files = files_summary(&policies, &snapshots);
     let Some(stored) = stored else {

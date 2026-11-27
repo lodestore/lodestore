@@ -1966,3 +1966,369 @@ async fn guest_unprotected_closes_on_selection() {
         env.stop().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn guest_unprotected_unknown_list_keeps_state() {
+    for backend in backends() {
+        let name = backend.name();
+        let env = Env::start(&backend).await;
+        let t0 = now_ms();
+        unprotected_ct(&env, t0).await;
+        env.tick(t0).await;
+        env.ct_facts("h1", &[200], false, t0 + HOUR).await;
+        env.tick(t0 + HOUR).await;
+        assert_eq!(env.of_type("active", "guest_unprotected").await.len(), 1);
+
+        env.tick(t0 + 3 * HOUR).await;
+        assert_eq!(
+            env.of_type("active", "guest_unprotected").await.len(),
+            1,
+            "[{name}] a stale list closes nothing"
+        );
+        env.ct_facts("h1", &[], true, t0 + 4 * HOUR).await;
+        env.tick(t0 + 4 * HOUR).await;
+        assert_eq!(
+            env.of_type("active", "guest_unprotected").await.len(),
+            1,
+            "[{name}] a cut list closes nothing"
+        );
+        assert_eq!(env.unprotected_rows().await.len(), 1, "[{name}]");
+        env.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn guest_unprotected_unknown_list_opens_nothing() {
+    for backend in backends() {
+        let name = backend.name();
+        let env = Env::start(&backend).await;
+        let t0 = now_ms();
+        unprotected_ct(&env, t0).await;
+        env.tick(t0 + 2 * HOUR).await;
+        assert!(env.unprotected_rows().await.is_empty(), "[{name}] stale");
+        env.ct_facts("h1", &[200], true, t0 + 3 * HOUR).await;
+        env.tick(t0 + 3 * HOUR).await;
+        assert!(env.unprotected_rows().await.is_empty(), "[{name}] cut");
+        assert_eq!(env.alert_count("guest_unprotected").await, 0, "[{name}]");
+        env.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn guest_unprotected_gone_closes() {
+    for backend in backends() {
+        let name = backend.name();
+        let env = Env::start(&backend).await;
+        let t0 = now_ms();
+        unprotected_ct(&env, t0).await;
+        env.tick(t0).await;
+        env.ct_facts("h1", &[200], false, t0 + HOUR).await;
+        env.tick(t0 + HOUR).await;
+        assert_eq!(env.of_type("active", "guest_unprotected").await.len(), 1);
+
+        env.ct_facts("h1", &[201], false, t0 + 2 * HOUR).await;
+        env.tick(t0 + 2 * HOUR).await;
+        assert!(
+            env.of_type("active", "guest_unprotected").await.is_empty(),
+            "[{name}]"
+        );
+        assert!(env.unprotected_rows().await.is_empty(), "[{name}]");
+        env.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn guest_unprotected_silenced() {
+    for backend in backends() {
+        let name = backend.name();
+        let env = Env::start(&backend).await;
+        let t0 = now_ms();
+        unprotected_ct(&env, t0).await;
+        env.silence_row("h1", None).await;
+        env.tick(t0).await;
+        env.ct_facts("h1", &[200], false, t0 + HOUR).await;
+        env.tick(t0 + HOUR).await;
+        let open = env.of_type("active", "guest_unprotected").await;
+        assert_eq!(open.len(), 1, "[{name}]");
+        assert_eq!(open[0]["silenced"], true, "[{name}]");
+        let id = open[0]["id"].as_str().unwrap();
+        assert!(env.events(id).await.is_empty(), "[{name}]");
+        env.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn guest_unprotected_vm_too() {
+    for backend in backends() {
+        let name = backend.name();
+        let env = Env::start(&backend).await;
+        let t0 = now_ms();
+        env.host("h1", "web-1").await;
+        env.facts("h1", &[100], t0).await;
+        let key = env.guest_key("h1", 100).await;
+        env.failed_job("j1", "h1", "vms", t0 - DAY, "outdated")
+            .await;
+        sqlx::query("UPDATE jobs SET source_ref = $1 WHERE id = 'j1'")
+            .bind(&key)
+            .execute(env.pool())
+            .await
+            .unwrap();
+
+        env.tick(t0).await;
+        env.facts("h1", &[100], t0 + HOUR).await;
+        env.tick(t0 + HOUR).await;
+        let open = env.of_type("active", "guest_unprotected").await;
+        assert_eq!(open.len(), 1, "[{name}]");
+        assert_eq!(
+            open[0]["title"],
+            "VM 100 · vm-100 on web-1 is not backed up by any policy"
+        );
+        assert!(
+            open[0]["detail"]
+                .as_str()
+                .unwrap()
+                .starts_with("It was backed up before."),
+            "[{name}]"
+        );
+        env.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sources_alert_open_flag() {
+    for backend in backends() {
+        let name = backend.name();
+        let env = Env::start(&backend).await;
+        let t0 = now_ms();
+        unprotected_ct(&env, t0).await;
+        env.ct_facts("h1", &[200, 300], false, t0).await;
+        env.tick(t0).await;
+        env.ct_facts("h1", &[200, 300], false, t0 + HOUR).await;
+        env.tick(t0 + HOUR).await;
+
+        let response = env.api.get("/api/v1/hosts/h1/sources").await;
+        assert_eq!(response.status().as_u16(), 200);
+        let body: Value = response.json().await.unwrap();
+        let flags: Vec<(u64, bool)> = body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| {
+                (
+                    i["vmid"].as_u64().unwrap(),
+                    i["alert_open"].as_bool().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(flags, [(200, true), (300, false)], "[{name}]");
+        env.stop().await;
+    }
+}
+
+impl Env {
+    async fn pve_facts(
+        &self,
+        host: &str,
+        (cluster, node): (&str, &str),
+        members: &[(&str, &str)],
+        plugin: (bool, bool),
+        truncated: bool,
+        at: i64,
+    ) {
+        let facts = SourceFacts {
+            truncated,
+            proxmox: Some(ProxmoxFacts {
+                cluster: cluster.to_string(),
+                node: node.to_string(),
+                nodes: members
+                    .iter()
+                    .map(|(name, marker)| lodestore_proto::agent::v1::ClusterNode {
+                        name: name.to_string(),
+                        online: true,
+                        plugin_marker: marker.to_string(),
+                    })
+                    .collect(),
+                plugin_installed: plugin.0,
+                plugin_current: plugin.1,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        sources::record(self.ts.state(), host, &facts, &mut None, at)
+            .await
+            .unwrap();
+    }
+
+    async fn plugin_alerts(&self, state: &str) -> Vec<(String, String)> {
+        sqlx::query("SELECT key, host_id FROM alerts WHERE type = 'pve_plugin_missing' AND state = $1 ORDER BY key")
+            .bind(state)
+            .fetch_all(self.pool())
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| (r.try_get("key").unwrap(), r.try_get("host_id").unwrap()))
+            .collect()
+    }
+}
+
+const MARKER: &str = "0.5.0 1 abc 9.2.33";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pve_plugin_missing_node_without_marker() {
+    for backend in backends() {
+        let name = backend.name();
+        let env = Env::start(&backend).await;
+        let t0 = now_ms();
+        env.host("h1", "pve-01").await;
+        env.host("h2", "pve-02").await;
+        let members =
+            |third: &'static str| [("pve-01", MARKER), ("pve-02", MARKER), ("pve-03", third)];
+        for (host, node) in [("h1", "pve-01"), ("h2", "pve-02")] {
+            env.pve_facts(host, ("c1", node), &members(""), (true, true), false, t0)
+                .await;
+        }
+        env.tick(t0).await;
+        assert_eq!(
+            env.plugin_alerts("firing").await,
+            [("pve_plugin_missing:c1:pve-03".to_string(), "h1".to_string())],
+            "[{name}]"
+        );
+        let open = env.of_type("active", "pve_plugin_missing").await;
+        assert_eq!(open.len(), 1, "[{name}]");
+        assert_eq!(open[0]["severity"], "warning");
+        assert_eq!(
+            open[0]["title"],
+            "The Lodestore plugin is missing on pve-03 in c1"
+        );
+        assert_eq!(
+            open[0]["detail"],
+            "Run lodestore-agent pve install on pve-03. A node without the plugin removes the Lodestore storage for the whole cluster the next time it writes storage.cfg."
+        );
+
+        for (host, node) in [("h1", "pve-01"), ("h2", "pve-02")] {
+            env.pve_facts(
+                host,
+                ("c1", node),
+                &members(MARKER),
+                (true, true),
+                false,
+                t0 + MINUTE,
+            )
+            .await;
+        }
+        env.tick(t0 + MINUTE).await;
+        assert!(env.plugin_alerts("firing").await.is_empty(), "[{name}]");
+        assert_eq!(env.plugin_alerts("resolved").await.len(), 1, "[{name}]");
+        env.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pve_plugin_missing_host_unhealthy() {
+    for backend in backends() {
+        let name = backend.name();
+        let env = Env::start(&backend).await;
+        let t0 = now_ms();
+        env.host("h2", "pve-02").await;
+        let members = [("pve-01", MARKER), ("pve-02", MARKER)];
+        env.pve_facts("h2", ("c1", "pve-02"), &members, (false, false), false, t0)
+            .await;
+        env.tick(t0).await;
+        let open = env.of_type("active", "pve_plugin_missing").await;
+        assert_eq!(open.len(), 1, "[{name}]");
+        assert_eq!(
+            open[0]["title"],
+            "The Lodestore plugin is missing on pve-02 in c1"
+        );
+
+        env.pve_facts(
+            "h2",
+            ("c1", "pve-02"),
+            &members,
+            (true, false),
+            false,
+            t0 + MINUTE,
+        )
+        .await;
+        env.tick(t0 + MINUTE).await;
+        let open = env.of_type("active", "pve_plugin_missing").await;
+        assert_eq!(open.len(), 1, "[{name}]");
+        assert_eq!(
+            open[0]["title"],
+            "The Lodestore plugin is outdated on pve-02 in c1"
+        );
+
+        env.pve_facts(
+            "h2",
+            ("c1", "pve-02"),
+            &members,
+            (true, true),
+            false,
+            t0 + 2 * MINUTE,
+        )
+        .await;
+        env.tick(t0 + 2 * MINUTE).await;
+        assert!(env.plugin_alerts("firing").await.is_empty(), "[{name}]");
+        env.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pve_plugin_missing_unknown_list() {
+    for backend in backends() {
+        let name = backend.name();
+        let env = Env::start(&backend).await;
+        let t0 = now_ms();
+        env.host("h1", "pve-01").await;
+        let members = [("pve-01", MARKER), ("pve-03", "")];
+        env.pve_facts("h1", ("c1", "pve-01"), &members, (true, true), false, t0)
+            .await;
+        env.tick(t0).await;
+        assert_eq!(env.plugin_alerts("firing").await.len(), 1, "[{name}]");
+
+        env.tick(t0 + HOUR).await;
+        assert_eq!(
+            env.plugin_alerts("firing").await.len(),
+            1,
+            "[{name}] stale facts close nothing"
+        );
+        let healed = [("pve-01", MARKER), ("pve-03", MARKER)];
+        env.pve_facts(
+            "h1",
+            ("c1", "pve-01"),
+            &healed,
+            (true, true),
+            true,
+            t0 + 2 * HOUR,
+        )
+        .await;
+        env.tick(t0 + 2 * HOUR).await;
+        assert_eq!(
+            env.plugin_alerts("firing").await.len(),
+            1,
+            "[{name}] cut facts close nothing"
+        );
+        env.pve_facts(
+            "h1",
+            ("c1", "pve-01"),
+            &healed,
+            (true, true),
+            false,
+            t0 + 3 * HOUR,
+        )
+        .await;
+        env.tick(t0 + 3 * HOUR).await;
+        assert!(env.plugin_alerts("firing").await.is_empty(), "[{name}]");
+
+        let other = t0 + 4 * HOUR;
+        env.pve_facts("h1", ("c1", "pve-01"), &members, (true, true), true, other)
+            .await;
+        env.tick(other).await;
+        env.tick(other + 2 * HOUR).await;
+        assert!(
+            env.plugin_alerts("firing").await.is_empty(),
+            "[{name}] unknown facts open nothing"
+        );
+        env.stop().await;
+    }
+}
