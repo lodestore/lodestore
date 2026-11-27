@@ -1065,10 +1065,12 @@ async fn ct_restore_pct_fails_cleans_staging() {
     assert!(lab.staging_clean(&lab.staging_default()));
 
     let base = lab.staging_default();
-    let stale = base.join("ab".repeat(16));
-    write(&stale.join("fs/etc/hostname"), "x\n");
+    let stale = base.join(format!("lodestore-restore-{}", "ab".repeat(16)));
+    write(&stale.join("data/fs/etc/hostname"), "x\n");
     fs::create_dir_all(base.join("not-a-restore")).unwrap();
-    let held = base.join("cd".repeat(16));
+    let unrelated = base.join("ef".repeat(16));
+    write(&unrelated.join("keep"), "x\n");
+    let held = base.join(format!("lodestore-restore-{}", "cd".repeat(16)));
     fs::create_dir_all(&held).unwrap();
     let lock = rustix::fs::open(
         held.join(".lock"),
@@ -1086,6 +1088,10 @@ async fn ct_restore_pct_fails_cleans_staging() {
     clean_stale_staging(&base);
     assert!(!stale.exists());
     assert!(base.join("not-a-restore").exists());
+    assert!(
+        unrelated.join("keep").exists(),
+        "a folder without the prefix is never removed"
+    );
     assert!(
         held.exists(),
         "a folder whose lock a live process holds stays"

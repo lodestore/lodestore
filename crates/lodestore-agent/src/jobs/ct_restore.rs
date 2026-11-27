@@ -41,6 +41,9 @@ use crate::pve::{STORAGE_ID, TOKEN_ENV};
 
 /// The default staging folder below the agent's state folder.
 pub const STAGING_DIR: &str = DEFAULT_GUEST_STAGING_DIR;
+/// Staging folders are named `{STAGING_PREFIX}{id}`; only these are ever
+/// cleaned up, as the staging folder may be shared with other files.
+const STAGING_PREFIX: &str = "lodestore-restore-";
 const LOCK_FILE: &str = ".lock";
 /// The folder the snapshot is restored into, beside the lock.
 const DATA_DIR: &str = "data";
@@ -586,7 +589,7 @@ async fn pct_restore(
     }
 }
 
-/// `{base}/{id}`, 0700, with a `.lock` held for as long as the restore
+/// `{base}/{STAGING_PREFIX}{id}`, 0700, with a `.lock` held for as long as the restore
 /// runs. The lock's descriptor is inherited by `pct`, so a `pct` left over
 /// from an agent that died keeps its folder; the folder is removed when the
 /// restore ends, however it ends. The snapshot goes into `data` beside the
@@ -607,7 +610,7 @@ impl Staging {
         let mut raw = [0u8; 16];
         getrandom::fill(&mut raw).map_err(|e| io::Error::other(e.to_string()))?;
         let id: String = raw.iter().map(|b| format!("{b:02x}")).collect();
-        let dir = base.join(&id);
+        let dir = base.join(format!("{STAGING_PREFIX}{id}"));
         std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
         let lock = rustix::fs::open(
@@ -647,8 +650,10 @@ impl Drop for Staging {
     }
 }
 
-fn is_restore_id(name: &str) -> bool {
-    name.len() == 32 && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+fn is_staging_name(name: &str) -> bool {
+    name.strip_prefix(STAGING_PREFIX).is_some_and(|id| {
+        id.len() == 32 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    })
 }
 
 /// The staging folder `base` as it resolves on this node: an absolute path
@@ -702,8 +707,8 @@ fn resolve(path: &Path) -> PathBuf {
 }
 
 /// Removes the staging folders under `base` a restore left behind: those
-/// whose `.lock` no live process holds. Only folders named like a restore
-/// id are touched, and nothing is followed through a symlink.
+/// whose `.lock` no live process holds. Only folders named like a staging
+/// folder are touched, and nothing is followed through a symlink.
 pub fn clean_stale_staging(base: &Path) {
     let Ok(entries) = std::fs::read_dir(base) else {
         return;
@@ -711,7 +716,7 @@ pub fn clean_stale_staging(base: &Path) {
     for entry in entries.flatten() {
         let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
         let name = entry.file_name();
-        if !is_dir || !name.to_str().is_some_and(is_restore_id) {
+        if !is_dir || !name.to_str().is_some_and(is_staging_name) {
             continue;
         }
         let dir = entry.path();
@@ -762,9 +767,11 @@ mod tests {
     }
 
     #[test]
-    fn restore_ids() {
-        assert!(is_restore_id(&"ab".repeat(16)));
-        assert!(!is_restore_id(&"AB".repeat(16)));
-        assert!(!is_restore_id("lost+found"));
+    fn staging_names() {
+        assert!(is_staging_name(&format!("lodestore-restore-{}", "ab".repeat(16))));
+        assert!(!is_staging_name(&format!("lodestore-restore-{}", "AB".repeat(16))));
+        assert!(!is_staging_name(&"ab".repeat(16)));
+        assert!(!is_staging_name("lodestore-restore-"));
+        assert!(!is_staging_name("lost+found"));
     }
 }
