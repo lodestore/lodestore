@@ -2,22 +2,27 @@
 //! server only queues the job and shows what the filter of the agent will
 //! drop; the agent filters the snapshot configuration itself.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use lodestore_format::Error as FormatError;
-use lodestore_format::ct::CtSnapshot;
+use lodestore_format::ct::{CtSnapshot, IdKind};
+use lodestore_format::guest_config::{
+    FilterInput, Filtered, filter_ct, guest_identity, parse_mountpoint, same_guest,
+};
 use lodestore_format::index::parse_hex32;
 use lodestore_format::source::{self, Meta};
 use lodestore_proto::agent::v1::restore_spec::Target;
 use lodestore_proto::agent::v1::{ConflictPolicy, GuestRestoreResult, GuestTarget, RestoreSpec};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
-use utoipa::ToSchema;
+use utoipa::{IntoParams, ToSchema};
 
 use super::api::RestoreCreated;
 use super::restore::{GuestRestoreRecord, RestoreRecord, conflict_name, insert_restore_job};
-use crate::auth::tokens::{RestoreGuestWrite, Scope, Scoped};
+use crate::auth::tokens::{RestoreGuestWrite, Scope, Scoped, SnapshotsRead};
 use crate::browse::tree::{read_error, reader};
 use crate::error::{ApiError, ErrorBody};
 use crate::grpc::registry::CAP_GUEST_RESTORE_CT;
@@ -202,6 +207,27 @@ impl OpenedCt {
 
     pub fn name(&self) -> Option<String> {
         self.meta.get("name").cloned()
+    }
+
+    /// The configuration through the filter the agent applies.
+    pub fn filter(&self, bridges: Option<&BTreeSet<String>>) -> Result<Filtered, ApiError> {
+        filter_ct(&FilterInput {
+            config: self.ct.config.as_bytes(),
+            firewall: self.ct.firewall.as_deref().map(str::as_bytes),
+            target: None,
+            bridges,
+        })
+        .map_err(|error| {
+            ApiError::Unprocessable(
+                "guest_config_unreadable",
+                format!("The container configuration cannot be filtered: {error}."),
+            )
+        })
+    }
+
+    /// The `meta uid` Proxmox VE reads from the snapshot: that of the filtered configuration.
+    pub fn uid(&self) -> Result<Option<String>, ApiError> {
+        Ok(guest_identity(self.filter(None)?.text.as_bytes()).map(|id| id.uid))
     }
 }
 
@@ -440,6 +466,362 @@ pub async fn create_guest_restore(
     };
     let job_id = insert_restore_job(&state, &target.id, &spec, &record).await?;
     Ok((StatusCode::CREATED, Json(RestoreCreated { job_id })))
+}
+
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct PreviewQuery {
+    /// The host whose node's bridges the network interfaces are checked against; without it they are not checked.
+    pub host_id: Option<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct ContainerVolume {
+    pub key: String,
+    /// The path inside the container, `/` for `rootfs`.
+    pub mp: String,
+    pub size_bytes: u64,
+}
+
+/// A container snapshot and its configuration through the filter the agent
+/// applies. A preview: the agent filters the configuration itself and reports
+/// what it dropped in the job.
+#[derive(Serialize, ToSchema)]
+pub struct ContainerFacts {
+    pub vmid: Option<u32>,
+    pub name: Option<String>,
+    /// `snapshot`, `suspend` or `stop`.
+    pub mode: String,
+    pub unprivileged: bool,
+    /// The canonical id map, `u:{ct}:{host}:{count},…`.
+    pub idmap: Option<String>,
+    /// The uid of root of the container on the node: 0 for a privileged container.
+    pub root_host_uid: Option<u32>,
+    /// The volumes `pct restore` allocates.
+    pub volumes: Vec<ContainerVolume>,
+    /// The network interfaces that stay.
+    pub network: Vec<GuestConfigLine>,
+    /// The bridges were checked against the node of `host_id`.
+    pub bridges_checked: bool,
+    /// Lines of the configuration that stay.
+    pub kept_count: u64,
+    pub dropped: Vec<DroppedKey>,
+}
+
+fn dropped_keys(filtered: &Filtered) -> Vec<DroppedKey> {
+    filtered
+        .dropped
+        .iter()
+        .map(|d| DroppedKey {
+            key: d.key.clone(),
+            value: d.value.clone(),
+            reason: d.reason.as_str().to_string(),
+        })
+        .collect()
+}
+
+/// The lines of the filtered configuration that stay.
+pub fn kept_count(filtered: &Filtered) -> u64 {
+    filtered
+        .text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .count() as u64
+}
+
+#[utoipa::path(
+    get,
+    tag = "Restore",
+    summary = "Preview a container snapshot and the config keys a restore drops",
+    security(("session" = []), ("bearer" = ["snapshots:read"])),
+    path = "/api/v1/restore/snapshots/{id}/container",
+    params(("id" = String, Path, description = "Snapshot id"), PreviewQuery),
+    responses(
+        (status = 200, description = "The container and its configuration through the filter of the agent", body = ContainerFacts),
+        (status = 404, description = "Unknown snapshot, or gone from storage", body = ErrorBody),
+        (status = 422, description = "`restore_snapshot_not_ct`: the snapshot is not of a container; `guest_config_unreadable`: the container snapshot cannot be read", body = ErrorBody),
+        (status = 502, description = "The repository storage is unavailable", body = ErrorBody),
+    )
+)]
+pub async fn container_preview(
+    State(state): State<AppState>,
+    _auth: Scoped<SnapshotsRead>,
+    Path(id): Path<String>,
+    Query(query): Query<PreviewQuery>,
+) -> Result<Json<ContainerFacts>, ApiError> {
+    let row = load_ct_row(&state, &id).await?;
+    let opened = open_ct(&state, &row).await?;
+    let bridges = match &query.host_id {
+        Some(host_id) => sources::load(&state, host_id)
+            .await?
+            .filter(|stored| sources::is_fresh(stored.collected_at, crate::db::now_ms()))
+            .and_then(|stored| stored.discovery.proxmox)
+            .map(|p| p.bridges.into_iter().collect::<BTreeSet<_>>()),
+        None => None,
+    };
+    let filtered = opened.filter(bridges.as_ref())?;
+    let meta = &opened.ct.meta;
+    Ok(Json(ContainerFacts {
+        vmid: opened.vmid(),
+        name: opened.name(),
+        mode: meta.mode.as_str().to_string(),
+        unprivileged: meta.unprivileged,
+        idmap: meta.idmap.as_ref().and_then(|m| m.canonical().ok()),
+        root_host_uid: match &meta.idmap {
+            Some(map) => map.to_host(IdKind::User, 0),
+            None => Some(0),
+        },
+        volumes: filtered
+            .volumes
+            .iter()
+            .map(|v| ContainerVolume {
+                key: v.key.clone(),
+                mp: v.mp.clone(),
+                size_bytes: v.size_bytes,
+            })
+            .collect(),
+        network: filtered
+            .network
+            .iter()
+            .map(|(key, value)| GuestConfigLine {
+                key: key.clone(),
+                value: value.clone(),
+            })
+            .collect(),
+        bridges_checked: bridges.is_some(),
+        kept_count: kept_count(&filtered),
+        dropped: dropped_keys(&filtered),
+    }))
+}
+
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct TargetsQuery {
+    pub snapshot_id: String,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct TargetNode {
+    /// The host of the node's agent; absent for a node of the cluster without an agent.
+    pub host_id: Option<String>,
+    pub name: String,
+    /// The agent is connected; for a node without an agent, the node is up in the cluster.
+    pub online: bool,
+    /// The node has an agent that can restore containers.
+    pub agent: bool,
+    pub plugin_installed: bool,
+    /// The agent allows replacing a guest (`restore.allow_guest_in_place`).
+    pub in_place_allowed: bool,
+    /// The next free VMID of the cluster, as the node reported it.
+    pub next_vmid: Option<u32>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct TargetStorage {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub shared: bool,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct TargetVolume {
+    /// `rootfs`, `mpN` or `unusedN`.
+    pub key: String,
+    pub value: String,
+    pub size_bytes: Option<u64>,
+    /// A replace destroys this volume and the snapshot holds no copy of it.
+    pub destroyed_without_copy: bool,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct ReplaceTarget {
+    pub host_id: String,
+    pub node: String,
+    pub vmid: u32,
+    pub name: Option<String>,
+    pub running: bool,
+    pub ha_managed: bool,
+    /// The `meta uid` of the container; absent when it has none.
+    pub pve_uid: Option<String>,
+    /// The snapshot is of another guest, or either has no uid: a replace needs `confirm_other_guest`.
+    pub other_guest: bool,
+    pub volumes: Vec<TargetVolume>,
+    /// The node did not list every volume; such a container cannot be replaced.
+    pub volumes_truncated: bool,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct SnapshotGuest {
+    pub vmid: Option<u32>,
+    pub name: Option<String>,
+    pub uid: Option<String>,
+}
+
+/// Where a container snapshot can be restored, from what the agents of the
+/// cluster reported. These are claims of the agents; the agent checks the
+/// target again before it restores.
+#[derive(Serialize, ToSchema)]
+pub struct GuestTargets {
+    /// The cluster of the snapshot, or its node outside a cluster.
+    pub cluster: String,
+    /// The node the snapshot was taken on, when its host has an agent.
+    pub source_node: Option<String>,
+    pub nodes: Vec<TargetNode>,
+    /// Storages for containers (`rootdir`) by host id.
+    pub storages: BTreeMap<String, Vec<TargetStorage>>,
+    /// Containers on nodes that allow replacing a guest.
+    pub replace: Vec<ReplaceTarget>,
+    pub snapshot_guest: SnapshotGuest,
+}
+
+/// Whether `--force` destroys the volume of the target without a copy in the
+/// snapshot: every `unusedN`, every `mpN` without `backup=1`, and every volume
+/// whose mount point the snapshot does not have.
+fn destroyed_without_copy(key: &str, value: &str, snapshot_mps: &BTreeSet<&str>) -> bool {
+    let parsed = parse_mountpoint(key, value);
+    key.starts_with("unused")
+        || (key.starts_with("mp") && parsed.as_ref().and_then(|m| m.backup) != Some(true))
+        || !parsed
+            .and_then(|m| m.mp)
+            .is_some_and(|mp| snapshot_mps.contains(mp.as_str()))
+}
+
+fn target_volumes(
+    lines: &[sources::VolumeLine],
+    snapshot_mps: &BTreeSet<&str>,
+) -> Vec<TargetVolume> {
+    lines
+        .iter()
+        .map(|line| TargetVolume {
+            key: line.key.clone(),
+            value: line.value.clone(),
+            size_bytes: parse_mountpoint(&line.key, &line.value).and_then(|m| m.size_bytes),
+            destroyed_without_copy: destroyed_without_copy(&line.key, &line.value, snapshot_mps),
+        })
+        .collect()
+}
+
+#[utoipa::path(
+    get,
+    tag = "Restore",
+    summary = "List where a container snapshot can be restored",
+    security(("session" = []), ("bearer" = ["snapshots:read"])),
+    path = "/api/v1/restore/guest-targets",
+    params(TargetsQuery),
+    responses(
+        (status = 200, description = "Nodes, storages and containers of the snapshot's cluster", body = GuestTargets),
+        (status = 404, description = "Unknown snapshot, or gone from storage", body = ErrorBody),
+        (status = 422, description = "`restore_snapshot_not_ct`: the snapshot is not of a container; `guest_config_unreadable`: the container snapshot cannot be read", body = ErrorBody),
+        (status = 502, description = "The repository storage is unavailable", body = ErrorBody),
+    )
+)]
+pub async fn guest_targets(
+    State(state): State<AppState>,
+    _auth: Scoped<SnapshotsRead>,
+    Query(query): Query<TargetsQuery>,
+) -> Result<Json<GuestTargets>, ApiError> {
+    let row = load_ct_row(&state, &query.snapshot_id).await?;
+    let opened = open_ct(&state, &row).await?;
+    let filtered = opened.filter(None)?;
+    let snapshot_uid = guest_identity(filtered.text.as_bytes()).map(|id| id.uid);
+    let snapshot_mps: BTreeSet<&str> = filtered.volumes.iter().map(|v| v.mp.as_str()).collect();
+    let cluster = row.cluster().to_string();
+    let hosts = load_hosts(&state).await?;
+    let members: Vec<(&AgentHost, &ProxmoxNode)> = hosts
+        .iter()
+        .filter_map(|h| h.proxmox().map(|p| (h, p)))
+        .filter(|(_, p)| p.name == cluster)
+        .collect();
+
+    let mut nodes: Vec<TargetNode> = members
+        .iter()
+        .map(|(host, p)| TargetNode {
+            host_id: Some(host.id.clone()),
+            name: host.node(),
+            online: state.registry.is_online(&host.id),
+            agent: host.capabilities.iter().any(|c| c == CAP_GUEST_RESTORE_CT),
+            plugin_installed: p.plugin_installed,
+            in_place_allowed: p.guest_in_place_allowed,
+            next_vmid: p.next_vmid,
+        })
+        .collect();
+    for (_, p) in &members {
+        for member in &p.nodes {
+            if !nodes.iter().any(|n| n.name == member.name) {
+                nodes.push(TargetNode {
+                    host_id: None,
+                    name: member.name.clone(),
+                    online: member.online,
+                    agent: false,
+                    plugin_installed: !member.plugin_marker.is_empty(),
+                    in_place_allowed: false,
+                    next_vmid: None,
+                });
+            }
+        }
+    }
+    nodes.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let storages = members
+        .iter()
+        .map(|(host, p)| {
+            let list = p
+                .storages
+                .iter()
+                .filter(|s| s.content.iter().any(|c| c == "rootdir"))
+                .map(|s| TargetStorage {
+                    id: s.id.clone(),
+                    kind: s.kind.clone(),
+                    shared: s.shared,
+                })
+                .collect();
+            (host.id.clone(), list)
+        })
+        .collect();
+
+    let replace = members
+        .iter()
+        .filter(|(_, p)| p.guest_in_place_allowed)
+        .flat_map(|(host, p)| {
+            p.guests
+                .iter()
+                .filter(|g| g.kind == sources::GuestType::Ct)
+                .map(|g| {
+                    let uid = Some(g.pve_uid.clone()).filter(|u| !u.is_empty());
+                    ReplaceTarget {
+                        host_id: host.id.clone(),
+                        node: host.node(),
+                        vmid: g.vmid,
+                        name: g.name.clone(),
+                        running: g.running,
+                        ha_managed: g.ha_managed,
+                        other_guest: !same_guest(snapshot_uid.as_deref(), uid.as_deref()),
+                        pve_uid: uid,
+                        volumes: target_volumes(&g.volumes, &snapshot_mps),
+                        volumes_truncated: g.volumes_truncated,
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
+    Ok(Json(GuestTargets {
+        source_node: row
+            .host_id
+            .as_ref()
+            .and_then(|id| hosts.iter().find(|h| &h.id == id))
+            .map(AgentHost::node),
+        cluster,
+        nodes,
+        storages,
+        replace,
+        snapshot_guest: SnapshotGuest {
+            vmid: opened.vmid(),
+            name: opened.name(),
+            uid: snapshot_uid,
+        },
+    }))
 }
 
 #[cfg(test)]

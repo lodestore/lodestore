@@ -955,6 +955,8 @@ pub fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(create_restore))
         .routes(routes!(super::guest_restore::create_guest_restore))
+        .routes(routes!(super::guest_restore::container_preview))
+        .routes(routes!(super::guest_restore::guest_targets))
         .routes(routes!(list_jobs))
         .routes(routes!(get_job))
         .routes(routes!(list_job_events))

@@ -5875,6 +5875,77 @@
         ]
       }
     },
+    "/api/v1/restore/guest-targets": {
+      "get": {
+        "tags": [
+          "Restore"
+        ],
+        "summary": "List where a container snapshot can be restored",
+        "operationId": "guest_targets",
+        "parameters": [
+          {
+            "name": "snapshot_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Nodes, storages and containers of the snapshot's cluster",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GuestTargets"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown snapshot, or gone from storage",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`restore_snapshot_not_ct`: the snapshot is not of a container; `guest_config_unreadable`: the container snapshot cannot be read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The repository storage is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "bearer": [
+              "snapshots:read"
+            ]
+          }
+        ]
+      }
+    },
     "/api/v1/restore/hosts": {
       "get": {
         "tags": [
@@ -5988,6 +6059,87 @@
           },
           "422": {
             "description": "Missing host, bad cursor or limit, unknown source type or key, or a key that does not match the type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "bearer": [
+              "snapshots:read"
+            ]
+          }
+        ]
+      }
+    },
+    "/api/v1/restore/snapshots/{id}/container": {
+      "get": {
+        "tags": [
+          "Restore"
+        ],
+        "summary": "Preview a container snapshot and the config keys a restore drops",
+        "operationId": "container_preview",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Snapshot id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "host_id",
+            "in": "query",
+            "description": "The host whose node's bridges the network interfaces are checked against; without it they are not checked.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The container and its configuration through the filter of the agent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContainerFacts"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown snapshot, or gone from storage",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`restore_snapshot_not_ct`: the snapshot is not of a container; `guest_config_unreadable`: the container snapshot cannot be read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The repository storage is unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -9164,6 +9316,110 @@
           }
         }
       },
+      "ContainerFacts": {
+        "type": "object",
+        "description": "A container snapshot and its configuration through the filter the agent\napplies. A preview: the agent filters the configuration itself and reports\nwhat it dropped in the job.",
+        "required": [
+          "mode",
+          "unprivileged",
+          "volumes",
+          "network",
+          "bridges_checked",
+          "kept_count",
+          "dropped"
+        ],
+        "properties": {
+          "bridges_checked": {
+            "type": "boolean",
+            "description": "The bridges were checked against the node of `host_id`."
+          },
+          "dropped": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DroppedKey"
+            }
+          },
+          "idmap": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The canonical id map, `u:{ct}:{host}:{count},…`."
+          },
+          "kept_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Lines of the configuration that stay.",
+            "minimum": 0
+          },
+          "mode": {
+            "type": "string",
+            "description": "`snapshot`, `suspend` or `stop`."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "network": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GuestConfigLine"
+            },
+            "description": "The network interfaces that stay."
+          },
+          "root_host_uid": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The uid of root of the container on the node: 0 for a privileged container.",
+            "minimum": 0
+          },
+          "unprivileged": {
+            "type": "boolean"
+          },
+          "vmid": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "volumes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ContainerVolume"
+            },
+            "description": "The volumes `pct restore` allocates."
+          }
+        }
+      },
+      "ContainerVolume": {
+        "type": "object",
+        "required": [
+          "key",
+          "mp",
+          "size_bytes"
+        ],
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "mp": {
+            "type": "string",
+            "description": "The path inside the container, `/` for `rootfs`."
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
       "CreateJoinToken": {
         "type": "object",
         "required": [
@@ -11233,6 +11489,59 @@
             "format": "int32",
             "default": 0,
             "minimum": 0
+          }
+        }
+      },
+      "GuestTargets": {
+        "type": "object",
+        "description": "Where a container snapshot can be restored, from what the agents of the\ncluster reported. These are claims of the agents; the agent checks the\ntarget again before it restores.",
+        "required": [
+          "cluster",
+          "nodes",
+          "storages",
+          "replace",
+          "snapshot_guest"
+        ],
+        "properties": {
+          "cluster": {
+            "type": "string",
+            "description": "The cluster of the snapshot, or its node outside a cluster."
+          },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TargetNode"
+            }
+          },
+          "replace": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReplaceTarget"
+            },
+            "description": "Containers on nodes that allow replacing a guest."
+          },
+          "snapshot_guest": {
+            "$ref": "#/components/schemas/SnapshotGuest"
+          },
+          "source_node": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The node the snapshot was taken on, when its host has an agent."
+          },
+          "storages": {
+            "type": "object",
+            "description": "Storages for containers (`rootdir`) by host id.",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "$ref": "#/components/schemas/TargetStorage"
+              }
+            },
+            "propertyNames": {
+              "type": "string"
+            }
           }
         }
       },
@@ -13465,6 +13774,65 @@
           }
         }
       },
+      "ReplaceTarget": {
+        "type": "object",
+        "required": [
+          "host_id",
+          "node",
+          "vmid",
+          "running",
+          "ha_managed",
+          "other_guest",
+          "volumes",
+          "volumes_truncated"
+        ],
+        "properties": {
+          "ha_managed": {
+            "type": "boolean"
+          },
+          "host_id": {
+            "type": "string"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "node": {
+            "type": "string"
+          },
+          "other_guest": {
+            "type": "boolean",
+            "description": "The snapshot is of another guest, or either has no uid: a replace needs `confirm_other_guest`."
+          },
+          "pve_uid": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `meta uid` of the container; absent when it has none."
+          },
+          "running": {
+            "type": "boolean"
+          },
+          "vmid": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "volumes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TargetVolume"
+            }
+          },
+          "volumes_truncated": {
+            "type": "boolean",
+            "description": "The node did not list every volume; such a container cannot be replaced."
+          }
+        }
+      },
       "RepoRef": {
         "type": "object",
         "required": [
@@ -14933,6 +15301,31 @@
           "tls"
         ]
       },
+      "SnapshotGuest": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "uid": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vmid": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
       "SnapshotItem": {
         "type": "object",
         "required": [
@@ -15714,6 +16107,100 @@
             "items": {
               "$ref": "#/components/schemas/AnomalyReasonDto"
             }
+          }
+        }
+      },
+      "TargetNode": {
+        "type": "object",
+        "required": [
+          "name",
+          "online",
+          "agent",
+          "plugin_installed",
+          "in_place_allowed"
+        ],
+        "properties": {
+          "agent": {
+            "type": "boolean",
+            "description": "The node has an agent that can restore containers."
+          },
+          "host_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The host of the node's agent; absent for a node of the cluster without an agent."
+          },
+          "in_place_allowed": {
+            "type": "boolean",
+            "description": "The agent allows replacing a guest (`restore.allow_guest_in_place`)."
+          },
+          "name": {
+            "type": "string"
+          },
+          "next_vmid": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The next free VMID of the cluster, as the node reported it.",
+            "minimum": 0
+          },
+          "online": {
+            "type": "boolean",
+            "description": "The agent is connected; for a node without an agent, the node is up in the cluster."
+          },
+          "plugin_installed": {
+            "type": "boolean"
+          }
+        }
+      },
+      "TargetStorage": {
+        "type": "object",
+        "required": [
+          "id",
+          "type",
+          "shared"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "shared": {
+            "type": "boolean"
+          },
+          "type": {
+            "type": "string"
+          }
+        }
+      },
+      "TargetVolume": {
+        "type": "object",
+        "required": [
+          "key",
+          "value",
+          "destroyed_without_copy"
+        ],
+        "properties": {
+          "destroyed_without_copy": {
+            "type": "boolean",
+            "description": "A replace destroys this volume and the snapshot holds no copy of it."
+          },
+          "key": {
+            "type": "string",
+            "description": "`rootfs`, `mpN` or `unusedN`."
+          },
+          "size_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "value": {
+            "type": "string"
           }
         }
       },
