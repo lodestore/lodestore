@@ -124,6 +124,7 @@ impl Lab {
             },
             pve_root: pve.clone(),
             perl_root: perl.clone(),
+            sys_root: tmp.path().join("sys"),
             socket: socket_path.clone(),
         });
         let shutdown = CancellationToken::new();

@@ -31,15 +31,15 @@ use super::runner::{
 };
 use super::throttle::Throttled;
 use super::{JobCtx, distrusted, failed};
-use crate::discovery::proxmox::{lookup_ct, parse_members};
+use crate::discovery::proxmox::{DPKG_STATUS, ScanRoots, lookup_ct, parse_members};
 use crate::discovery::{MAX_PVE_FILE_BYTES, read_bounded};
 use crate::pve::install::plugin_health;
 use crate::pve::socket::{BackupEvent, BackupSession, Info, PveSessions, Token};
 use crate::pve::{STORAGE_ID, TOKEN_ENV};
 use lodestore_format::store::Store;
 
-const VMIDS: std::ops::RangeInclusive<u32> = 100..=999_999_999;
-const SOCKET_ENV: &str = "LODESTORE_AGENT_SOCKET";
+pub(super) const VMIDS: std::ops::RangeInclusive<u32> = 100..=999_999_999;
+pub(super) const SOCKET_ENV: &str = "LODESTORE_AGENT_SOCKET";
 const MODE_WAIT: Duration = Duration::from_secs(10);
 const TERM_WAIT: Duration = Duration::from_secs(30);
 const OUTPUT_WAIT: Duration = Duration::from_secs(5);
@@ -71,8 +71,22 @@ pub struct PveJobs {
     pub commands: PveCommands,
     pub pve_root: PathBuf,
     pub perl_root: PathBuf,
+    /// `/sys`: the node's bridges and running containers.
+    pub sys_root: PathBuf,
     /// The agent socket, handed to the provider through vzdump's environment.
     pub socket: PathBuf,
+}
+
+impl PveJobs {
+    /// What a container restore reads of the node, as discovery reads it.
+    pub(crate) fn roots(&self) -> ScanRoots {
+        ScanRoots {
+            pve: self.pve_root.clone(),
+            sys: self.sys_root.clone(),
+            perl: self.perl_root.clone(),
+            dpkg_status: PathBuf::from(DPKG_STATUS),
+        }
+    }
 }
 
 /// The mode of a `backup mode: {mode}` line of vzdump's output.
@@ -100,9 +114,9 @@ struct Target {
 }
 
 /// A job that ends before or instead of a snapshot.
-type Refused = Box<JobFinished>;
+pub(super) type Refused = Box<JobFinished>;
 
-fn refuse(code: &str, text: &str) -> Refused {
+pub(super) fn refuse(code: &str, text: &str) -> Refused {
     Box::new(failed(code, text))
 }
 
@@ -243,7 +257,7 @@ async fn backup(
         return failed("vzdump_failed", "vzdump exited at once");
     };
     pve.sessions.set_spawned_pid(&token, pid);
-    let output = Output::watch(ctx, &mut child, &token);
+    let output = Output::watch(ctx, &mut child, &token, "vzdump_output");
     Run {
         ctx,
         spec,
@@ -259,17 +273,22 @@ async fn backup(
     .await
 }
 
-/// What vzdump prints: each line becomes a job event (up to a limit, without
-/// the token), the first `backup mode:` line is the mode and the last lines
-/// of stderr explain a failure.
-struct Output {
+/// What vzdump or pct prints: each line becomes a job event of `kind` (up
+/// to a limit, without the token), the first `backup mode:` line is the mode
+/// and the last lines of stderr explain a failure.
+pub(super) struct Output {
     mode: watch::Receiver<Option<CtMode>>,
     tail: Arc<Mutex<VecDeque<String>>>,
     readers: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl Output {
-    fn watch(ctx: &JobCtx, child: &mut Child, token: &Token) -> Output {
+    pub(super) fn watch(
+        ctx: &JobCtx,
+        child: &mut Child,
+        token: &Token,
+        kind: &'static str,
+    ) -> Output {
         let (mode, seen) = watch::channel(None);
         let mode = Arc::new(mode);
         let tail = Arc::new(Mutex::new(VecDeque::new()));
@@ -287,6 +306,7 @@ impl Output {
                 mode: Arc::clone(&mode),
                 tail: is_stderr.then(|| Arc::clone(&tail)),
                 events: Arc::clone(&events),
+                kind,
             };
             readers.push(tokio::spawn(lines.read(stream)));
         }
@@ -304,7 +324,7 @@ impl Output {
         seen.ok()?.ok().and_then(|m| *m)
     }
 
-    async fn finish(&mut self) -> String {
+    pub(super) async fn finish(&mut self) -> String {
         for reader in self.readers.drain(..) {
             let _ = tokio::time::timeout(OUTPUT_WAIT, reader).await;
         }
@@ -319,6 +339,7 @@ struct Lines {
     mode: Arc<watch::Sender<Option<CtMode>>>,
     tail: Option<Arc<Mutex<VecDeque<String>>>>,
     events: Arc<AtomicUsize>,
+    kind: &'static str,
 }
 
 impl Lines {
@@ -350,7 +371,7 @@ impl Lines {
             }
             if self.events.fetch_add(1, Ordering::Relaxed) < OUTPUT_EVENTS {
                 self.ctx
-                    .event(JobEventLevel::Info, "vzdump_output", b"", "", &line);
+                    .event(JobEventLevel::Info, self.kind, b"", "", &line);
             }
         }
     }
@@ -487,20 +508,7 @@ impl Run<'_> {
     /// Stops vzdump and everything it started: SIGTERM to its process
     /// group, SIGKILL if it is still there after a while.
     async fn stop(mut self) -> JobFinished {
-        use rustix::process::{Pid, Signal, kill_process_group};
-        let group = i32::try_from(self.pid).ok().and_then(Pid::from_raw);
-        if let Some(group) = group {
-            let _ = kill_process_group(group, Signal::TERM);
-        }
-        if tokio::time::timeout(TERM_WAIT, self.child.wait())
-            .await
-            .is_err()
-        {
-            if let Some(group) = group {
-                let _ = kill_process_group(group, Signal::KILL);
-            }
-            let _ = self.child.wait().await;
-        }
+        terminate(&mut self.child, self.pid).await;
         self.output.finish().await;
         if !self.ctx.cancel_flag().load(Ordering::Relaxed) && self.deadline.expired() {
             time_limit(self.deadline.limit().as_secs())
@@ -594,6 +602,22 @@ impl Run<'_> {
             .backup_container(root, ct, options, &progress)
             .await
             .map_err(|e| Box::new(backup_error(ctx, e)))
+    }
+}
+
+/// SIGTERM to the process group of `pid`, SIGKILL if `child` is still there
+/// after a while.
+pub(super) async fn terminate(child: &mut Child, pid: u32) {
+    use rustix::process::{Pid, Signal, kill_process_group};
+    let group = i32::try_from(pid).ok().and_then(Pid::from_raw);
+    if let Some(group) = group {
+        let _ = kill_process_group(group, Signal::TERM);
+    }
+    if tokio::time::timeout(TERM_WAIT, child.wait()).await.is_err() {
+        if let Some(group) = group {
+            let _ = kill_process_group(group, Signal::KILL);
+        }
+        let _ = child.wait().await;
     }
 }
 

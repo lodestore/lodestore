@@ -26,6 +26,7 @@ use crate::socket::StdinHeader;
 use crate::{AgentError, NetOptions, Paths};
 
 pub mod ct_backup;
+pub mod ct_restore;
 pub(crate) mod distrusted;
 pub mod fetch;
 pub(crate) mod own_shards;

@@ -61,9 +61,15 @@ impl SpaceReserve {
         percent: 5,
     };
 
+    /// `NoSpace` when `need` bytes do not fit on the file system of `dir`
+    /// without going below the reserve.
+    pub fn check(self, dir: impl AsFd, need: u64) -> Result<()> {
+        self.room(dir, need).map(|_| ())
+    }
+
     /// Bytes that may still be written to the file system of `dir`, at most
     /// what is left until the next check; `NoSpace` when `need` does not fit.
-    fn room(self, dir: &OwnedFd, need: u64) -> Result<u64> {
+    fn room(self, dir: impl AsFd, need: u64) -> Result<u64> {
         let st = rustix::fs::fstatvfs(dir)?;
         let size = st.f_blocks.saturating_mul(st.f_frsize);
         let reserve = self
