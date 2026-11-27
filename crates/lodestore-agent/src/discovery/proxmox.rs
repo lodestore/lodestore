@@ -794,13 +794,11 @@ pub(crate) fn ct_target_facts(
 
 /// The saved id of a container and the `meta uid` it was given with; the uid
 /// is empty for a container without one and for an entry of the old format.
-#[cfg_attr(not(test), expect(dead_code))]
 pub(crate) struct CtIdentity {
     pub uuid: String,
     pub pve_uid: String,
 }
 
-#[cfg_attr(not(test), expect(dead_code))]
 pub(crate) fn lookup_ct(ids_path: &Path, vmid: u32) -> Result<Option<CtIdentity>, ScanFailed> {
     let ids = load_ids(ids_path)?;
     Ok(ids
