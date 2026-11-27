@@ -2663,6 +2663,7 @@ fn tagged_guest(kind: GuestKind, vmid: u32, pool: &str, tags: &[&str]) -> Proxmo
         uuid: format!("{vmid:08}-1111-4111-8111-111111111111"),
         pool: pool.to_string(),
         tags: tags.iter().map(|t| t.to_string()).collect(),
+        ..Default::default()
     }
 }
 

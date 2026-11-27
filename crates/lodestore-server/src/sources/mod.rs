@@ -39,6 +39,16 @@ pub const MAX_FACTS_BYTES: usize = (256 << 10) + 16;
 pub const MAX_STORAGES: usize = 64;
 /// Content types kept per storage.
 pub const MAX_STORAGE_CONTENT: usize = 8;
+/// Cluster nodes kept per node report.
+pub const MAX_CLUSTER_NODES: usize = 64;
+/// Bridges kept per node.
+pub const MAX_BRIDGES: usize = 256;
+/// Volume lines kept per guest.
+pub const MAX_GUEST_VOLUMES: usize = 64;
+/// Longest volume line.
+pub const MAX_VOLUME_LINE: usize = 512;
+/// Longest plugin marker.
+pub const MAX_PLUGIN_MARKER: usize = 128;
 /// The source types besides files, in the order lists show them.
 pub const SOURCE_TYPES: [&str; 4] = ["proxmox-vm", "proxmox-ct", "postgres", "mysql"];
 /// How long a collection counts as current.
@@ -59,9 +69,10 @@ pub enum ScopeKind {
     Node,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GuestType {
+    #[default]
     Vm,
     Ct,
 }
@@ -74,6 +85,13 @@ pub enum DbType {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VolumeLine {
+    pub key: String,
+    pub value: String,
+}
+
+/// What the agent claims about a guest; nothing here selects or grants.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Guest {
     pub kind: GuestType,
     pub vmid: u32,
@@ -81,6 +99,27 @@ pub struct Guest {
     pub pool: Option<String>,
     pub tags: Vec<String>,
     pub key: String,
+    #[serde(default)]
+    pub running: bool,
+    #[serde(default)]
+    pub unprivileged: bool,
+    #[serde(default)]
+    pub pve_uid: String,
+    #[serde(default)]
+    pub pve_rtime: u64,
+    #[serde(default)]
+    pub ha_managed: bool,
+    #[serde(default)]
+    pub volumes: Vec<VolumeLine>,
+    #[serde(default)]
+    pub volumes_truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClusterNode {
+    pub name: String,
+    pub online: bool,
+    pub plugin_marker: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -98,6 +137,20 @@ pub struct ProxmoxNode {
     pub guests: Vec<Guest>,
     #[serde(default)]
     pub storages: Vec<Storage>,
+    #[serde(default)]
+    pub nodes: Vec<ClusterNode>,
+    #[serde(default)]
+    pub plugin_installed: bool,
+    #[serde(default)]
+    pub plugin_current: bool,
+    #[serde(default)]
+    pub guest_in_place_allowed: bool,
+    #[serde(default)]
+    pub next_vmid: Option<u32>,
+    #[serde(default)]
+    pub pve_version: String,
+    #[serde(default)]
+    pub bridges: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -252,7 +305,100 @@ fn proxmox_node(
         name: name.to_string(),
         guests,
         storages: proxmox_storages(&facts.storages, truncated),
+        nodes: cluster_nodes(&facts.nodes, truncated),
+        plugin_installed: facts.plugin_installed,
+        plugin_current: facts.plugin_current,
+        guest_in_place_allowed: facts.guest_in_place_allowed,
+        next_vmid: Some(facts.next_vmid).filter(|id| (MIN_VMID..=MAX_VMID).contains(id)),
+        pve_version: clip(&facts.pve_version, MAX_VERSION_BYTES),
+        bridges: bridges(&facts.bridges, truncated),
     })
+}
+
+fn node_name_valid(name: &str) -> bool {
+    (1..=MAX_SCOPE_NAME_BYTES).contains(&name.len())
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
+fn cluster_nodes(
+    nodes: &[lodestore_proto::agent::v1::ClusterNode],
+    truncated: &mut bool,
+) -> Vec<ClusterNode> {
+    let mut kept: Vec<ClusterNode> = Vec::new();
+    for node in nodes {
+        if kept.len() >= MAX_CLUSTER_NODES {
+            *truncated = true;
+            break;
+        }
+        if !node_name_valid(&node.name) || kept.iter().any(|k| k.name == node.name) {
+            *truncated = true;
+            continue;
+        }
+        if node.plugin_marker.len() > MAX_PLUGIN_MARKER {
+            *truncated = true;
+        }
+        kept.push(ClusterNode {
+            name: node.name.clone(),
+            online: node.online,
+            plugin_marker: clip(&node.plugin_marker, MAX_PLUGIN_MARKER),
+        });
+    }
+    kept
+}
+
+fn bridges(names: &[String], truncated: &mut bool) -> Vec<String> {
+    let mut kept: Vec<String> = Vec::new();
+    for name in names {
+        if kept.len() >= MAX_BRIDGES {
+            *truncated = true;
+            break;
+        }
+        let valid = (1..=15).contains(&name.len())
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+        if !valid || kept.contains(name) {
+            *truncated = true;
+        } else {
+            kept.push(name.clone());
+        }
+    }
+    kept
+}
+
+fn volume_key_valid(key: &str) -> bool {
+    let digits = key
+        .strip_prefix("mp")
+        .or_else(|| key.strip_prefix("unused"));
+    key == "rootfs"
+        || digits
+            .is_some_and(|d| (1..=3).contains(&d.len()) && d.bytes().all(|b| b.is_ascii_digit()))
+}
+
+fn guest_volumes(
+    lines: &[lodestore_proto::agent::v1::ConfigLine],
+    agent_cut: bool,
+) -> (Vec<VolumeLine>, bool) {
+    let mut cut = agent_cut;
+    let mut kept = Vec::new();
+    for line in lines {
+        if kept.len() >= MAX_GUEST_VOLUMES
+            || line.value.len() > MAX_VOLUME_LINE
+            || !volume_key_valid(&line.key)
+        {
+            cut = true;
+        } else {
+            kept.push(VolumeLine {
+                key: line.key.clone(),
+                value: line.value.clone(),
+            });
+        }
+    }
+    (kept, cut)
+}
+
+fn pve_uid_valid(uid: &str) -> bool {
+    uid.len() == 20 && uid.bytes().all(|b| matches!(b, b'a'..=b'z' | b'2'..=b'7'))
 }
 
 fn proxmox_storages(
@@ -326,6 +472,7 @@ fn proxmox_guest(
     }
     vmids.insert(guest.vmid);
     seen.insert(key.as_str().to_string());
+    let (volumes, volumes_truncated) = guest_volumes(&guest.volumes, guest.volumes_truncated);
     let mut tags: Vec<String> = guest
         .tags
         .iter()
@@ -344,6 +491,16 @@ fn proxmox_guest(
         pool: clipped(&guest.pool, MAX_NAME_BYTES),
         tags,
         key: key.as_str().to_string(),
+        running: guest.running,
+        unprivileged: guest.unprivileged,
+        pve_uid: Some(guest.pve_uid.as_str())
+            .filter(|uid| pve_uid_valid(uid))
+            .unwrap_or_default()
+            .to_string(),
+        pve_rtime: guest.pve_rtime,
+        ha_managed: guest.ha_managed,
+        volumes,
+        volumes_truncated,
     })
 }
 

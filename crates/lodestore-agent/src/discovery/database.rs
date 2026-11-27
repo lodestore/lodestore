@@ -1005,7 +1005,6 @@ exit 0
             let bin = fakes();
             let user = user();
             let config = Config {
-                pve_root: root.join("no-pve"),
                 pg_socket_dirs: Vec::new(),
                 mysql_sockets: Vec::new(),
                 pg_user: user.clone(),
@@ -1014,6 +1013,7 @@ exit 0
                 mysql: bin.join("mysql"),
                 command_timeout: Duration::from_secs(10),
                 db_deadline: Duration::from_secs(30),
+                ..Config::proxmox_only(root.join("no-pve"))
             };
             Host {
                 tmp,
