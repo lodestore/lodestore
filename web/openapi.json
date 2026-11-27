@@ -6250,7 +6250,7 @@
             }
           },
           "422": {
-            "description": "The selection, destination or host is not valid; the snapshot is neither a files backup, a container snapshot nor a disk image restored whole (select `/`); a disk image or a container snapshot cannot be restored in place; or the disk image has too many holes to restore through the server; `ct_idmap_unsupported`: `restore_owners` for a container whose id map gives an id to root of the node",
+            "description": "The selection, destination or host is not valid; the snapshot is neither a files backup, a container snapshot nor a disk image restored whole (select `/`); a disk image or a container snapshot cannot be restored in place; or the disk image has too many holes to restore through the server; `ct_idmap_unsupported`: `restore_owners` for a container whose id map gives an id to root of the node or cannot be recorded",
             "content": {
               "application/json": {
                 "schema": {
