@@ -39,6 +39,7 @@ export const sources = {
 		},
 		protection: {
 			notProtected: "Not protected",
+			alertOpen: "alert open",
 			agentTooOld: "Agent too old",
 		},
 		never: "Never",

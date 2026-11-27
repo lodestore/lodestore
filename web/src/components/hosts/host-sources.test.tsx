@@ -191,6 +191,20 @@ describe("Host sources tab", () => {
 		expect(within(rows[2]).getByText("Not protected")).toBeInTheDocument();
 		expect(screen.getByRole("table").textContent).not.toMatch(/source_ref/);
 	});
+
+	it("marks a guest whose alert is open, and only that one", async () => {
+		await openSources(
+			makeHost(),
+			makeSources({
+				items: [ct(200, "dns", { alert_open: true }), ct(201, "mail")],
+			}),
+		);
+		await screen.findByText("CT 200 · dns");
+		const rows = within(screen.getByRole("table")).getAllByRole("row").slice(1);
+		expect(within(rows[0]).getByText("Not protected")).toBeInTheDocument();
+		expect(within(rows[0]).getByText("alert open")).toBeInTheDocument();
+		expect(within(rows[1]).queryByText("alert open")).toBeNull();
+	});
 });
 
 const mixed = () =>
